@@ -1,0 +1,112 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: hanye-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hanye}
+      POSTGRES_USER: ${POSTGRES_USER:-hanye}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hanye_dev_password}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - postgres_backups:/backups
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  server:
+    build:
+      context: ./server
+    container_name: hanye-server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 5174
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB:-hanye}
+      PGUSER: ${POSTGRES_USER:-hanye}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-hanye_dev_password}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
+      TZ: ${TZ:-Asia/Shanghai}
+    expose:
+      - "5174"
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:5174/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  server-standby:
+    build:
+      context: ./server
+    container_name: hanye-server-standby
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 5174
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB:-hanye}
+      PGUSER: ${POSTGRES_USER:-hanye}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-hanye_dev_password}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
+      TZ: ${TZ:-Asia/Shanghai}
+    expose:
+      - "5174"
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:5174/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  web:
+    build:
+      context: ./web
+    container_name: hanye-web
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_healthy
+      server-standby:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  postgres-backup:
+    image: postgres:16-alpine
+    profiles: ["backup"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB:-hanye}
+      PGUSER: ${POSTGRES_USER:-hanye}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-hanye_dev_password}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - postgres_backups:/backups
+      - ./ops/postgres:/ops/postgres:ro
+    entrypoint: ["/bin/sh", "/ops/postgres/backup-loop.sh"]
+
+volumes:
+  postgres_data:
+  postgres_backups:

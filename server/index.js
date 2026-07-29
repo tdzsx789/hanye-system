@@ -1,0 +1,3517 @@
+import cors from "cors";
+import ExcelJS from "exceljs";
+import express from "express";
+import fs from "node:fs";
+import zlib from "node:zlib";
+import PDFDocument from "pdfkit";
+import { db, databaseInfo, writeAudit } from "./db.js";
+
+const app = express();
+const port = Number(process.env.PORT || 5174);
+const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
+const SHARED_DIRECTION = "进出口通用";
+const extraCorsOrigins = new Set(
+  String(process.env.CORS_ORIGINS || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean)
+);
+const SAFE_FILE_TYPES = [
+  { extensions: [".png"], mimes: ["image/png"] },
+  { extensions: [".jpg", ".jpeg"], mimes: ["image/jpeg"] },
+  { extensions: [".webp"], mimes: ["image/webp"] },
+  { extensions: [".gif"], mimes: ["image/gif"] },
+  { extensions: [".pdf"], mimes: ["application/pdf"] },
+  { extensions: [".txt"], mimes: ["text/plain"] },
+  { extensions: [".csv"], mimes: ["text/csv", "application/csv", "application/vnd.ms-excel"] },
+  { extensions: [".doc"], mimes: ["application/msword"] },
+  { extensions: [".docx"], mimes: ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"] },
+  { extensions: [".xls"], mimes: ["application/vnd.ms-excel"] },
+  { extensions: [".xlsx"], mimes: ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"] }
+];
+const PREVIEW_MIMES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif", "application/pdf", "text/plain"]);
+
+function normalizeTransportMode(value = "") {
+  const text = String(value || "").trim();
+  if (text === "香港司机直送") return "单司机";
+  if (text === "香港司机 + 大陆骑师接驳") return "双司机";
+  if (text === "口岸交货") return "口岸转国内车";
+  return ["单司机", "双司机", "口岸转国内车"].includes(text) ? text : "";
+}
+
+function requestHasTransitDeletePermission(req) {
+  const decodeHeaderValue = (value) => {
+    try {
+      return decodeURIComponent(String(value || ""));
+    } catch {
+      return String(value || "");
+    }
+  };
+  const text = [
+    req.headers["x-hanye-role"],
+    req.headers["x-hanye-display-name"]
+  ].map(decodeHeaderValue).join(" ");
+  return ["超级管理员", "老板"].some((keyword) => text.includes(keyword));
+}
+
+app.disable("x-powered-by");
+
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+
+    const allowed =
+      extraCorsOrigins.has("*") ||
+      extraCorsOrigins.has(origin) ||
+      origin === "http://127.0.0.1:5173" ||
+      origin === "http://localhost:5173" ||
+      origin === "http://127.0.0.1:8080" ||
+      origin === "http://localhost:8080" ||
+      origin === "https://524458.cn" ||
+      origin === "https://www.524458.cn" ||
+      origin === "http://524458.cn" ||
+      origin === "http://www.524458.cn" ||
+      /^http:\/\/192\.168\.\d{1,3}\.\d{1,3}:5173$/.test(origin) ||
+      /^http:\/\/10\.\d{1,3}\.\d{1,3}\.\d{1,3}:5173$/.test(origin) ||
+      /^http:\/\/172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}:5173$/.test(origin);
+
+    callback(allowed ? null : new Error("Not allowed by CORS"), allowed);
+  }
+}));
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  res.setHeader("Cache-Control", "no-store");
+  next();
+});
+app.use((req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = (payload) => {
+    const acceptsGzip = /\bgzip\b/.test(String(req.headers["accept-encoding"] || ""));
+    if (!acceptsGzip) return originalJson(payload);
+    const body = Buffer.from(JSON.stringify(payload));
+    if (body.length < 1024) return originalJson(payload);
+    const gzipped = zlib.gzipSync(body);
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader("Content-Encoding", "gzip");
+    res.setHeader("Vary", "Accept-Encoding");
+    res.setHeader("Content-Length", String(gzipped.length));
+    return res.send(gzipped);
+  };
+  next();
+});
+app.use(express.json({ limit: "12mb" }));
+
+function todayInputValue() {
+  const now = new Date();
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 10);
+}
+
+function mapCustomer(row) {
+  return {
+    id: row.id,
+    type: row.type,
+    name: row.name,
+    province: row.province || "广东省",
+    city: row.city,
+    address: row.address || "",
+    term: row.term,
+    taxNo: row.tax_no || "",
+    contact: row.contact || "",
+    mobile: row.mobile || "",
+    driverWageAdjustHKD: row.driver_wage_adjust_hkd || 0,
+    defaultTemplateId: row.default_template_id || "",
+    receivableRMB: row.receivable_rmb,
+    receivableHKD: row.receivable_hkd,
+    recentOrder: row.recent_order,
+    createdAt: row.created_at,
+    invoice: {
+      title: row.invoice_title || row.name || "",
+      taxNo: row.invoice_tax_no || row.tax_no || "",
+      bank: row.invoice_bank || "",
+      account: row.invoice_account || "",
+      address: row.address || "",
+      addressPhone: row.invoice_address_phone || row.address || ""
+    }
+  };
+}
+
+function normalizeCustomerPayload(body, id = "") {
+  const invoice = body.invoice || {};
+  const name = String(body.name || "").trim();
+  const address = String(body.address || invoice.address || "").trim();
+  const taxNo = String(body.taxNo || invoice.taxNo || "").trim();
+  return {
+    id,
+    type: body.type === "供应商" ? "供应商" : "客户",
+    name,
+    province: String(body.province || "广东省").trim(),
+    city: String(body.city || "深圳市").trim(),
+    address,
+    term: String(body.term || "月结30天").trim(),
+    taxNo,
+    contact: String(body.contact || "").trim(),
+    mobile: String(body.mobile || "").trim(),
+    driverWageAdjustHKD: Number(body.driverWageAdjustHKD || 0),
+    defaultTemplateId: String(body.defaultTemplateId || "").trim(),
+    receivableRMB: Number(body.receivableRMB || 0),
+    receivableHKD: Number(body.receivableHKD || 0),
+    recentOrder: String(body.recentOrder || "-").trim(),
+    createdAt: body.createdAt || todayInputValue(),
+    invoiceTitle: String(body.invoiceTitle || invoice.title || name).trim(),
+    invoiceTaxNo: String(body.invoiceTax || invoice.taxNo || taxNo).trim(),
+    invoiceBank: String(body.invoiceBank || invoice.bank || "").trim(),
+    invoiceAccount: String(body.invoiceAccount || invoice.account || "").trim(),
+    invoiceAddressPhone: String(body.invoiceAddressPhone || invoice.addressPhone || address).trim()
+  };
+}
+
+function mapOrder(row) {
+  return {
+    no: row.no,
+    dispatchNo: row.dispatch_no || "",
+    customerId: row.customer_id,
+    customer: row.customer,
+    businessType: row.business_type,
+    port: row.port,
+    direction: row.direction,
+    tonnage: row.tonnage,
+    currency: row.currency,
+    quantity: row.quantity,
+    weight: row.weight,
+    vehicleSource: row.vehicle_source,
+    supplier: row.supplier,
+    plate: row.plate || "",
+    driver: row.driver || "",
+    hkDriver: row.hk_driver || "",
+    mainlandDriver: row.mainland_driver || "",
+    transportMode: normalizeTransportMode(row.transport_mode || ""),
+    loading: row.loading,
+    unloading: row.unloading,
+    date: row.order_date,
+    receivableHKD: row.receivable_hkd,
+    receivableRMB: row.receivable_rmb,
+    status: row.status,
+    remark: row.remark || "",
+    tripNoEnabled: Boolean(row.trip_no_enabled),
+    tripNo: row.trip_no || "",
+    sixSheetEnabled: Boolean(row.six_sheet_enabled),
+    sixSheetNo: row.six_sheet_no || "",
+    fees: []
+  };
+}
+
+const ORDER_EXPORT_COLUMNS = [
+  ["排车单号", "dispatchNo", 82],
+  ["订单号", "no", 82],
+  ["客户", "customer", 118],
+  ["业务", "businessType", 46],
+  ["口岸", "port", 70],
+  ["进出口", "direction", 44],
+  ["吨位", "tonnage", 42],
+  ["币种", "currency", 42],
+  ["件数", "quantity", 42],
+  ["重量", "weight", 56],
+  ["装货地", "loading", 140],
+  ["卸货地", "unloading", 140],
+  ["日期", "date", 64],
+  ["港币", "receivableHKD", 50],
+  ["人民币", "receivableRMB", 54],
+  ["状态", "status", 50]
+];
+const ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS = [
+  { key: "__hkdTotal", label: "HKD合计", width: 64, fontSize: 8, system: true },
+  { key: "__rmbTotal", label: "RMB合计", width: 64, fontSize: 8, system: true }
+];
+const ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN = { key: "__sequence", label: "序号", width: 42, fontSize: 8, system: true };
+
+function normalizeExportTemplate(template = null) {
+  if (!template || template.type !== "visual-export-template") return null;
+  const fallbackColumns = ORDER_EXPORT_COLUMNS.map(([label, key, width]) => ({ label, key, width }));
+  const columns = Array.isArray(template.columns) && template.columns.length
+    ? template.columns
+    : fallbackColumns;
+  const headerTextColor = validHexColor(template.headerTextColor, "#17233c");
+  const footerTextColor = validHexColor(template.footerTextColor, "#64748b");
+  const headerTextItems = Array.isArray(template.headerTextItems) ? template.headerTextItems : [];
+  const footerTextItems = Array.isArray(template.footerTextItems) && template.footerTextItems.length
+    ? template.footerTextItems
+    : (template.footer ? [{
+      text: template.footer,
+      x: 0,
+      y: 0,
+      fontSize: template.footerFontSize || 9,
+      color: footerTextColor,
+      bold: false
+    }] : []);
+  return {
+    orientation: ["portrait", "landscape", "fluid"].includes(template.orientation) ? template.orientation : "landscape",
+    headerTextItems: headerTextItems.map((item) => ({
+      ...item,
+      color: validHexColor(item.color, headerTextColor),
+      width: Math.max(80, Math.min(520, Number(item.width || 260))),
+      align: ["left", "center", "right"].includes(item.align) ? item.align : "left"
+    })),
+    footerTextItems: footerTextItems.map((item) => ({
+      ...item,
+      color: validHexColor(item.color, footerTextColor),
+      width: Math.max(80, Math.min(520, Number(item.width || 280))),
+      align: ["left", "center", "right"].includes(item.align) ? item.align : "left"
+    })),
+    header: String(template.header || ""),
+    footer: String(template.footer || ""),
+    logo: String(template.logo || ""),
+    logoWidth: Number(template.logoWidth || 92),
+    logoHeight: Number(template.logoHeight || 56),
+    logoFit: template.logoFit === "cover" ? "cover" : "contain",
+    logoX: Number(template.logoX ?? 18),
+    logoY: Number(template.logoY ?? 12),
+    headerHeight: Math.max(48, Math.min(180, Number(template.headerHeight || 92))),
+    footerHeight: Math.max(28, Math.min(140, Number(template.footerHeight || 70))),
+    headerFontSize: Number(template.headerFontSize || 14),
+    headerTextColor,
+    tableFontSize: Math.max(5, Math.min(22, Number(template.tableFontSize || 8))),
+    tableTextColor: validHexColor(template.tableTextColor, "#17233c"),
+    tableHeaderTextColor: validHexColor(template.tableHeaderTextColor, "#1f2a44"),
+    tableHeaderBgColor: validHexColor(template.tableHeaderBgColor, "#f1f5f9"),
+    tableBorderColor: validHexColor(template.tableBorderColor, "#d9e3f2"),
+    tableBorderWidth: Math.max(0, Math.min(6, Number(template.tableBorderWidth ?? 1))),
+    tableHeaderBold: template.tableHeaderBold !== false,
+    tableBold: Boolean(template.tableBold),
+    tableAlign: ["left", "center", "right"].includes(template.tableAlign) ? template.tableAlign : "left",
+    footerFontSize: Number(template.footerFontSize || 9),
+    footerTextColor,
+    columns: columns
+      .filter((column) => column?.visible !== false)
+      .map((column) => ({
+        label: String(column.label || column.key || ""),
+        key: String(column.key || ""),
+        feeItemId: String(column.feeItemId || ""),
+        feeName: String(column.feeName || ""),
+        feeCurrency: String(column.feeCurrency || ""),
+        fontSize: Math.max(5, Math.min(22, Number(column.fontSize || template.tableFontSize || 8))),
+        width: Number(column.width || fallbackColumns.find((item) => item.key === column.key)?.width || 76),
+        order: Number(column.order || column.sortOrder || 0) || 0,
+        headerBold: typeof column.headerBold === "boolean" ? column.headerBold : ""
+      }))
+      .filter((column) => column.key)
+  };
+}
+
+function validHexColor(value, fallback) {
+  const color = String(value || "").trim();
+  return /^#[0-9a-f]{6}$/i.test(color) ? color : fallback;
+}
+
+function templateText(text, context) {
+  return String(text || "")
+    .replaceAll("{{title}}", context.title)
+    .replaceAll("{{date}}", context.date)
+    .replaceAll("{{user}}", context.user)
+    .replaceAll("{{page}}", String(context.page || ""))
+    .replaceAll("{{pages}}", String(context.pages || ""));
+}
+
+function dataUrlBuffer(value) {
+  const match = String(value || "").match(/^data:image\/(?:png|jpe?g);base64,(.+)$/i);
+  if (!match) return null;
+  return Buffer.from(match[1], "base64");
+}
+
+function dataUrlImage(value) {
+  const match = String(value || "").match(/^data:image\/(png|jpe?g);base64,(.+)$/i);
+  if (!match) return null;
+  return {
+    buffer: Buffer.from(match[2], "base64"),
+    extension: match[1].toLowerCase().startsWith("jp") ? "jpeg" : "png"
+  };
+}
+
+function sanitizeFilename(value) {
+  const fallback = `file-${Date.now()}`;
+  const filename = textValue(value)
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim();
+  const safe = filename.split(/[\\/]/).pop() || fallback;
+  return safe.slice(0, 120) || fallback;
+}
+
+function fileExtension(filename) {
+  const name = textValue(filename).toLowerCase();
+  const index = name.lastIndexOf(".");
+  return index >= 0 ? name.slice(index) : "";
+}
+
+function normalizeMime(value) {
+  return textValue(value || "application/octet-stream").split(";")[0].trim().toLowerCase() || "application/octet-stream";
+}
+
+function fileTypeRule(filename, mime) {
+  const extension = fileExtension(filename);
+  const normalizedMime = normalizeMime(mime);
+  return SAFE_FILE_TYPES.find((rule) =>
+    rule.extensions.includes(extension) && rule.mimes.includes(normalizedMime)
+  ) || null;
+}
+
+function bufferMatchesMime(buffer, mime) {
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) return false;
+  if (mime === "image/png") return buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  if (mime === "image/jpeg") return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  if (mime === "image/gif") return buffer.subarray(0, 6).toString("ascii") === "GIF87a" || buffer.subarray(0, 6).toString("ascii") === "GIF89a";
+  if (mime === "image/webp") return buffer.subarray(0, 4).toString("ascii") === "RIFF" && buffer.subarray(8, 12).toString("ascii") === "WEBP";
+  if (mime === "application/pdf") return buffer.subarray(0, 5).toString("ascii") === "%PDF-";
+  if (mime === "text/plain" || mime === "text/csv" || mime === "application/csv") return !buffer.subarray(0, 1024).includes(0);
+  return true;
+}
+
+function validateStoredFilePayload(item) {
+  const filename = sanitizeFilename(item.filename);
+  const mime = normalizeMime(item.mime);
+  const rule = fileTypeRule(filename, mime);
+  if (!rule) return { error: "不支持的文件类型，请上传图片、PDF、Word、Excel、CSV 或 TXT" };
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(item.contentBase64) || item.contentBase64.length % 4 !== 0) {
+    return { error: "文件内容格式不正确" };
+  }
+  const buffer = Buffer.from(item.contentBase64, "base64");
+  if (!buffer.length) return { error: "文件内容不能为空" };
+  if (buffer.length > MAX_UPLOAD_BYTES) return { error: `文件不能超过 ${Math.round(MAX_UPLOAD_BYTES / 1024 / 1024)}MB` };
+  if (Number(item.size || 0) > 0 && Math.abs(Number(item.size) - buffer.length) > 8) {
+    return { error: "文件大小校验失败，请重新上传" };
+  }
+  if (!bufferMatchesMime(buffer, mime)) return { error: "文件类型与内容不匹配，已拒绝上传" };
+  return { filename, mime, size: buffer.length, contentBase64: buffer.toString("base64") };
+}
+
+function resolvePdfFontPath() {
+  return [
+    "C:/Windows/Fonts/msyh.ttc",
+    "C:/Windows/Fonts/simsun.ttc",
+    "C:/Windows/Fonts/nsimsun.ttc",
+    "C:/Windows/Fonts/simhei.ttf",
+    "/Library/Fonts/Arial Unicode.ttf",
+    "/Library/Fonts/Microsoft Yahei.ttf",
+    "/Library/Fonts/Songti.ttc",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/System/Library/Fonts/STHeiti Medium.ttc",
+    "/System/Library/Fonts/Supplemental/Songti.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/arphic/uming.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"
+  ].find((fontPath) => fs.existsSync(fontPath));
+}
+
+function textValue(value) {
+  if (value === null || value === undefined) return "";
+  return String(value);
+}
+
+function htmlEscape(value) {
+  return textValue(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function csvCell(value) {
+  return `"${textValue(value).replaceAll('"', '""')}"`;
+}
+
+function csvRows(headers, rows) {
+  return [headers, ...rows]
+    .map((row) => row.map(csvCell).join(","))
+    .join("\n");
+}
+
+function shortLocationValue(value) {
+  const parts = textValue(value)
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts.length > 2 ? parts.slice(0, 2).join(" / ") : textValue(value);
+}
+
+function formatExportAmount(value, emptyZero = true) {
+  const amount = Number(value || 0);
+  if (!amount && emptyZero) return "";
+  return amount ? amount.toLocaleString("zh-Hans-CN") : "0";
+}
+
+function exportFeeItemCurrencyForColumn(column = {}) {
+  const feeItemId = textValue(column?.feeItemId).trim();
+  const feeName = textValue(column?.feeName || column?.label).trim();
+  const columnCurrency = textValue(column?.feeCurrency).trim();
+  if (feeItemId) {
+    const row = db
+      .prepare("SELECT currency FROM fee_items WHERE id = ? AND deleted_at IS NULL")
+      .get(Number(feeItemId));
+    if (row?.currency) return row.currency;
+  }
+  if (columnCurrency) return columnCurrency;
+  if (feeName) {
+    const row = db
+      .prepare("SELECT currency FROM fee_items WHERE name = ? AND deleted_at IS NULL")
+      .get(feeName);
+    if (row?.currency) return row.currency;
+  }
+  return "";
+}
+
+function feeAmountForColumn(order, column) {
+  return feeRowsForColumn(order, column)
+    .reduce((sum, fee) => sum + Number(fee.amount || 0), 0);
+}
+
+function feeDisplayForColumn(order, column) {
+  const rows = feeRowsForColumn(order, column);
+  const amount = rows.reduce((sum, fee) => sum + Number(fee.amount || 0), 0);
+  const amountText = formatExportAmount(amount);
+  if (amountText) return amountText;
+  return "";
+}
+
+function feeRemarkForColumn(order, column) {
+  const remarks = feeRowsForColumn(order, column)
+    .map((fee) => textValue(fee.remark).trim())
+    .filter(Boolean);
+  return Array.from(new Set(remarks)).join("；");
+}
+
+function exportOrderColumnComment(order, column) {
+  if (!isExportFeeItemColumn(column)) return "";
+  return feeRemarkForColumn(order, column);
+}
+
+function feeHasRecordedValue(fee) {
+  if (!textValue(fee?.name).trim()) return false;
+  return Number(fee?.amount || 0) !== 0
+    || Boolean(textValue(fee?.quantity).trim())
+    || Boolean(textValue(fee?.remark).trim());
+}
+
+function feeRowsForColumn(order, column) {
+  const fees = Array.isArray(order?.fees) ? order.fees : [];
+  const feeItemId = textValue(column?.feeItemId).trim();
+  const feeName = textValue(column?.feeName || column?.label).trim();
+  const feeCurrency = exportFeeItemCurrencyForColumn(column);
+  const normalizedColumnCurrency = normalizeFeeCurrency(feeCurrency);
+  if (!feeItemId && !feeName) return [];
+  return fees.filter((fee) => {
+    const name = textValue(fee.name).trim();
+    const itemId = textValue(fee.feeItemId || fee.fee_item_id).trim();
+    const currencyMatches = !feeCurrency || normalizeFeeCurrency(fee.currency) === normalizedColumnCurrency;
+    if (feeItemId && itemId) return itemId === feeItemId && currencyMatches;
+    return name === feeName && currencyMatches;
+  });
+}
+
+function feeColumnHasRecordedValue(column, orders = []) {
+  return orders.some((order) => feeRowsForColumn(order, column).some(feeHasRecordedValue));
+}
+
+function isExportAmountColumn(column) {
+  const key = textValue(column?.key);
+  const label = textValue(column?.label);
+  return key === "__hkdTotal"
+    || key === "__rmbTotal"
+    || key === "receivableHKD"
+    || key === "receivableRMB"
+    || key.startsWith("fee-item-")
+    || /金额|应收|港币|人民币|运费|税金|过磅费|停车费|登记费|等候费|装货费|卸货费/.test(label);
+}
+
+function exportOrderColumnAmount(order, column) {
+  const key = textValue(column?.key);
+  if (key === "__sequence") return 0;
+  if (key === "__hkdTotal") return Number(order?.receivableHKD || 0);
+  if (key === "__rmbTotal") return Number(order?.receivableRMB || 0);
+  if (key.startsWith("fee-item-")) return feeAmountForColumn(order, column);
+  if (key === "receivableHKD" || key === "receivableRMB") return Number(order?.[key] || 0);
+  return Number(order?.[key] || 0);
+}
+
+function exportOrderColumnValue(order, column, rowIndex = 0) {
+  const key = textValue(column?.key);
+  if (key === "__sequence") return rowIndex + 1;
+  if (key === "__hkdTotal") return formatExportAmount(order?.receivableHKD);
+  if (key === "__rmbTotal") return formatExportAmount(order?.receivableRMB);
+  if (key === "loading" || key === "unloading") return shortLocationValue(order?.[key]);
+  if (key.startsWith("fee-item-")) return feeDisplayForColumn(order, column);
+  if (key === "receivableHKD" || key === "receivableRMB") return formatExportAmount(order?.[key]);
+  const value = order?.[key];
+  if (value !== undefined && value !== null && value !== "" && Number(value) === 0) return "";
+  return value ?? "";
+}
+
+function normalizeExportExchange(input = null) {
+  const mode = textValue(input?.mode || input?.exchangeMode).trim();
+  const rate = Number(input?.rate ?? input?.exchangeRate ?? 0);
+  if (!["hkd-to-rmb", "rmb-to-hkd"].includes(mode) || !Number.isFinite(rate) || rate <= 0) {
+    return null;
+  }
+  return { mode, rate };
+}
+
+function exportTotalAmountForColumn(orders, column, exchange = null) {
+  const key = textValue(column?.key);
+  const hkdTotal = orders.reduce((sum, order) => sum + Number(order?.receivableHKD || 0), 0);
+  const rmbTotal = orders.reduce((sum, order) => sum + Number(order?.receivableRMB || 0), 0);
+  if (exchange?.mode === "hkd-to-rmb" && (key === "__rmbTotal" || key === "receivableRMB")) {
+    return rmbTotal + (hkdTotal * exchange.rate);
+  }
+  if (exchange?.mode === "rmb-to-hkd" && (key === "__hkdTotal" || key === "receivableHKD")) {
+    return hkdTotal + (rmbTotal / exchange.rate);
+  }
+  return orders.reduce((sum, order) => sum + exportOrderColumnAmount(order, column), 0);
+}
+
+function exportTotalRow(orders, columns, exchangeInput = null) {
+  const exchange = normalizeExportExchange(exchangeInput);
+  return columns.map((column, index) => {
+    if (index === 0) return "合计";
+    if (!isExportAmountColumn(column)) return "";
+    return formatExportAmount(exportTotalAmountForColumn(orders, column, exchange), false);
+  });
+}
+
+function exportOrderNoForSort(order = {}) {
+  return textValue(order?.no || order?.orderNo || order?.order_no).trim();
+}
+
+function sortOrdersForExport(orders = []) {
+  return [...orders];
+}
+
+function exportTableRows(orders, columns, exchange = null) {
+  const sortedOrders = sortOrdersForExport(orders);
+  const rows = sortedOrders.map((order, rowIndex) => columns.map((column) => exportOrderColumnValue(order, column, rowIndex)));
+  return [...rows, exportTotalRow(sortedOrders, columns, exchange)];
+}
+
+function exportFilenamePart(value, fallback = "未填写") {
+  return textValue(value || fallback)
+    .replace(/[\\/:*?"<>|]/g, "")
+    .replace(/\s+/g, "")
+    .trim() || fallback;
+}
+
+function exportOrderDailySequence(order) {
+  const match = textValue(order?.no).match(/(\d+)$/);
+  if (!match) return "01";
+  return String(Number(match[1].slice(-2)) || 1).padStart(2, "0");
+}
+
+function orderExportFilename(orders, extension) {
+  const first = orders[0] || {};
+  const customer = exportFilenamePart(first.customer || "客户");
+  const date = exportFilenamePart(first.date || todayInputValue()).replaceAll("-", "");
+  const sequence = exportOrderDailySequence(first);
+  return `${customer}_${date}${sequence}.${extension}`;
+}
+
+async function exportTemplateById(templateId) {
+  const id = Number(templateId || 0);
+  if (!id) return null;
+  const row = await db.prepare("SELECT * FROM templates WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!row?.content) return null;
+  try {
+    const content = JSON.parse(row.content);
+    return content?.type === "visual-export-template" ? content : null;
+  } catch {
+    return null;
+  }
+}
+
+function exportColumnsFromTemplate(template = null) {
+  const normalized = normalizeExportTemplate(template);
+  const columns = normalized?.columns?.length
+    ? normalized.columns
+    : ORDER_EXPORT_COLUMNS.map(([label, key, width]) => ({ label, key, width }));
+  const withoutSequenceColumn = columns.filter((column) => column.key !== ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key);
+  const hasConfigurableTotalColumns = ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS.some((systemColumn) =>
+    withoutSequenceColumn.some((column) => column.key === systemColumn.key)
+  );
+  const visibleColumns = withoutSequenceColumn.filter((column) => column.visible !== false);
+  const totalColumns = hasConfigurableTotalColumns
+    ? []
+    : ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS.map((column) => ({ ...column }));
+  return [{ ...ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN }, ...visibleColumns, ...totalColumns];
+}
+
+function normalizeFeeCurrency(value = "") {
+  const text = textValue(value).trim().toUpperCase();
+  if (text === "人民币" || text === "RMB") return "RMB";
+  return "HKD";
+}
+
+function currencyDisplay(value = "") {
+  return normalizeFeeCurrency(value) === "RMB" ? "RMB" : "HKD";
+}
+
+function currencyNameDisplay(value = "") {
+  return normalizeFeeCurrency(value) === "RMB" ? "人民币" : "港币";
+}
+
+function exportColumnCurrencyLabel(column = {}) {
+  const key = textValue(column.key);
+  if (key === "__hkdTotal" || key === "receivableHKD") return "HKD";
+  if (key === "__rmbTotal" || key === "receivableRMB") return "RMB";
+  if (key.startsWith("fee-item-") || column.feeItemId || column.feeName) {
+    const feeCurrency = exportFeeItemCurrencyForColumn(column);
+    return feeCurrency ? currencyDisplay(feeCurrency) : "";
+  }
+  return "";
+}
+
+function exportColumnBaseLabel(column = {}) {
+  const label = textValue(column.label);
+  const currency = exportColumnCurrencyLabel(column);
+  if (!currency) return label;
+  const normalizedCurrency = normalizeFeeCurrency(currency);
+  const displayCurrency = currencyNameDisplay(currency);
+  return label
+    .replace(new RegExp(`\\s*(?:${currency}|${normalizedCurrency}|${displayCurrency})$`, "i"), "")
+    .trim() || label;
+}
+
+function exportColumnHeaderText(column = {}) {
+  const currency = exportColumnCurrencyLabel(column);
+  return currency ? `${exportColumnBaseLabel(column)}\n${currency}` : exportColumnBaseLabel(column);
+}
+
+function exportColumnHeaderHtml(column = {}) {
+  const currency = exportColumnCurrencyLabel(column);
+  const label = htmlEscape(exportColumnBaseLabel(column));
+  if (!currency) return label;
+  return `<span class="table-header-label">${label}</span><span class="table-header-currency">${htmlEscape(currency)}</span>`;
+}
+
+function exportColumnHeaderBold(column = {}, template = null) {
+  if (column.headerBold === true) return true;
+  if (column.headerBold === false) return false;
+  return template?.tableHeaderBold !== false;
+}
+
+function pdfTextWithWeight(doc, text, x, y, options = {}, bold = false) {
+  doc.text(text, x, y, options);
+  if (bold) doc.text(text, x + 0.18, y, options);
+}
+
+function dynamicExportFeeColumns(orders = [], existingColumns = []) {
+  const existingFeeKeys = new Set(existingColumns
+    .filter(isExportFeeItemColumn)
+    .map((column) => `${textValue(column.feeName || column.label).trim()}|${normalizeFeeCurrency(exportFeeItemCurrencyForColumn(column))}`)
+    .filter((key) => !key.startsWith("|")));
+  const feeColumns = [];
+  const seen = new Set();
+  orders.forEach((order) => {
+    (Array.isArray(order?.fees) ? order.fees : []).forEach((fee) => {
+      const name = textValue(fee.name).trim();
+      const currency = normalizeFeeCurrency(fee.currency);
+      if (!feeHasRecordedValue(fee)) return;
+      const key = `${name}|${currency}`;
+      if (existingFeeKeys.has(key)) return;
+      if (seen.has(key)) return;
+      seen.add(key);
+      feeColumns.push({
+        key: `fee-item-dynamic-${feeColumns.length + 1}`,
+        label: name,
+        feeName: name,
+        feeCurrency: currency,
+        width: Math.max(76, Math.min(140, stringDisplayWidth(`${name} ${currency}`) * 8))
+      });
+    });
+  });
+  return feeColumns;
+}
+
+function exportFeeColumnName(column = {}) {
+  return textValue(column.feeName || column.label).trim();
+}
+
+function exportFeeColumnKey(column = {}) {
+  return `${exportFeeColumnName(column)}|${normalizeFeeCurrency(exportFeeItemCurrencyForColumn(column))}`;
+}
+
+function mergeExportColumnsByTemplateOrder(templateColumns = [], includedColumns = [], dynamicColumns = []) {
+  const includedSet = new Set(includedColumns);
+  const usedDynamic = new Set();
+  const result = [];
+  templateColumns.forEach((column) => {
+    if (includedSet.has(column)) result.push(column);
+    if (!isExportFeeItemColumn(column)) return;
+    const templateName = exportFeeColumnName(column);
+    dynamicColumns.forEach((dynamicColumn) => {
+      if (usedDynamic.has(dynamicColumn)) return;
+      if (exportFeeColumnName(dynamicColumn) !== templateName) return;
+      result.push(dynamicColumn);
+      usedDynamic.add(dynamicColumn);
+    });
+  });
+  dynamicColumns.forEach((column) => {
+    if (!usedDynamic.has(column)) result.push(column);
+  });
+  return result;
+}
+
+function exportColumnsForOrders(templatePayload = null, orders = []) {
+  const template = normalizeExportTemplate(templatePayload);
+  const columns = exportColumnsFromTemplate(templatePayload);
+  const sequenceColumn = columns.find((column) => column.key === ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key);
+  const bodyColumns = columns.filter((column) =>
+    column.key !== ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key
+    && (!isExportFeeItemColumn(column) || feeColumnHasRecordedValue(column, orders))
+  );
+  const dynamicColumns = dynamicExportFeeColumns(orders, bodyColumns);
+  return [
+    sequenceColumn || { ...ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN },
+    ...mergeExportColumnsByTemplateOrder(
+      columns.filter((column) => column.key !== ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key),
+      bodyColumns,
+      dynamicColumns
+    )
+  ].map((column) => ({
+    ...column,
+    width: exportColumnAutoWidth(column, orders, { fluid: template?.orientation === "fluid" })
+  }));
+}
+
+function exportTemplateTextRows(templatePayload = null, title = "订单导出") {
+  const template = normalizeExportTemplate(templatePayload);
+  const context = {
+    title,
+    date: todayInputValue(),
+    user: "高级管理员",
+    page: 1,
+    pages: 1
+  };
+  const headerItems = template
+    ? (
+      template.headerTextItems.length
+        ? template.headerTextItems
+        : [{ text: template.header || "{{title}}\n日期：{{date}}" }]
+    )
+    : [{ text: title }, { text: `导出时间：${todayInputValue()}` }];
+  const footerItems = template?.footerTextItems?.length
+    ? template.footerTextItems
+    : (template ? [{ text: template.footer || "制表人：{{user}}" }] : []);
+  return {
+    headerRows: headerItems
+      .map((item) => templateText(item.text, context))
+      .filter(Boolean)
+      .flatMap((text) => text.split(/\r?\n/).filter(Boolean)),
+    footerRows: footerItems
+      .map((item) => templateText(item.text, context))
+      .filter(Boolean)
+      .flatMap((text) => text.split(/\r?\n/).filter(Boolean))
+  };
+}
+
+function renderOrdersCsv(orders, title = "订单导出", templatePayload = null, exchange = null) {
+  const columns = exportColumnsForOrders(templatePayload, orders);
+  const headers = columns.map(exportColumnHeaderText);
+  const rows = exportTableRows(orders, columns, exchange);
+  const { headerRows, footerRows } = exportTemplateTextRows(templatePayload, title);
+  const csvBodyRows = [
+    ...headerRows.map((text) => [text]),
+    ...(headerRows.length ? [[]] : []),
+    headers,
+    ...rows,
+    ...(footerRows.length ? [[], ...footerRows.map((text) => [text])] : [])
+  ];
+  return csvRows(csvBodyRows[0] || [], csvBodyRows.slice(1));
+}
+
+function stringDisplayWidth(value) {
+  return Array.from(textValue(value)).reduce((sum, char) => {
+    return sum + (/[\u2e80-\u9fff\uff00-\uffef]/.test(char) ? 2 : 1);
+  }, 0);
+}
+
+function cellDisplayWidth(value) {
+  const lines = textValue(value).split(/\r?\n/);
+  return Math.max(...lines.map(stringDisplayWidth), 0);
+}
+
+function exportCellLineCount(value, columnWidth = 76) {
+  const usableWidth = Math.max(1, Number(columnWidth || 76) - 10);
+  const maxCharsPerLine = Math.max(1, Math.floor(usableWidth / 6.5));
+  const explicitLines = textValue(value).split(/\r?\n/);
+  const estimated = explicitLines.reduce((sum, line) => {
+    return sum + Math.max(1, Math.ceil(stringDisplayWidth(line) / maxCharsPerLine));
+  }, 0);
+  return Math.min(2, Math.max(1, estimated));
+}
+
+function isExportFeeItemColumn(column = {}) {
+  const key = textValue(column.key);
+  return key.startsWith("fee-item-") || column.feeItemId || column.feeName;
+}
+
+function exportColumnMinimumWidth(column = {}) {
+  const key = textValue(column.key);
+  const isFeeColumn = isExportFeeItemColumn(column);
+  const widthUnits = Math.max(
+    stringDisplayWidth(exportColumnBaseLabel(column)),
+    stringDisplayWidth(exportColumnCurrencyLabel(column))
+  );
+  const baseWidth = widthUnits * 5.2 + 16;
+  return Math.max(isFeeColumn ? 46 : 34, Math.min(isFeeColumn ? 90 : 120, baseWidth));
+}
+
+function exportColumnMaxWidth(column = {}) {
+  const key = textValue(column.key);
+  if (key === ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key) return 42;
+  if (key === "date") return 72;
+  if (["direction", "currency", "tonnage"].includes(key)) return 50;
+  if (["quantity", "weight", "status"].includes(key)) return 68;
+  if (["plate", "driver", "hkDriver", "mainlandDriver"].includes(key)) return 82;
+  if (["dispatchNo", "no", "sixSheetNo", "tripNo"].includes(key)) return 98;
+  if (["customer", "supplier"].includes(key)) return 138;
+  if (["loading", "unloading"].includes(key)) return 132;
+  if (key === "__hkdTotal" || key === "__rmbTotal" || key === "receivableHKD" || key === "receivableRMB") return 76;
+  if (isExportFeeItemColumn(column)) return 112;
+  return 118;
+}
+
+function exportColumnFluidMaxWidth(column = {}) {
+  const key = textValue(column.key);
+  if (key === ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key) return 42;
+  if (["direction", "currency", "tonnage"].includes(key)) return 56;
+  if (key === "date") return 76;
+  if (key === "customer" || key === "supplier") return 240;
+  if (key === "loading" || key === "unloading") return 260;
+  if (isExportFeeItemColumn(column)) return 180;
+  return 180;
+}
+
+function exportColumnAutoWidth(column = {}, orders = [], options = {}) {
+  const sidePadding = options.fluid ? 14 : 10;
+  const headerWidth = exportColumnMinimumWidth(column);
+  const valueWidth = orders.reduce((max, order, index) => {
+    return Math.max(max, cellDisplayWidth(exportOrderColumnValue(order, column, index)));
+  }, 0);
+  const contentWidth = valueWidth ? valueWidth * (options.fluid ? 6.5 : 4.2) + 18 + sidePadding : 0;
+  return Math.round(Math.max(
+    headerWidth + sidePadding,
+    Math.min(options.fluid ? exportColumnFluidMaxWidth(column) : exportColumnMaxWidth(column), contentWidth || headerWidth)
+  ));
+}
+
+function excelArgb(value, fallback = "#17233c") {
+  return `FF${validHexColor(value, fallback).slice(1).toUpperCase()}`;
+}
+
+function excelAlignment(align = "left") {
+  return ["left", "center", "right"].includes(align) ? align : "left";
+}
+
+function excelColumnWidthForExport(column = {}, headerValue = "", rowValues = [], template = null) {
+  const tableFontSize = Number(template?.tableFontSize || 8);
+  const bodyFontSize = Number(column.fontSize || tableFontSize);
+  const fontScale = Math.max(0.75, bodyFontSize / 11);
+  const headerScale = Math.max(0.75, tableFontSize / 11);
+  const headerWidth = cellDisplayWidth(headerValue) * headerScale;
+  const bodyWidth = rowValues.reduce((max, value) => {
+    return Math.max(max, cellDisplayWidth(value) * fontScale);
+  }, 0);
+  const maxWidth = template?.orientation === "fluid" ? 72 : 46;
+  return Math.max(6, Math.min(maxWidth, Math.ceil(Math.max(headerWidth, bodyWidth) + 2)));
+}
+
+async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePayload = null, exchange = null) {
+  const template = normalizeExportTemplate(templatePayload);
+  const columns = exportColumnsForOrders(templatePayload, orders);
+  const headers = columns.map(exportColumnHeaderText);
+  const rows = exportTableRows(orders, columns, exchange);
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = "汉业管理系统";
+  workbook.created = new Date();
+  const worksheet = workbook.addWorksheet("订单导出");
+  worksheet.pageSetup = {
+    paperSize: 9,
+    orientation: template?.orientation === "portrait" ? "portrait" : "landscape",
+    fitToPage: template?.orientation !== "fluid",
+    fitToWidth: template?.orientation === "fluid" ? 0 : 1,
+    fitToHeight: 0,
+    horizontalCentered: true,
+    margins: {
+      left: 0.3,
+      right: 0.3,
+      top: 0.35,
+      bottom: 0.35,
+      header: 0.1,
+      footer: 0.1
+    }
+  };
+  const context = {
+    title,
+    date: todayInputValue(),
+    user: "高级管理员",
+    page: 1,
+    pages: 1
+  };
+
+  columns.forEach((column, index) => {
+    worksheet.getColumn(index + 1).width = excelColumnWidthForExport(
+      column,
+      headers[index],
+      rows.map((row) => row[index]),
+      template
+    );
+  });
+
+  const headerHeight = template?.headerHeight || 72;
+  const headerBlockRows = Math.max(2, Math.ceil(headerHeight / 20));
+  const mergeEndColumn = Math.max(1, columns.length);
+  const headerItems = template
+    ? (
+      template.headerTextItems.length
+        ? template.headerTextItems
+        : [{ text: template.header || "{{title}}\n日期：{{date}}", color: template.headerTextColor, fontSize: template.headerFontSize, bold: true }]
+    )
+    : [{ text: title, fontSize: 15, bold: true }, { text: `导出时间：${todayInputValue()}    订单数：${orders.length}`, fontSize: 9, color: "#64748b" }];
+
+  // Excel is stricter than browsers/PDF readers about drawing anchors. Keep the
+  // workbook drawing-free so exported files open without repair prompts.
+
+  headerItems.forEach((item, itemIndex) => {
+    const text = templateText(item.text, context);
+    if (!text) return;
+    const rowNumber = Math.max(1, Math.min(headerBlockRows, 1 + Math.floor(Number(item.y ?? itemIndex * 18) / 20)));
+    const columnNumber = Math.max(1, Math.min(mergeEndColumn, 1 + Math.floor(Number(item.x || 0) / 72)));
+    const cell = worksheet.getCell(rowNumber, columnNumber);
+    cell.value = text;
+    cell.font = {
+      name: "Microsoft YaHei",
+      size: Number(item.fontSize || template?.headerFontSize || 14),
+      bold: Boolean(item.bold),
+      color: { argb: excelArgb(item.color || template?.headerTextColor || "#17233c") }
+    };
+    cell.alignment = { vertical: "middle", horizontal: excelAlignment(item.align), wrapText: true };
+    worksheet.getRow(rowNumber).height = Math.max(20, Math.ceil(Number(item.fontSize || 14) * 1.8));
+    if (columnNumber < mergeEndColumn) {
+      try {
+        worksheet.mergeCells(rowNumber, columnNumber, rowNumber, mergeEndColumn);
+      } catch {
+        // Multiple text boxes can intentionally share a row; keep the cell unmerged.
+      }
+    }
+  });
+
+  const tableStartRow = headerBlockRows + 2;
+  const borderStyle = template?.tableBorderWidth === 0 ? undefined : {
+    style: Number(template?.tableBorderWidth || 1) > 1 ? "medium" : "thin",
+    color: { argb: excelArgb(template?.tableBorderColor || "#d9e3f2") }
+  };
+  const tableBorder = borderStyle
+    ? { top: borderStyle, left: borderStyle, bottom: borderStyle, right: borderStyle }
+    : {};
+  const headerRow = worksheet.getRow(tableStartRow);
+  headerRow.values = headers;
+  headerRow.height = Math.max(30, Number(template?.tableFontSize || 8) * 2.8 + 12);
+  headerRow.eachCell((cell, columnNumber) => {
+    const column = columns[columnNumber - 1] || {};
+    cell.font = {
+      name: "Microsoft YaHei",
+      size: Number(template?.tableFontSize || 8),
+      bold: exportColumnHeaderBold(column, template),
+      color: { argb: excelArgb(template?.tableHeaderTextColor || "#1f2a44") }
+    };
+    cell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: excelArgb(template?.tableHeaderBgColor || "#f1f5f9") }
+    };
+    cell.alignment = { vertical: "middle", horizontal: excelAlignment(template?.tableAlign), wrapText: true };
+    cell.border = tableBorder;
+  });
+
+  const sortedOrders = sortOrdersForExport(orders);
+  rows.forEach((rowValues, rowIndex) => {
+    const isTotalRow = rowIndex === rows.length - 1;
+    const sourceOrder = sortedOrders[rowIndex] || null;
+    const row = worksheet.getRow(tableStartRow + 1 + rowIndex);
+    row.values = rowValues;
+    row.height = Math.max(22, Number(template?.tableFontSize || 8) * 1.9 + 12);
+    row.eachCell((cell, columnNumber) => {
+      const column = columns[columnNumber - 1] || {};
+      if (isExportAmountColumn(column)) {
+        const amount = isTotalRow
+          ? exportTotalAmountForColumn(sortedOrders, column, exchange)
+          : exportOrderColumnAmount(sourceOrder, column);
+        if (isTotalRow || Number(amount || 0) !== 0) {
+          cell.value = Number(amount || 0);
+          cell.numFmt = "#,##0";
+        } else {
+          cell.value = "";
+        }
+      }
+      cell.font = {
+        name: "Microsoft YaHei",
+        size: Number(column.fontSize || template?.tableFontSize || 8),
+        bold: isTotalRow || Boolean(template?.tableBold),
+        color: { argb: excelArgb(template?.tableTextColor || "#17233c") }
+      };
+      if (isTotalRow) {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: excelArgb(template?.tableHeaderBgColor || "#f1f5f9") }
+        };
+      }
+      cell.alignment = { vertical: "middle", horizontal: excelAlignment(template?.tableAlign), wrapText: false };
+      if (!isTotalRow && sourceOrder) {
+        const comment = exportOrderColumnComment(sourceOrder, column);
+        if (comment) {
+          cell.note = comment;
+        }
+      }
+      cell.border = tableBorder;
+    });
+  });
+
+  const footerItems = template?.footerTextItems?.length
+    ? template.footerTextItems
+    : (template ? [{ text: template.footer || "制表人：{{user}}", color: template.footerTextColor, fontSize: template.footerFontSize }] : []);
+  let footerRowNumber = tableStartRow + rows.length + 2;
+  footerItems.forEach((item) => {
+    const lines = templateText(item.text, context).split(/\r?\n/).filter(Boolean);
+    lines.forEach((line) => {
+      const row = worksheet.getRow(footerRowNumber);
+      const cell = row.getCell(1);
+      cell.value = line;
+      cell.font = {
+        name: "Microsoft YaHei",
+        size: Number(item.fontSize || template?.footerFontSize || 9),
+        bold: Boolean(item.bold),
+        color: { argb: excelArgb(item.color || template?.footerTextColor || "#64748b") }
+      };
+      cell.alignment = { vertical: "middle", horizontal: excelAlignment(item.align), wrapText: true };
+      if (mergeEndColumn > 1) worksheet.mergeCells(footerRowNumber, 1, footerRowNumber, mergeEndColumn);
+      footerRowNumber += 1;
+    });
+  });
+
+  return Buffer.from(await workbook.xlsx.writeBuffer());
+}
+
+function renderOrdersExcelHtml(orders, title = "订单导出", templatePayload = null, exchange = null) {
+  const template = normalizeExportTemplate(templatePayload);
+  const columns = exportColumnsForOrders(templatePayload, orders);
+  const context = {
+    title,
+    date: todayInputValue(),
+    user: "高级管理员",
+    page: 1,
+    pages: 1
+  };
+  const headerItems = template
+    ? (
+      template.headerTextItems.length
+        ? template.headerTextItems
+        : [{ text: template.header || "{{title}}\n日期：{{date}}", color: template.headerTextColor, fontSize: template.headerFontSize }]
+    )
+    : [{ text: title }, { text: `导出时间：${todayInputValue()}    订单数：${orders.length}` }];
+  const footerItems = template?.footerTextItems?.length
+    ? template.footerTextItems
+    : (template ? [{ text: template.footer || "制表人：{{user}}", color: template.footerTextColor, fontSize: template.footerFontSize }] : []);
+  const headerHtml = headerItems
+    .filter((item) => item?.text)
+    .map((item) => `<div class="header-line" style="color:${htmlEscape(item.color || template?.headerTextColor || "#17233c")};font-size:${Number(item.fontSize || template?.headerFontSize || 14)}px;font-weight:${item.bold ? 700 : 400};text-align:${htmlEscape(item.align || "left")};width:${Math.max(80, Math.min(520, Number(item.width || 260)))}px;">${htmlEscape(templateText(item.text, context)).replaceAll("\n", "<br>")}</div>`)
+    .join("");
+  const logoWidth = template ? Math.max(48, Math.min(180, Number(template.logoWidth || 92))) : 92;
+  const logoHeight = template ? Math.max(28, Math.min(120, Number(template.logoHeight || 56))) : 56;
+  const logoFit = template?.logoFit === "cover" ? "cover" : "contain";
+  const logoHtml = template?.logo && dataUrlBuffer(template.logo)
+    ? `<td class="header-logo-cell" style="width:${logoWidth + 16}px;"><img class="header-logo" src="${htmlEscape(template.logo)}" style="width:${logoWidth}px;height:${logoHeight}px;object-fit:${logoFit};" alt="logo"></td>`
+    : "";
+  const headerBlockHtml = logoHtml
+    ? `<table class="header-layout"><tr>${logoHtml}<td class="header-text-cell">${headerHtml}</td></tr></table>`
+    : headerHtml;
+  const footerHtml = footerItems
+    .filter((item) => item?.text)
+    .map((item) => `<div class="footer-line" style="color:${htmlEscape(item.color || template?.footerTextColor || "#64748b")};font-size:${Number(item.fontSize || template?.footerFontSize || 9)}px;font-weight:${item.bold ? 700 : 400};text-align:${htmlEscape(item.align || "left")};width:${Math.max(80, Math.min(520, Number(item.width || 280)))}px;">${htmlEscape(templateText(item.text, context)).replaceAll("\n", "<br>")}</div>`)
+    .join("");
+  const headerBg = template?.tableHeaderBgColor || "#f1f5f9";
+  const headerColor = template?.tableHeaderTextColor || "#1f2a44";
+  const textColor = template?.tableTextColor || "#17233c";
+  const borderColor = template?.tableBorderColor || "#d9e3f2";
+  const tableFontSize = Number(template?.tableFontSize || 11);
+  const tableFontWeight = template?.tableBold ? 700 : 400;
+  const tableHeaderFontWeight = template?.tableHeaderBold === false ? 400 : 700;
+  const tableAlign = template?.tableAlign || "left";
+  const tablePixelWidth = columns.reduce((sum, column) => sum + Number(column.width || 76), 0);
+  const tableWidthCss = template?.orientation === "fluid" ? `${Math.max(1, tablePixelWidth)}px` : "100%";
+  const tableRows = exportTableRows(orders, columns, exchange);
+  const rowsHtml = tableRows.map((row, rowIndex) => `
+    <tr${rowIndex === tableRows.length - 1 ? ' class="total-row"' : ""}>
+      ${row.map((value) => `<td>${htmlEscape(value)}</td>`).join("")}
+    </tr>
+  `).join("");
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: "Microsoft YaHei", Arial, sans-serif; color: ${textColor}; }
+    .header { margin-bottom: 14px; }
+    .header-layout { border-collapse: collapse; width: 100%; margin: 0 0 8px 0; }
+    .header-layout td { border: 0; padding: 0; vertical-align: top; }
+    .header-logo-cell { padding-top: 4px; }
+    .header-logo { display: block; }
+    .header-line { font-weight: 700; line-height: 1.45; margin: 2px 0; }
+    .data-table { border-collapse: collapse; width: ${tableWidthCss}; font-size: ${tableFontSize}px; text-align: ${tableAlign}; }
+    .data-table th { background: ${headerBg}; color: ${headerColor}; font-weight: ${tableHeaderFontWeight}; }
+    .data-table th, .data-table td { border: 1px solid ${borderColor}; padding: 6px 8px; line-height: 1.25; mso-number-format: "\\@"; vertical-align: top; }
+    .data-table th { overflow-wrap: anywhere; white-space: normal; }
+    .data-table td { overflow-wrap: normal; white-space: nowrap; }
+    .data-table th span { display: block; }
+    .data-table .table-header-currency { margin-top: 2px; color: ${headerColor}; font-size: 0.86em; }
+    .data-table td { font-weight: ${tableFontWeight}; }
+    .data-table .total-row td { background: ${headerBg}; font-weight: 700; }
+    .footer { margin-top: 14px; color: #64748b; }
+  </style>
+</head>
+<body>
+  <div class="header">${headerBlockHtml}</div>
+  <table class="data-table">
+    <thead><tr>${columns.map((column) => `<th style="font-weight:${exportColumnHeaderBold(column, template) ? 700 : 400};">${exportColumnHeaderHtml(column)}</th>`).join("")}</tr></thead>
+    <tbody>${rowsHtml}</tbody>
+  </table>
+  <div class="footer">${footerHtml}</div>
+</body>
+</html>`;
+}
+
+async function loadExportOrders(orderNos = []) {
+  if (orderNos.length > 0) {
+    const placeholders = orderNos.map(() => "?").join(",");
+    const rows = await db.prepare(`
+      SELECT * FROM orders
+      WHERE deleted_at IS NULL AND no IN (${placeholders})
+      ORDER BY order_date DESC, no DESC
+    `).all(...orderNos);
+    const orderIndex = new Map(orderNos.map((no, index) => [no, index]));
+    const hydrated = await hydrateOrderFees(rows.map(mapOrder));
+    return hydrated.sort((a, b) => (orderIndex.get(a.no) ?? 0) - (orderIndex.get(b.no) ?? 0));
+  }
+  const rows = await db.prepare("SELECT * FROM orders WHERE deleted_at IS NULL ORDER BY order_date DESC, no DESC").all();
+  return hydrateOrderFees(rows.map(mapOrder));
+}
+
+function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = null, filename = "", exchange = null) {
+  const template = normalizeExportTemplate(templatePayload);
+  const sourceColumns = exportColumnsForOrders(templatePayload, orders);
+  const tableWidth = sourceColumns.reduce((sum, column) => sum + Number(column.width || 76), 0);
+  const fluidPageWidth = Math.max(842, Math.ceil(tableWidth + 48));
+  const layout = template?.orientation === "portrait" ? "portrait" : "landscape";
+  const doc = new PDFDocument({
+    size: template?.orientation === "fluid" ? [fluidPageWidth, 595] : "A4",
+    layout,
+    margin: 24,
+    bufferPages: true
+  });
+  const fontPath = resolvePdfFontPath();
+  if (fontPath) doc.font(fontPath);
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename || `${title}-${todayInputValue()}.pdf`)}`);
+  doc.pipe(res);
+
+  const pageWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const scale = template?.orientation === "fluid" ? 1 : Math.min(1, pageWidth / tableWidth);
+  const columns = sourceColumns.map((column) => ({
+    ...column,
+    width: Number(column.width || 76) * scale,
+    fontSize: Number(column.fontSize || template?.tableFontSize || 8)
+  }));
+  const startX = doc.page.margins.left;
+  const rowHeight = template?.orientation === "fluid"
+    ? Math.max(22, Number(template?.tableFontSize || 8) * 1.35 + 12)
+    : Math.max(28, Number(template?.tableFontSize || 8) * 2.35 + 12);
+  const tableHeaderHeight = Math.max(30, Number(template?.tableFontSize || 8) * 2.45 + 12);
+  const headerHeight = template?.headerHeight || 58;
+  const footerHeight = template?.footerHeight || 28;
+  const footerFontSize = template?.footerFontSize || 8;
+  const contextBase = {
+    title,
+    date: todayInputValue(),
+    user: "高级管理员"
+  };
+
+  function measureFooterReserve() {
+    if (!template?.footerTextItems?.length) return footerHeight;
+    const reserve = template.footerTextItems.reduce((max, item) => {
+      doc.fontSize(Number(item.fontSize || footerFontSize));
+      const textHeight = doc.heightOfString(templateText(item.text, { ...contextBase, page: 999, pages: 999 }), {
+        width: pageWidth - Number(item.x || 0),
+        lineGap: 2
+      });
+      return Math.max(max, Number(item.y || 0) + Math.ceil(textHeight) + 8);
+    }, footerHeight);
+    return Math.max(footerHeight, reserve);
+  }
+
+  const footerReserve = measureFooterReserve();
+
+  function drawHeader() {
+    if (template) {
+      const logoBuffer = dataUrlBuffer(template.logo);
+      if (logoBuffer) {
+        try {
+          const logoWidth = Math.max(36, Math.min(180, Number(template.logoWidth || 92)));
+          const logoHeight = Math.max(24, Math.min(120, Number(template.logoHeight || 56)));
+          const logoBox = template.logoFit === "cover"
+            ? { cover: [logoWidth, logoHeight] }
+            : { fit: [logoWidth, logoHeight] };
+          doc.image(logoBuffer, startX + template.logoX, doc.page.margins.top + template.logoY, logoBox);
+        } catch {
+          // Ignore invalid image payloads so export still succeeds.
+        }
+      }
+      if (template.headerTextItems.length) {
+        template.headerTextItems.forEach((item) => {
+          const fontSize = Number(item.fontSize || template.headerFontSize || 14);
+          doc.fontSize(fontSize).fillColor(item.color || template.headerTextColor || "#17233c");
+          doc.text(
+            templateText(item.text, contextBase),
+            startX + Number(item.x || 0),
+            doc.page.margins.top + Number(item.y || 0),
+            {
+              width: Math.min(Number(item.width || 260), pageWidth - Number(item.x || 0)),
+              align: item.align || "left",
+              lineGap: 2
+            }
+          );
+        });
+      } else {
+        doc.fontSize(template.headerFontSize).fillColor(template.headerTextColor || "#17233c").text(
+          templateText(template.header || "{{title}}\n日期：{{date}}", contextBase),
+          startX,
+          doc.page.margins.top,
+          { width: pageWidth }
+        );
+      }
+    } else {
+      doc.fontSize(15).fillColor("#17233c").text(title, startX, 18, { continued: false });
+      doc.fontSize(9).fillColor("#64748b").text(`导出时间：${todayInputValue()}    订单数：${orders.length}`, startX, 38);
+    }
+    let x = startX;
+    const y = doc.page.margins.top + headerHeight;
+    doc.rect(startX, y, columns.reduce((sum, column) => sum + column.width, 0), tableHeaderHeight).fill(template?.tableHeaderBgColor || "#f1f5f9");
+    doc.fillColor(template?.tableHeaderTextColor || "#1f2a44").fontSize(template?.tableFontSize || 8);
+    columns.forEach((column, columnIndex) => {
+      doc.lineWidth(template?.tableBorderWidth ?? 1).rect(x, y, column.width, tableHeaderHeight).strokeColor(template?.tableBorderColor || "#d9e3f2").stroke();
+      const currency = exportColumnCurrencyLabel(column);
+      const labelHeight = currency ? Math.max(9, tableHeaderHeight * 0.45) : tableHeaderHeight - 8;
+      const headerBold = exportColumnHeaderBold(column, template);
+      pdfTextWithWeight(doc, exportColumnBaseLabel(column), x + 3, y + (currency ? 5 : 8), {
+        width: column.width - 6,
+        height: labelHeight,
+        align: template?.tableAlign || "left",
+        lineGap: 1
+      }, headerBold);
+      if (currency) {
+        doc.fontSize(Math.max(5, Number(template?.tableFontSize || 8) - 1));
+        pdfTextWithWeight(doc, currency, x + 3, y + 5 + labelHeight, {
+          width: column.width - 6,
+          height: tableHeaderHeight - labelHeight - 6,
+          align: template?.tableAlign || "left",
+          lineGap: 1
+        }, headerBold);
+        doc.fontSize(template?.tableFontSize || 8);
+      }
+      x += column.width;
+    });
+    return y + tableHeaderHeight;
+  }
+
+  const sortedOrders = sortOrdersForExport(orders);
+  const pdfRows = [
+    ...sortedOrders.map((order, rowIndex) => ({ total: false, values: columns.map((column) => exportOrderColumnValue(order, column, rowIndex)) })),
+    { total: true, values: exportTotalRow(sortedOrders, columns, exchange) }
+  ];
+  let y = drawHeader();
+  pdfRows.forEach((rowData) => {
+    if (y + rowHeight > doc.page.height - doc.page.margins.bottom - footerReserve) {
+      doc.addPage();
+      y = drawHeader();
+    }
+    let x = startX;
+    doc.fillColor(template?.tableTextColor || "#17233c");
+    columns.forEach((column, columnIndex) => {
+      doc.fontSize(column.fontSize || template?.tableFontSize || 7.3);
+      if (rowData.total) {
+        doc.rect(x, y, column.width, rowHeight).fill(template?.tableHeaderBgColor || "#f1f5f9");
+        doc.fillColor(template?.tableTextColor || "#17233c");
+      }
+      doc.lineWidth(template?.tableBorderWidth ?? 1).rect(x, y, column.width, rowHeight).strokeColor(template?.tableBorderColor || "#e9eef6").stroke();
+      const textOptions = {
+        width: column.width - 6,
+        align: template?.tableAlign || "left",
+        lineGap: 1,
+        lineBreak: false
+      };
+      if (template?.orientation !== "fluid") textOptions.height = rowHeight - 8;
+      doc.text(textValue(rowData.values[columnIndex]), x + 3, y + 6, textOptions);
+      x += column.width;
+    });
+    y += rowHeight;
+  });
+
+  const range = doc.bufferedPageRange();
+  for (let index = range.start; index < range.start + range.count; index += 1) {
+    doc.switchToPage(index);
+    const page = index + 1 - range.start;
+    if (template?.footerTextItems?.length) {
+      template.footerTextItems.forEach((item) => {
+        doc.fontSize(Number(item.fontSize || footerFontSize)).fillColor(item.color || template.footerTextColor || "#64748b");
+        doc.text(
+          templateText(item.text, { ...contextBase, page, pages: range.count }),
+          doc.page.margins.left + Number(item.x || 0),
+          doc.page.height - doc.page.margins.bottom - footerReserve + Number(item.y || 0),
+          {
+            width: Math.min(Number(item.width || 280), pageWidth - Number(item.x || 0)),
+            align: item.align || "left",
+            lineGap: 2
+          }
+        );
+      });
+    } else {
+      const footerText = `第 ${page} / ${range.count} 页`;
+      doc.fontSize(footerFontSize);
+      const footerTextHeight = doc.heightOfString(footerText, {
+        width: pageWidth,
+        lineGap: 2
+      });
+      doc.fillColor("#64748b").text(
+        footerText,
+        doc.page.margins.left,
+        doc.page.height - doc.page.margins.bottom - footerTextHeight,
+        { align: "right", width: pageWidth, lineGap: 2 }
+      );
+    }
+  }
+
+  doc.end();
+}
+
+function mapOrderFee(row) {
+  return {
+    id: row.id,
+    category: row.category,
+    name: row.name,
+    quantity: row.quantity,
+    unitPrice: row.unit_price || 0,
+    currency: row.currency,
+    amount: row.amount,
+    remark: row.remark,
+    driverRole: row.driver_role || "",
+    driverName: row.driver_name || ""
+  };
+}
+
+function mapAddressBook(row) {
+  return {
+    id: row.id,
+    area: row.area || "",
+    contact: row.contact || "",
+    phone: row.phone || "",
+    address: row.address || "",
+    note: row.note || "",
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || ""
+  };
+}
+
+function mapCustomerContact(row) {
+  return {
+    id: row.id,
+    customerId: row.customer_id,
+    name: row.name || "",
+    gender: row.gender || "",
+    title: row.title || "",
+    mobile: row.mobile || "",
+    phone: row.phone || "",
+    area: row.area || "",
+    address: row.address || "",
+    fax: row.fax || "",
+    email: row.email || "",
+    wechat: row.wechat || "",
+    qq: row.qq || "",
+    remark: row.remark || "",
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || ""
+  };
+}
+
+function normalizeAddressBookPayload(body) {
+  return {
+    area: String(body.area || "").trim(),
+    contact: String(body.contact || "").trim(),
+    phone: String(body.phone || "").trim(),
+    address: String(body.address || "").trim(),
+    note: String(body.note || "").trim()
+  };
+}
+
+function addressHistoryKey(value) {
+  return String(value || "").replace(/\s+/g, "").toLowerCase();
+}
+
+function normalizeCustomerContactPayload(body, existing = null) {
+  return {
+    customerId: String(body.customerId || body.customer_id || existing?.customer_id || "").trim(),
+    name: String(body.name || existing?.name || "").trim(),
+    gender: String(body.gender || existing?.gender || "").trim(),
+    title: String(body.title || existing?.title || "").trim(),
+    mobile: String(body.mobile || existing?.mobile || "").trim(),
+    phone: String(body.phone || existing?.phone || "").trim(),
+    area: String(body.area || existing?.area || "").trim(),
+    address: String(body.address || existing?.address || "").trim(),
+    fax: String(body.fax || existing?.fax || "").trim(),
+    email: String(body.email || existing?.email || "").trim(),
+    wechat: String(body.wechat || existing?.wechat || "").trim(),
+    qq: String(body.qq || existing?.qq || "").trim(),
+    remark: String(body.remark || existing?.remark || "").trim()
+  };
+}
+
+function mapVehicle(row) {
+  return {
+    plate: row.plate,
+    brand: row.brand,
+    model: row.model,
+    type: row.vehicle_type,
+    purchaseDate: row.purchase_date,
+    factoryDate: row.factory_date,
+    mainlandReviewDate: row.mainland_review_date,
+    hkReviewDate: row.hk_review_date,
+    mainlandInsuranceDate: row.mainland_insurance_date,
+    hkInsuranceDate: row.hk_insurance_date,
+    insuranceReminder: row.insurance_reminder,
+    maintenanceReminder: row.maintenance_reminder,
+    status: row.status,
+    monthlyCost: row.monthly_cost,
+    note: row.note
+  };
+}
+
+function mapDriver(row) {
+  return {
+    id: row.id,
+    type: row.type || "香港司机",
+    name: row.name,
+    phone: row.phone,
+    idNo: row.id_no,
+    license: row.license,
+    birthday: row.birthday,
+    hireDate: row.hire_date,
+    leaveDate: row.leave_date,
+    expireAt: row.expire_at,
+    status: row.status,
+    defaultWage: row.default_wage,
+    note: row.note
+  };
+}
+
+function mapFeeItem(row) {
+  return {
+    id: row.id,
+    category: row.category,
+    name: row.name,
+    currency: row.currency,
+    defaultAmount: row.default_amount,
+    defaultDriverRole: row.default_driver_role || "",
+    sortOrder: row.sort_order
+  };
+}
+
+function mapFreightRate(row) {
+  return {
+    id: row.id,
+    direction: row.direction,
+    level1: row.level1 || row.city || "",
+    level2: row.level2 || "",
+    level3: row.level3 || "",
+    city: row.city,
+    tonnage: row.tonnage,
+    rmbAmount: row.rmb_amount,
+    hkdAmount: row.hkd_amount,
+    sortOrder: row.sort_order
+  };
+}
+
+function mapDriverWageRule(row) {
+  let advanceFeeRates = {};
+  try {
+    advanceFeeRates = JSON.parse(row.advance_fee_rates || "{}") || {};
+  } catch {
+    advanceFeeRates = {};
+  }
+  return {
+    id: row.id,
+    driverId: row.driver_id,
+    direction: row.direction,
+    city: row.city,
+    transportMode: normalizeTransportMode(row.transport_mode || "单司机") || "单司机",
+    currency: row.currency,
+    baseRMB: row.base_rmb,
+    baseHKD: row.base_hkd,
+    loadPerBoard: row.load_per_board,
+    unloadPerBoard: row.unload_per_board,
+    crossSeaFee: row.cross_sea_fee,
+    addPointFee: row.add_point_fee,
+    waitingPerHour: row.waiting_per_hour,
+    advanceFeeRates,
+    note: row.note
+  };
+}
+
+function mapDriverAdjustment(row) {
+  return {
+    id: row.id,
+    driverId: row.driver_id,
+    date: row.date,
+    type: row.type,
+    currency: row.currency,
+    amount: row.amount,
+    status: row.status,
+    note: row.note,
+    createdAt: row.created_at
+  };
+}
+
+function templateContentType(content = "") {
+  try {
+    return JSON.parse(content || "{}")?.type || "";
+  } catch {
+    return "";
+  }
+}
+
+function mapTemplate(row, options = {}) {
+  const contentType = templateContentType(row.content);
+  const includeContent = options.includeContent !== false;
+  return {
+    id: row.id,
+    name: row.name,
+    format: row.format,
+    description: row.description,
+    content: includeContent ? row.content : "",
+    contentType,
+    contentLoaded: includeContent,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapRule(row) {
+  return {
+    id: row.id,
+    ruleType: row.rule_type,
+    name: row.name,
+    content: row.content,
+    enabled: Boolean(row.enabled),
+    createdAt: row.created_at
+  };
+}
+
+function mapMasterData(row) {
+  return {
+    id: row.id,
+    type: row.type,
+    name: row.name,
+    value: row.value,
+    sortOrder: row.sort_order
+  };
+}
+
+function mapAccount(row) {
+  return {
+    id: row.id,
+    username: row.username,
+    displayName: row.display_name,
+    role: row.role,
+    status: row.status,
+    hireDate: row.hire_date || "",
+    department: row.department || "",
+    position: row.position || "",
+    phone: row.phone || "",
+    email: row.email || "",
+    note: row.note || "",
+    permissions: JSON.parse(row.permissions || "[]"),
+    createdAt: row.created_at
+  };
+}
+
+function mapAuditLog(row) {
+  return {
+    id: row.id,
+    actor: row.actor,
+    action: row.action,
+    entityType: row.entity_type,
+    entityId: row.entity_id,
+    detail: row.detail,
+    createdAt: row.created_at
+  };
+}
+
+function mapFile(row) {
+  return {
+    id: row.id,
+    entityType: row.entity_type,
+    entityId: row.entity_id,
+    category: row.category,
+    filename: row.filename,
+    mime: row.mime,
+    size: row.size,
+    createdAt: row.created_at,
+    deletedAt: row.deleted_at || ""
+  };
+}
+
+async function hydrateOrderFees(orders) {
+  if (orders.length === 0) return orders;
+  const fees = await db.prepare(`
+    SELECT * FROM order_fees
+    WHERE order_no IN (${orders.map(() => "?").join(",")})
+    ORDER BY id ASC
+  `).all(...orders.map((item) => item.no));
+  const feeMap = new Map();
+  fees.forEach((fee) => {
+    if (!feeMap.has(fee.order_no)) feeMap.set(fee.order_no, []);
+    feeMap.get(fee.order_no).push(mapOrderFee(fee));
+  });
+  return orders.map((item) => ({ ...item, fees: feeMap.get(item.no) || [] }));
+}
+
+async function nextCustomerId(type) {
+  const prefix = type === "供应商" ? "GY" : "KH";
+  const row = await db.prepare(`
+    SELECT id FROM customers
+    WHERE id LIKE ?
+    ORDER BY id DESC
+    LIMIT 1
+  `).get(`${prefix}%`);
+  const next = row ? Number(row.id.slice(2)) + 1 : 21001;
+  return `${prefix}${String(next).padStart(8, "0")}`;
+}
+
+async function nextOrderNo() {
+  const today = new Date();
+  const yymmdd = `${String(today.getFullYear()).slice(2)}${String(today.getMonth() + 1).padStart(2, "0")}${String(today.getDate()).padStart(2, "0")}`;
+  const prefix = `HY${yymmdd}`;
+  const row = await db.prepare(`
+    SELECT no FROM orders
+    WHERE no LIKE ?
+    ORDER BY no DESC
+    LIMIT 1
+  `).get(`${prefix}%`);
+  const next = row ? Number(row.no.slice(prefix.length)) + 1 : 1;
+  return `${prefix}${String(next).padStart(4, "0")}`;
+}
+
+app.get("/api/health", async (_req, res) => {
+  res.json({ ok: true, database: databaseInfo });
+});
+
+app.get("/api/files", async (req, res) => {
+  const entityType = String(req.query.entityType || "").trim();
+  const entityId = String(req.query.entityId || "").trim();
+  const includeOrderFiles = String(req.query.includeOrderFiles || "") === "1";
+  const deletedOnly = String(req.query.deletedOnly || "") === "1";
+  if (!entityType || !entityId) {
+    res.status(400).json({ message: "缺少文件归属信息" });
+    return;
+  }
+  if (includeOrderFiles && entityType === "customer") {
+    const rows = await db.prepare(`
+      SELECT f.*, '客户附件' AS source_label, '' AS order_no, '' AS order_date, '' AS order_business_type
+      FROM files f
+      WHERE f.deleted_at IS NULL
+        AND f.entity_type = 'customer'
+        AND f.entity_id = ?
+      UNION ALL
+      SELECT f.*, '订单附件' AS source_label, o.no AS order_no, o.order_date AS order_date, o.business_type AS order_business_type
+      FROM files f
+      JOIN orders o ON o.no = f.entity_id
+      WHERE f.deleted_at IS NULL
+        AND f.entity_type = 'order'
+        AND o.deleted_at IS NULL
+        AND o.customer_id = ?
+      ORDER BY created_at DESC, id DESC
+    `).all(entityId, entityId);
+    res.json(rows.map((row) => ({
+      ...mapFile(row),
+      sourceLabel: row.source_label || "",
+      orderNo: row.order_no || "",
+      orderDate: row.order_date || "",
+      orderBusinessType: row.order_business_type || ""
+    })));
+    return;
+  }
+  const deletedClause = deletedOnly ? "deleted_at IS NOT NULL" : "deleted_at IS NULL";
+  const rows = await db.prepare(`
+    SELECT * FROM files
+    WHERE ${deletedClause} AND entity_type = ? AND entity_id = ?
+    ORDER BY ${deletedOnly ? "deleted_at" : "created_at"} DESC, id DESC
+  `).all(entityType, entityId);
+  res.json(rows.map(mapFile));
+});
+
+app.post("/api/files", async (req, res) => {
+  const item = {
+    entityType: String(req.body.entityType || "").trim(),
+    entityId: String(req.body.entityId || "").trim(),
+    category: String(req.body.category || "").trim(),
+    filename: String(req.body.filename || "").trim(),
+    mime: String(req.body.mime || "application/octet-stream").trim(),
+    size: Number(req.body.size || 0),
+    contentBase64: String(req.body.contentBase64 || "").trim()
+  };
+
+  if (!item.entityType || !item.entityId || !item.filename || !item.contentBase64) {
+    res.status(400).json({ message: "文件名称、归属和内容不能为空" });
+    return;
+  }
+  const validated = validateStoredFilePayload(item);
+  if (validated.error) {
+    await writeAudit("reject_upload", "file", `${item.entityType}/${item.entityId}`, `${item.filename}: ${validated.error}`);
+    res.status(400).json({ message: validated.error });
+    return;
+  }
+
+  const result = await db.prepare(`
+    INSERT INTO files (entity_type, entity_id, category, filename, mime, size, content_base64)
+    VALUES (@entityType, @entityId, @category, @filename, @mime, @size, @contentBase64)
+  `).run({ ...item, ...validated });
+  await writeAudit("upload", "file", String(result.lastInsertId), `${item.entityType}/${item.entityId}/${validated.filename}`);
+  const row = await db.prepare("SELECT * FROM files WHERE id = ?").get(result.lastInsertId);
+  res.status(201).json(mapFile(row));
+});
+
+async function sendStoredFile(req, res, disposition) {
+  const id = Number(req.params.id || 0);
+  const row = await db.prepare("SELECT * FROM files WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!row) {
+    res.status(404).json({ message: "文件不存在" });
+    return;
+  }
+  const mime = normalizeMime(row.mime);
+  const safeDisposition = disposition === "inline" && PREVIEW_MIMES.has(mime) ? "inline" : "attachment";
+  const filename = encodeURIComponent(row.filename);
+  res.setHeader("Content-Type", mime || "application/octet-stream");
+  res.setHeader("Content-Disposition", `${safeDisposition}; filename*=UTF-8''${filename}`);
+  res.setHeader("Content-Security-Policy", "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox");
+  await writeAudit(safeDisposition === "inline" ? "preview" : "download", "file", String(id), row.filename);
+  res.send(Buffer.from(row.content_base64, "base64"));
+}
+
+app.get("/api/files/:id/preview", async (req, res) => sendStoredFile(req, res, "inline"));
+
+app.get("/api/files/:id/download", async (req, res) => sendStoredFile(req, res, "attachment"));
+
+app.delete("/api/files/:id", async (req, res) => {
+  const id = Number(req.params.id || 0);
+  const row = await db.prepare("SELECT * FROM files WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!row) {
+    res.status(404).json({ message: "文件不存在" });
+    return;
+  }
+  await db.prepare("UPDATE files SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?").run(id);
+  await writeAudit("delete", "file", String(id), row.filename);
+  res.json({ ok: true });
+});
+
+app.post("/api/files/:id/restore", async (req, res) => {
+  const id = Number(req.params.id || 0);
+  const row = await db.prepare("SELECT * FROM files WHERE id = ? AND deleted_at IS NOT NULL").get(id);
+  if (!row) {
+    res.status(404).json({ message: "回收站内找不到该文件" });
+    return;
+  }
+  await db.prepare("UPDATE files SET deleted_at = NULL WHERE id = ?").run(id);
+  await writeAudit("restore", "file", String(id), row.filename);
+  const restored = await db.prepare("SELECT * FROM files WHERE id = ?").get(id);
+  res.json(mapFile(restored));
+});
+
+app.delete("/api/files/:id/permanent", async (req, res) => {
+  const id = Number(req.params.id || 0);
+  const row = await db.prepare("SELECT * FROM files WHERE id = ?").get(id);
+  if (!row) {
+    res.status(404).json({ message: "文件不存在" });
+    return;
+  }
+  await db.prepare("DELETE FROM files WHERE id = ?").run(id);
+  await writeAudit("purge", "file", String(id), row.filename);
+  res.json({ ok: true });
+});
+
+app.get("/api/customers", async (req, res) => {
+  const type = req.query.type === "供应商" ? "供应商" : req.query.type === "客户" ? "客户" : null;
+  const rows = type
+    ? await db.prepare("SELECT * FROM customers WHERE deleted_at IS NULL AND type = ? ORDER BY created_at DESC, id DESC").all(type)
+    : await db.prepare("SELECT * FROM customers WHERE deleted_at IS NULL ORDER BY created_at DESC, id DESC").all();
+  res.json(rows.map(mapCustomer));
+});
+
+app.patch("/api/customers/:id", async (req, res) => {
+  const id = String(req.params.id || "").trim();
+  const item = normalizeCustomerPayload(req.body, id);
+
+  if (!item.name) {
+    res.status(400).json({ message: "公司名称不能为空" });
+    return;
+  }
+
+  const result = await db.prepare(`
+    UPDATE customers
+    SET type = @type,
+        name = @name,
+        province = @province,
+        city = @city,
+        address = @address,
+        term = @term,
+        receivable_rmb = @receivableRMB,
+        receivable_hkd = @receivableHKD,
+        tax_no = @taxNo,
+        contact = @contact,
+        mobile = @mobile,
+        driver_wage_adjust_hkd = @driverWageAdjustHKD,
+        default_template_id = @defaultTemplateId,
+        invoice_title = @invoiceTitle,
+        invoice_tax_no = @invoiceTaxNo,
+        invoice_bank = @invoiceBank,
+        invoice_account = @invoiceAccount,
+        invoice_address_phone = @invoiceAddressPhone
+    WHERE id = @id AND deleted_at IS NULL
+  `).run(item);
+  if (result.changes === 0) {
+    res.status(404).json({ message: "客户不存在或已删除" });
+    return;
+  }
+  await writeAudit("update", "customer", id, item.name);
+  res.json(mapCustomer(await db.prepare("SELECT * FROM customers WHERE id = ?").get(id)));
+});
+
+app.post("/api/customers", async (req, res) => {
+  const item = normalizeCustomerPayload(req.body, req.body.id || (await nextCustomerId(req.body.type)));
+
+  if (!item.name) {
+    res.status(400).json({ message: "公司名称不能为空" });
+    return;
+  }
+
+  await db.prepare(`
+    INSERT INTO customers
+      (id, type, name, province, city, address, term, receivable_rmb, receivable_hkd, recent_order, created_at,
+       tax_no, contact, mobile, driver_wage_adjust_hkd, default_template_id,
+       invoice_title, invoice_tax_no, invoice_bank, invoice_account, invoice_address_phone)
+    VALUES
+      (@id, @type, @name, @province, @city, @address, @term, @receivableRMB, @receivableHKD, @recentOrder, @createdAt,
+       @taxNo, @contact, @mobile, @driverWageAdjustHKD, @defaultTemplateId,
+       @invoiceTitle, @invoiceTaxNo, @invoiceBank, @invoiceAccount, @invoiceAddressPhone)
+  `).run(item);
+  await writeAudit("create", "customer", item.id, item.name);
+  res.status(201).json(mapCustomer(await db.prepare("SELECT * FROM customers WHERE id = ?").get(item.id)));
+});
+
+app.delete("/api/customers/:id", async (req, res) => {
+  const id = String(req.params.id || "").trim();
+  const customer = await db.prepare("SELECT * FROM customers WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!customer) {
+    res.status(404).json({ message: "客户或供应商不存在" });
+    return;
+  }
+  const orderCount = (await db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM orders
+    WHERE deleted_at IS NULL
+      AND (customer_id = ? OR customer = ? OR supplier = ?)
+  `).get(id, customer.name, customer.name)).count;
+  if (orderCount > 0) {
+    res.status(409).json({ message: "已有订单记录，不允许删除" });
+    return;
+  }
+  await db.prepare("UPDATE customers SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?").run(id);
+  await writeAudit("delete", "customer", id, customer.name);
+  res.json({ ok: true });
+});
+
+app.get("/api/customer-contacts", async (req, res) => {
+  const customerId = String(req.query.customerId || "").trim();
+  const rows = customerId
+    ? await db.prepare("SELECT * FROM customer_contacts WHERE deleted_at IS NULL AND customer_id = ? ORDER BY id DESC").all(customerId)
+    : await db.prepare("SELECT * FROM customer_contacts WHERE deleted_at IS NULL ORDER BY id DESC").all();
+  res.json(rows.map(mapCustomerContact));
+});
+
+app.post("/api/customer-contacts", async (req, res) => {
+  const item = normalizeCustomerContactPayload(req.body);
+  if (!item.customerId) {
+    res.status(400).json({ message: "请选择客户" });
+    return;
+  }
+  const customer = await db.prepare("SELECT id, name FROM customers WHERE id = ? AND deleted_at IS NULL").get(item.customerId);
+  if (!customer) {
+    res.status(404).json({ message: "客户不存在或已删除" });
+    return;
+  }
+  if (!item.name) {
+    res.status(400).json({ message: "联系人姓名不能为空" });
+    return;
+  }
+  const result = await db.prepare(`
+    INSERT INTO customer_contacts
+      (customer_id, name, gender, title, mobile, phone, area, address, fax, email, wechat, qq, remark)
+    VALUES
+      (@customerId, @name, @gender, @title, @mobile, @phone, @area, @address, @fax, @email, @wechat, @qq, @remark)
+  `).run(item);
+  await writeAudit("create", "customer_contact", String(result.lastInsertId), `${customer.name} / ${item.name}`);
+  res.status(201).json(mapCustomerContact(await db.prepare("SELECT * FROM customer_contacts WHERE id = ?").get(result.lastInsertId)));
+});
+
+app.patch("/api/customer-contacts/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const existing = await db.prepare("SELECT * FROM customer_contacts WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!existing) {
+    res.status(404).json({ message: "联系人不存在或已删除" });
+    return;
+  }
+  const item = normalizeCustomerContactPayload(req.body, existing);
+  if (!item.name) {
+    res.status(400).json({ message: "联系人姓名不能为空" });
+    return;
+  }
+  await db.prepare(`
+    UPDATE customer_contacts
+    SET name = @name,
+        gender = @gender,
+        title = @title,
+        mobile = @mobile,
+        phone = @phone,
+        area = @area,
+        address = @address,
+        fax = @fax,
+        email = @email,
+        wechat = @wechat,
+        qq = @qq,
+        remark = @remark,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = @id
+  `).run({ id, ...item });
+  await writeAudit("update", "customer_contact", String(id), item.name);
+  res.json(mapCustomerContact(await db.prepare("SELECT * FROM customer_contacts WHERE id = ?").get(id)));
+});
+
+app.delete("/api/customer-contacts/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const row = await db.prepare("SELECT * FROM customer_contacts WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!row) {
+    res.status(404).json({ message: "联系人不存在或已删除" });
+    return;
+  }
+  await db.prepare("UPDATE customer_contacts SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(id);
+  await writeAudit("delete", "customer_contact", String(id), row.name);
+  res.json({ ok: true });
+});
+
+app.get("/api/orders", async (_req, res) => {
+  const rows = await db.prepare("SELECT * FROM orders WHERE deleted_at IS NULL ORDER BY order_date DESC, no DESC").all();
+  res.json(await hydrateOrderFees(rows.map(mapOrder)));
+});
+
+app.get("/api/dispatch-plans/:date", async (req, res) => {
+  const date = String(req.params.date || "").trim();
+  const row = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
+  let rows = [];
+  if (row) {
+    try {
+      const parsed = JSON.parse(row.rows_json || "[]");
+      rows = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      rows = [];
+    }
+  }
+  res.json({ date, rows, updatedAt: row?.updated_at || "" });
+});
+
+app.put("/api/dispatch-plans/:date", async (req, res) => {
+  const date = String(req.params.date || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    res.status(400).json({ message: "排车日期无效" });
+    return;
+  }
+  const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+  const cleanRows = rows.map((row) => {
+    const item = row && typeof row === "object" ? row : {};
+    return {
+      id: String(item.id || ""),
+      dispatchNo: String(item.dispatchNo || ""),
+      orderNo: String(item.orderNo || ""),
+      customer: String(item.customer || ""),
+      plate: String(item.plate || ""),
+      port: String(item.port || ""),
+      direction: String(item.direction || ""),
+      tonnage: String(item.tonnage || ""),
+      quantity: item.quantity ?? "",
+      weight: String(item.weight || ""),
+      loading: String(item.loading || ""),
+      unloading: String(item.unloading || ""),
+      loadTime: String(item.loadTime || ""),
+      vehicleSource: String(item.vehicleSource || ""),
+      supplier: String(item.supplier || ""),
+      transportMode: String(item.transportMode || ""),
+      driver: String(item.driver || ""),
+      hkDriver: String(item.hkDriver || ""),
+      mainlandDriver: String(item.mainlandDriver || ""),
+      status: String(item.status || ""),
+      note: String(item.note || "")
+    };
+  });
+  const rowsJson = JSON.stringify(cleanRows);
+  await db.prepare(`
+    INSERT INTO dispatch_plans (plan_date, rows_json, updated_at)
+    VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(plan_date) DO UPDATE SET rows_json = excluded.rows_json, updated_at = CURRENT_TIMESTAMP
+  `).run(date, rowsJson);
+  await writeAudit("update", "dispatch_plan", date, `保存 ${cleanRows.length} 条`);
+  res.json({ date, rows: cleanRows });
+});
+
+app.get("/api/orders/recycle", async (_req, res) => {
+  const rows = await db.prepare("SELECT * FROM orders WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, order_date DESC").all();
+  res.json(await hydrateOrderFees(rows.map(mapOrder)));
+});
+
+app.get("/api/orders/export/csv", async (req, res) => {
+  const orderNos = String(req.query.orderNos || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const title = String(req.query.title || "订单导出").trim() || "订单导出";
+  const template = await exportTemplateById(req.query.templateId);
+  const exchange = normalizeExportExchange(req.query);
+  const orders = await loadExportOrders(orderNos);
+  if (orders.length === 0) {
+    res.status(400).type("text/plain").send("没有可导出的订单");
+    return;
+  }
+  const body = `\ufeff${renderOrdersCsv(orders, title, template, exchange)}`;
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(orderExportFilename(orders, "csv"))}`);
+  await writeAudit("export", "order", orderNos.join(",") || "all", `CSV ${orders.length} 条`);
+  res.send(body);
+});
+
+app.get("/api/orders/export/excel", async (req, res) => {
+  const orderNos = String(req.query.orderNos || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const title = String(req.query.title || "订单导出").trim() || "订单导出";
+  const template = await exportTemplateById(req.query.templateId);
+  const exchange = normalizeExportExchange(req.query);
+  const orders = await loadExportOrders(orderNos);
+  if (orders.length === 0) {
+    res.status(400).type("text/plain").send("没有可导出的订单");
+    return;
+  }
+  try {
+    const body = await renderOrdersXlsxBuffer(orders, title, template, exchange);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(orderExportFilename(orders, "xlsx"))}`);
+    await writeAudit("export", "order", orderNos.join(",") || "all", `Excel ${orders.length} 条`);
+    res.send(body);
+  } catch (error) {
+    console.error("Excel export failed", error);
+    res.status(500).type("text/plain").send("Excel 导出失败");
+  }
+});
+
+app.post("/api/orders/export/pdf", async (req, res) => {
+  const orderNos = Array.isArray(req.body.orderNos) ? req.body.orderNos.map(String).filter(Boolean) : [];
+  const title = String(req.body.title || "订单导出").trim() || "订单导出";
+  const template = req.body.template && typeof req.body.template === "object" ? req.body.template : null;
+  const exchange = normalizeExportExchange(req.body.exchange);
+  const orders = await loadExportOrders(orderNos);
+  if (orders.length === 0) {
+    res.status(400).json({ message: "没有可导出的订单" });
+    return;
+  }
+  await writeAudit("export", "order", orderNos.join(",") || "all", `PDF ${orders.length} 条`);
+  renderOrdersPdf(res, orders, title, template, orderExportFilename(orders, "pdf"), exchange);
+});
+
+app.post("/api/orders/audit", async (req, res) => {
+  const orderNos = Array.isArray(req.body.orderNos) ? req.body.orderNos.map(String).filter(Boolean) : [];
+  if (orderNos.length === 0) {
+    res.status(400).json({ message: "请选择需要审核的订单" });
+    return;
+  }
+
+  const update = await db.prepare("UPDATE orders SET status = '已审核' WHERE no = ? AND deleted_at IS NULL");
+  const select = await db.prepare("SELECT * FROM orders WHERE no = ? AND deleted_at IS NULL");
+  const updated = [];
+
+  const transaction = db.transaction(async (nos) => {
+    for (const no of nos) {
+      await update.run(no);
+      const row = await select.get(no);
+      if (row) {
+        await writeAudit("audit", "order", no, "批量审核通过");
+        updated.push(mapOrder(row));
+      }
+    }
+  });
+
+  await transaction(orderNos);
+  res.json(updated);
+});
+
+function pickBody(body, camelKey, snakeKey, fallback) {
+  if (Object.prototype.hasOwnProperty.call(body, camelKey)) return body[camelKey];
+  if (snakeKey && Object.prototype.hasOwnProperty.call(body, snakeKey)) return body[snakeKey];
+  return fallback;
+}
+
+async function readOrderPayload(body, existing = null) {
+  return {
+    no: existing?.no || body.no || (await nextOrderNo()),
+    dispatchNo: String(pickBody(body, "dispatchNo", "dispatch_no", existing?.dispatch_no || "") || "").trim(),
+    customerId: pickBody(body, "customerId", "customer_id", existing?.customer_id || null),
+    customer: String(pickBody(body, "customer", "customer_name", existing?.customer || "") || "").trim(),
+    businessType: String(pickBody(body, "businessType", "business_type", existing?.business_type || "运输") || "运输").trim(),
+    port: String(pickBody(body, "port", null, existing?.port || "") || "").trim(),
+    direction: String(pickBody(body, "direction", null, existing?.direction || "") || "").trim(),
+    tonnage: String(pickBody(body, "tonnage", null, existing?.tonnage || "") || "").trim(),
+    currency: String(pickBody(body, "currency", null, existing?.currency || "") || "").trim(),
+    quantity: String(pickBody(body, "quantity", null, existing?.quantity || "") || "").trim(),
+    weight: String(pickBody(body, "weight", null, existing?.weight || "") || "").trim(),
+    vehicleSource: String(pickBody(body, "vehicleSource", "vehicle_source", existing?.vehicle_source || "") || "").trim(),
+    supplier: String(pickBody(body, "supplier", null, existing?.supplier || "-") || "-").trim(),
+    plate: String(pickBody(body, "plate", null, existing?.plate || "") || "").trim(),
+    driver: String(pickBody(body, "driver", null, existing?.driver || "") || "").trim(),
+    hkDriver: String(pickBody(body, "hkDriver", "hk_driver", existing?.hk_driver || "") || "").trim(),
+    mainlandDriver: String(pickBody(body, "mainlandDriver", "mainland_driver", existing?.mainland_driver || "") || "").trim(),
+    transportMode: String(pickBody(body, "transportMode", "transport_mode", existing?.transport_mode || "") || "").trim(),
+    loading: String(pickBody(body, "loading", "loading_place", existing?.loading || "") || "").trim(),
+    unloading: String(pickBody(body, "unloading", "unloading_place", existing?.unloading || "") || "").trim(),
+    date: pickBody(body, "date", "order_date", existing?.order_date || todayInputValue()),
+    receivableHKD: Number(pickBody(body, "receivableHKD", "hkd_receivable", existing?.receivable_hkd || 0) || 0),
+    receivableRMB: Number(pickBody(body, "receivableRMB", "rmb_receivable", existing?.receivable_rmb || 0) || 0),
+    status: String(pickBody(body, "status", null, existing?.status || "待确认") || "待确认").trim(),
+    remark: String(pickBody(body, "remark", null, existing?.remark || "") || "").trim(),
+    tripNoEnabled: pickBody(body, "tripNoEnabled", "trip_no_enabled", existing?.trip_no_enabled || 0) ? 1 : 0,
+    tripNo: String(pickBody(body, "tripNo", "trip_no", existing?.trip_no || "") || "").trim(),
+    sixSheetEnabled: pickBody(body, "sixSheetEnabled", "six_sheet_enabled", existing?.six_sheet_enabled || 0) ? 1 : 0,
+    sixSheetNo: String(pickBody(body, "sixSheetNo", "six_sheet_no", existing?.six_sheet_no || "") || "").trim(),
+    fees: Array.isArray(body.fees) ? body.fees : null
+  };
+}
+
+async function resolveOrderCustomer(item) {
+  const customerId = String(item.customerId || "").trim();
+  const customerName = String(item.customer || "").trim();
+  let customer = null;
+
+  if (customerId) {
+    customer = await db.prepare("SELECT id, name FROM customers WHERE id = ? AND deleted_at IS NULL").get(customerId);
+  }
+
+  if (!customer && customerName) {
+    customer = await db.prepare("SELECT id, name FROM customers WHERE name = ? AND deleted_at IS NULL AND type = '客户'").get(customerName);
+  }
+
+  if (!customer) {
+    return false;
+  }
+
+  item.customerId = customer.id;
+  item.customer = customer.name;
+  return true;
+}
+
+app.post("/api/orders", async (req, res) => {
+  const item = await readOrderPayload(req.body);
+  item.fees = item.fees || [];
+  if (!(await resolveOrderCustomer(item))) {
+    res.status(400).json({ message: "请选择有效客户" });
+    return;
+  }
+
+  if (item.fees.length > 0) {
+    Object.assign(item, calculateOrderReceivables(item.fees, item.currency));
+  }
+
+  const transaction = db.transaction(async () => {
+    await db.prepare(`
+      INSERT INTO orders
+        (no, dispatch_no, customer_id, customer, business_type, port, direction, tonnage, currency, quantity,
+         weight, vehicle_source, supplier, plate, driver, hk_driver, mainland_driver, transport_mode, loading, unloading, order_date, receivable_hkd,
+         receivable_rmb, status, remark, trip_no_enabled, trip_no, six_sheet_enabled, six_sheet_no)
+      VALUES
+        (@no, @dispatchNo, @customerId, @customer, @businessType, @port, @direction, @tonnage, @currency,
+         @quantity, @weight, @vehicleSource, @supplier, @plate, @driver, @hkDriver, @mainlandDriver, @transportMode, @loading, @unloading, @date,
+         @receivableHKD, @receivableRMB, @status, @remark, @tripNoEnabled, @tripNo,
+         @sixSheetEnabled, @sixSheetNo)
+    `).run(item);
+    await saveOrderFees(item.no, item.fees, item.currency);
+  });
+
+  await transaction();
+  await writeAudit("create", "order", item.no, item.customer);
+  const created = await db.prepare("SELECT * FROM orders WHERE no = ?").get(item.no);
+  res.status(201).json((await hydrateOrderFees([mapOrder(created)]))[0]);
+});
+
+function normalizeOrderFee(fee, fallbackCurrency) {
+  const driverRole = String(fee.driverRole || fee.driver_role || "").trim();
+  return {
+    category: fee.category === "代垫" ? "代垫" : "正常",
+    name: String(fee.name || "").trim(),
+    quantity: Number(fee.quantity || 0),
+    unitPrice: Number(fee.unitPrice || fee.unit_price || 0),
+    currency: String(fee.currency || fallbackCurrency || "港币").trim(),
+    amount: Number(fee.amount || 0),
+    remark: String(fee.remark || "").trim(),
+    driverRole: ["香港司机", "大陆骑师", "跟随订单司机", "手动指定"].includes(driverRole) ? driverRole : "",
+    driverName: String(fee.driverName || fee.driver_name || "").trim()
+  };
+}
+
+function calculateOrderReceivables(fees, fallbackCurrency) {
+  return fees
+    .map((fee) => normalizeOrderFee(fee, fallbackCurrency))
+    .filter((fee) => fee.name)
+    .reduce((totals, fee) => {
+      if (fee.currency === "人民币" || fee.currency === "RMB") {
+        totals.receivableRMB += fee.amount;
+      } else {
+        totals.receivableHKD += fee.amount;
+      }
+      return totals;
+    }, { receivableHKD: 0, receivableRMB: 0 });
+}
+
+async function saveOrderFees(orderNo, fees, fallbackCurrency) {
+  const insert = await db.prepare(`
+    INSERT INTO order_fees (order_no, category, name, quantity, unit_price, currency, amount, remark, driver_role, driver_name)
+    VALUES (@orderNo, @category, @name, @quantity, @unitPrice, @currency, @amount, @remark, @driverRole, @driverName)
+  `);
+  await db.prepare("DELETE FROM order_fees WHERE order_no = ?").run(orderNo);
+  const normalizedFees = fees
+    .map((fee) => normalizeOrderFee(fee, fallbackCurrency))
+    .filter((fee) => fee.name);
+  for (const fee of normalizedFees) {
+    await insert.run({ orderNo, ...fee });
+  }
+}
+
+app.patch("/api/orders/:no", async (req, res) => {
+  const no = String(req.params.no || "").trim();
+  const existing = await db.prepare("SELECT * FROM orders WHERE no = ? AND deleted_at IS NULL").get(no);
+  if (!existing) {
+    res.status(404).json({ message: "订单不存在或已删除" });
+    return;
+  }
+
+  const item = await readOrderPayload(req.body, existing);
+  item.no = no;
+  item.fees = item.fees || (await hydrateOrderFees([mapOrder(existing)]))[0].fees;
+  if (!(await resolveOrderCustomer(item))) {
+    res.status(400).json({ message: "请选择有效客户" });
+    return;
+  }
+
+  if (item.fees.length > 0) {
+    Object.assign(item, calculateOrderReceivables(item.fees, item.currency));
+  }
+
+  const transaction = db.transaction(async () => {
+    await db.prepare(`
+      UPDATE orders
+      SET dispatch_no = @dispatchNo,
+          customer_id = @customerId, customer = @customer, business_type = @businessType,
+          port = @port, direction = @direction, tonnage = @tonnage, currency = @currency,
+          quantity = @quantity, weight = @weight, vehicle_source = @vehicleSource,
+          supplier = @supplier, plate = @plate, driver = @driver, hk_driver = @hkDriver,
+          mainland_driver = @mainlandDriver, transport_mode = @transportMode,
+          loading = @loading, unloading = @unloading,
+          order_date = @date, receivable_hkd = @receivableHKD, receivable_rmb = @receivableRMB,
+          status = @status, remark = @remark, trip_no_enabled = @tripNoEnabled,
+          trip_no = @tripNo, six_sheet_enabled = @sixSheetEnabled, six_sheet_no = @sixSheetNo
+      WHERE no = @no AND deleted_at IS NULL
+    `).run(item);
+    await saveOrderFees(no, item.fees, item.currency);
+  });
+
+  await transaction();
+  await writeAudit("update", "order", no, item.customer);
+  const updated = await db.prepare("SELECT * FROM orders WHERE no = ?").get(no);
+  res.json((await hydrateOrderFees([mapOrder(updated)]))[0]);
+});
+
+app.patch("/api/orders/:no/status", async (req, res) => {
+  const no = String(req.params.no || "").trim();
+  const status = String(req.body.status || "").trim();
+  const allowedStatuses = new Set(["待确认", "预排", "正常", "通关中", "待审核", "已审核", "缺票据", "费用待确认"]);
+
+  if (!allowedStatuses.has(status)) {
+    res.status(400).json({ message: "订单状态无效" });
+    return;
+  }
+
+  const result = await db.prepare("UPDATE orders SET status = ? WHERE no = ? AND deleted_at IS NULL").run(status, no);
+  if (result.changes === 0) {
+    res.status(404).json({ message: "订单不存在或已删除" });
+    return;
+  }
+
+  await writeAudit(status === "已审核" ? "audit" : "update_status", "order", no, `状态改为${status}`);
+  const row = await db.prepare("SELECT * FROM orders WHERE no = ?").get(no);
+  res.json((await hydrateOrderFees([mapOrder(row)]))[0]);
+});
+
+app.delete("/api/orders/:no", async (req, res) => {
+  const no = String(req.params.no || "").trim();
+  const row = await db.prepare("SELECT status FROM orders WHERE no = ? AND deleted_at IS NULL").get(no);
+  if (!row) {
+    res.status(404).json({ message: "订单不存在或已删除" });
+    return;
+  }
+  if (row.status === "已审核") {
+    res.status(409).json({ message: "已审核订单不可删除" });
+    return;
+  }
+  if (row.status === "通关中" && !requestHasTransitDeletePermission(req)) {
+    res.status(403).json({ message: "通关中订单不可删除，请使用超级管理员或老板账号操作" });
+    return;
+  }
+
+  await db.prepare("UPDATE orders SET deleted_at = CURRENT_TIMESTAMP WHERE no = ?").run(no);
+  await writeAudit("delete", "order", no, "移入回收站");
+  res.json({ ok: true });
+});
+
+app.post("/api/orders/:no/restore", async (req, res) => {
+  const no = String(req.params.no || "").trim();
+  const result = await db.prepare("UPDATE orders SET deleted_at = NULL WHERE no = ? AND deleted_at IS NOT NULL").run(no);
+  if (result.changes === 0) {
+    res.status(404).json({ message: "回收站内找不到该订单" });
+    return;
+  }
+  await writeAudit("restore", "order", no, "从回收站恢复");
+  const restored = await db.prepare("SELECT * FROM orders WHERE no = ?").get(no);
+  res.json((await hydrateOrderFees([mapOrder(restored)]))[0]);
+});
+
+app.get("/api/vehicles", async (_req, res) => {
+  const rows = await db.prepare("SELECT * FROM vehicles WHERE deleted_at IS NULL ORDER BY plate ASC").all();
+  res.json(rows.map(mapVehicle));
+});
+
+app.post("/api/vehicles", async (req, res) => {
+  const item = {
+    plate: String(req.body.plate || "").trim(),
+    brand: String(req.body.brand || "").trim(),
+    model: String(req.body.model || "").trim(),
+    type: String(req.body.type || "").trim(),
+    purchaseDate: String(req.body.purchaseDate || "").trim(),
+    factoryDate: String(req.body.factoryDate || "").trim(),
+    mainlandReviewDate: String(req.body.mainlandReviewDate || "").trim(),
+    hkReviewDate: String(req.body.hkReviewDate || "").trim(),
+    mainlandInsuranceDate: String(req.body.mainlandInsuranceDate || "").trim(),
+    hkInsuranceDate: String(req.body.hkInsuranceDate || "").trim(),
+    insuranceReminder: String(req.body.insuranceReminder || "提前30天").trim(),
+    maintenanceReminder: String(req.body.maintenanceReminder || "").trim(),
+    status: String(req.body.status || "正常").trim(),
+    monthlyCost: Number(req.body.monthlyCost || 0),
+    note: String(req.body.note || "").trim()
+  };
+  if (!item.plate) {
+    res.status(400).json({ message: "车牌不能为空" });
+    return;
+  }
+  await db.prepare(`
+    INSERT INTO vehicles
+      (plate, brand, model, vehicle_type, purchase_date, factory_date, mainland_review_date,
+       hk_review_date, mainland_insurance_date, hk_insurance_date, insurance_reminder,
+       maintenance_reminder, status, monthly_cost, note)
+    VALUES
+      (@plate, @brand, @model, @type, @purchaseDate, @factoryDate, @mainlandReviewDate,
+       @hkReviewDate, @mainlandInsuranceDate, @hkInsuranceDate, @insuranceReminder,
+       @maintenanceReminder, @status, @monthlyCost, @note)
+  `).run(item);
+  await writeAudit("create", "vehicle", item.plate, item.note);
+  res.status(201).json(item);
+});
+
+app.patch("/api/vehicles/:plate", async (req, res) => {
+  const originalPlate = String(req.params.plate || "").trim();
+  const current = await db.prepare("SELECT * FROM vehicles WHERE plate = ? AND deleted_at IS NULL").get(originalPlate);
+  if (!current) {
+    res.status(404).json({ message: "车辆不存在或已删除" });
+    return;
+  }
+  const item = {
+    originalPlate,
+    plate: String(req.body.plate || originalPlate).trim(),
+    brand: String(req.body.brand ?? current.brand ?? "").trim(),
+    model: String(req.body.model ?? current.model ?? "").trim(),
+    type: String(req.body.type ?? current.vehicle_type ?? "").trim(),
+    purchaseDate: String(req.body.purchaseDate ?? current.purchase_date ?? "").trim(),
+    factoryDate: String(req.body.factoryDate ?? current.factory_date ?? "").trim(),
+    mainlandReviewDate: String(req.body.mainlandReviewDate ?? current.mainland_review_date ?? "").trim(),
+    hkReviewDate: String(req.body.hkReviewDate ?? current.hk_review_date ?? "").trim(),
+    mainlandInsuranceDate: String(req.body.mainlandInsuranceDate ?? current.mainland_insurance_date ?? "").trim(),
+    hkInsuranceDate: String(req.body.hkInsuranceDate ?? current.hk_insurance_date ?? "").trim(),
+    insuranceReminder: String(req.body.insuranceReminder ?? current.insurance_reminder ?? "提前30天").trim(),
+    maintenanceReminder: String(req.body.maintenanceReminder ?? current.maintenance_reminder ?? "").trim(),
+    status: String(req.body.status ?? current.status ?? "正常").trim(),
+    monthlyCost: Number(req.body.monthlyCost ?? current.monthly_cost ?? 0),
+    note: String(req.body.note ?? current.note ?? "").trim()
+  };
+  if (!item.plate) {
+    res.status(400).json({ message: "车牌不能为空" });
+    return;
+  }
+  if (item.plate !== originalPlate) {
+    const duplicate = await db.prepare("SELECT plate FROM vehicles WHERE plate = ? AND deleted_at IS NULL").get(item.plate);
+    if (duplicate) {
+      res.status(409).json({ message: "车牌已存在，不能重复" });
+      return;
+    }
+  }
+  const transaction = db.transaction(async () => {
+    const result = await db.prepare(`
+      UPDATE vehicles
+      SET plate = @plate, brand = @brand, model = @model, vehicle_type = @type,
+          purchase_date = @purchaseDate, factory_date = @factoryDate,
+          mainland_review_date = @mainlandReviewDate, hk_review_date = @hkReviewDate,
+          mainland_insurance_date = @mainlandInsuranceDate, hk_insurance_date = @hkInsuranceDate,
+          insurance_reminder = @insuranceReminder, maintenance_reminder = @maintenanceReminder,
+          status = @status, monthly_cost = @monthlyCost, note = @note
+      WHERE plate = @originalPlate AND deleted_at IS NULL
+    `).run(item);
+    if (result.changes === 0) {
+      throw new Error("车辆不存在或已删除");
+    }
+    if (item.plate !== originalPlate) {
+      await db.prepare("UPDATE orders SET plate = ? WHERE plate = ? AND deleted_at IS NULL").run(item.plate, originalPlate);
+      await db.prepare("UPDATE files SET entity_id = ? WHERE entity_type = 'vehicle' AND entity_id = ? AND deleted_at IS NULL").run(item.plate, originalPlate);
+    }
+  });
+  try {
+    await transaction();
+  } catch (error) {
+    res.status(404).json({ message: error.message });
+    return;
+  }
+  await writeAudit("update", "vehicle", item.plate, item.note);
+  res.json(mapVehicle(await db.prepare("SELECT * FROM vehicles WHERE plate = ?").get(item.plate)));
+});
+
+app.delete("/api/vehicles/:plate", async (req, res) => {
+  const plate = String(req.params.plate || "").trim();
+  const vehicle = await db.prepare("SELECT plate FROM vehicles WHERE plate = ? AND deleted_at IS NULL").get(plate);
+  if (!vehicle) {
+    res.status(404).json({ message: "车辆不存在或已删除" });
+    return;
+  }
+  const orderCount = (await db.prepare("SELECT COUNT(*) AS count FROM orders WHERE plate = ? AND deleted_at IS NULL").get(plate)).count;
+  if (orderCount > 0) {
+    res.status(409).json({ message: "车辆已有订单记录，不允许删除" });
+    return;
+  }
+  const result = await db.prepare("UPDATE vehicles SET deleted_at = CURRENT_TIMESTAMP WHERE plate = ? AND deleted_at IS NULL").run(plate);
+  if (result.changes === 0) {
+    res.status(404).json({ message: "车辆不存在或已删除" });
+    return;
+  }
+  await writeAudit("delete", "vehicle", plate, "移入回收站");
+  res.json({ ok: true });
+});
+
+app.get("/api/drivers", async (_req, res) => {
+  const rows = await db.prepare("SELECT * FROM drivers WHERE deleted_at IS NULL ORDER BY id ASC").all();
+  res.json(rows.map(mapDriver));
+});
+
+app.post("/api/drivers", async (req, res) => {
+  const item = {
+    type: String(req.body.type || "香港司机").trim(),
+    name: String(req.body.name || "").trim(),
+    phone: String(req.body.phone || "").trim(),
+    idNo: String(req.body.idNo || "").trim(),
+    license: String(req.body.license || "").trim(),
+    birthday: String(req.body.birthday || "").trim(),
+    hireDate: String(req.body.hireDate || "").trim(),
+    leaveDate: String(req.body.leaveDate || "").trim(),
+    expireAt: String(req.body.expireAt || "").trim(),
+    status: String(req.body.status || "正常").trim(),
+    defaultWage: Number(req.body.defaultWage || 0),
+    note: String(req.body.note || "").trim()
+  };
+  if (!item.name) {
+    res.status(400).json({ message: "司机姓名不能为空" });
+    return;
+  }
+  const result = await db.prepare(`
+    INSERT INTO drivers (type, name, phone, id_no, license, birthday, hire_date, leave_date, expire_at, status, default_wage, note)
+    VALUES (@type, @name, @phone, @idNo, @license, @birthday, @hireDate, @leaveDate, @expireAt, @status, @defaultWage, @note)
+  `).run(item);
+  await writeAudit("create", "driver", String(result.lastInsertId), item.name);
+  res.status(201).json({ id: result.lastInsertId, ...item });
+});
+
+app.patch("/api/drivers/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const current = await db.prepare("SELECT * FROM drivers WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!current) {
+    res.status(404).json({ message: "司机不存在或已删除" });
+    return;
+  }
+  const item = {
+    id,
+    type: String(req.body.type ?? current.type ?? "香港司机").trim() || "香港司机",
+    name: String(req.body.name ?? current.name ?? "").trim(),
+    phone: String(req.body.phone ?? current.phone ?? "").trim(),
+    idNo: String(req.body.idNo ?? current.id_no ?? "").trim(),
+    license: String(req.body.license ?? current.license ?? "").trim(),
+    birthday: String(req.body.birthday ?? current.birthday ?? "").trim(),
+    hireDate: String(req.body.hireDate ?? current.hire_date ?? "").trim(),
+    leaveDate: String(req.body.leaveDate ?? current.leave_date ?? "").trim(),
+    expireAt: String(req.body.expireAt ?? current.expire_at ?? "").trim(),
+    status: String(req.body.status ?? current.status ?? "正常").trim(),
+    defaultWage: Number(req.body.defaultWage ?? current.default_wage ?? 0),
+    note: String(req.body.note ?? current.note ?? "").trim()
+  };
+  if (!item.name) {
+    res.status(400).json({ message: "司机姓名不能为空" });
+    return;
+  }
+  const transaction = db.transaction(async () => {
+    const result = await db.prepare(`
+      UPDATE drivers
+      SET type = @type, name = @name, phone = @phone, id_no = @idNo, license = @license,
+          birthday = @birthday, hire_date = @hireDate, leave_date = @leaveDate, expire_at = @expireAt,
+          status = @status, default_wage = @defaultWage, note = @note
+      WHERE id = @id AND deleted_at IS NULL
+    `).run(item);
+    if (result.changes === 0) {
+      throw new Error("司机不存在或已删除");
+    }
+    if (item.name !== current.name) {
+      await db.prepare("UPDATE orders SET driver = ? WHERE driver = ? AND deleted_at IS NULL").run(item.name, current.name);
+    }
+  });
+  try {
+    await transaction();
+  } catch (error) {
+    res.status(404).json({ message: error.message });
+    return;
+  }
+  await writeAudit("update", "driver", String(id), item.name);
+  res.json(mapDriver(await db.prepare("SELECT * FROM drivers WHERE id = ?").get(id)));
+});
+
+app.delete("/api/drivers/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const row = await db.prepare("SELECT name FROM drivers WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!row) {
+    res.status(404).json({ message: "司机不存在或已删除" });
+    return;
+  }
+  const orderCount = (await db.prepare("SELECT COUNT(*) AS count FROM orders WHERE driver = ? AND deleted_at IS NULL").get(row.name)).count;
+  if (orderCount > 0) {
+    res.status(409).json({ message: "司机已有订单记录，不允许删除" });
+    return;
+  }
+  await db.prepare("UPDATE drivers SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?").run(id);
+  await writeAudit("delete", "driver", String(id), row.name);
+  res.json({ ok: true });
+});
+
+function readDriverWageRulePayload(body, current = null) {
+  const transportMode = String(body.transportMode ?? body.transport_mode ?? current?.transport_mode ?? "单司机").trim();
+  const normalizedTransportMode = normalizeTransportMode(transportMode) || "单司机";
+  const currentAdvanceFeeRates = (() => {
+    try {
+      return JSON.parse(current?.advance_fee_rates || "{}") || {};
+    } catch {
+      return {};
+    }
+  })();
+  const advanceFeeRates = Object.fromEntries(
+    Object.entries(body.advanceFeeRates ?? currentAdvanceFeeRates)
+      .map(([key, value]) => [String(key), Number(value || 0)])
+      .filter(([key]) => key)
+  );
+  return {
+    driverId: body.driverId === undefined
+      ? (current?.driver_id ?? null)
+      : (body.driverId ? Number(body.driverId) : null),
+    direction: String(body.direction ?? current?.direction ?? SHARED_DIRECTION).trim() || SHARED_DIRECTION,
+    city: String(body.city ?? current?.city ?? "").trim(),
+    transportMode: normalizedTransportMode,
+    currency: String(body.currency ?? current?.currency ?? "港币").trim() || "港币",
+    baseRMB: Number(body.baseRMB ?? current?.base_rmb ?? 0) || 0,
+    baseHKD: Number(body.baseHKD ?? current?.base_hkd ?? 0) || 0,
+    loadPerBoard: Number(body.loadPerBoard ?? current?.load_per_board ?? 0) || 0,
+    unloadPerBoard: Number(body.unloadPerBoard ?? current?.unload_per_board ?? 0) || 0,
+    crossSeaFee: Number(body.crossSeaFee ?? current?.cross_sea_fee ?? 0) || 0,
+    addPointFee: Number(body.addPointFee ?? current?.add_point_fee ?? 0) || 0,
+    waitingPerHour: Number(body.waitingPerHour ?? current?.waiting_per_hour ?? 0) || 0,
+    advanceFeeRates: JSON.stringify(advanceFeeRates),
+    note: String(body.note ?? current?.note ?? "").trim()
+  };
+}
+
+app.get("/api/driver-wage-rules", async (req, res) => {
+  const driverId = req.query.driverId ? Number(req.query.driverId) : null;
+  const rows = driverId
+    ? await db.prepare(`
+        SELECT * FROM driver_wage_rules
+        WHERE deleted_at IS NULL AND (driver_id = ? OR driver_id IS NULL)
+        ORDER BY direction ASC, city ASC, transport_mode ASC, id ASC
+      `).all(driverId)
+    : await db.prepare(`
+        SELECT * FROM driver_wage_rules
+        WHERE deleted_at IS NULL
+        ORDER BY direction ASC, city ASC, transport_mode ASC, id ASC
+      `).all();
+  res.json(rows.map(mapDriverWageRule));
+});
+
+app.post("/api/driver-wage-rules", async (req, res) => {
+  const item = readDriverWageRulePayload(req.body);
+  if (!item.city) {
+    res.status(400).json({ message: "计价城市不能为空" });
+    return;
+  }
+  const duplicate = await db.prepare(`
+    SELECT id FROM driver_wage_rules
+    WHERE deleted_at IS NULL
+      AND COALESCE(driver_id, 0) = COALESCE(?, 0)
+      AND direction = ? AND city = ? AND transport_mode = ?
+  `).get(item.driverId, item.direction, item.city, item.transportMode);
+  if (duplicate) {
+    res.status(409).json({ message: "同司机、方向、城市、运输模式的司机费用规则已存在" });
+    return;
+  }
+  const result = await db.prepare(`
+    INSERT INTO driver_wage_rules
+      (driver_id, direction, city, transport_mode, currency, base_rmb, base_hkd, load_per_board, unload_per_board,
+       cross_sea_fee, add_point_fee, waiting_per_hour, advance_fee_rates, note)
+    VALUES
+      (@driverId, @direction, @city, @transportMode, @currency, @baseRMB, @baseHKD, @loadPerBoard, @unloadPerBoard,
+       @crossSeaFee, @addPointFee, @waitingPerHour, @advanceFeeRates, @note)
+  `).run(item);
+  await writeAudit("create", "driver_wage_rule", String(result.lastInsertId), `${item.direction}/${item.city}`);
+  res.status(201).json(mapDriverWageRule(await db.prepare("SELECT * FROM driver_wage_rules WHERE id = ?").get(result.lastInsertId)));
+});
+
+app.patch("/api/driver-wage-rules/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const current = await db.prepare("SELECT * FROM driver_wage_rules WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!current) {
+    res.status(404).json({ message: "司机费用规则不存在或已删除" });
+    return;
+  }
+  const item = { id, ...readDriverWageRulePayload(req.body, current) };
+  if (!item.city) {
+    res.status(400).json({ message: "计价城市不能为空" });
+    return;
+  }
+  const duplicate = await db.prepare(`
+    SELECT id FROM driver_wage_rules
+    WHERE deleted_at IS NULL AND id <> ?
+      AND COALESCE(driver_id, 0) = COALESCE(?, 0)
+      AND direction = ? AND city = ? AND transport_mode = ?
+  `).get(id, item.driverId, item.direction, item.city, item.transportMode);
+  if (duplicate) {
+    res.status(409).json({ message: "同司机、方向、城市、运输模式的司机费用规则已存在" });
+    return;
+  }
+  await db.prepare(`
+    UPDATE driver_wage_rules
+    SET driver_id = @driverId, direction = @direction, city = @city, transport_mode = @transportMode, currency = @currency,
+        base_rmb = @baseRMB, base_hkd = @baseHKD, load_per_board = @loadPerBoard,
+        unload_per_board = @unloadPerBoard, cross_sea_fee = @crossSeaFee,
+        add_point_fee = @addPointFee, waiting_per_hour = @waitingPerHour, advance_fee_rates = @advanceFeeRates, note = @note
+    WHERE id = @id AND deleted_at IS NULL
+  `).run(item);
+  await writeAudit("update", "driver_wage_rule", String(id), `${item.direction}/${item.city}`);
+  res.json(mapDriverWageRule(await db.prepare("SELECT * FROM driver_wage_rules WHERE id = ?").get(id)));
+});
+
+app.delete("/api/driver-wage-rules/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const result = await db.prepare("UPDATE driver_wage_rules SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(id);
+  if (result.changes === 0) {
+    res.status(404).json({ message: "司机费用规则不存在或已删除" });
+    return;
+  }
+  await writeAudit("delete", "driver_wage_rule", String(id), "移入回收站");
+  res.json({ ok: true });
+});
+
+function readDriverAdjustmentPayload(body, current = null) {
+  return {
+    driverId: body.driverId === undefined ? Number(current?.driver_id || 0) : Number(body.driverId || 0),
+    date: String(body.date ?? current?.date ?? "").trim(),
+    type: String(body.type ?? current?.type ?? "预支款").trim() || "预支款",
+    currency: String(body.currency ?? current?.currency ?? "港币").trim() || "港币",
+    amount: Number(body.amount ?? current?.amount ?? 0) || 0,
+    status: String(body.status ?? current?.status ?? "待工资结算").trim() || "待工资结算",
+    note: String(body.note ?? current?.note ?? "").trim()
+  };
+}
+
+app.get("/api/driver-adjustments", async (req, res) => {
+  const driverId = req.query.driverId ? Number(req.query.driverId) : null;
+  const rows = driverId
+    ? await db.prepare(`
+        SELECT * FROM driver_adjustments
+        WHERE deleted_at IS NULL AND driver_id = ?
+        ORDER BY date DESC, id DESC
+      `).all(driverId)
+    : await db.prepare(`
+        SELECT * FROM driver_adjustments
+        WHERE deleted_at IS NULL
+        ORDER BY date DESC, id DESC
+      `).all();
+  res.json(rows.map(mapDriverAdjustment));
+});
+
+app.post("/api/driver-adjustments", async (req, res) => {
+  const item = readDriverAdjustmentPayload(req.body);
+  if (!item.driverId) {
+    res.status(400).json({ message: "请选择司机" });
+    return;
+  }
+  if (!item.date) {
+    res.status(400).json({ message: "日期不能为空" });
+    return;
+  }
+  const driver = await db.prepare("SELECT id, name FROM drivers WHERE id = ? AND deleted_at IS NULL").get(item.driverId);
+  if (!driver) {
+    res.status(404).json({ message: "司机不存在或已删除" });
+    return;
+  }
+  const result = await db.prepare(`
+    INSERT INTO driver_adjustments (driver_id, date, type, currency, amount, status, note)
+    VALUES (@driverId, @date, @type, @currency, @amount, @status, @note)
+  `).run(item);
+  await writeAudit("create", "driver_adjustment", String(result.lastInsertId), `${driver.name}/${item.type}`);
+  res.status(201).json(mapDriverAdjustment(await db.prepare("SELECT * FROM driver_adjustments WHERE id = ?").get(result.lastInsertId)));
+});
+
+app.patch("/api/driver-adjustments/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const current = await db.prepare("SELECT * FROM driver_adjustments WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!current) {
+    res.status(404).json({ message: "预支/报销记录不存在或已删除" });
+    return;
+  }
+  const item = { id, ...readDriverAdjustmentPayload(req.body, current) };
+  if (!item.driverId || !item.date) {
+    res.status(400).json({ message: "司机和日期不能为空" });
+    return;
+  }
+  await db.prepare(`
+    UPDATE driver_adjustments
+    SET driver_id = @driverId, date = @date, type = @type, currency = @currency,
+        amount = @amount, status = @status, note = @note
+    WHERE id = @id AND deleted_at IS NULL
+  `).run(item);
+  await writeAudit("update", "driver_adjustment", String(id), item.type);
+  res.json(mapDriverAdjustment(await db.prepare("SELECT * FROM driver_adjustments WHERE id = ?").get(id)));
+});
+
+app.delete("/api/driver-adjustments/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const result = await db.prepare("UPDATE driver_adjustments SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(id);
+  if (result.changes === 0) {
+    res.status(404).json({ message: "预支/报销记录不存在或已删除" });
+    return;
+  }
+  await writeAudit("delete", "driver_adjustment", String(id), "移入回收站");
+  res.json({ ok: true });
+});
+
+app.get("/api/fee-items", async (_req, res) => {
+  const rows = await db.prepare("SELECT * FROM fee_items WHERE deleted_at IS NULL ORDER BY sort_order ASC, id ASC").all();
+  res.json(rows.map(mapFeeItem));
+});
+
+function normalizeDefaultDriverRole(value = "") {
+  const text = String(value || "").trim();
+  return ["香港司机", "大陆骑师", "跟随订单司机", "手动指定"].includes(text) ? text : "";
+}
+
+app.post("/api/fee-items", async (req, res) => {
+  const requestedSortOrder = Number(req.body.sortOrder);
+  const nextSortOrder = (await db.prepare(`
+    SELECT COALESCE(MAX(sort_order), 0) + 1 AS value
+    FROM fee_items
+    WHERE deleted_at IS NULL
+  `).get()).value;
+  const item = {
+    category: req.body.category === "代垫" ? "代垫" : "正常",
+    name: String(req.body.name || "").trim(),
+    currency: String(req.body.currency || "港币").trim(),
+    defaultAmount: Number(req.body.defaultAmount || 0),
+    defaultDriverRole: normalizeDefaultDriverRole(req.body.defaultDriverRole || req.body.default_driver_role),
+    sortOrder: Number.isFinite(requestedSortOrder) && requestedSortOrder > 0 ? requestedSortOrder : nextSortOrder
+  };
+  if (!item.name) {
+    res.status(400).json({ message: "收费项目名称不能为空" });
+    return;
+  }
+  const duplicate = await db.prepare("SELECT id FROM fee_items WHERE name = ? AND deleted_at IS NULL").get(item.name);
+  if (duplicate) {
+    res.status(409).json({ message: "收费项目名称不能重复" });
+    return;
+  }
+  const result = await db.prepare(`
+    INSERT INTO fee_items (category, name, currency, default_amount, default_driver_role, sort_order)
+    VALUES (@category, @name, @currency, @defaultAmount, @defaultDriverRole, @sortOrder)
+  `).run(item);
+  await writeAudit("create", "fee_item", String(result.lastInsertId), item.name);
+  res.status(201).json(mapFeeItem(await db.prepare("SELECT * FROM fee_items WHERE id = ?").get(result.lastInsertId)));
+});
+
+app.patch("/api/fee-items/order", async (req, res) => {
+  const ids = Array.isArray(req.body.ids)
+    ? req.body.ids.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0)
+    : [];
+  if (ids.length === 0) {
+    res.status(400).json({ message: "请选择需要排序的收费项目" });
+    return;
+  }
+  const existingRows = await db.prepare(`
+    SELECT id
+    FROM fee_items
+    WHERE deleted_at IS NULL
+  `).all();
+  const existingIds = new Set(existingRows.map((row) => row.id));
+  const orderedIds = [];
+  ids.forEach((id) => {
+    if (existingIds.has(id) && !orderedIds.includes(id)) orderedIds.push(id);
+  });
+  existingRows.forEach((row) => {
+    if (!orderedIds.includes(row.id)) orderedIds.push(row.id);
+  });
+  const updateSort = await db.prepare("UPDATE fee_items SET sort_order = ? WHERE id = ? AND deleted_at IS NULL");
+  const updateOrder = db.transaction(async (orderIds) => {
+    for (const [index, id] of orderIds.entries()) {
+      await updateSort.run(index + 1, id);
+    }
+  });
+  await updateOrder(orderedIds);
+  await writeAudit("update", "fee_item_order", "all", `调整收费项目顺序 ${orderedIds.length} 项`);
+  const rows = await db.prepare("SELECT * FROM fee_items WHERE deleted_at IS NULL ORDER BY sort_order ASC, id ASC").all();
+  res.json(rows.map(mapFeeItem));
+});
+
+app.patch("/api/fee-items/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const current = await db.prepare("SELECT * FROM fee_items WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!current) {
+    res.status(404).json({ message: "收费项目不存在或已删除" });
+    return;
+  }
+  const item = {
+    id,
+    category: req.body.category === undefined ? current.category : (req.body.category === "代垫" ? "代垫" : "正常"),
+    name: req.body.name === undefined ? current.name : String(req.body.name || "").trim(),
+    currency: req.body.currency === undefined ? current.currency : String(req.body.currency || "港币").trim(),
+    defaultAmount: req.body.defaultAmount === undefined ? Number(current.default_amount || 0) : Number(req.body.defaultAmount || 0),
+    defaultDriverRole: req.body.defaultDriverRole === undefined && req.body.default_driver_role === undefined
+      ? (current.default_driver_role || "")
+      : normalizeDefaultDriverRole(req.body.defaultDriverRole || req.body.default_driver_role)
+  };
+  if (!item.name) {
+    res.status(400).json({ message: "收费项目名称不能为空" });
+    return;
+  }
+  const duplicate = await db.prepare("SELECT id FROM fee_items WHERE name = ? AND id <> ? AND deleted_at IS NULL").get(item.name, id);
+  if (duplicate) {
+    res.status(409).json({ message: "收费项目名称不能重复" });
+    return;
+  }
+  const result = await db.prepare(`
+    UPDATE fee_items
+    SET category = @category, name = @name, currency = @currency, default_amount = @defaultAmount, default_driver_role = @defaultDriverRole
+    WHERE id = @id AND deleted_at IS NULL
+  `).run(item);
+  if (result.changes === 0) {
+    res.status(404).json({ message: "收费项目不存在或已删除" });
+    return;
+  }
+  await writeAudit("update", "fee_item", String(id), item.name);
+  res.json(mapFeeItem(await db.prepare("SELECT * FROM fee_items WHERE id = ?").get(id)));
+});
+
+app.delete("/api/fee-items/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const result = await db.prepare("UPDATE fee_items SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(id);
+  if (result.changes === 0) {
+    res.status(404).json({ message: "收费项目不存在或已删除" });
+    return;
+  }
+  await writeAudit("delete", "fee_item", String(id), "移入回收站");
+  res.json({ ok: true });
+});
+
+function readFreightRatePayload(body, current = null) {
+  const level1 = String(body.level1 ?? current?.level1 ?? current?.city ?? "").trim();
+  const level2 = String(body.level2 ?? current?.level2 ?? "").trim();
+  const level3 = String(body.level3 ?? current?.level3 ?? "").trim();
+  const cityValue = body.city ?? current?.city ?? "";
+  const city = String(cityValue).trim() || level3 || level2 || level1;
+  return {
+    direction: String(body.direction ?? current?.direction ?? "").trim(),
+    level1,
+    level2,
+    level3,
+    city,
+    tonnage: String(body.tonnage ?? current?.tonnage ?? "").trim(),
+    rmbAmount: Number(body.rmbAmount ?? current?.rmb_amount ?? 0) || 0,
+    hkdAmount: Number(body.hkdAmount ?? current?.hkd_amount ?? 0) || 0,
+    sortOrder: Number(body.sortOrder ?? current?.sort_order ?? 0) || 0
+  };
+}
+
+app.get("/api/freight-rates", async (_req, res) => {
+  const rows = await db.prepare("SELECT * FROM freight_rates WHERE deleted_at IS NULL ORDER BY sort_order ASC, id ASC").all();
+  res.json(rows.map(mapFreightRate));
+});
+
+app.post("/api/freight-rates", async (req, res) => {
+  const item = readFreightRatePayload(req.body);
+  if (!item.direction || !item.level1 || !item.tonnage) {
+    res.status(400).json({ message: "方向、一级目录、吨位不能为空" });
+    return;
+  }
+  const duplicate = await db.prepare(`
+    SELECT id FROM freight_rates
+    WHERE deleted_at IS NULL
+      AND direction = ? AND level1 = ? AND level2 = ? AND level3 = ? AND tonnage = ?
+  `).get(item.direction, item.level1, item.level2, item.level3, item.tonnage);
+  if (duplicate) {
+    res.status(409).json({ message: "同方向、目录、吨位的运费模板已存在" });
+    return;
+  }
+  const result = await db.prepare(`
+    INSERT INTO freight_rates (direction, level1, level2, level3, city, tonnage, rmb_amount, hkd_amount, sort_order)
+    VALUES (@direction, @level1, @level2, @level3, @city, @tonnage, @rmbAmount, @hkdAmount, @sortOrder)
+  `).run(item);
+  await writeAudit("create", "freight_rate", String(result.lastInsertId), `${item.direction}/${item.level1}/${item.level2}/${item.level3}/${item.tonnage}`);
+  res.status(201).json(mapFreightRate(await db.prepare("SELECT * FROM freight_rates WHERE id = ?").get(result.lastInsertId)));
+});
+
+app.patch("/api/freight-rates/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const current = await db.prepare("SELECT * FROM freight_rates WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!current) {
+    res.status(404).json({ message: "运费模板不存在或已删除" });
+    return;
+  }
+  const item = { id, ...readFreightRatePayload(req.body, current) };
+  if (!item.direction || !item.level1 || !item.tonnage) {
+    res.status(400).json({ message: "方向、一级目录、吨位不能为空" });
+    return;
+  }
+  const duplicate = await db.prepare(`
+    SELECT id FROM freight_rates
+    WHERE deleted_at IS NULL AND id <> ?
+      AND direction = ? AND level1 = ? AND level2 = ? AND level3 = ? AND tonnage = ?
+  `).get(id, item.direction, item.level1, item.level2, item.level3, item.tonnage);
+  if (duplicate) {
+    res.status(409).json({ message: "同方向、目录、吨位的运费模板已存在" });
+    return;
+  }
+  await db.prepare(`
+    UPDATE freight_rates
+    SET direction = @direction, level1 = @level1, level2 = @level2, level3 = @level3,
+        city = @city, tonnage = @tonnage,
+        rmb_amount = @rmbAmount, hkd_amount = @hkdAmount, sort_order = @sortOrder
+    WHERE id = @id AND deleted_at IS NULL
+  `).run(item);
+  await writeAudit("update", "freight_rate", String(id), `${item.direction}/${item.level1}/${item.level2}/${item.level3}/${item.tonnage}`);
+  res.json(mapFreightRate(await db.prepare("SELECT * FROM freight_rates WHERE id = ?").get(id)));
+});
+
+app.delete("/api/freight-rates/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const result = await db.prepare("UPDATE freight_rates SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(id);
+  if (result.changes === 0) {
+    res.status(404).json({ message: "运费模板不存在或已删除" });
+    return;
+  }
+  await writeAudit("delete", "freight_rate", String(id), "移入回收站");
+  res.json({ ok: true });
+});
+
+app.get("/api/templates", async (req, res) => {
+  const includeContent = req.query.includeContent !== "0" && req.query.includeContent !== "false";
+  let rows = await db.prepare("SELECT * FROM templates WHERE deleted_at IS NULL ORDER BY updated_at DESC, id DESC").all();
+  if (req.query.scope === "export") {
+    rows = rows.filter((row) => !["order-freight-template", "outsourced-cost-rule"].includes(templateContentType(row.content)));
+  }
+  res.json(rows.map((row) => mapTemplate(row, { includeContent })));
+});
+
+app.get("/api/templates/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const row = await db.prepare("SELECT * FROM templates WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!row) {
+    res.status(404).json({ message: "模板不存在或已删除" });
+    return;
+  }
+  res.json(mapTemplate(row, { includeContent: true }));
+});
+
+app.post("/api/templates", async (req, res) => {
+  const item = {
+    name: String(req.body.name || "").trim(),
+    format: String(req.body.format || "通用").trim() || "通用",
+    description: String(req.body.description || "").trim(),
+    content: String(req.body.content || "").trim()
+  };
+  if (!item.name) {
+    res.status(400).json({ message: "模板名称不能为空" });
+    return;
+  }
+  const duplicate = await db.prepare("SELECT id FROM templates WHERE name = ? AND deleted_at IS NULL").get(item.name);
+  if (duplicate) {
+    res.status(409).json({ message: "模板名称已存在" });
+    return;
+  }
+  const result = await db.prepare(`
+    INSERT INTO templates (name, format, description, content, updated_at)
+    VALUES (@name, @format, @description, @content, CURRENT_TIMESTAMP)
+  `).run(item);
+  await writeAudit("create", "template", String(result.lastInsertId), item.name);
+  res.status(201).json(mapTemplate(await db.prepare("SELECT * FROM templates WHERE id = ?").get(result.lastInsertId)));
+});
+
+app.patch("/api/templates/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const current = await db.prepare("SELECT * FROM templates WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!current) {
+    res.status(404).json({ message: "模板不存在或已删除" });
+    return;
+  }
+  const item = {
+    id,
+    name: req.body.name === undefined ? current.name : String(req.body.name || "").trim(),
+    format: "通用",
+    description: req.body.description === undefined ? current.description : String(req.body.description || "").trim(),
+    content: req.body.content === undefined ? current.content : String(req.body.content || "").trim()
+  };
+  if (!item.name) {
+    res.status(400).json({ message: "模板名称不能为空" });
+    return;
+  }
+  const duplicate = await db.prepare("SELECT id FROM templates WHERE name = ? AND id != ? AND deleted_at IS NULL").get(item.name, id);
+  if (duplicate) {
+    res.status(409).json({ message: "模板名称已存在" });
+    return;
+  }
+  const result = await db.prepare(`
+    UPDATE templates
+    SET name = @name, format = @format, description = @description,
+        content = @content, updated_at = CURRENT_TIMESTAMP
+    WHERE id = @id AND deleted_at IS NULL
+  `).run(item);
+  if (result.changes === 0) {
+    res.status(404).json({ message: "模板不存在或已删除" });
+    return;
+  }
+  await writeAudit("update", "template", String(id), item.name);
+  res.json(mapTemplate(await db.prepare("SELECT * FROM templates WHERE id = ?").get(id)));
+});
+
+app.delete("/api/templates/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const result = await db.prepare("UPDATE templates SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(id);
+  if (result.changes === 0) {
+    res.status(404).json({ message: "模板不存在或已删除" });
+    return;
+  }
+  await writeAudit("delete", "template", String(id), "移入回收站");
+  res.json({ ok: true });
+});
+
+app.get("/api/rules", async (_req, res) => {
+  const rows = await db.prepare("SELECT * FROM rule_items WHERE deleted_at IS NULL ORDER BY id ASC").all();
+  res.json(rows.map(mapRule));
+});
+
+app.post("/api/rules", async (req, res) => {
+  const item = {
+    ruleType: String(req.body.ruleType || "业务规则").trim(),
+    name: String(req.body.name || "").trim(),
+    content: String(req.body.content || "").trim(),
+    enabled: req.body.enabled === false ? 0 : 1
+  };
+  if (!item.name) {
+    res.status(400).json({ message: "规则名称不能为空" });
+    return;
+  }
+  const result = await db.prepare(`
+    INSERT INTO rule_items (rule_type, name, content, enabled)
+    VALUES (@ruleType, @name, @content, @enabled)
+  `).run(item);
+  await writeAudit("create", "rule", String(result.lastInsertId), item.name);
+  res.status(201).json(mapRule(await db.prepare("SELECT * FROM rule_items WHERE id = ?").get(result.lastInsertId)));
+});
+
+app.patch("/api/rules/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const current = await db.prepare("SELECT * FROM rule_items WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!current) {
+    res.status(404).json({ message: "规则不存在或已删除" });
+    return;
+  }
+  const item = {
+    id,
+    ruleType: req.body.ruleType === undefined ? current.rule_type : String(req.body.ruleType || "业务规则").trim(),
+    name: req.body.name === undefined ? current.name : String(req.body.name || "").trim(),
+    content: req.body.content === undefined ? current.content : String(req.body.content || "").trim(),
+    enabled: req.body.enabled === undefined ? current.enabled : (req.body.enabled === false ? 0 : 1)
+  };
+  if (!item.name) {
+    res.status(400).json({ message: "规则名称不能为空" });
+    return;
+  }
+  const result = await db.prepare(`
+    UPDATE rule_items
+    SET rule_type = @ruleType, name = @name, content = @content, enabled = @enabled
+    WHERE id = @id AND deleted_at IS NULL
+  `).run(item);
+  if (result.changes === 0) {
+    res.status(404).json({ message: "规则不存在或已删除" });
+    return;
+  }
+  await writeAudit("update", "rule", String(id), item.name);
+  res.json(mapRule(await db.prepare("SELECT * FROM rule_items WHERE id = ?").get(id)));
+});
+
+app.delete("/api/rules/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const result = await db.prepare("UPDATE rule_items SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(id);
+  if (result.changes === 0) {
+    res.status(404).json({ message: "规则不存在或已删除" });
+    return;
+  }
+  await writeAudit("delete", "rule", String(id), "移入回收站");
+  res.json({ ok: true });
+});
+
+app.get("/api/master-data", async (_req, res) => {
+  const rows = await db.prepare("SELECT * FROM master_data WHERE deleted_at IS NULL ORDER BY type ASC, sort_order ASC, id ASC").all();
+  res.json(rows.map(mapMasterData));
+});
+
+app.post("/api/master-data", async (req, res) => {
+  const item = {
+    type: String(req.body.type || "").trim(),
+    name: String(req.body.name || "").trim(),
+    value: String(req.body.value || req.body.name || "").trim(),
+    sortOrder: Number(req.body.sortOrder || 0)
+  };
+  if (!item.type || !item.name) {
+    res.status(400).json({ message: "类型和名称不能为空" });
+    return;
+  }
+  const duplicate = await db.prepare("SELECT id FROM master_data WHERE type = ? AND name = ? AND deleted_at IS NULL").get(item.type, item.name);
+  if (duplicate) {
+    res.status(409).json({ message: "基础数据已存在" });
+    return;
+  }
+  const result = await db.prepare(`
+    INSERT INTO master_data (type, name, value, sort_order)
+    VALUES (@type, @name, @value, @sortOrder)
+  `).run(item);
+  await writeAudit("create", "master_data", String(result.lastInsertId), `${item.type}/${item.name}`);
+  res.status(201).json(mapMasterData(await db.prepare("SELECT * FROM master_data WHERE id = ?").get(result.lastInsertId)));
+});
+
+app.patch("/api/master-data/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const current = await db.prepare("SELECT * FROM master_data WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!current) {
+    res.status(404).json({ message: "基础数据不存在或已删除" });
+    return;
+  }
+  const item = {
+    id,
+    type: req.body.type === undefined ? current.type : String(req.body.type || "").trim(),
+    name: req.body.name === undefined ? current.name : String(req.body.name || "").trim(),
+    value: req.body.value === undefined ? current.value : String(req.body.value || req.body.name || current.name || "").trim(),
+    sortOrder: req.body.sortOrder === undefined ? Number(current.sort_order || 0) : Number(req.body.sortOrder || 0)
+  };
+  if (!item.type || !item.name) {
+    res.status(400).json({ message: "类型和名称不能为空" });
+    return;
+  }
+  const duplicate = await db.prepare("SELECT id FROM master_data WHERE type = ? AND name = ? AND id != ? AND deleted_at IS NULL").get(item.type, item.name, id);
+  if (duplicate) {
+    res.status(409).json({ message: "基础数据已存在" });
+    return;
+  }
+  const result = await db.prepare(`
+    UPDATE master_data
+    SET type = @type, name = @name, value = @value, sort_order = @sortOrder
+    WHERE id = @id AND deleted_at IS NULL
+  `).run(item);
+  if (result.changes === 0) {
+    res.status(404).json({ message: "基础数据不存在或已删除" });
+    return;
+  }
+  await writeAudit("update", "master_data", String(id), `${item.type}/${item.name}`);
+  res.json(mapMasterData(await db.prepare("SELECT * FROM master_data WHERE id = ?").get(id)));
+});
+
+app.delete("/api/master-data/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const result = await db.prepare("UPDATE master_data SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(id);
+  if (result.changes === 0) {
+    res.status(404).json({ message: "基础数据不存在或已删除" });
+    return;
+  }
+  await writeAudit("delete", "master_data", String(id), "移入回收站");
+  res.json({ ok: true });
+});
+
+app.get("/api/accounts", async (_req, res) => {
+  const rows = await db.prepare("SELECT * FROM app_accounts WHERE deleted_at IS NULL ORDER BY id ASC").all();
+  res.json(rows.map(mapAccount));
+});
+
+app.post("/api/accounts", async (req, res) => {
+  const item = {
+    username: String(req.body.username || "").trim(),
+    displayName: String(req.body.displayName || "").trim(),
+    role: String(req.body.role || "员工").trim(),
+    status: String(req.body.status || "启用").trim(),
+    hireDate: String(req.body.hireDate || "").trim(),
+    department: String(req.body.department || "").trim(),
+    position: String(req.body.position || "").trim(),
+    phone: String(req.body.phone || "").trim(),
+    email: String(req.body.email || "").trim(),
+    note: String(req.body.note || "").trim(),
+    permissions: JSON.stringify(Array.isArray(req.body.permissions) ? req.body.permissions : String(req.body.permissions || "").split(/[，,]/).map((item) => item.trim()).filter(Boolean))
+  };
+  if (!item.username) {
+    res.status(400).json({ message: "账号不能为空" });
+    return;
+  }
+  const duplicate = await db.prepare("SELECT id FROM app_accounts WHERE username = ? AND deleted_at IS NULL").get(item.username);
+  if (duplicate) {
+    res.status(409).json({ message: "账号已存在" });
+    return;
+  }
+  const result = await db.prepare(`
+    INSERT INTO app_accounts (username, display_name, role, status, hire_date, department, position, phone, email, note, permissions)
+    VALUES (@username, @displayName, @role, @status, @hireDate, @department, @position, @phone, @email, @note, @permissions)
+  `).run(item);
+  await writeAudit("create", "account", String(result.lastInsertId), item.username);
+  res.status(201).json(mapAccount(await db.prepare("SELECT * FROM app_accounts WHERE id = ?").get(result.lastInsertId)));
+});
+
+app.patch("/api/accounts/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const current = await db.prepare("SELECT * FROM app_accounts WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!current) {
+    res.status(404).json({ message: "账号不存在或已删除" });
+    return;
+  }
+  const currentPermissions = (() => {
+    try {
+      return JSON.parse(current.permissions || "[]");
+    } catch (_error) {
+      return [];
+    }
+  })();
+  const item = {
+    id,
+    username: req.body.username === undefined ? current.username : String(req.body.username || "").trim(),
+    displayName: req.body.displayName === undefined ? current.display_name : String(req.body.displayName || "").trim(),
+    role: req.body.role === undefined ? current.role : String(req.body.role || "员工").trim(),
+    status: req.body.status === undefined ? current.status : String(req.body.status || "启用").trim(),
+    hireDate: req.body.hireDate === undefined ? current.hire_date : String(req.body.hireDate || "").trim(),
+    department: req.body.department === undefined ? current.department : String(req.body.department || "").trim(),
+    position: req.body.position === undefined ? current.position : String(req.body.position || "").trim(),
+    phone: req.body.phone === undefined ? current.phone : String(req.body.phone || "").trim(),
+    email: req.body.email === undefined ? current.email : String(req.body.email || "").trim(),
+    note: req.body.note === undefined ? current.note : String(req.body.note || "").trim(),
+    permissions: JSON.stringify(req.body.permissions === undefined
+      ? currentPermissions
+      : (Array.isArray(req.body.permissions) ? req.body.permissions : String(req.body.permissions || "").split(/[，,]/).map((item) => item.trim()).filter(Boolean)))
+  };
+  if (!item.username) {
+    res.status(400).json({ message: "账号不能为空" });
+    return;
+  }
+  const duplicate = await db.prepare("SELECT id FROM app_accounts WHERE username = ? AND id != ? AND deleted_at IS NULL").get(item.username, id);
+  if (duplicate) {
+    res.status(409).json({ message: "账号已存在" });
+    return;
+  }
+  const result = await db.prepare(`
+    UPDATE app_accounts
+    SET username = @username, display_name = @displayName, role = @role,
+        status = @status, hire_date = @hireDate, department = @department,
+        position = @position, phone = @phone, email = @email, note = @note,
+        permissions = @permissions
+    WHERE id = @id AND deleted_at IS NULL
+  `).run(item);
+  if (result.changes === 0) {
+    res.status(404).json({ message: "账号不存在或已删除" });
+    return;
+  }
+  await writeAudit("update", "account", String(id), item.username);
+  res.json(mapAccount(await db.prepare("SELECT * FROM app_accounts WHERE id = ?").get(id)));
+});
+
+app.delete("/api/accounts/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const row = await db.prepare("SELECT username FROM app_accounts WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!row) {
+    res.status(404).json({ message: "账号不存在或已删除" });
+    return;
+  }
+  if (row.username === "admin") {
+    res.status(409).json({ message: "默认管理员账号不可删除" });
+    return;
+  }
+  await db.prepare("UPDATE app_accounts SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?").run(id);
+  await writeAudit("delete", "account", String(id), row.username);
+  res.json({ ok: true });
+});
+
+app.get("/api/address-book", async (_req, res) => {
+  const rows = await db.prepare("SELECT * FROM address_book WHERE deleted_at IS NULL ORDER BY id DESC").all();
+  res.json(rows.map(mapAddressBook));
+});
+
+app.post("/api/address-book", async (req, res) => {
+  const item = normalizeAddressBookPayload(req.body);
+  if (!item.address) {
+    res.status(400).json({ message: "请填写详细地址" });
+    return;
+  }
+  const result = await db.prepare(`
+    INSERT INTO address_book (area, contact, phone, address, note)
+    VALUES (@area, @contact, @phone, @address, @note)
+  `).run(item);
+  await writeAudit("create", "address_book", String(result.lastInsertId), item.address);
+  res.status(201).json(mapAddressBook(await db.prepare("SELECT * FROM address_book WHERE id = ?").get(result.lastInsertId)));
+});
+
+app.patch("/api/address-book/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const existing = await db.prepare("SELECT * FROM address_book WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!existing) {
+    res.status(404).json({ message: "地址不存在或已删除" });
+    return;
+  }
+  const item = normalizeAddressBookPayload(req.body);
+  if (!item.address) {
+    res.status(400).json({ message: "请填写详细地址" });
+    return;
+  }
+  await db.prepare(`
+    UPDATE address_book
+    SET area = @area,
+        contact = @contact,
+        phone = @phone,
+        address = @address,
+        note = @note,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = @id
+  `).run({ id, ...item });
+  await writeAudit("update", "address_book", String(id), item.address);
+  res.json(mapAddressBook(await db.prepare("SELECT * FROM address_book WHERE id = ?").get(id)));
+});
+
+app.delete("/api/address-book/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const row = await db.prepare("SELECT * FROM address_book WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!row) {
+    res.status(404).json({ message: "地址不存在或已删除" });
+    return;
+  }
+  await db.prepare("UPDATE address_book SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(id);
+  await writeAudit("delete", "address_book", String(id), row.address);
+  res.json({ ok: true });
+});
+
+app.post("/api/address-book/batch-delete", async (req, res) => {
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.map(Number).filter(Number.isFinite) : [];
+  if (ids.length === 0) {
+    res.status(400).json({ message: "请先勾选地址" });
+    return;
+  }
+  const deleteOne = await db.prepare("UPDATE address_book SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL");
+  const transaction = db.transaction(async (items) => {
+    for (const id of items) {
+      await deleteOne.run(id);
+    }
+  });
+  await transaction(ids);
+  await writeAudit("delete", "address_book", ids.join(","), `批量删除 ${ids.length} 条地址`);
+  res.json({ ok: true, count: ids.length });
+});
+
+app.get("/api/address-history-hidden", async (_req, res) => {
+  const rows = await db.prepare("SELECT * FROM hidden_history_addresses ORDER BY created_at DESC").all();
+  res.json(rows.map((row) => ({
+    key: row.address_key,
+    address: row.address,
+    createdAt: row.created_at
+  })));
+});
+
+app.post("/api/address-history-hidden", async (req, res) => {
+  const address = String(req.body.address || "").trim();
+  const key = addressHistoryKey(req.body.key || address);
+  if (!address || !key) {
+    res.status(400).json({ message: "地址不能为空" });
+    return;
+  }
+  await db.prepare(`
+    INSERT INTO hidden_history_addresses (address_key, address)
+    VALUES (@key, @address)
+    ON CONFLICT(address_key) DO UPDATE SET address = excluded.address
+  `).run({ key, address });
+  await writeAudit("delete", "address_history", key, address);
+  res.status(201).json({ key, address });
+});
+
+app.get("/api/audit-logs", async (_req, res) => {
+  const rows = await db.prepare("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 200").all();
+  res.json(rows.map(mapAuditLog));
+});
+
+app.listen(port, () => {
+  console.log(`Hanye API listening on http://127.0.0.1:${port}`);
+  console.log(`PostgreSQL database: ${databaseInfo}`);
+});
