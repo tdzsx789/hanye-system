@@ -23,10 +23,13 @@ const sortTemplateColumnsBySavedOrder = (columns = []) => {
     .map(({ column }) => column);
 };
 
-
-const ADMIN = { username: "admin", password: "admin" };
-const ADMIN_PASSWORD_STORAGE_KEY = "hanye_admin_password";
 const API_BASE = "/api";
+const SESSION_LOGIN_KEY = "hanye_session_login";
+const SESSION_USER_KEY = "hanye_session_user";
+const SESSION_TOKEN_KEY = "hanye_session_token";
+const SESSION_ACCOUNT_KEY = "hanye_session_account";
+const SESSION_EXPIRES_KEY = "hanye_session_expires_at";
+const ACCOUNT_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const ROUTE_ALIASES = {
   vehicleManage: "vehicleDriver",
   driverManage: "vehicleDriver",
@@ -34,6 +37,92 @@ const ROUTE_ALIASES = {
   dispatch: "dispatchBoard",
   dispatchBoard: "dispatchBoard",
   finance: "financeWages"
+};
+const ACCOUNT_ROLES = ["司机", "跟单员", "财务", "管理员"];
+const ROLE_ALLOWED_MODULES = {
+  管理员: [
+    "home",
+    "customers",
+    "orders",
+    "vehicleDriver",
+    "dispatchBoard",
+    "financeWages",
+    "financeCosts",
+    "financeDaily",
+    "freight",
+    "templates",
+    "rules",
+    "master",
+    "security",
+    "accounts"
+  ],
+  财务: ["home", "customers", "orders", "vehicleDriver", "dispatchBoard", "financeWages", "financeCosts", "financeDaily"],
+  跟单员: ["home", "customers", "orders", "vehicleDriver", "dispatchBoard"],
+  司机: ["vehicleDriver", "dispatchBoard"]
+};
+const ROLE_PERMISSION_LABELS = {
+  管理员: "全部权限",
+  财务: "业务、车辆司机、财务中心",
+  跟单员: "业务、车辆司机",
+  司机: "车辆司机"
+};
+const AUDIT_ACTION_LABELS = {
+  create: "新增",
+  update: "修改",
+  update_status: "修改状态",
+  delete: "删除",
+  restore: "恢复",
+  purge: "彻底删除",
+  export: "导出",
+  upload: "上传",
+  download: "下载",
+  preview: "预览",
+  audit: "审核",
+  reject_upload: "拒绝上传"
+};
+const AUDIT_ENTITY_LABELS = {
+  account: "账号",
+  account_password: "账号密码",
+  account_profile: "账号资料",
+  address_book: "地址簿",
+  address_history: "历史地址",
+  customer: "客户",
+  customer_contact: "客户联系人",
+  dispatch_plan: "排车计划",
+  driver: "司机",
+  driver_adjustment: "司机预支/报销",
+  driver_wage_rule: "司机工资规则",
+  fee_item: "收费项目",
+  fee_item_order: "收费项目顺序",
+  file: "文件",
+  freight_rate: "运费模板",
+  master_data: "基础数据",
+  order: "订单",
+  rule: "规则",
+  template: "模板",
+  vehicle: "车辆"
+};
+const AUDIT_RECORD_PREFIXES = {
+  account: "账号ID",
+  account_password: "账号ID",
+  account_profile: "账号ID",
+  address_book: "地址ID",
+  address_history: "地址标识",
+  customer: "客户编号",
+  customer_contact: "联系人ID",
+  dispatch_plan: "排车日期",
+  driver: "司机ID",
+  driver_adjustment: "预支/报销ID",
+  driver_wage_rule: "工资规则ID",
+  fee_item: "收费项目ID",
+  fee_item_order: "调整范围",
+  file: "文件ID",
+  freight_rate: "模板ID",
+  master_data: "基础数据ID",
+  order: "订单号",
+  rule: "规则ID",
+  template: "模板ID",
+  vehicle: "车牌"
 };
 const TONNAGE_OPTIONS = ["3T", "5T", "8T", "10T", "12T", "20尺柜", "40尺柜"];
 const DIRECTION_OPTIONS = ["出口", "进口"];
@@ -832,13 +921,133 @@ function dateInputFromDate(date) {
   return local.toISOString().slice(0, 10);
 }
 
-const loginForm = reactive({ username: "admin", password: "admin" });
-const loggedIn = ref(sessionStorage.getItem("hanye_session_login") === "1");
-const currentUsername = ref(sessionStorage.getItem("hanye_session_user") || ADMIN.username);
-const loginFailureState = reactive({
-  count: Number(localStorage.getItem("hanye_login_fail_count") || 0),
-  lockedUntil: Number(localStorage.getItem("hanye_login_locked_until") || 0)
-});
+function formatAuditTime(value = "") {
+  const text = String(value || "").trim();
+  const matched = text.match(/^(\d{4}-\d{2}-\d{2})[T\s](\d{2}:\d{2}:\d{2})/);
+  if (matched) return `${matched[1]} ${matched[2]}`;
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) return text || "-";
+  const local = new Date(parsed.getTime() - parsed.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 19).replace("T", " ");
+}
+
+function auditActionText(action = "") {
+  const key = String(action || "").trim();
+  return AUDIT_ACTION_LABELS[key] || key || "-";
+}
+
+function auditEntityText(entityType = "") {
+  const key = String(entityType || "").trim();
+  return AUDIT_ENTITY_LABELS[key] || key || "-";
+}
+
+function auditRecordText(item = {}) {
+  const id = String(item.entityId || "").trim();
+  if (!id) return "-";
+  const prefix = AUDIT_RECORD_PREFIXES[String(item.entityType || "").trim()] || "记录";
+  if (id === "all") return `${prefix}：全部`;
+  return `${prefix}：${id}`;
+}
+
+const SESSION_STORAGE_KEYS = [
+  SESSION_LOGIN_KEY,
+  SESSION_USER_KEY,
+  SESSION_TOKEN_KEY,
+  SESSION_ACCOUNT_KEY,
+  SESSION_EXPIRES_KEY
+];
+
+function readStoredSessionItem(key) {
+  return localStorage.getItem(key) || sessionStorage.getItem(key) || "";
+}
+
+function writeStoredSessionItem(key, value) {
+  localStorage.setItem(key, String(value));
+  sessionStorage.removeItem(key);
+}
+
+function clearStoredSession() {
+  SESSION_STORAGE_KEYS.forEach((key) => {
+    localStorage.removeItem(key);
+    sessionStorage.removeItem(key);
+  });
+}
+
+function tokenExpiresAtMs(token = "") {
+  try {
+    const payload = String(token || "").split(".")[1];
+    if (!payload) return 0;
+    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    const parsed = JSON.parse(atob(padded));
+    const expiresAtSeconds = Number(parsed?.exp || 0);
+    return expiresAtSeconds > 0 ? expiresAtSeconds * 1000 : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function normalizeSessionExpiresAt(value, token = "") {
+  const numeric = Number(value || 0);
+  if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  const parsedDate = Date.parse(String(value || ""));
+  if (Number.isFinite(parsedDate)) return parsedDate;
+  return tokenExpiresAtMs(token);
+}
+
+function readSessionAccount() {
+  try {
+    return JSON.parse(readStoredSessionItem(SESSION_ACCOUNT_KEY) || "null");
+  } catch {
+    return null;
+  }
+}
+
+function readStoredLoginSession() {
+  const token = readStoredSessionItem(SESSION_TOKEN_KEY);
+  const logged = readStoredSessionItem(SESSION_LOGIN_KEY) === "1";
+  const expiresAt = normalizeSessionExpiresAt(readStoredSessionItem(SESSION_EXPIRES_KEY), token);
+  if (!token || !logged) {
+    return { valid: false, token: "", account: null, username: "", expiresAt: 0 };
+  }
+  if (expiresAt && expiresAt <= Date.now()) {
+    clearStoredSession();
+    return { valid: false, token: "", account: null, username: "", expiresAt: 0 };
+  }
+  const account = readSessionAccount();
+  const username = account?.username || readStoredSessionItem(SESSION_USER_KEY);
+  const nextExpiresAt = expiresAt || Date.now() + ACCOUNT_SESSION_TTL_MS;
+  writeStoredSessionItem(SESSION_LOGIN_KEY, "1");
+  writeStoredSessionItem(SESSION_TOKEN_KEY, token);
+  writeStoredSessionItem(SESSION_EXPIRES_KEY, String(nextExpiresAt));
+  if (username) writeStoredSessionItem(SESSION_USER_KEY, username);
+  if (account) writeStoredSessionItem(SESSION_ACCOUNT_KEY, JSON.stringify(account));
+  return { valid: true, token, account, username, expiresAt: nextExpiresAt };
+}
+
+function normalizeAccountRole(value = "") {
+  const text = String(value || "").trim();
+  if (ACCOUNT_ROLES.includes(text)) return text;
+  if (/管理员|老板|超级|高级/.test(text)) return "管理员";
+  if (/财务|会计|出纳/.test(text)) return "财务";
+  if (/司机|驾驶/.test(text)) return "司机";
+  return "跟单员";
+}
+
+function allowedModulesForRole(role = "") {
+  return [...(ROLE_ALLOWED_MODULES[normalizeAccountRole(role)] || ROLE_ALLOWED_MODULES["司机"])];
+}
+
+function permissionTextForRole(role = "") {
+  return ROLE_PERMISSION_LABELS[normalizeAccountRole(role)] || ROLE_PERMISSION_LABELS["司机"];
+}
+
+const savedLoginSession = readStoredLoginSession();
+const loginForm = reactive({ username: "", password: "" });
+const authToken = ref(savedLoginSession.token);
+const currentSessionAccount = ref(savedLoginSession.account);
+const loggedIn = ref(savedLoginSession.valid);
+const currentUsername = ref(savedLoginSession.account?.username || savedLoginSession.username || "");
 const activeModule = ref(normalizeRoute(location.hash.replace("#", "")));
 let syncedHash = "";
 const activePartnerType = ref("客户");
@@ -988,6 +1197,13 @@ const customerOrderColumnMenuOpen = ref(false);
 const orderColumnMenuOpen = ref(false);
 const dispatchColumnMenuOpen = ref(false);
 const accountPasswordModalOpen = ref(false);
+const accountProfileModalOpen = ref(false);
+const accountCreateModalOpen = ref(false);
+const accountEditModalOpen = ref(false);
+const accountPasswordSaving = ref(false);
+const accountProfileSaving = ref(false);
+const accountCreateSaving = ref(false);
+const accountEditSaving = ref(false);
 const orderExportExchangeMode = ref("");
 const orderExportExchangeRate = ref("");
 const orderCustomerKeyword = ref("");
@@ -1042,6 +1258,13 @@ const accountPasswordForm = reactive({
   current: "",
   next: "",
   confirm: ""
+});
+
+const accountProfileForm = reactive({
+  displayName: "",
+  phone: "",
+  email: "",
+  note: ""
 });
 
 const contactRowDraft = reactive({
@@ -1492,22 +1715,25 @@ const masterForm = reactive({
   sortOrder: 0
 });
 
-const accountForm = reactive({
-  id: null,
-  username: "",
-  displayName: "",
-  role: "员工",
-  status: "启用",
-  hireDate: "",
-  department: "",
-  position: "",
-  phone: "",
-  email: "",
-  note: "",
-  password: "",
-  passwordConfirm: "",
-  permissionsText: "客户管理,订单管理"
-});
+function blankAccountForm() {
+  return {
+    id: null,
+    username: "",
+    displayName: "",
+    role: "跟单员",
+    status: "启用",
+    hireDate: "",
+    phone: "",
+    email: "",
+    note: "",
+    password: "",
+    passwordConfirm: "",
+    permissionsText: permissionTextForRole("跟单员")
+  };
+}
+
+const accountForm = reactive(blankAccountForm());
+const accountCreateForm = reactive(blankAccountForm());
 
 const modules = [
   { id: "home", label: "首页看板", group: "业务" },
@@ -1526,8 +1752,25 @@ const modules = [
   { id: "accounts", label: "权限账号", group: "系统配置" }
 ];
 
+const currentAllowedModuleIds = computed(() => {
+  const accountModules = currentAccount.value?.allowedModules;
+  return Array.isArray(accountModules) && accountModules.length
+    ? accountModules
+    : allowedModulesForRole(currentAccount.value?.role);
+});
+
+const visibleModules = computed(() =>
+  modules.filter((item) => currentAllowedModuleIds.value.includes(item.id))
+);
+
+const firstAccessibleModule = computed(() => visibleModules.value[0]?.id || "vehicleDriver");
+
+function canAccessModule(id) {
+  return currentAllowedModuleIds.value.includes(normalizeRoute(id));
+}
+
 const groupedModules = computed(() =>
-  modules.reduce((groups, item) => {
+  visibleModules.value.reduce((groups, item) => {
     groups[item.group] ||= [];
     groups[item.group].push(item);
     return groups;
@@ -6015,17 +6258,49 @@ const selectedAccount = computed(() =>
 );
 
 const currentAccount = computed(() =>
-  accountRows.value.find((item) => item.username === currentUsername.value) || {
-    username: currentUsername.value || ADMIN.username,
-    displayName: "高级管理员",
-    role: "高级管理员",
+  accountRows.value.find((item) => item.username === currentUsername.value) ||
+  currentSessionAccount.value || {
+    username: currentUsername.value || "",
+    displayName: "",
+    role: "司机",
     status: "已登录"
   }
 );
 
 const currentAccountLabel = computed(() =>
-  currentAccount.value.displayName || currentAccount.value.username || "高级管理员"
+  currentAccount.value.displayName || currentAccount.value.username || "当前账号"
 );
+
+function setSessionAccount(account) {
+  if (!account) return;
+  currentSessionAccount.value = account;
+  currentUsername.value = account.username || currentUsername.value;
+  writeStoredSessionItem(SESSION_ACCOUNT_KEY, JSON.stringify(account));
+  writeStoredSessionItem(SESSION_USER_KEY, currentUsername.value);
+}
+
+function saveLoginSession(token, account, expiresAtValue) {
+  const expiresAt = normalizeSessionExpiresAt(expiresAtValue, token) || Date.now() + ACCOUNT_SESSION_TTL_MS;
+  authToken.value = token || "";
+  setSessionAccount(account);
+  writeStoredSessionItem(SESSION_LOGIN_KEY, "1");
+  writeStoredSessionItem(SESSION_TOKEN_KEY, authToken.value);
+  writeStoredSessionItem(SESSION_EXPIRES_KEY, String(expiresAt));
+}
+
+async function refreshCurrentAccount(options = {}) {
+  if (!authToken.value) return null;
+  try {
+    const result = await apiFetch("/auth/me");
+    if (result?.account) {
+      setSessionAccount(result.account);
+      return result.account;
+    }
+  } catch (error) {
+    if (!options.silent) notify(error.message);
+  }
+  return null;
+}
 
 function tableSortKey(tableId) {
   return `hanye_table_sort_${tableId}`;
@@ -6129,10 +6404,16 @@ function sortRowsByTable(rows = [], tableId, fallbackIndexKey = "__sortIndex") {
 }
 
 const currentAccountCanDeleteInTransitOrder = computed(() =>
-  [currentAccount.value.role, currentAccount.value.displayName].some((value) =>
-    ["超级管理员", "老板"].some((keyword) => String(value || "").includes(keyword))
-  )
+  normalizeAccountRole(currentAccount.value.role) === "管理员"
 );
+
+watch(() => accountForm.role, (role) => {
+  accountForm.permissionsText = permissionTextForRole(role);
+});
+
+watch(() => accountCreateForm.role, (role) => {
+  accountCreateForm.permissionsText = permissionTextForRole(role);
+});
 
 function canDeleteOrder(order = {}) {
   if (order.status === "已审核") return false;
@@ -7283,6 +7564,7 @@ async function apiFetch(path, options) {
     ...options,
     headers: {
       "Content-Type": "application/json",
+      ...(authToken.value ? { Authorization: `Bearer ${authToken.value}` } : {}),
       "X-Hanye-User": encodeHeaderValue(currentAccount.value.username),
       "X-Hanye-Role": encodeHeaderValue(currentAccount.value.role),
       "X-Hanye-Display-Name": encodeHeaderValue(currentAccount.value.displayName),
@@ -7291,6 +7573,9 @@ async function apiFetch(path, options) {
   });
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
+    if (response.status === 401 && loggedIn.value) {
+      logout({ silent: true });
+    }
     throw new Error(error.message || "接口请求失败");
   }
   return response.json();
@@ -7321,7 +7606,8 @@ async function ensureTemplateRowsLoaded(options = {}) {
 }
 
 function fileEndpoint(file, action) {
-  return `${API_BASE}/files/${file.id}/${action}`;
+  const tokenQuery = authToken.value ? `?token=${encodeURIComponent(authToken.value)}` : "";
+  return `${API_BASE}/files/${file.id}/${action}${tokenQuery}`;
 }
 
 function openStoredFile(file, action = "preview") {
@@ -7542,6 +7828,10 @@ function keepSelection(previousValue, rows, key, fallback = "") {
 
 async function loadDatabaseData(options = {}) {
   const { preserveSelection = false } = options;
+  const canLoadRules = canAccessModule("rules");
+  const canLoadMasterData = canAccessModule("master");
+  const canLoadAccounts = canAccessModule("accounts");
+  const canLoadAuditLogs = canAccessModule("security");
   const previousSelection = {
     customerId: selectedCustomerId.value,
     vehiclePlate: selectedVehiclePlate.value,
@@ -7582,12 +7872,12 @@ async function loadDatabaseData(options = {}) {
       apiFetchList("/driver-adjustments", "司机预支/报销"),
       apiFetchList("/fee-items", "收费项目"),
       apiFetchList("/freight-rates", "运费模板"),
-      apiFetchList("/rules", "规则管理"),
-      apiFetchList("/master-data", "基础数据"),
-      apiFetchList("/accounts", "权限账号"),
+      canLoadRules ? apiFetchList("/rules", "规则管理") : Promise.resolve([]),
+      canLoadMasterData ? apiFetchList("/master-data", "基础数据") : Promise.resolve([]),
+      canLoadAccounts ? apiFetchList("/accounts", "权限账号") : Promise.resolve([]),
       apiFetchList("/address-book", "地址本"),
       apiFetchList("/address-history-hidden", "隐藏历史地址"),
-      apiFetchList("/audit-logs", "审计记录")
+      canLoadAuditLogs ? apiFetchList("/audit-logs", "审计记录") : Promise.resolve([])
     ]);
     customerRows.value = customerData;
     customerContactRows.value = customerContactData;
@@ -7652,10 +7942,6 @@ async function loadDatabaseData(options = {}) {
   }
 }
 
-function currentAdminPassword() {
-  return localStorage.getItem(ADMIN_PASSWORD_STORAGE_KEY) || ADMIN.password;
-}
-
 function openAccountPasswordModal() {
   Object.assign(accountPasswordForm, {
     current: "",
@@ -7665,68 +7951,108 @@ function openAccountPasswordModal() {
   accountPasswordModalOpen.value = true;
 }
 
-function saveAccountPassword() {
-  if (accountPasswordForm.current !== currentAdminPassword()) {
-    notify("原密码不正确");
+async function saveAccountPassword() {
+  if (!accountPasswordForm.current) {
+    notify("请输入原密码");
     return;
   }
   if (accountPasswordForm.next.length < 4) {
     notify("新密码至少 4 位");
     return;
   }
+  if (accountPasswordForm.current === accountPasswordForm.next) {
+    notify("新密码不能和原密码相同");
+    return;
+  }
   if (accountPasswordForm.next !== accountPasswordForm.confirm) {
     notify("两次输入的新密码不一致");
     return;
   }
-  localStorage.setItem(ADMIN_PASSWORD_STORAGE_KEY, accountPasswordForm.next);
-  accountPasswordModalOpen.value = false;
-  notify("密码已修改");
+  try {
+    accountPasswordSaving.value = true;
+    await apiFetch("/auth/password", {
+      method: "PATCH",
+      body: JSON.stringify({
+        currentPassword: accountPasswordForm.current,
+        nextPassword: accountPasswordForm.next
+      })
+    });
+    accountPasswordModalOpen.value = false;
+    Object.assign(accountPasswordForm, { current: "", next: "", confirm: "" });
+    notify("密码已修改");
+  } catch (error) {
+    notify(error.message);
+  } finally {
+    accountPasswordSaving.value = false;
+  }
 }
 
-function openAccountManage() {
-  openModule("accounts");
+function openAccountSettings() {
+  Object.assign(accountProfileForm, {
+    displayName: currentAccount.value.displayName || "",
+    phone: currentAccount.value.phone || "",
+    email: currentAccount.value.email || "",
+    note: currentAccount.value.note || ""
+  });
+  accountProfileModalOpen.value = true;
 }
 
-function login() {
-  const now = Date.now();
-  const isAdminAccount = loginForm.username === ADMIN.username;
-  const passwordMatches = isAdminAccount && [ADMIN.password, currentAdminPassword()].includes(loginForm.password);
-  if (passwordMatches) {
-    sessionStorage.setItem("hanye_session_login", "1");
-    sessionStorage.setItem("hanye_session_user", loginForm.username);
-    currentUsername.value = loginForm.username;
-    loginFailureState.count = 0;
-    loginFailureState.lockedUntil = 0;
-    localStorage.removeItem("hanye_login_fail_count");
-    localStorage.removeItem("hanye_login_locked_until");
+async function saveAccountProfile() {
+  try {
+    accountProfileSaving.value = true;
+    const account = await apiFetch("/auth/profile", {
+      method: "PATCH",
+      body: JSON.stringify(accountProfileForm)
+    });
+    setSessionAccount(account);
+    accountRows.value = accountRows.value.some((row) => row.id === account.id)
+      ? accountRows.value.map((row) => row.id === account.id ? account : row)
+      : accountRows.value;
+    accountProfileModalOpen.value = false;
+    notify("账号资料已保存");
+  } catch (error) {
+    notify(error.message);
+  } finally {
+    accountProfileSaving.value = false;
+  }
+}
+
+async function login() {
+  try {
+    const response = await fetch(`${API_BASE}/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(loginForm)
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.message || "账号或密码错误");
+    }
+    const result = await response.json();
+    if (!result.token) throw new Error("登录凭证生成失败");
+    saveLoginSession(result.token || "", result.account || { username: loginForm.username, role: "司机" }, result.expiresAt);
     loggedIn.value = true;
+    if (!canAccessModule(activeModule.value)) {
+      activeModule.value = firstAccessibleModule.value;
+      location.hash = activeModule.value === "vehicleDriver" ? "vehicleManage" : activeModule.value;
+    }
     loadDatabaseData();
     if (activeModule.value === "templates") {
       ensureTemplateRowsLoaded({ silent: true }).catch((error) => notify(error.message || "模板中心加载失败"));
     }
-    return;
+  } catch (error) {
+    notify(error.message || "账号或密码错误");
   }
-  if (loginFailureState.lockedUntil > now) {
-    const minutes = Math.ceil((loginFailureState.lockedUntil - now) / 60000);
-    notify(`登录失败次数过多，请 ${minutes} 分钟后再试`);
-    return;
-  }
-  loginFailureState.count += 1;
-  localStorage.setItem("hanye_login_fail_count", String(loginFailureState.count));
-  if (loginFailureState.count >= 5) {
-    loginFailureState.lockedUntil = now + 5 * 60 * 1000;
-    localStorage.setItem("hanye_login_locked_until", String(loginFailureState.lockedUntil));
-    notify("登录失败次数过多，已临时锁定 5 分钟");
-    return;
-  }
-  notify("账号或密码错误");
 }
 
-function logout() {
-  sessionStorage.removeItem("hanye_session_login");
-  sessionStorage.removeItem("hanye_session_user");
+function logout(options = {}) {
+  clearStoredSession();
+  authToken.value = "";
+  currentSessionAccount.value = null;
+  currentUsername.value = "";
   closeTransientUi();
   loggedIn.value = false;
+  if (!options.silent) notify("已退出登录");
 }
 
 function closeTransientUi() {
@@ -7741,6 +8067,9 @@ function closeTransientUi() {
   orderColumnMenuOpen.value = false;
   dispatchColumnMenuOpen.value = false;
   accountPasswordModalOpen.value = false;
+  accountProfileModalOpen.value = false;
+  accountCreateModalOpen.value = false;
+  accountEditModalOpen.value = false;
   loadFeeTemplateMenuOpen.value = false;
   activeOrderDetailTab.value = "收费项目";
 }
@@ -7758,7 +8087,8 @@ function scheduleDatabaseRefresh() {
 }
 
 function openModule(id) {
-  const next = normalizeRoute(id);
+  const requested = normalizeRoute(id);
+  const next = loggedIn.value && !canAccessModule(requested) ? firstAccessibleModule.value : requested;
   if (next !== activeModule.value) {
     closeTransientUi();
   }
@@ -8573,7 +8903,7 @@ async function deleteSelectedOrders() {
 async function deleteOrder(order) {
   if (!canDeleteOrder(order)) {
     if (order.status === "通关中") {
-      notify("通关中订单不可删除，请使用高级管理员账号操作");
+      notify("通关中订单不可删除，请使用管理员账号操作");
       return;
     }
     notify("已审核订单不可删除");
@@ -12352,56 +12682,113 @@ async function deleteMaster(item) {
 }
 
 function editAccount(item = selectedAccount.value) {
+  const role = normalizeAccountRole(item?.role || "跟单员");
   Object.assign(accountForm, {
     id: item?.id || null,
     username: item?.username || "",
     displayName: item?.displayName || "",
-    role: item?.role || "员工",
+    role,
     status: item?.status || "启用",
     hireDate: item?.hireDate || "",
-    department: item?.department || "",
-    position: item?.position || "",
     phone: item?.phone || "",
     email: item?.email || "",
     note: item?.note || "",
     password: "",
     passwordConfirm: "",
-    permissionsText: Array.isArray(item?.permissions) ? item.permissions.join(",") : "客户管理,订单管理"
+    permissionsText: permissionTextForRole(role)
   });
+}
+
+function validateAccountPassword(form, options = {}) {
+  const nextPassword = form.password.trim();
+  if (options.required && !nextPassword) {
+    notify("新增账号必须填写登录密码");
+    return null;
+  }
+  if (nextPassword || form.passwordConfirm) {
+    if (nextPassword.length < 4) {
+      notify("登录密码至少 4 位");
+      return null;
+    }
+    if (nextPassword !== form.passwordConfirm) {
+      notify("两次输入的登录密码不一致");
+      return null;
+    }
+  }
+  return nextPassword;
+}
+
+function accountPayloadFromForm(form, nextPassword) {
+  return {
+    ...form,
+    passwordConfirm: undefined,
+    password: nextPassword || undefined,
+    role: normalizeAccountRole(form.role),
+    permissions: permissionTextForRole(form.role).split(/[，,、]/).map((item) => item.trim()).filter(Boolean)
+  };
+}
+
+function openAccountCreateModal() {
+  Object.assign(accountCreateForm, blankAccountForm());
+  accountCreateModalOpen.value = true;
+}
+
+function openAccountEditModal(item = selectedAccount.value) {
+  if (!item?.id) {
+    notify("请先选择要编辑的账号");
+    return;
+  }
+  selectedAccountId.value = item.id;
+  editAccount(item);
+  accountEditModalOpen.value = true;
+}
+
+async function saveNewAccount() {
+  try {
+    const nextPassword = validateAccountPassword(accountCreateForm, { required: true });
+    if (nextPassword === null) return;
+    accountCreateSaving.value = true;
+    const item = await apiFetch("/accounts", {
+      method: "POST",
+      body: JSON.stringify(accountPayloadFromForm(accountCreateForm, nextPassword))
+    });
+    accountRows.value = [item, ...accountRows.value];
+    selectedAccountId.value = item.id;
+    editAccount(item);
+    accountCreateModalOpen.value = false;
+    notify("账号已新增");
+  } catch (error) {
+    notify(error.message);
+  } finally {
+    accountCreateSaving.value = false;
+  }
 }
 
 async function saveAccount() {
   try {
-    const nextPassword = accountForm.password.trim();
-    if (nextPassword || accountForm.passwordConfirm) {
-      if (nextPassword.length < 4) {
-        notify("登录密码至少 4 位");
-        return;
-      }
-      if (nextPassword !== accountForm.passwordConfirm) {
-        notify("两次输入的登录密码不一致");
-        return;
-      }
+    if (!accountForm.id) {
+      notify("请先选择要编辑的账号");
+      return;
     }
-    const payload = {
-      ...accountForm,
-      password: undefined,
-      passwordConfirm: undefined,
-      permissions: accountForm.permissionsText.split(/[，,]/).map((item) => item.trim()).filter(Boolean)
-    };
-    const method = accountForm.id ? "PATCH" : "POST";
-    const path = accountForm.id ? `/accounts/${accountForm.id}` : "/accounts";
-    const item = await apiFetch(path, { method, body: JSON.stringify(payload) });
-    if (item.username === ADMIN.username && nextPassword) {
-      localStorage.setItem(ADMIN_PASSWORD_STORAGE_KEY, nextPassword);
+    const nextPassword = validateAccountPassword(accountForm);
+    if (nextPassword === null) return;
+    accountEditSaving.value = true;
+    const item = await apiFetch(`/accounts/${accountForm.id}`, {
+      method: "PATCH",
+      body: JSON.stringify(accountPayloadFromForm(accountForm, nextPassword))
+    });
+    accountRows.value = accountRows.value.map((row) => row.id === item.id ? item : row);
+    selectedAccountId.value = item.id;
+    if (item.username === currentUsername.value) {
+      setSessionAccount(item);
     }
-    accountRows.value = accountForm.id
-      ? accountRows.value.map((row) => row.id === item.id ? item : row)
-      : [item, ...accountRows.value];
     editAccount(item);
+    accountEditModalOpen.value = false;
     notify("账号权限已保存");
   } catch (error) {
     notify(error.message);
+  } finally {
+    accountEditSaving.value = false;
   }
 }
 
@@ -12663,7 +13050,8 @@ function syncVehicleDriverTabFromRoute(routeKey) {
 function syncRouteFromHash() {
   const rawHash = location.hash || "#home";
   const routeKey = rawHash.replace("#", "").split("?")[0];
-  const next = normalizeRoute(routeKey);
+  const normalized = normalizeRoute(routeKey);
+  const next = loggedIn.value && !canAccessModule(normalized) ? firstAccessibleModule.value : normalized;
   if (rawHash === syncedHash && next === activeModule.value) {
     return;
   }
@@ -12757,11 +13145,14 @@ watch([dispatchCustomDateStart, dispatchCustomDateEnd], () => {
   if (dispatchDateFilter.value === "custom") loadDispatchPlansForCurrentFilter();
 });
 
-onMounted(() => {
+onMounted(async () => {
   syncRouteFromHash();
   loadDispatchPlansForCurrentFilter();
   window.setInterval(syncRouteFromHash, 1000);
-  if (loggedIn.value) loadDatabaseData();
+  if (loggedIn.value) {
+    await refreshCurrentAccount({ silent: true });
+    if (loggedIn.value) loadDatabaseData();
+  }
 });
 
 const dispatchSearchKeyword = ref('')
@@ -12837,6 +13228,8 @@ function orderDetailFeeRows(order = {}) {
 </script>
 
 <template>
+  <div v-if="notice" class="toast">{{ notice }}</div>
+
   <section v-if="!loggedIn" class="login-page">
     <form class="login-card" @submit.prevent="login">
       <div>
@@ -12852,12 +13245,11 @@ function orderDetailFeeRows(order = {}) {
         <input v-model="loginForm.password" type="password" autocomplete="current-password" />
       </label>
       <button class="primary-btn" type="submit"><IconSvg name="lock" />登录系统</button>
-      <p class="hint">默认管理员账号：admin / admin。正式部署后会改为数据库账号和加密密码。</p>
+      <p class="hint">初始管理员账号：admin / admin。登录后请及时修改密码。</p>
     </form>
   </section>
 
   <div v-else class="app-shell">
-    <div v-if="notice" class="toast">{{ notice }}</div>
     <aside class="sidebar">
       <div class="brand">
         <button class="brand-home-button" type="button" @click="openModule('home')">
@@ -12886,12 +13278,12 @@ function orderDetailFeeRows(order = {}) {
             <span class="account-avatar"><IconSvg name="user" /></span>
             <div>
               <strong>{{ currentAccountLabel }}</strong>
-              <span>{{ currentAccount.role || '高级管理员' }}</span>
+              <span>{{ currentAccount.role || '司机' }}</span>
             </div>
           </div>
           <div class="account-action-grid">
+            <button class="ghost-btn small" type="button" @click="openAccountSettings"><IconSvg name="user" />账号设置</button>
             <button class="ghost-btn small" type="button" @click="openAccountPasswordModal"><IconSvg name="lock" />修改密码</button>
-            <button class="ghost-btn small" type="button" @click="openAccountManage"><IconSvg name="shield" />账号设置</button>
           </div>
           <button class="ghost-btn logout-btn" type="button" @click="logout"><IconSvg name="close" />退出登录</button>
         </section>
@@ -15299,57 +15691,44 @@ function orderDetailFeeRows(order = {}) {
         <div class="section-head">
           <div>
             <p class="eyebrow">权限账号</p>
-            <h2>员工账号与功能权限</h2>
+            <h2>系统账号与功能权限</h2>
           </div>
-          <button class="primary-btn" @click="editAccount(null)"><IconSvg name="userPlus" />新增账号</button>
+          <button class="primary-btn" @click="openAccountCreateModal"><IconSvg name="userPlus" />新增账号</button>
         </div>
-        <div class="module-grid two-columns">
+        <div class="module-grid">
           <div class="table-card">
-            <table>
-              <thead><tr><th>账号</th><th>姓名</th><th>部门</th><th>岗位</th><th>入职日期</th><th>角色</th><th>状态</th><th>权限</th><th>操作</th></tr></thead>
+            <table class="account-table">
+              <colgroup>
+                <col class="account-username-col" />
+                <col class="account-name-col" />
+                <col class="account-hire-col" />
+                <col class="account-role-col" />
+                <col class="account-status-col" />
+                <col class="account-permissions-col" />
+                <col class="account-actions-col" />
+              </colgroup>
+              <thead><tr><th>账号</th><th>姓名</th><th>入职日期</th><th>部门</th><th>状态</th><th>权限</th><th class="account-actions-header">操作</th></tr></thead>
               <tbody>
                 <tr
                   v-for="item in accountRows"
                   :key="item.id"
                   :class="{ selected: selectedAccount?.id === item.id }"
-                  @click="selectedAccountId = item.id; editAccount(item)"
+                  @click="selectedAccountId = item.id"
                 >
                   <td>{{ item.username }}</td>
                   <td>{{ item.displayName }}</td>
-                  <td>{{ item.department || '-' }}</td>
-                  <td>{{ item.position || '-' }}</td>
                   <td>{{ item.hireDate || '-' }}</td>
                   <td>{{ item.role }}</td>
                   <td>{{ item.status }}</td>
-                  <td>{{ item.permissions?.join('、') }}</td>
-                  <td class="row-actions">
-                    <button class="icon-btn" @click.stop="selectedAccountId = item.id; editAccount(item)"><IconSvg name="edit" />编辑</button>
+                  <td class="account-permissions" :title="item.permissions?.join('、') || ''">{{ item.permissions?.join('、') }}</td>
+                  <td class="row-actions account-actions">
+                    <button class="icon-btn" @click.stop="openAccountEditModal(item)"><IconSvg name="edit" />编辑</button>
                     <button class="icon-btn danger" @click.stop="deleteAccount(item)"><IconSvg name="trash" />删除</button>
                   </td>
                 </tr>
               </tbody>
             </table>
           </div>
-          <form class="edit-card account-edit-card is-editing-record" @submit.prevent="saveAccount">
-            <h3>{{ accountForm.id ? '编辑账号' : '新增账号' }}</h3>
-            <label>账号<input v-model.trim="accountForm.username" /></label>
-            <label>姓名<input v-model.trim="accountForm.displayName" /></label>
-            <label>登录密码<input v-model.trim="accountForm.password" type="password" autocomplete="new-password" placeholder="留空表示不修改" /></label>
-            <label>确认密码<input v-model.trim="accountForm.passwordConfirm" type="password" autocomplete="new-password" placeholder="再次输入新密码" /></label>
-            <label>入职日期<input v-model="accountForm.hireDate" type="date" /></label>
-            <label>部门<input v-model.trim="accountForm.department" placeholder="例如：财务部" /></label>
-            <label>岗位<input v-model.trim="accountForm.position" placeholder="例如：会计" /></label>
-            <label>手机号<input v-model.trim="accountForm.phone" inputmode="tel" /></label>
-            <label>邮箱<input v-model.trim="accountForm.email" type="email" /></label>
-            <label>角色<select v-model="accountForm.role"><option>超级管理员</option><option>老板</option><option>管理员</option><option>财务</option><option>操作员</option><option>员工</option></select></label>
-            <label>状态<select v-model="accountForm.status"><option>启用</option><option>停用</option></select></label>
-            <label>备注<textarea v-model.trim="accountForm.note" rows="3" placeholder="岗位说明、交接说明等" /></label>
-            <label>权限<textarea v-model.trim="accountForm.permissionsText" rows="5" placeholder="用逗号分隔，例如：客户管理,订单管理" /></label>
-            <div class="edit-card-actions">
-              <button class="ghost-btn" type="button" @click="editAccount(selectedAccount)"><IconSvg name="refresh" />重置</button>
-              <button class="primary-btn" type="submit"><IconSvg name="save" />保存账号</button>
-            </div>
-          </form>
         </div>
       </section>
 
@@ -15359,40 +15738,40 @@ function orderDetailFeeRows(order = {}) {
             <p class="eyebrow">数据安全</p>
             <h2>数据库、备份、回收站和文件归档</h2>
           </div>
-          <div class="toolbar-actions">
+          <div class="toolbar-actions security-actions">
             <button class="primary-btn" @click="exportLocalBackup"><IconSvg name="download" />立即备份</button>
             <button class="ghost-btn" @click="showRestoreNotice"><IconSvg name="upload" />恢复/导入</button>
             <button class="ghost-btn" @click="openRecycleBin"><IconSvg name="archive" />回收站</button>
             <button class="ghost-btn" @click="refreshAuditLogs"><IconSvg name="refresh" />刷新审计日志</button>
           </div>
         </div>
-        <div class="cards-grid">
-          <article class="policy-card">
+        <div class="cards-grid security-policy-list">
+          <article class="policy-card security-policy-item">
             <h3>正式数据进数据库</h3>
             <p>客户、订单、车辆、司机、运费模板、权限账号全部由后端 API 写入数据库，浏览器不再作为正式数据源。</p>
           </article>
-          <article class="policy-card">
+          <article class="policy-card security-policy-item">
             <h3>自动备份</h3>
             <p>服务器每日自动备份 PostgreSQL 数据库，并建议同步到异地存储。</p>
           </article>
-          <article class="policy-card">
+          <article class="policy-card security-policy-item">
             <h3>回收站</h3>
             <p>删除进入回收站，60 天内可恢复，超期再由服务器定时清理。</p>
           </article>
-          <article class="policy-card">
+          <article class="policy-card security-policy-item">
             <h3>文件归档</h3>
             <p>保险单、订单附件、单据图片保存到服务器文件库，并提供预览、下载、上传人和上传时间记录。</p>
           </article>
         </div>
         <div class="table-card audit-table">
           <table>
-            <thead><tr><th>时间</th><th>操作</th><th>对象</th><th>编号</th><th>说明</th></tr></thead>
+            <thead><tr><th>时间</th><th>操作</th><th>对象</th><th>关联记录</th><th>说明</th></tr></thead>
             <tbody>
               <tr v-for="item in auditRows" :key="item.id">
-                <td>{{ item.createdAt }}</td>
-                <td>{{ item.action }}</td>
-                <td>{{ item.entityType }}</td>
-                <td>{{ item.entityId }}</td>
+                <td>{{ formatAuditTime(item.createdAt) }}</td>
+                <td>{{ auditActionText(item.action) }}</td>
+                <td>{{ auditEntityText(item.entityType) }}</td>
+                <td>{{ auditRecordText(item) }}</td>
                 <td>{{ item.detail }}</td>
               </tr>
               <tr v-if="auditRows.length === 0"><td colspan="5">暂无审计记录</td></tr>
@@ -17549,6 +17928,95 @@ function orderDetailFeeRows(order = {}) {
       </section>
     </div>
 
+    <div v-if="accountCreateModalOpen" class="modal-backdrop">
+      <form class="modal-card compact-modal account-create-modal" @submit.prevent="saveNewAccount">
+        <div class="modal-head">
+          <h2>
+            新增账号
+            <span class="order-title-meta">创建新的系统登录账号</span>
+          </h2>
+          <button type="button" class="icon-btn" @click="accountCreateModalOpen = false"><IconSvg name="close" />关闭</button>
+        </div>
+        <div class="form-grid account-create-grid">
+          <label>账号<input v-model.trim="accountCreateForm.username" autocomplete="off" /></label>
+          <label>姓名<input v-model.trim="accountCreateForm.displayName" autocomplete="name" /></label>
+          <label>登录密码<input v-model.trim="accountCreateForm.password" type="password" autocomplete="new-password" placeholder="新增账号必须填写" /></label>
+          <label>确认密码<input v-model.trim="accountCreateForm.passwordConfirm" type="password" autocomplete="new-password" placeholder="再次输入新密码" /></label>
+          <label>部门<select v-model="accountCreateForm.role"><option v-for="role in ACCOUNT_ROLES" :key="role">{{ role }}</option></select></label>
+          <label>入职日期<input v-model="accountCreateForm.hireDate" type="date" /></label>
+          <label>手机号<input v-model.trim="accountCreateForm.phone" inputmode="tel" /></label>
+          <label>邮箱<input v-model.trim="accountCreateForm.email" type="email" /></label>
+          <label>状态<select v-model="accountCreateForm.status"><option>启用</option><option>停用</option></select></label>
+          <label class="span-2">备注<textarea v-model.trim="accountCreateForm.note" rows="3" placeholder="账号说明、交接备注等" /></label>
+          <label class="span-2">权限<textarea v-model.trim="accountCreateForm.permissionsText" rows="4" readonly /></label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="ghost-btn" @click="accountCreateModalOpen = false">取消</button>
+          <button type="submit" class="primary-btn" :disabled="accountCreateSaving"><IconSvg name="save" />{{ accountCreateSaving ? '保存中' : '创建账号' }}</button>
+        </div>
+      </form>
+    </div>
+
+    <div v-if="accountEditModalOpen" class="modal-backdrop">
+      <form class="modal-card compact-modal account-edit-modal" @submit.prevent="saveAccount">
+        <div class="modal-head">
+          <h2>
+            编辑账号
+            <span class="order-title-meta">{{ accountForm.username || '当前账号' }}</span>
+          </h2>
+          <button type="button" class="icon-btn" @click="accountEditModalOpen = false"><IconSvg name="close" />关闭</button>
+        </div>
+        <div class="form-grid account-edit-grid">
+          <label>账号<input v-model.trim="accountForm.username" /></label>
+          <label>姓名<input v-model.trim="accountForm.displayName" /></label>
+          <label>登录密码<input v-model.trim="accountForm.password" type="password" autocomplete="new-password" placeholder="留空表示不修改" /></label>
+          <label>确认密码<input v-model.trim="accountForm.passwordConfirm" type="password" autocomplete="new-password" placeholder="再次输入新密码" /></label>
+          <label>部门<select v-model="accountForm.role"><option v-for="role in ACCOUNT_ROLES" :key="role">{{ role }}</option></select></label>
+          <label>入职日期<input v-model="accountForm.hireDate" type="date" /></label>
+          <label>手机号<input v-model.trim="accountForm.phone" inputmode="tel" /></label>
+          <label>邮箱<input v-model.trim="accountForm.email" type="email" /></label>
+          <label>状态<select v-model="accountForm.status"><option>启用</option><option>停用</option></select></label>
+          <label class="span-2">备注<textarea v-model.trim="accountForm.note" rows="3" placeholder="账号说明、交接备注等" /></label>
+          <label class="span-2">权限<textarea v-model.trim="accountForm.permissionsText" rows="4" readonly /></label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="ghost-btn" @click="editAccount(selectedAccount)">重置</button>
+          <button type="submit" class="primary-btn" :disabled="accountEditSaving"><IconSvg name="save" />{{ accountEditSaving ? '保存中' : '保存账号' }}</button>
+        </div>
+      </form>
+    </div>
+
+    <div v-if="accountProfileModalOpen" class="modal-backdrop">
+      <form class="modal-card compact-modal account-profile-modal" @submit.prevent="saveAccountProfile">
+        <div class="modal-head">
+          <h2>
+            账号设置
+            <span class="order-title-meta">{{ currentAccount.username || '当前账号' }}</span>
+          </h2>
+          <button type="button" class="icon-btn" @click="accountProfileModalOpen = false"><IconSvg name="close" />关闭</button>
+        </div>
+        <div class="account-profile-summary">
+          <span class="account-avatar account-avatar-large"><IconSvg name="user" /></span>
+          <div>
+            <strong>{{ currentAccountLabel }}</strong>
+            <span>{{ currentAccount.role || '司机' }}</span>
+          </div>
+        </div>
+        <div class="form-grid account-profile-grid">
+          <label>账号<input :value="currentAccount.username" readonly /></label>
+          <label>角色<input :value="currentAccount.role" readonly /></label>
+          <label>姓名<input v-model.trim="accountProfileForm.displayName" autocomplete="name" /></label>
+          <label>手机号<input v-model.trim="accountProfileForm.phone" inputmode="tel" autocomplete="tel" /></label>
+          <label class="span-2">邮箱<input v-model.trim="accountProfileForm.email" type="email" autocomplete="email" /></label>
+          <label class="span-2">备注<textarea v-model.trim="accountProfileForm.note" rows="4" placeholder="联系方式补充、交接备注等" /></label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="ghost-btn" @click="accountProfileModalOpen = false">取消</button>
+          <button type="submit" class="primary-btn" :disabled="accountProfileSaving"><IconSvg name="save" />{{ accountProfileSaving ? '保存中' : '保存设置' }}</button>
+        </div>
+      </form>
+    </div>
+
     <div v-if="accountPasswordModalOpen" class="modal-backdrop">
       <form class="modal-card compact-modal account-password-modal" @submit.prevent="saveAccountPassword">
         <div class="modal-head">
@@ -17565,7 +18033,7 @@ function orderDetailFeeRows(order = {}) {
         </div>
         <div class="modal-actions">
           <button type="button" class="ghost-btn" @click="accountPasswordModalOpen = false">取消</button>
-          <button type="submit" class="primary-btn"><IconSvg name="save" />保存密码</button>
+          <button type="submit" class="primary-btn" :disabled="accountPasswordSaving"><IconSvg name="save" />{{ accountPasswordSaving ? '保存中' : '保存密码' }}</button>
         </div>
       </form>
     </div>

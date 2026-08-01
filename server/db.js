@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Pool, types } from "pg";
+import { accountPermissionsForRole, hashPassword, normalizeAccountRole, roleLevelFor } from "./auth.js";
 
 types.setTypeParser(20, (value) => Number(value));
 types.setTypeParser(1700, (value) => Number(value));
@@ -214,6 +215,12 @@ async function addColumn(table, definition) {
   }
 }
 
+async function dropColumnIfExists(table, column) {
+  if (await hasColumn(table, column)) {
+    await db.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+  }
+}
+
 async function initializeSchema() {
   await db.exec(`
     CREATE TABLE IF NOT EXISTS customers (
@@ -399,16 +406,18 @@ async function initializeSchema() {
       id BIGSERIAL PRIMARY KEY,
       username TEXT NOT NULL UNIQUE,
       display_name TEXT NOT NULL DEFAULT '',
-      role TEXT NOT NULL DEFAULT '员工',
+      role TEXT NOT NULL DEFAULT '跟单员',
+      role_level INTEGER NOT NULL DEFAULT 2,
       status TEXT NOT NULL DEFAULT '启用',
+      password_hash TEXT NOT NULL DEFAULT '',
       hire_date TEXT NOT NULL DEFAULT '',
-      department TEXT NOT NULL DEFAULT '',
-      position TEXT NOT NULL DEFAULT '',
       phone TEXT NOT NULL DEFAULT '',
       email TEXT NOT NULL DEFAULT '',
       note TEXT NOT NULL DEFAULT '',
       permissions TEXT NOT NULL DEFAULT '[]',
       created_at TEXT NOT NULL DEFAULT (CURRENT_DATE::text),
+      updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      last_login_at TEXT,
       deleted_at TEXT
     );
 
@@ -533,12 +542,14 @@ async function initializeSchema() {
       "address TEXT NOT NULL DEFAULT ''"
     ],
     app_accounts: [
+      "role_level INTEGER NOT NULL DEFAULT 2",
+      "password_hash TEXT NOT NULL DEFAULT ''",
       "hire_date TEXT NOT NULL DEFAULT ''",
-      "department TEXT NOT NULL DEFAULT ''",
-      "position TEXT NOT NULL DEFAULT ''",
       "phone TEXT NOT NULL DEFAULT ''",
       "email TEXT NOT NULL DEFAULT ''",
-      "note TEXT NOT NULL DEFAULT ''"
+      "note TEXT NOT NULL DEFAULT ''",
+      "updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)",
+      "last_login_at TEXT"
     ],
     fee_items: [
       "sort_order INTEGER NOT NULL DEFAULT 0",
@@ -574,6 +585,64 @@ async function initializeSchema() {
     for (const definition of definitions) {
       await addColumn(table, definition);
     }
+  }
+
+  await dropColumnIfExists("app_accounts", "department");
+  await dropColumnIfExists("app_accounts", "position");
+
+  const accountRows = await db.prepare("SELECT id, role FROM app_accounts WHERE deleted_at IS NULL").all();
+  for (const row of accountRows) {
+    const role = normalizeAccountRole(row.role);
+    const permissions = JSON.stringify(accountPermissionsForRole(role));
+    await db.prepare(`
+      UPDATE app_accounts
+      SET role = @role,
+          role_level = @roleLevel,
+          permissions = @permissions,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = @id
+        AND (role <> @role OR role_level <> @roleLevel OR permissions <> @permissions)
+    `).run({
+      id: row.id,
+      role,
+      roleLevel: roleLevelFor(role),
+      permissions
+    });
+  }
+
+  const adminRole = "管理员";
+  const adminPermissions = JSON.stringify(accountPermissionsForRole(adminRole));
+  const adminPasswordHash = hashPassword("admin");
+  const adminAccount = await db.prepare("SELECT id, display_name, password_hash FROM app_accounts WHERE username = 'admin' ORDER BY id ASC LIMIT 1").get();
+  if (adminAccount) {
+    await db.prepare(`
+      UPDATE app_accounts
+      SET display_name = CASE WHEN COALESCE(display_name, '') = '' THEN '系统管理员' ELSE display_name END,
+          role = @role,
+          role_level = @roleLevel,
+          status = '启用',
+          password_hash = CASE WHEN COALESCE(password_hash, '') = '' THEN @passwordHash ELSE password_hash END,
+          permissions = @permissions,
+          updated_at = CURRENT_TIMESTAMP,
+          deleted_at = NULL
+      WHERE id = @id
+    `).run({
+      id: adminAccount.id,
+      role: adminRole,
+      roleLevel: roleLevelFor(adminRole),
+      passwordHash: adminPasswordHash,
+      permissions: adminPermissions
+    });
+  } else {
+    await db.prepare(`
+      INSERT INTO app_accounts (username, display_name, role, role_level, status, password_hash, permissions)
+      VALUES ('admin', '系统管理员', @role, @roleLevel, '启用', @passwordHash, @permissions)
+    `).run({
+      role: adminRole,
+      roleLevel: roleLevelFor(adminRole),
+      passwordHash: adminPasswordHash,
+      permissions: adminPermissions
+    });
   }
 
   await db.prepare(`

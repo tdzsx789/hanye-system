@@ -1,8 +1,19 @@
 import cors from "cors";
 import ExcelJS from "exceljs";
 import express from "express";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import zlib from "node:zlib";
+import {
+  ACCOUNT_ROLES,
+  accountPermissionsForRole,
+  allowedModulesForRole,
+  canAccessModule,
+  hashPassword,
+  normalizeAccountRole,
+  roleLevelFor,
+  verifyPassword
+} from "./auth.js";
 import PDFDocument from "pdfkit";
 import { db, databaseInfo, writeAudit } from "./db.js";
 
@@ -30,6 +41,62 @@ const SAFE_FILE_TYPES = [
   { extensions: [".xlsx"], mimes: ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"] }
 ];
 const PREVIEW_MIMES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif", "application/pdf", "text/plain"]);
+const AUTH_TOKEN_TTL_SECONDS = Number(process.env.AUTH_TOKEN_TTL_SECONDS || 7 * 24 * 60 * 60);
+const AUTH_SECRET = process.env.HANYE_AUTH_SECRET || process.env.AUTH_SECRET || "hanye-system-local-dev-secret";
+
+function base64UrlEncode(value) {
+  return Buffer.from(value).toString("base64url");
+}
+
+function base64UrlJson(value) {
+  return base64UrlEncode(JSON.stringify(value));
+}
+
+function signTokenPayload(encodedHeader, encodedPayload) {
+  return crypto
+    .createHmac("sha256", AUTH_SECRET)
+    .update(`${encodedHeader}.${encodedPayload}`)
+    .digest("base64url");
+}
+
+function createAuthToken(account) {
+  const now = Math.floor(Date.now() / 1000);
+  const expiresAt = now + AUTH_TOKEN_TTL_SECONDS;
+  const header = base64UrlJson({ alg: "HS256", typ: "JWT" });
+  const payload = base64UrlJson({
+    sub: String(account.id),
+    username: account.username,
+    role: normalizeAccountRole(account.role),
+    iat: now,
+    exp: expiresAt
+  });
+  return {
+    token: `${header}.${payload}.${signTokenPayload(header, payload)}`,
+    expiresAt: new Date(expiresAt * 1000).toISOString()
+  };
+}
+
+function verifyAuthToken(token = "") {
+  const [header, payload, signature] = String(token || "").split(".");
+  if (!header || !payload || !signature) return null;
+  const expected = signTokenPayload(header, payload);
+  const expectedBytes = Buffer.from(expected);
+  const signatureBytes = Buffer.from(signature);
+  if (expectedBytes.length !== signatureBytes.length || !crypto.timingSafeEqual(expectedBytes, signatureBytes)) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    if (!parsed?.sub || !parsed?.username || Number(parsed.exp || 0) <= Math.floor(Date.now() / 1000)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function bearerTokenFromRequest(req) {
+  const header = String(req.headers.authorization || "");
+  if (header.toLowerCase().startsWith("bearer ")) return header.slice(7).trim();
+  return String(req.query.token || "").trim();
+}
 
 function normalizeTransportMode(value = "") {
   const text = String(value || "").trim();
@@ -40,6 +107,7 @@ function normalizeTransportMode(value = "") {
 }
 
 function requestHasTransitDeletePermission(req) {
+  if (roleLevelFor(req.account?.role) >= roleLevelFor("管理员")) return true;
   const decodeHeaderValue = (value) => {
     try {
       return decodeURIComponent(String(value || ""));
@@ -51,7 +119,7 @@ function requestHasTransitDeletePermission(req) {
     req.headers["x-hanye-role"],
     req.headers["x-hanye-display-name"]
   ].map(decodeHeaderValue).join(" ");
-  return ["超级管理员", "老板"].some((keyword) => text.includes(keyword));
+  return ["管理员", "超级管理员", "老板"].some((keyword) => text.includes(keyword));
 }
 
 app.disable("x-powered-by");
@@ -1637,19 +1705,20 @@ function mapMasterData(row) {
 }
 
 function mapAccount(row) {
+  const role = normalizeAccountRole(row.role);
   return {
     id: row.id,
     username: row.username,
     displayName: row.display_name,
-    role: row.role,
+    role,
+    roleLevel: roleLevelFor(role),
     status: row.status,
     hireDate: row.hire_date || "",
-    department: row.department || "",
-    position: row.position || "",
     phone: row.phone || "",
     email: row.email || "",
     note: row.note || "",
-    permissions: JSON.parse(row.permissions || "[]"),
+    permissions: accountPermissionsForRole(role),
+    allowedModules: allowedModulesForRole(role),
     createdAt: row.created_at
   };
 }
@@ -1723,6 +1792,148 @@ async function nextOrderNo() {
 
 app.get("/api/health", async (_req, res) => {
   res.json({ ok: true, database: databaseInfo });
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  const username = String(req.body?.username || "").trim();
+  const password = String(req.body?.password || "");
+  if (!username || !password) {
+    res.status(400).json({ message: "请输入账号和密码" });
+    return;
+  }
+  const row = await db.prepare("SELECT * FROM app_accounts WHERE username = ? AND deleted_at IS NULL").get(username);
+  if (!row) {
+    res.status(404).json({ message: "账号不存在" });
+    return;
+  }
+  if (row.status !== "启用") {
+    res.status(403).json({ message: "账号已停用" });
+    return;
+  }
+  if (!verifyPassword(password, row.password_hash)) {
+    res.status(401).json({ message: "密码错误" });
+    return;
+  }
+  const role = normalizeAccountRole(row.role);
+  const permissions = JSON.stringify(accountPermissionsForRole(role));
+  await db.prepare(`
+    UPDATE app_accounts
+    SET role = @role,
+        role_level = @roleLevel,
+        permissions = @permissions,
+        last_login_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = @id
+  `).run({
+    id: row.id,
+    role,
+    roleLevel: roleLevelFor(role),
+    permissions
+  });
+  const account = mapAccount({ ...row, role, role_level: roleLevelFor(role), permissions });
+  const authSession = createAuthToken(account);
+  res.json({
+    token: authSession.token,
+    expiresAt: authSession.expiresAt,
+    account,
+    roles: ACCOUNT_ROLES
+  });
+});
+
+async function authenticateApiRequest(req, res, next) {
+  const payload = verifyAuthToken(bearerTokenFromRequest(req));
+  if (!payload) {
+    res.status(401).json({ message: "请先登录" });
+    return;
+  }
+  const row = await db.prepare("SELECT * FROM app_accounts WHERE id = ? AND username = ? AND deleted_at IS NULL").get(Number(payload.sub), payload.username);
+  if (!row || row.status !== "启用") {
+    res.status(401).json({ message: "登录状态已失效，请重新登录" });
+    return;
+  }
+  req.account = mapAccount(row);
+  next();
+}
+
+function requiredModuleForRequest(req) {
+  const path = req.path;
+  if (path.startsWith("/accounts")) return "accounts";
+  if (path.startsWith("/audit-logs")) return "security";
+  if (path.startsWith("/rules")) return "rules";
+  if (path.startsWith("/templates") && req.method !== "GET") return "templates";
+  if (path.startsWith("/master-data") && req.method !== "GET") return "master";
+  if (path.startsWith("/freight-rates") && req.method !== "GET") return "freight";
+  return "";
+}
+
+function authorizeApiRequest(req, res, next) {
+  const moduleId = requiredModuleForRequest(req);
+  if (moduleId && !canAccessModule(req.account?.role, moduleId)) {
+    res.status(403).json({ message: "当前账号无权访问该功能" });
+    return;
+  }
+  next();
+}
+
+app.use("/api", authenticateApiRequest, authorizeApiRequest);
+
+app.get("/api/auth/me", async (req, res) => {
+  res.json({ account: req.account, roles: ACCOUNT_ROLES });
+});
+
+app.patch("/api/auth/password", async (req, res) => {
+  const currentPassword = String(req.body?.currentPassword || req.body?.current || "");
+  const nextPassword = String(req.body?.nextPassword || req.body?.next || "");
+  if (!currentPassword) {
+    res.status(400).json({ message: "请输入原密码" });
+    return;
+  }
+  if (nextPassword.length < 4) {
+    res.status(400).json({ message: "新密码至少 4 位" });
+    return;
+  }
+  if (currentPassword === nextPassword) {
+    res.status(400).json({ message: "新密码不能和原密码相同" });
+    return;
+  }
+  const row = await db.prepare("SELECT * FROM app_accounts WHERE id = ? AND deleted_at IS NULL").get(req.account.id);
+  if (!row || !verifyPassword(currentPassword, row.password_hash)) {
+    res.status(400).json({ message: "原密码不正确" });
+    return;
+  }
+  await db.prepare(`
+    UPDATE app_accounts
+    SET password_hash = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(hashPassword(nextPassword), req.account.id);
+  await writeAudit("update", "account_password", String(req.account.id), req.account.username);
+  res.json({ ok: true });
+});
+
+app.patch("/api/auth/profile", async (req, res) => {
+  const item = {
+    id: req.account.id,
+    displayName: String(req.body?.displayName || "").trim(),
+    phone: String(req.body?.phone || "").trim(),
+    email: String(req.body?.email || "").trim(),
+    note: String(req.body?.note || "").trim()
+  };
+  const result = await db.prepare(`
+    UPDATE app_accounts
+    SET display_name = @displayName,
+        phone = @phone,
+        email = @email,
+        note = @note,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = @id AND deleted_at IS NULL
+  `).run(item);
+  if (result.changes === 0) {
+    res.status(404).json({ message: "账号不存在或已删除" });
+    return;
+  }
+  await writeAudit("update", "account_profile", String(req.account.id), req.account.username);
+  res.json(mapAccount(await db.prepare("SELECT * FROM app_accounts WHERE id = ?").get(req.account.id)));
 });
 
 app.get("/api/files", async (req, res) => {
@@ -2396,7 +2607,7 @@ app.delete("/api/orders/:no", async (req, res) => {
     return;
   }
   if (row.status === "通关中" && !requestHasTransitDeletePermission(req)) {
-    res.status(403).json({ message: "通关中订单不可删除，请使用超级管理员或老板账号操作" });
+    res.status(403).json({ message: "通关中订单不可删除，请使用管理员账号操作" });
     return;
   }
 
@@ -3306,21 +3517,27 @@ app.get("/api/accounts", async (_req, res) => {
 });
 
 app.post("/api/accounts", async (req, res) => {
+  const role = normalizeAccountRole(req.body.role || "跟单员");
+  const password = String(req.body.password || "");
   const item = {
     username: String(req.body.username || "").trim(),
     displayName: String(req.body.displayName || "").trim(),
-    role: String(req.body.role || "员工").trim(),
+    role,
+    roleLevel: roleLevelFor(role),
     status: String(req.body.status || "启用").trim(),
+    passwordHash: password ? hashPassword(password) : "",
     hireDate: String(req.body.hireDate || "").trim(),
-    department: String(req.body.department || "").trim(),
-    position: String(req.body.position || "").trim(),
     phone: String(req.body.phone || "").trim(),
     email: String(req.body.email || "").trim(),
     note: String(req.body.note || "").trim(),
-    permissions: JSON.stringify(Array.isArray(req.body.permissions) ? req.body.permissions : String(req.body.permissions || "").split(/[，,]/).map((item) => item.trim()).filter(Boolean))
+    permissions: JSON.stringify(accountPermissionsForRole(role))
   };
   if (!item.username) {
     res.status(400).json({ message: "账号不能为空" });
+    return;
+  }
+  if (password.length < 4) {
+    res.status(400).json({ message: "登录密码至少 4 位" });
     return;
   }
   const duplicate = await db.prepare("SELECT id FROM app_accounts WHERE username = ? AND deleted_at IS NULL").get(item.username);
@@ -3329,8 +3546,8 @@ app.post("/api/accounts", async (req, res) => {
     return;
   }
   const result = await db.prepare(`
-    INSERT INTO app_accounts (username, display_name, role, status, hire_date, department, position, phone, email, note, permissions)
-    VALUES (@username, @displayName, @role, @status, @hireDate, @department, @position, @phone, @email, @note, @permissions)
+    INSERT INTO app_accounts (username, display_name, role, role_level, status, password_hash, hire_date, phone, email, note, permissions)
+    VALUES (@username, @displayName, @role, @roleLevel, @status, @passwordHash, @hireDate, @phone, @email, @note, @permissions)
   `).run(item);
   await writeAudit("create", "account", String(result.lastInsertId), item.username);
   res.status(201).json(mapAccount(await db.prepare("SELECT * FROM app_accounts WHERE id = ?").get(result.lastInsertId)));
@@ -3343,31 +3560,32 @@ app.patch("/api/accounts/:id", async (req, res) => {
     res.status(404).json({ message: "账号不存在或已删除" });
     return;
   }
-  const currentPermissions = (() => {
-    try {
-      return JSON.parse(current.permissions || "[]");
-    } catch (_error) {
-      return [];
-    }
-  })();
+  const role = req.body.role === undefined ? normalizeAccountRole(current.role) : normalizeAccountRole(req.body.role || "跟单员");
+  const password = String(req.body.password || "");
   const item = {
     id,
     username: req.body.username === undefined ? current.username : String(req.body.username || "").trim(),
     displayName: req.body.displayName === undefined ? current.display_name : String(req.body.displayName || "").trim(),
-    role: req.body.role === undefined ? current.role : String(req.body.role || "员工").trim(),
+    role,
+    roleLevel: roleLevelFor(role),
     status: req.body.status === undefined ? current.status : String(req.body.status || "启用").trim(),
+    passwordHash: password ? hashPassword(password) : null,
     hireDate: req.body.hireDate === undefined ? current.hire_date : String(req.body.hireDate || "").trim(),
-    department: req.body.department === undefined ? current.department : String(req.body.department || "").trim(),
-    position: req.body.position === undefined ? current.position : String(req.body.position || "").trim(),
     phone: req.body.phone === undefined ? current.phone : String(req.body.phone || "").trim(),
     email: req.body.email === undefined ? current.email : String(req.body.email || "").trim(),
     note: req.body.note === undefined ? current.note : String(req.body.note || "").trim(),
-    permissions: JSON.stringify(req.body.permissions === undefined
-      ? currentPermissions
-      : (Array.isArray(req.body.permissions) ? req.body.permissions : String(req.body.permissions || "").split(/[，,]/).map((item) => item.trim()).filter(Boolean)))
+    permissions: JSON.stringify(accountPermissionsForRole(role))
   };
   if (!item.username) {
     res.status(400).json({ message: "账号不能为空" });
+    return;
+  }
+  if (current.username === "admin" && item.username !== "admin") {
+    res.status(409).json({ message: "默认管理员账号不可改名" });
+    return;
+  }
+  if (password && password.length < 4) {
+    res.status(400).json({ message: "登录密码至少 4 位" });
     return;
   }
   const duplicate = await db.prepare("SELECT id FROM app_accounts WHERE username = ? AND id != ? AND deleted_at IS NULL").get(item.username, id);
@@ -3378,9 +3596,11 @@ app.patch("/api/accounts/:id", async (req, res) => {
   const result = await db.prepare(`
     UPDATE app_accounts
     SET username = @username, display_name = @displayName, role = @role,
-        status = @status, hire_date = @hireDate, department = @department,
-        position = @position, phone = @phone, email = @email, note = @note,
-        permissions = @permissions
+        role_level = @roleLevel, status = @status,
+        password_hash = COALESCE(@passwordHash, password_hash),
+        hire_date = @hireDate, phone = @phone, email = @email, note = @note,
+        permissions = @permissions,
+        updated_at = CURRENT_TIMESTAMP
     WHERE id = @id AND deleted_at IS NULL
   `).run(item);
   if (result.changes === 0) {
