@@ -33,7 +33,17 @@ services:
       PGDATABASE: ${POSTGRES_DB:-hanye}
       PGUSER: ${POSTGRES_USER:-hanye}
       PGPASSWORD: ${POSTGRES_PASSWORD:-hanye_dev_password}
+      SEED_DEMO_DATA: ${SEED_DEMO_DATA:-0}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
+      OSS_BUCKET: ${OSS_BUCKET:-}
+      OSS_REGION: ${OSS_REGION:-}
+      OSS_ENDPOINT: ${OSS_ENDPOINT:-}
+      OSS_INTERNAL: ${OSS_INTERNAL:-0}
+      OSS_SECURE: ${OSS_SECURE:-1}
+      OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID:-}
+      OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET:-}
+      OSS_KEY_PREFIX: ${OSS_KEY_PREFIX:-hanye-system/uploads}
+      OSS_SIGNED_URL_EXPIRES_SECONDS: ${OSS_SIGNED_URL_EXPIRES_SECONDS:-3600}
       TZ: ${TZ:-Asia/Shanghai}
     expose:
       - "5174"
@@ -59,7 +69,17 @@ services:
       PGDATABASE: ${POSTGRES_DB:-hanye}
       PGUSER: ${POSTGRES_USER:-hanye}
       PGPASSWORD: ${POSTGRES_PASSWORD:-hanye_dev_password}
+      SEED_DEMO_DATA: ${SEED_DEMO_DATA:-0}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
+      OSS_BUCKET: ${OSS_BUCKET:-}
+      OSS_REGION: ${OSS_REGION:-}
+      OSS_ENDPOINT: ${OSS_ENDPOINT:-}
+      OSS_INTERNAL: ${OSS_INTERNAL:-0}
+      OSS_SECURE: ${OSS_SECURE:-1}
+      OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID:-}
+      OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET:-}
+      OSS_KEY_PREFIX: ${OSS_KEY_PREFIX:-hanye-system/uploads}
+      OSS_SIGNED_URL_EXPIRES_SECONDS: ${OSS_SIGNED_URL_EXPIRES_SECONDS:-3600}
       TZ: ${TZ:-Asia/Shanghai}
     expose:
       - "5174"

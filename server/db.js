@@ -11,6 +11,7 @@ const pgDatabase = process.env.PGDATABASE || "hanye";
 const pgUser = process.env.PGUSER || "hanye";
 const pgPassword = process.env.PGPASSWORD || "hanye";
 const connectionString = process.env.DATABASE_URL || `postgres://${encodeURIComponent(pgUser)}:${encodeURIComponent(pgPassword)}@${pgHost}:${pgPort}/${pgDatabase}`;
+const seedDemoDataEnabled = ["1", "true", "yes", "on"].includes(String(process.env.SEED_DEMO_DATA || "").toLowerCase());
 
 function maskConnectionString(value) {
   try {
@@ -109,10 +110,13 @@ const idReturningTables = new Set([
   "master_data",
   "app_accounts",
   "files",
+  "customs_businesses",
   "driver_wage_rules",
   "driver_adjustments",
   "address_book",
-  "customer_contacts"
+  "customer_contacts",
+  "driver_route_adjust_rules",
+  "statement_downloads"
 ]);
 
 function withReturningId(sql) {
@@ -183,6 +187,21 @@ export const db = {
   }
 };
 
+export async function withAdvisoryLock(lockId, callback) {
+  const client = await pool.connect();
+  try {
+    await client.query("SELECT pg_advisory_lock($1)", [Number(lockId)]);
+    let result;
+    await transactionClient.run(client, async () => {
+      result = await callback();
+    });
+    return result;
+  } finally {
+    await client.query("SELECT pg_advisory_unlock($1)", [Number(lockId)]).catch(() => {});
+    client.release();
+  }
+}
+
 async function waitForDatabase() {
   const attempts = Number(process.env.PG_CONNECT_RETRIES || 45);
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -208,11 +227,32 @@ async function hasColumn(table, column) {
   return Boolean(row);
 }
 
+async function columnDataType(table, column) {
+  const row = await db.prepare(`
+    SELECT data_type
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = ?
+      AND column_name = ?
+    LIMIT 1
+  `).get(table, column);
+  return row?.data_type || "";
+}
+
 async function addColumn(table, definition) {
   const column = definition.split(/\s+/)[0];
   if (!(await hasColumn(table, column))) {
     await db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
   }
+}
+
+async function ensureTextColumn(table, column, defaultValue = "''") {
+  if ((await columnDataType(table, column)) === "text") return;
+  await db.exec(`
+    ALTER TABLE ${table} ALTER COLUMN ${column} DROP DEFAULT;
+    ALTER TABLE ${table} ALTER COLUMN ${column} TYPE TEXT USING COALESCE(${column}::text, '');
+    ALTER TABLE ${table} ALTER COLUMN ${column} SET DEFAULT ${defaultValue};
+  `);
 }
 
 async function dropColumnIfExists(table, column) {
@@ -231,6 +271,7 @@ async function initializeSchema() {
       city TEXT NOT NULL DEFAULT '',
       address TEXT NOT NULL DEFAULT '',
       term TEXT NOT NULL DEFAULT '月结30天',
+      settlement_currency TEXT NOT NULL DEFAULT '',
       tax_no TEXT NOT NULL DEFAULT '',
       contact TEXT NOT NULL DEFAULT '',
       mobile TEXT NOT NULL DEFAULT '',
@@ -258,7 +299,7 @@ async function initializeSchema() {
       direction TEXT NOT NULL DEFAULT '',
       tonnage TEXT NOT NULL DEFAULT '',
       currency TEXT NOT NULL DEFAULT '',
-      quantity DOUBLE PRECISION NOT NULL DEFAULT 0,
+      quantity TEXT NOT NULL DEFAULT '',
       weight TEXT NOT NULL DEFAULT '',
       vehicle_source TEXT NOT NULL DEFAULT '',
       supplier TEXT NOT NULL DEFAULT '',
@@ -360,6 +401,8 @@ async function initializeSchema() {
 
     CREATE TABLE IF NOT EXISTS freight_rates (
       id BIGSERIAL PRIMARY KEY,
+      customer_id TEXT NOT NULL DEFAULT '',
+      customer_name TEXT NOT NULL DEFAULT '',
       direction TEXT NOT NULL DEFAULT '',
       level1 TEXT NOT NULL DEFAULT '',
       level2 TEXT NOT NULL DEFAULT '',
@@ -429,8 +472,34 @@ async function initializeSchema() {
       filename TEXT NOT NULL,
       mime TEXT NOT NULL DEFAULT 'application/octet-stream',
       size INTEGER NOT NULL DEFAULT 0,
-      content_base64 TEXT NOT NULL,
+      content_base64 TEXT NOT NULL DEFAULT '',
+      storage_provider TEXT NOT NULL DEFAULT 'oss',
+      bucket TEXT NOT NULL DEFAULT '',
+      object_key TEXT NOT NULL DEFAULT '',
+      etag TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      deleted_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS customs_businesses (
+      id BIGSERIAL PRIMARY KEY,
+      business_date TEXT NOT NULL DEFAULT '',
+      declaration_no TEXT NOT NULL DEFAULT '',
+      six_sheet_no TEXT NOT NULL DEFAULT '',
+      company TEXT NOT NULL DEFAULT '',
+      direction TEXT NOT NULL DEFAULT '',
+      item_count DOUBLE PRECISION NOT NULL DEFAULT 0,
+      page_count DOUBLE PRECISION NOT NULL DEFAULT 0,
+      customs_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
+      page_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
+      manifest_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
+      inspection_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
+      check_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
+      other_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
+      total DOUBLE PRECISION NOT NULL DEFAULT 0,
+      remark TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
       deleted_at TEXT
     );
 
@@ -498,6 +567,38 @@ async function initializeSchema() {
       deleted_at TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS driver_route_adjust_rules (
+      id BIGSERIAL PRIMARY KEY,
+      source_key TEXT NOT NULL DEFAULT '',
+      customer_name TEXT NOT NULL DEFAULT '',
+      driver_ids TEXT NOT NULL DEFAULT '[]',
+      driver_names TEXT NOT NULL DEFAULT '[]',
+      driver_id BIGINT REFERENCES drivers(id) ON DELETE SET NULL,
+      driver_name TEXT NOT NULL DEFAULT '',
+      transport_mode TEXT NOT NULL DEFAULT '',
+      loading TEXT NOT NULL DEFAULT '',
+      unloading TEXT NOT NULL DEFAULT '',
+      amount_hkd DOUBLE PRECISION NOT NULL DEFAULT 0,
+      amount_rmb DOUBLE PRECISION NOT NULL DEFAULT 0,
+      note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      deleted_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS statement_downloads (
+      id BIGSERIAL PRIMARY KEY,
+      download_key TEXT NOT NULL UNIQUE,
+      statement_type TEXT NOT NULL DEFAULT 'customer',
+      entity_name TEXT NOT NULL DEFAULT '',
+      start_date TEXT NOT NULL DEFAULT '',
+      end_date TEXT NOT NULL DEFAULT '',
+      downloaded_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      deleted_at TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS hidden_history_addresses (
       address_key TEXT PRIMARY KEY,
       address TEXT NOT NULL DEFAULT '',
@@ -508,7 +609,10 @@ async function initializeSchema() {
     CREATE INDEX IF NOT EXISTS idx_orders_deleted_order_date ON orders(deleted_at, order_date);
     CREATE INDEX IF NOT EXISTS idx_order_fees_order_no ON order_fees(order_no);
     CREATE INDEX IF NOT EXISTS idx_files_entity ON files(entity_type, entity_id);
+    CREATE INDEX IF NOT EXISTS idx_customs_businesses_date ON customs_businesses(deleted_at, business_date);
     CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
+    CREATE INDEX IF NOT EXISTS idx_driver_route_adjust_deleted ON driver_route_adjust_rules(deleted_at, id);
+    CREATE INDEX IF NOT EXISTS idx_statement_downloads_deleted ON statement_downloads(deleted_at, downloaded_at);
   `);
 
   const migrations = {
@@ -561,6 +665,8 @@ async function initializeSchema() {
       "driver_name TEXT NOT NULL DEFAULT ''"
     ],
     freight_rates: [
+      "customer_id TEXT NOT NULL DEFAULT ''",
+      "customer_name TEXT NOT NULL DEFAULT ''",
       "level1 TEXT NOT NULL DEFAULT ''",
       "level2 TEXT NOT NULL DEFAULT ''",
       "level3 TEXT NOT NULL DEFAULT ''"
@@ -568,6 +674,7 @@ async function initializeSchema() {
     customers: [
       "province TEXT NOT NULL DEFAULT ''",
       "address TEXT NOT NULL DEFAULT ''",
+      "settlement_currency TEXT NOT NULL DEFAULT ''",
       "tax_no TEXT NOT NULL DEFAULT ''",
       "contact TEXT NOT NULL DEFAULT ''",
       "mobile TEXT NOT NULL DEFAULT ''",
@@ -578,6 +685,12 @@ async function initializeSchema() {
       "invoice_bank TEXT NOT NULL DEFAULT ''",
       "invoice_account TEXT NOT NULL DEFAULT ''",
       "invoice_address_phone TEXT NOT NULL DEFAULT ''"
+    ],
+    files: [
+      "storage_provider TEXT NOT NULL DEFAULT 'oss'",
+      "bucket TEXT NOT NULL DEFAULT ''",
+      "object_key TEXT NOT NULL DEFAULT ''",
+      "etag TEXT NOT NULL DEFAULT ''"
     ]
   };
 
@@ -586,6 +699,26 @@ async function initializeSchema() {
       await addColumn(table, definition);
     }
   }
+
+  await ensureTextColumn("orders", "quantity");
+
+  await db.exec(`
+    ALTER TABLE files ALTER COLUMN storage_provider SET DEFAULT 'oss';
+    CREATE INDEX IF NOT EXISTS idx_files_object_key ON files(storage_provider, object_key);
+    CREATE INDEX IF NOT EXISTS idx_freight_rates_customer_scope
+      ON freight_rates(customer_id, direction, level1, level2, level3, tonnage)
+      WHERE deleted_at IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_driver_route_adjust_source_key
+      ON driver_route_adjust_rules(source_key)
+      WHERE source_key <> '';
+  `);
+
+  await db.prepare(`
+    UPDATE customers
+    SET settlement_currency = '人民币结算'
+    WHERE type = '客户'
+      AND COALESCE(settlement_currency, '') = ''
+  `).run();
 
   await dropColumnIfExists("app_accounts", "department");
   await dropColumnIfExists("app_accounts", "position");
@@ -694,6 +827,835 @@ async function initializeSchema() {
     SET province = '广东省'
     WHERE deleted_at IS NULL AND COALESCE(province, '') = ''
   `).run();
+
+  if (seedDemoDataEnabled) {
+    await seedDemoData();
+  }
+}
+
+const DEMO_CUSTOMERS = [
+  {
+    id: "KH00021053",
+    type: "客户",
+    name: "深圳市汉业国际货运代理有限公司",
+    province: "广东省",
+    city: "深圳市",
+    address: "深圳市南山区蛇口太子路18号海景广场12楼",
+    term: "月结30天",
+    taxNo: "91440300MA5HANYE01",
+    contact: "刘小姐",
+    mobile: "13800138001",
+    driverWageAdjustHKD: 20,
+    defaultTemplateId: "",
+    receivableRMB: 86500,
+    receivableHKD: 126800,
+    recentOrder: "2026-08-03",
+    createdAt: "2026-06-01",
+    invoiceTitle: "深圳市汉业国际货运代理有限公司",
+    invoiceTaxNo: "91440300MA5HANYE01",
+    invoiceBank: "招商银行深圳南山支行",
+    invoiceAccount: "7559000012345678",
+    invoiceAddressPhone: "深圳市南山区蛇口太子路18号 0755-26668888"
+  },
+  {
+    id: "KH00021054",
+    type: "客户",
+    name: "深圳市文永供应链管理有限公司",
+    province: "广东省",
+    city: "深圳市",
+    address: "深圳市龙岗区坂田街道雪岗北路2018号仓储园B栋",
+    term: "月结45天",
+    taxNo: "91440300MA5WENYONG",
+    contact: "周经理",
+    mobile: "13900139002",
+    driverWageAdjustHKD: 0,
+    defaultTemplateId: "",
+    receivableRMB: 54200,
+    receivableHKD: 18200,
+    recentOrder: "2026-08-02",
+    createdAt: "2026-06-03",
+    invoiceTitle: "深圳市文永供应链管理有限公司",
+    invoiceTaxNo: "91440300MA5WENYONG",
+    invoiceBank: "中国银行深圳坂田支行",
+    invoiceAccount: "7699000098765432",
+    invoiceAddressPhone: "深圳市龙岗区坂田街道雪岗北路2018号 0755-28889999"
+  },
+  {
+    id: "KH00021055",
+    type: "客户",
+    name: "深圳市环联程物流有限公司",
+    province: "广东省",
+    city: "深圳市",
+    address: "深圳市宝安区福永街道怀德南路66号",
+    term: "月结30天",
+    taxNo: "91440300MA5HUANLC",
+    contact: "邓生",
+    mobile: "13700137003",
+    driverWageAdjustHKD: -10,
+    defaultTemplateId: "",
+    receivableRMB: 31800,
+    receivableHKD: 98600,
+    recentOrder: "2026-06-29",
+    createdAt: "2026-06-05",
+    invoiceTitle: "深圳市环联程物流有限公司",
+    invoiceTaxNo: "91440300MA5HUANLC",
+    invoiceBank: "平安银行深圳宝安支行",
+    invoiceAccount: "110146000123456",
+    invoiceAddressPhone: "深圳市宝安区福永街道怀德南路66号 0755-27336666"
+  },
+  {
+    id: "KH00021056",
+    type: "客户",
+    name: "香港恒达贸易有限公司",
+    province: "香港",
+    city: "香港",
+    address: "香港九龙观塘开源道55号开联工业中心",
+    term: "月结15天",
+    taxNo: "",
+    contact: "陈小姐",
+    mobile: "+852 6123 4567",
+    driverWageAdjustHKD: 0,
+    defaultTemplateId: "",
+    receivableRMB: 12800,
+    receivableHKD: 43200,
+    recentOrder: "2026-08-01",
+    createdAt: "2026-06-08",
+    invoiceTitle: "香港恒达贸易有限公司",
+    invoiceTaxNo: "",
+    invoiceBank: "HSBC Hong Kong",
+    invoiceAccount: "400-123456-838",
+    invoiceAddressPhone: "香港九龙观塘开源道55号 +852 2388 6688"
+  },
+  {
+    id: "GY00021001",
+    type: "供应商",
+    name: "深圳市飞龙通达物流有限公司",
+    province: "广东省",
+    city: "深圳市",
+    address: "深圳市罗湖区清水河一路跨境物流园A区",
+    term: "月结30天",
+    taxNo: "91440300MA5FEILONG",
+    contact: "曾生",
+    mobile: "13600136001",
+    driverWageAdjustHKD: 0,
+    defaultTemplateId: "",
+    receivableRMB: 0,
+    receivableHKD: 0,
+    recentOrder: "2026-06-30",
+    createdAt: "2026-06-01",
+    invoiceTitle: "深圳市飞龙通达物流有限公司",
+    invoiceTaxNo: "91440300MA5FEILONG",
+    invoiceBank: "建设银行深圳罗湖支行",
+    invoiceAccount: "44201500000012345678",
+    invoiceAddressPhone: "深圳市罗湖区清水河一路 0755-22338888"
+  },
+  {
+    id: "GY00021002",
+    type: "供应商",
+    name: "香港顺安跨境物流有限公司",
+    province: "香港",
+    city: "香港",
+    address: "香港新界葵涌货柜码头南路8号",
+    term: "月结15天",
+    taxNo: "",
+    contact: "黄生",
+    mobile: "+852 6012 8899",
+    driverWageAdjustHKD: 0,
+    defaultTemplateId: "",
+    receivableRMB: 0,
+    receivableHKD: 0,
+    recentOrder: "2026-08-03",
+    createdAt: "2026-06-02",
+    invoiceTitle: "香港顺安跨境物流有限公司",
+    invoiceTaxNo: "",
+    invoiceBank: "Bank of China Hong Kong",
+    invoiceAccount: "012-875-12345678",
+    invoiceAddressPhone: "香港新界葵涌货柜码头南路8号 +852 2422 8899"
+  },
+  {
+    id: "GY00021003",
+    type: "供应商",
+    name: "深圳市粤港报关服务有限公司",
+    province: "广东省",
+    city: "深圳市",
+    address: "深圳市福田区福强路口岸服务中心3楼",
+    term: "现结",
+    taxNo: "91440300MA5YUEGANG",
+    contact: "吴小姐",
+    mobile: "13500135003",
+    driverWageAdjustHKD: 0,
+    defaultTemplateId: "",
+    receivableRMB: 0,
+    receivableHKD: 0,
+    recentOrder: "2026-08-02",
+    createdAt: "2026-06-06",
+    invoiceTitle: "深圳市粤港报关服务有限公司",
+    invoiceTaxNo: "91440300MA5YUEGANG",
+    invoiceBank: "工商银行深圳福田支行",
+    invoiceAccount: "4000022009201234567",
+    invoiceAddressPhone: "深圳市福田区福强路口岸服务中心3楼 0755-83886666"
+  }
+];
+
+const DEMO_CUSTOMER_CONTACTS = [
+  { customerId: "KH00021053", name: "刘小姐", gender: "女", title: "物流主管", mobile: "13800138001", phone: "0755-26668888", area: "深圳 / 南山 / 蛇口", address: "蛇口太子路18号海景广场12楼", fax: "0755-26668889", email: "liujie@hanye-logistics.example", wechat: "hanye-liu", qq: "", remark: "默认对账联系人" },
+  { customerId: "KH00021054", name: "周经理", gender: "男", title: "供应链经理", mobile: "13900139002", phone: "0755-28889999", area: "深圳 / 龙岗 / 坂田", address: "雪岗北路2018号仓储园B栋", fax: "", email: "zhou@wenyong.example", wechat: "wenyong-zhou", qq: "", remark: "进口业务联系人" },
+  { customerId: "KH00021055", name: "邓生", gender: "男", title: "仓库负责人", mobile: "13700137003", phone: "0755-27336666", area: "深圳 / 宝安 / 福永", address: "怀德南路66号", fax: "", email: "deng@huanliancheng.example", wechat: "hlc-deng", qq: "", remark: "装货现场联系人" },
+  { customerId: "KH00021056", name: "陈小姐", gender: "女", title: "贸易跟单", mobile: "+852 6123 4567", phone: "+852 2388 6688", area: "香港 / 九龙 / 观塘", address: "开源道55号开联工业中心", fax: "", email: "chan@hangtat.example", wechat: "", qq: "", remark: "香港卸货联系人" }
+];
+
+const DEMO_ADDRESS_BOOK = [
+  { area: "深圳 / 南山 / 蛇口", contact: "刘小姐", phone: "13800138001", address: "蛇口太子路18号海景广场12楼", note: "客户办公室/文件交接" },
+  { area: "深圳 / 龙岗 / 坂田", contact: "周经理", phone: "13900139002", address: "雪岗北路2018号仓储园B栋", note: "文永坂田仓" },
+  { area: "深圳 / 宝安 / 福永", contact: "邓生", phone: "13700137003", address: "怀德南路66号福永仓", note: "环联程常用装货点" },
+  { area: "香港 / 新界 / 元朗", contact: "何小姐", phone: "+852 6122 7788", address: "元朗工业区宏业东街22号", note: "进口装货点" },
+  { area: "香港 / 九龙 / 葵涌", contact: "梁生", phone: "+852 6233 8899", address: "葵涌货柜码头南路8号", note: "码头交货点" },
+  { area: "香港 / 沙田 / 火炭", contact: "林生", phone: "+852 6333 2211", address: "火炭坳背湾街45号", note: "出口卸货点" }
+];
+
+const DEMO_VEHICLES = [
+  { plate: "粤ZFC62港", brand: "五十铃", model: "NPR", type: "3T中港车", purchaseDate: "2023-03-18", factoryDate: "2022-12-01", mainlandReviewDate: "2027-03-18", hkReviewDate: "2027-02-28", mainlandInsuranceDate: "2027-03-10", hkInsuranceDate: "2027-02-20", insuranceReminder: "提前30天", maintenanceReminder: "每10000公里", status: "正常", monthlyCost: 12800, note: "常跑莲塘/深圳湾，带尾板" },
+  { plate: "粤ZYR22港", brand: "日野", model: "700", type: "12T中港车", purchaseDate: "2022-09-12", factoryDate: "2022-04-01", mainlandReviewDate: "2026-09-12", hkReviewDate: "2026-08-30", mainlandInsuranceDate: "2026-09-01", hkInsuranceDate: "2026-08-20", insuranceReminder: "提前30天", maintenanceReminder: "每8000公里", status: "正常", monthlyCost: 16500, note: "大吨位线路，适合福永/葵涌" },
+  { plate: "粤Z1234港", brand: "东风", model: "天锦", type: "5T外派车", purchaseDate: "2024-01-10", factoryDate: "2023-10-01", mainlandReviewDate: "2027-01-10", hkReviewDate: "2026-12-20", mainlandInsuranceDate: "2026-12-31", hkInsuranceDate: "2026-12-20", insuranceReminder: "提前30天", maintenanceReminder: "供应商负责", status: "正常", monthlyCost: 0, note: "飞龙通达外派车辆样例" },
+  { plate: "港AU7421", brand: "Mercedes-Benz", model: "Actros", type: "香港本地车", purchaseDate: "2021-07-08", factoryDate: "2021-01-01", mainlandReviewDate: "", hkReviewDate: "2026-11-15", mainlandInsuranceDate: "", hkInsuranceDate: "2026-11-01", insuranceReminder: "提前45天", maintenanceReminder: "每月保养", status: "正常", monthlyCost: 9800, note: "香港本地提派备用" },
+  { plate: "粤B8D936", brand: "江铃", model: "顺达", type: "大陆接驳车", purchaseDate: "2024-05-22", factoryDate: "2024-02-01", mainlandReviewDate: "2027-05-22", hkReviewDate: "", mainlandInsuranceDate: "2027-05-01", hkInsuranceDate: "", insuranceReminder: "提前30天", maintenanceReminder: "每10000公里", status: "正常", monthlyCost: 7200, note: "口岸转国内车样例" }
+];
+
+const DEMO_DRIVERS = [
+  { type: "香港司机", name: "李永洪", phone: "+852 6111 8899", idNo: "H123456(7)", license: "HK-LIC-0001", birthday: "1982-05-16", hireDate: "2022-04-01", leaveDate: "", expireAt: "2027-04-30", status: "正常", defaultWage: 620, note: "熟悉莲塘/元朗进口线路" },
+  { type: "香港司机", name: "廖永贤", phone: "+852 6222 8899", idNo: "K765432(1)", license: "HK-LIC-0002", birthday: "1979-11-03", hireDate: "2021-09-15", leaveDate: "", expireAt: "2027-09-30", status: "正常", defaultWage: 680, note: "12T及口岸转车经验" },
+  { type: "香港司机", name: "陈志强", phone: "+852 6333 8899", idNo: "E246810(3)", license: "HK-LIC-0003", birthday: "1988-02-22", hireDate: "2024-01-20", leaveDate: "", expireAt: "2027-01-19", status: "正常", defaultWage: 600, note: "外派车对接司机" },
+  { type: "香港司机", name: "黄启明", phone: "+852 6444 8899", idNo: "Y135790(2)", license: "HK-LIC-0004", birthday: "1985-08-09", hireDate: "2023-06-01", leaveDate: "", expireAt: "2026-12-31", status: "正常", defaultWage: 580, note: "香港本地提派" },
+  { type: "大陆骑师", name: "张伟强", phone: "13800138005", idNo: "440301198910101234", license: "粤B-A2-0005", birthday: "1989-10-10", hireDate: "2024-03-05", leaveDate: "", expireAt: "2028-03-04", status: "正常", defaultWage: 360, note: "大陆接驳/口岸转国内车" },
+  { type: "大陆骑师", name: "王敏", phone: "13600136006", idNo: "440306199208081234", license: "粤B-B2-0006", birthday: "1992-08-08", hireDate: "2025-02-18", leaveDate: "", expireAt: "2028-02-17", status: "正常", defaultWage: 330, note: "深圳市内短驳" }
+];
+
+const DEMO_FEE_ITEMS = [
+  { category: "正常", name: "基础运费", currency: "港币", defaultAmount: 0, defaultDriverRole: "", sortOrder: 1 },
+  { category: "正常", name: "装货费", currency: "港币", defaultAmount: 120, defaultDriverRole: "", sortOrder: 2 },
+  { category: "正常", name: "卸货费", currency: "港币", defaultAmount: 120, defaultDriverRole: "", sortOrder: 3 },
+  { category: "正常", name: "加点费", currency: "港币", defaultAmount: 180, defaultDriverRole: "", sortOrder: 4 },
+  { category: "正常", name: "等候费", currency: "港币", defaultAmount: 80, defaultDriverRole: "", sortOrder: 5 },
+  { category: "正常", name: "报关服务费", currency: "人民币", defaultAmount: 350, defaultDriverRole: "", sortOrder: 6 },
+  { category: "正常", name: "查验服务费", currency: "人民币", defaultAmount: 500, defaultDriverRole: "", sortOrder: 7 },
+  { category: "代垫", name: "过海费", currency: "港币", defaultAmount: 180, defaultDriverRole: "香港司机", sortOrder: 8 },
+  { category: "代垫", name: "停车费", currency: "港币", defaultAmount: 60, defaultDriverRole: "跟随订单司机", sortOrder: 9 },
+  { category: "代垫", name: "香港司机代垫", currency: "港币", defaultAmount: 120, defaultDriverRole: "香港司机", sortOrder: 10 },
+  { category: "代垫", name: "大陆骑师代垫", currency: "人民币", defaultAmount: 80, defaultDriverRole: "大陆骑师", sortOrder: 11 }
+];
+
+const DEMO_FREIGHT_RATES = [
+  { direction: "出口", level1: "深圳", level2: "南山", level3: "蛇口", city: "蛇口", tonnage: "3T", rmbAmount: 0, hkdAmount: 1680, sortOrder: 1 },
+  { direction: "出口", level1: "深圳", level2: "南山", level3: "蛇口", city: "蛇口", tonnage: "5T", rmbAmount: 0, hkdAmount: 2380, sortOrder: 2 },
+  { direction: "出口", level1: "深圳", level2: "宝安", level3: "福永", city: "福永", tonnage: "5T", rmbAmount: 0, hkdAmount: 2580, sortOrder: 3 },
+  { direction: "出口", level1: "深圳", level2: "宝安", level3: "福永", city: "福永", tonnage: "12T", rmbAmount: 0, hkdAmount: 4200, sortOrder: 4 },
+  { direction: "进口", level1: "香港", level2: "新界", level3: "元朗", city: "元朗", tonnage: "3T", rmbAmount: 1850, hkdAmount: 0, sortOrder: 5 },
+  { direction: "进口", level1: "香港", level2: "新界", level3: "元朗", city: "元朗", tonnage: "5T", rmbAmount: 2300, hkdAmount: 0, sortOrder: 6 },
+  { direction: "进口", level1: "香港", level2: "九龙", level3: "葵涌", city: "葵涌", tonnage: "5T", rmbAmount: 2600, hkdAmount: 0, sortOrder: 7 }
+];
+
+const DEMO_ORDERS = [
+  {
+    no: "HY2606300001",
+    dispatchNo: "PC260630001",
+    customerId: "KH00021053",
+    customer: "深圳市汉业国际货运代理有限公司",
+    businessType: "运输",
+    port: "深圳湾海关",
+    direction: "出口",
+    tonnage: "5T",
+    currency: "港币",
+    quantity: 18,
+    weight: "1280kg",
+    vehicleSource: "外派车辆",
+    supplier: "深圳市飞龙通达物流有限公司",
+    plate: "粤Z1234港",
+    driver: "陈志强",
+    hkDriver: "陈志强",
+    mainlandDriver: "",
+    transportMode: "单司机",
+    loading: "深圳 / 南山 / 蛇口仓",
+    unloading: "香港 / 九龙 / 葵涌货柜码头",
+    date: "2026-06-30",
+    receivableHKD: 2380,
+    receivableRMB: 0,
+    status: "待审核",
+    remark: "模板预览样例：外派车辆出口运输",
+    tripNoEnabled: 1,
+    tripNo: "TRIP-0630-01",
+    sixSheetEnabled: 0,
+    sixSheetNo: ""
+  },
+  {
+    no: "HY2606300002",
+    dispatchNo: "PC260630002",
+    customerId: "KH00021054",
+    customer: "深圳市文永供应链管理有限公司",
+    businessType: "运输+报关",
+    port: "莲塘海关",
+    direction: "进口",
+    tonnage: "3T",
+    currency: "人民币",
+    quantity: 32,
+    weight: "860kg",
+    vehicleSource: "本公司车辆",
+    supplier: "-",
+    plate: "粤ZFC62港",
+    driver: "李永洪",
+    hkDriver: "李永洪",
+    mainlandDriver: "",
+    transportMode: "双司机",
+    loading: "香港 / 新界 / 元朗工业区",
+    unloading: "深圳 / 龙岗 / 坂田仓库",
+    date: "2026-06-30",
+    receivableHKD: 0,
+    receivableRMB: 1850,
+    status: "已审核",
+    remark: "模板预览样例：进口运输+报关",
+    tripNoEnabled: 1,
+    tripNo: "TRIP-0630-02",
+    sixSheetEnabled: 1,
+    sixSheetNo: "LS2026063002"
+  },
+  {
+    no: "HY2606300003",
+    dispatchNo: "PC260629001",
+    customerId: "KH00021055",
+    customer: "深圳市环联程物流有限公司",
+    businessType: "运输",
+    port: "文锦渡海关",
+    direction: "出口",
+    tonnage: "12T",
+    currency: "港币",
+    quantity: 6,
+    weight: "4600kg",
+    vehicleSource: "本公司车辆",
+    supplier: "-",
+    plate: "粤ZYR22港",
+    driver: "廖永贤",
+    hkDriver: "廖永贤",
+    mainlandDriver: "张伟强",
+    transportMode: "口岸转国内车",
+    loading: "深圳 / 宝安 / 福永仓",
+    unloading: "香港 / 沙田 / 火炭仓",
+    date: "2026-06-29",
+    receivableHKD: 4200,
+    receivableRMB: 0,
+    status: "待审核",
+    remark: "模板预览样例：口岸转国内车",
+    tripNoEnabled: 0,
+    tripNo: "",
+    sixSheetEnabled: 0,
+    sixSheetNo: ""
+  },
+  {
+    no: "HY2608019001",
+    dispatchNo: "PC260801901",
+    customerId: "KH00021056",
+    customer: "香港恒达贸易有限公司",
+    businessType: "运输",
+    port: "深圳湾海关",
+    direction: "出口",
+    tonnage: "5T",
+    currency: "港币",
+    quantity: 20,
+    weight: "1500kg",
+    vehicleSource: "本公司车辆",
+    supplier: "-",
+    plate: "港AU7421",
+    driver: "黄启明",
+    hkDriver: "黄启明",
+    mainlandDriver: "",
+    transportMode: "单司机",
+    loading: "深圳 / 南山 / 蛇口仓",
+    unloading: "香港 / 九龙 / 观塘开联工业中心",
+    date: "2026-08-01",
+    receivableHKD: 2550,
+    receivableRMB: 0,
+    status: "通关中",
+    remark: "当前月样例：香港客户出口",
+    tripNoEnabled: 1,
+    tripNo: "TRIP-0801-01",
+    sixSheetEnabled: 0,
+    sixSheetNo: ""
+  },
+  {
+    no: "HY2608029001",
+    dispatchNo: "PC260802901",
+    customerId: "KH00021054",
+    customer: "深圳市文永供应链管理有限公司",
+    businessType: "运输+报关",
+    port: "莲塘海关",
+    direction: "进口",
+    tonnage: "5T",
+    currency: "人民币",
+    quantity: 24,
+    weight: "1260kg",
+    vehicleSource: "外派车辆",
+    supplier: "香港顺安跨境物流有限公司",
+    plate: "港AU7421",
+    driver: "黄启明",
+    hkDriver: "黄启明",
+    mainlandDriver: "",
+    transportMode: "单司机",
+    loading: "香港 / 新界 / 元朗工业区",
+    unloading: "深圳 / 龙岗 / 坂田仓库",
+    date: "2026-08-02",
+    receivableHKD: 0,
+    receivableRMB: 2250,
+    status: "已审核",
+    remark: "当前月样例：供应商外派进口",
+    tripNoEnabled: 0,
+    tripNo: "",
+    sixSheetEnabled: 1,
+    sixSheetNo: "LS2026080201"
+  },
+  {
+    no: "HY2608030001",
+    dispatchNo: "PC260803001",
+    customerId: "KH00021053",
+    customer: "深圳市汉业国际货运代理有限公司",
+    businessType: "运输+报关",
+    port: "大桥海关",
+    direction: "出口",
+    tonnage: "3T",
+    currency: "港币",
+    quantity: 12,
+    weight: "980kg",
+    vehicleSource: "本公司车辆",
+    supplier: "-",
+    plate: "粤ZFC62港",
+    driver: "李永洪",
+    hkDriver: "李永洪",
+    mainlandDriver: "王敏",
+    transportMode: "双司机",
+    loading: "深圳 / 龙岗 / 坂田仓库",
+    unloading: "香港 / 新界 / 元朗工业区",
+    date: "2026-08-03",
+    receivableHKD: 2800,
+    receivableRMB: 500,
+    status: "待确认",
+    remark: "当前月样例：同一订单含港币和人民币收费",
+    tripNoEnabled: 1,
+    tripNo: "TRIP-0803-01",
+    sixSheetEnabled: 1,
+    sixSheetNo: "LS2026080301"
+  }
+];
+
+const DEMO_ORDER_FEES = {
+  HY2606300001: [
+    { category: "正常", name: "基础运费", quantity: 1, unitPrice: 2100, currency: "港币", amount: 2100, remark: "5T 蛇口至葵涌", driverRole: "", driverName: "" },
+    { category: "正常", name: "装货费", quantity: 18, unitPrice: 10, currency: "港币", amount: 180, remark: "按板数", driverRole: "", driverName: "" },
+    { category: "代垫", name: "过海费", quantity: 1, unitPrice: 100, currency: "港币", amount: 100, remark: "司机代垫", driverRole: "香港司机", driverName: "陈志强" }
+  ],
+  HY2606300002: [
+    { category: "正常", name: "基础运费", quantity: 1, unitPrice: 1500, currency: "人民币", amount: 1500, remark: "3T 元朗至坂田", driverRole: "", driverName: "" },
+    { category: "正常", name: "报关服务费", quantity: 1, unitPrice: 350, currency: "人民币", amount: 350, remark: "莲塘进口报关", driverRole: "", driverName: "" }
+  ],
+  HY2606300003: [
+    { category: "正常", name: "基础运费", quantity: 1, unitPrice: 3600, currency: "港币", amount: 3600, remark: "12T 福永至火炭", driverRole: "", driverName: "" },
+    { category: "正常", name: "装货费", quantity: 6, unitPrice: 50, currency: "港币", amount: 300, remark: "大板装货", driverRole: "", driverName: "" },
+    { category: "正常", name: "卸货费", quantity: 6, unitPrice: 50, currency: "港币", amount: 300, remark: "香港卸货", driverRole: "", driverName: "" }
+  ],
+  HY2608019001: [
+    { category: "正常", name: "基础运费", quantity: 1, unitPrice: 2300, currency: "港币", amount: 2300, remark: "5T 深圳湾出口", driverRole: "", driverName: "" },
+    { category: "正常", name: "加点费", quantity: 1, unitPrice: 250, currency: "港币", amount: 250, remark: "观塘加点", driverRole: "", driverName: "" }
+  ],
+  HY2608029001: [
+    { category: "正常", name: "基础运费", quantity: 1, unitPrice: 1800, currency: "人民币", amount: 1800, remark: "5T 元朗至坂田", driverRole: "", driverName: "" },
+    { category: "正常", name: "报关服务费", quantity: 1, unitPrice: 350, currency: "人民币", amount: 350, remark: "进口报关", driverRole: "", driverName: "" },
+    { category: "正常", name: "等候费", quantity: 1, unitPrice: 100, currency: "人民币", amount: 100, remark: "装货等候", driverRole: "", driverName: "" }
+  ],
+  HY2608030001: [
+    { category: "正常", name: "基础运费", quantity: 1, unitPrice: 2500, currency: "港币", amount: 2500, remark: "3T 大桥出口", driverRole: "", driverName: "" },
+    { category: "代垫", name: "香港司机代垫", quantity: 1, unitPrice: 300, currency: "港币", amount: 300, remark: "香港停车/杂费", driverRole: "香港司机", driverName: "李永洪" },
+    { category: "正常", name: "查验服务费", quantity: 1, unitPrice: 500, currency: "人民币", amount: 500, remark: "大桥查验", driverRole: "", driverName: "" }
+  ]
+};
+
+const DEMO_DRIVER_WAGE_RULES = [
+  { driverName: "", direction: "出口", city: "深圳", transportMode: "单司机", currency: "港币", baseRMB: 0, baseHKD: 520, loadPerBoard: 10, unloadPerBoard: 10, crossSeaFee: 180, addPointFee: 120, waitingPerHour: 80, advanceFeeRates: { "过海费": 180, "停车费": 60, "香港司机代垫": 120 }, note: "通用单司机出口规则" },
+  { driverName: "", direction: "进口", city: "香港", transportMode: "单司机", currency: "港币", baseRMB: 0, baseHKD: 560, loadPerBoard: 10, unloadPerBoard: 10, crossSeaFee: 180, addPointFee: 120, waitingPerHour: 80, advanceFeeRates: { "过海费": 180, "停车费": 60 }, note: "通用单司机进口规则" },
+  { driverName: "李永洪", direction: "进口", city: "香港", transportMode: "双司机", currency: "人民币", baseRMB: 420, baseHKD: 260, loadPerBoard: 8, unloadPerBoard: 8, crossSeaFee: 180, addPointFee: 100, waitingPerHour: 70, advanceFeeRates: { "香港司机代垫": 120, "大陆骑师代垫": 80 }, note: "李永洪双司机进口规则" },
+  { driverName: "廖永贤", direction: "出口", city: "深圳", transportMode: "口岸转国内车", currency: "港币", baseRMB: 280, baseHKD: 680, loadPerBoard: 12, unloadPerBoard: 12, crossSeaFee: 220, addPointFee: 150, waitingPerHour: 90, advanceFeeRates: { "过海费": 220, "停车费": 80 }, note: "12T 出口/口岸转车" },
+  { driverName: "张伟强", direction: "出口", city: "深圳", transportMode: "口岸转国内车", currency: "人民币", baseRMB: 360, baseHKD: 0, loadPerBoard: 6, unloadPerBoard: 6, crossSeaFee: 0, addPointFee: 50, waitingPerHour: 50, advanceFeeRates: { "大陆骑师代垫": 80 }, note: "大陆骑师接驳规则" }
+];
+
+const DEMO_DRIVER_ADJUSTMENTS = [
+  { driverName: "李永洪", date: "2026-08-01", type: "预支款", currency: "港币", amount: 500, status: "待工资结算", note: "8月预支生活费" },
+  { driverName: "廖永贤", date: "2026-07-30", type: "报销", currency: "港币", amount: 180, status: "待工资结算", note: "停车票报销" },
+  { driverName: "张伟强", date: "2026-08-02", type: "预支款", currency: "人民币", amount: 300, status: "待工资结算", note: "国内接驳油费预支" }
+];
+
+const DEMO_RULE_ITEMS = [
+  { ruleType: "业务规则", name: "订单审核规则", content: "订单状态为“已审核”后，不允许普通删除；需要先由管理员撤回或走回收站流程。", enabled: 1 },
+  { ruleType: "财务规则", name: "对账导出规则", content: "客户对账优先按订单日期筛选；同一订单的港币、人民币应收分开汇总。", enabled: 1 },
+  { ruleType: "车辆司机规则", name: "司机工资规则", content: "司机工资按司机、方向、城市、运输模式匹配；无专属规则时使用通用规则。", enabled: 1 }
+];
+
+const DEMO_MASTER_DATA = [
+  { type: "口岸", name: "深圳湾海关", value: "深圳湾海关", sortOrder: 1 },
+  { type: "口岸", name: "莲塘海关", value: "莲塘海关", sortOrder: 2 },
+  { type: "口岸", name: "文锦渡海关", value: "文锦渡海关", sortOrder: 3 },
+  { type: "口岸", name: "大桥海关", value: "大桥海关", sortOrder: 4 },
+  { type: "吨位", name: "3T", value: "3T", sortOrder: 1 },
+  { type: "吨位", name: "5T", value: "5T", sortOrder: 2 },
+  { type: "吨位", name: "12T", value: "12T", sortOrder: 3 },
+  { type: "账期", name: "现结", value: "现结", sortOrder: 1 },
+  { type: "账期", name: "月结15天", value: "月结15天", sortOrder: 2 },
+  { type: "账期", name: "月结30天", value: "月结30天", sortOrder: 3 },
+  { type: "账期", name: "月结45天", value: "月结45天", sortOrder: 4 },
+  { type: "城市", name: "深圳", value: "深圳", sortOrder: 1 },
+  { type: "城市", name: "香港", value: "香港", sortOrder: 2 },
+  { type: "订单状态", name: "待确认", value: "待确认", sortOrder: 1 },
+  { type: "订单状态", name: "待审核", value: "待审核", sortOrder: 2 },
+  { type: "订单状态", name: "通关中", value: "通关中", sortOrder: 3 },
+  { type: "订单状态", name: "已审核", value: "已审核", sortOrder: 4 },
+  { type: "订单状态", name: "缺票据", value: "缺票据", sortOrder: 5 }
+];
+
+function demoExportTemplateContent() {
+  return JSON.stringify({
+    type: "visual-export-template",
+    orientation: "landscape",
+    header: "汉业物流订单明细\n导出日期：{{date}}",
+    headerX: 24,
+    headerY: 18,
+    headerTextItems: [
+      { id: "demo-title", text: "汉业物流订单明细", x: 24, y: 18, width: 360, align: "left", fontFamily: "standard-serif-cn", fontSize: 18, color: "#17233c" },
+      { id: "demo-subtitle", text: "导出日期：{{date}}    制表人：{{user}}", x: 24, y: 48, width: 420, align: "left", fontFamily: "standard-sans-cn", fontSize: 11, color: "#475569" }
+    ],
+    footerTextItems: [
+      { id: "demo-footer", text: "第 {{page}} / {{pages}} 页", x: 760, y: 742, width: 180, align: "right", fontFamily: "standard-sans-cn", fontSize: 10, color: "#64748b" }
+    ],
+    logo: "",
+    logoName: "",
+    logoWidth: 92,
+    logoHeight: 56,
+    logoFit: "contain",
+    logoX: 18,
+    logoY: 12,
+    footer: "第 {{page}} / {{pages}} 页",
+    headerHeight: 82,
+    footerHeight: 52,
+    headerFontFamily: "standard-serif-cn",
+    headerFontSize: 14,
+    headerTextColor: "#17233c",
+    tableFontFamily: "standard-serif-cn",
+    tableFontSize: 10,
+    tableTextColor: "#1f2937",
+    tableHeaderTextColor: "#164e8f",
+    tableHeaderBgColor: "#eef6ff",
+    tableBorderColor: "#dbeafe",
+    tableBorderWidth: 1,
+    tableHeaderBold: true,
+    tableBold: false,
+    tableAlign: "left",
+    footerFontFamily: "standard-sans-cn",
+    footerFontSize: 10,
+    footerTextColor: "#64748b",
+    columns: [
+      { key: "dispatchNo", label: "排车单号", visible: true, width: 86, fontSize: 10 },
+      { key: "no", label: "订单号", visible: true, width: 90, fontSize: 10 },
+      { key: "customer", label: "客户", visible: true, width: 142, fontSize: 10 },
+      { key: "businessType", label: "业务", visible: true, width: 58, fontSize: 10 },
+      { key: "port", label: "口岸", visible: true, width: 76, fontSize: 10 },
+      { key: "direction", label: "进出口", visible: true, width: 54, fontSize: 10 },
+      { key: "tonnage", label: "吨位", visible: true, width: 46, fontSize: 10 },
+      { key: "quantity", label: "件数", visible: true, width: 44, fontSize: 10 },
+      { key: "loading", label: "装货地", visible: true, width: 150, fontSize: 10 },
+      { key: "unloading", label: "卸货地", visible: true, width: 150, fontSize: 10 },
+      { key: "date", label: "日期", visible: true, width: 72, fontSize: 10 },
+      { key: "__hkdTotal", label: "港币合计", visible: true, width: 74, fontSize: 10, align: "right" },
+      { key: "__rmbTotal", label: "人民币合计", visible: true, width: 78, fontSize: 10, align: "right" },
+      { key: "status", label: "状态", visible: true, width: 58, fontSize: 10 }
+    ]
+  });
+}
+
+function demoDispatchPlanRows(date) {
+  const rows = DEMO_ORDERS
+    .filter((order) => order.date === date)
+    .map((order, index) => ({
+      id: `demo-${date}-${index + 1}`,
+      dispatchNo: order.dispatchNo,
+      orderNo: order.no,
+      customer: order.customer,
+      plate: order.plate,
+      port: order.port,
+      direction: order.direction,
+      tonnage: order.tonnage,
+      quantity: order.quantity,
+      weight: order.weight,
+      loading: order.loading,
+      unloading: order.unloading,
+      loadTime: `${date} ${index === 0 ? "09:30" : index === 1 ? "13:30" : "16:00"}`,
+      vehicleSource: order.vehicleSource,
+      supplier: order.supplier,
+      transportMode: order.transportMode,
+      driver: order.driver,
+      hkDriver: order.hkDriver,
+      mainlandDriver: order.mainlandDriver,
+      status: order.status === "已审核" ? "已派车" : "待派车",
+      note: order.remark
+    }));
+  return rows;
+}
+
+async function seedCustomer(item) {
+  await db.prepare(`
+    INSERT INTO customers
+      (id, type, name, province, city, address, term, tax_no, contact, mobile, driver_wage_adjust_hkd,
+       default_template_id, receivable_rmb, receivable_hkd, recent_order, invoice_title, invoice_tax_no,
+       invoice_bank, invoice_account, invoice_address_phone, created_at)
+    SELECT
+      @id, @type, @name, @province, @city, @address, @term, @taxNo, @contact, @mobile, @driverWageAdjustHKD,
+      @defaultTemplateId, @receivableRMB, @receivableHKD, @recentOrder, @invoiceTitle, @invoiceTaxNo,
+      @invoiceBank, @invoiceAccount, @invoiceAddressPhone, @createdAt
+    WHERE NOT EXISTS (
+      SELECT 1 FROM customers
+      WHERE id = @id OR (deleted_at IS NULL AND type = @type AND name = @name)
+    )
+    ON CONFLICT (id) DO NOTHING
+  `).run(item);
+}
+
+async function seedCustomerContact(item) {
+  await db.prepare(`
+    INSERT INTO customer_contacts
+      (customer_id, name, gender, title, mobile, phone, area, address, fax, email, wechat, qq, remark)
+    SELECT
+      @customerId, @name, @gender, @title, @mobile, @phone, @area, @address, @fax, @email, @wechat, @qq, @remark
+    WHERE EXISTS (
+      SELECT 1 FROM customers WHERE id = @customerId AND deleted_at IS NULL
+    )
+      AND NOT EXISTS (
+        SELECT 1 FROM customer_contacts
+        WHERE deleted_at IS NULL AND customer_id = @customerId AND name = @name AND mobile = @mobile
+      )
+  `).run(item);
+}
+
+async function seedAddressBook(item) {
+  await db.prepare(`
+    INSERT INTO address_book (area, contact, phone, address, note)
+    SELECT @area, @contact, @phone, @address, @note
+    WHERE NOT EXISTS (
+      SELECT 1 FROM address_book
+      WHERE deleted_at IS NULL AND address = @address AND phone = @phone
+    )
+  `).run(item);
+}
+
+async function seedVehicle(item) {
+  await db.prepare(`
+    INSERT INTO vehicles
+      (plate, brand, model, vehicle_type, purchase_date, factory_date, mainland_review_date,
+       hk_review_date, mainland_insurance_date, hk_insurance_date, insurance_reminder,
+       maintenance_reminder, status, monthly_cost, note)
+    VALUES
+      (@plate, @brand, @model, @type, @purchaseDate, @factoryDate, @mainlandReviewDate,
+       @hkReviewDate, @mainlandInsuranceDate, @hkInsuranceDate, @insuranceReminder,
+       @maintenanceReminder, @status, @monthlyCost, @note)
+    ON CONFLICT (plate) DO NOTHING
+  `).run(item);
+}
+
+async function seedDriver(item) {
+  await db.prepare(`
+    INSERT INTO drivers
+      (type, name, phone, id_no, license, birthday, hire_date, leave_date, expire_at, status, default_wage, note)
+    VALUES
+      (@type, @name, @phone, @idNo, @license, @birthday, @hireDate, @leaveDate, @expireAt, @status, @defaultWage, @note)
+    ON CONFLICT (name) DO NOTHING
+  `).run(item);
+}
+
+async function seedFeeItem(item) {
+  await db.prepare(`
+    INSERT INTO fee_items (category, name, currency, default_amount, default_driver_role, sort_order)
+    VALUES (@category, @name, @currency, @defaultAmount, @defaultDriverRole, @sortOrder)
+    ON CONFLICT (name) DO NOTHING
+  `).run(item);
+}
+
+async function seedFreightRate(item) {
+  await db.prepare(`
+    INSERT INTO freight_rates (customer_id, customer_name, direction, level1, level2, level3, city, tonnage, rmb_amount, hkd_amount, sort_order)
+    SELECT '', '', @direction, @level1, @level2, @level3, @city, @tonnage, @rmbAmount, @hkdAmount, @sortOrder
+    WHERE NOT EXISTS (
+      SELECT 1 FROM freight_rates
+      WHERE deleted_at IS NULL
+        AND customer_id = ''
+        AND direction = @direction
+        AND level1 = @level1
+        AND level2 = @level2
+        AND level3 = @level3
+        AND tonnage = @tonnage
+    )
+  `).run(item);
+}
+
+async function seedOrder(item) {
+  const customer = await db.prepare(`
+    SELECT id, name
+    FROM customers
+    WHERE deleted_at IS NULL
+      AND (id = ? OR (type = '客户' AND name = ?))
+    ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END
+    LIMIT 1
+  `).get(item.customerId, item.customer, item.customerId);
+  if (!customer) return;
+
+  await db.prepare(`
+    INSERT INTO orders
+      (no, dispatch_no, customer_id, customer, business_type, port, direction, tonnage, currency, quantity,
+       weight, vehicle_source, supplier, plate, driver, hk_driver, mainland_driver, transport_mode, loading, unloading,
+       order_date, receivable_hkd, receivable_rmb, status, remark, trip_no_enabled, trip_no, six_sheet_enabled, six_sheet_no)
+    VALUES
+      (@no, @dispatchNo, @customerId, @customer, @businessType, @port, @direction, @tonnage, @currency, @quantity,
+       @weight, @vehicleSource, @supplier, @plate, @driver, @hkDriver, @mainlandDriver, @transportMode, @loading, @unloading,
+       @date, @receivableHKD, @receivableRMB, @status, @remark, @tripNoEnabled, @tripNo, @sixSheetEnabled, @sixSheetNo)
+    ON CONFLICT (no) DO NOTHING
+  `).run({ ...item, customerId: customer.id, customer: customer.name });
+}
+
+async function seedOrderFees(orderNo, fees, sourceOrder = null) {
+  const order = await db.prepare("SELECT no, customer_id, customer FROM orders WHERE no = ? AND deleted_at IS NULL").get(orderNo);
+  if (!order) return;
+  if (sourceOrder && order.customer_id !== sourceOrder.customerId && order.customer !== sourceOrder.customer) return;
+  const existing = await db.prepare("SELECT COUNT(*) AS count FROM order_fees WHERE order_no = ?").get(orderNo);
+  if (Number(existing?.count || 0) > 0) return;
+
+  const insert = db.prepare(`
+    INSERT INTO order_fees (order_no, category, name, quantity, unit_price, currency, amount, remark, driver_role, driver_name)
+    VALUES (@orderNo, @category, @name, @quantity, @unitPrice, @currency, @amount, @remark, @driverRole, @driverName)
+  `);
+  for (const fee of fees) {
+    await insert.run({ orderNo, ...fee });
+  }
+}
+
+async function driverIdByName(name) {
+  if (!name) return null;
+  const row = await db.prepare("SELECT id FROM drivers WHERE deleted_at IS NULL AND name = ? LIMIT 1").get(name);
+  return row?.id || null;
+}
+
+async function seedDriverWageRule(item) {
+  const driverId = await driverIdByName(item.driverName);
+  if (item.driverName && !driverId) return;
+  const params = {
+    ...item,
+    driverId,
+    advanceFeeRates: JSON.stringify(item.advanceFeeRates || {})
+  };
+  await db.prepare(`
+    INSERT INTO driver_wage_rules
+      (driver_id, direction, city, transport_mode, currency, base_rmb, base_hkd, load_per_board, unload_per_board,
+       cross_sea_fee, add_point_fee, waiting_per_hour, advance_fee_rates, note)
+    SELECT
+      @driverId, @direction, @city, @transportMode, @currency, @baseRMB, @baseHKD, @loadPerBoard, @unloadPerBoard,
+      @crossSeaFee, @addPointFee, @waitingPerHour, @advanceFeeRates, @note
+    WHERE NOT EXISTS (
+      SELECT 1 FROM driver_wage_rules
+      WHERE deleted_at IS NULL
+        AND COALESCE(driver_id, 0) = COALESCE(@driverId, 0)
+        AND direction = @direction
+        AND city = @city
+        AND transport_mode = @transportMode
+    )
+  `).run(params);
+}
+
+async function seedDriverAdjustment(item) {
+  const driverId = await driverIdByName(item.driverName);
+  if (!driverId) return;
+  await db.prepare(`
+    INSERT INTO driver_adjustments (driver_id, date, type, currency, amount, status, note)
+    SELECT @driverId, @date, @type, @currency, @amount, @status, @note
+    WHERE NOT EXISTS (
+      SELECT 1 FROM driver_adjustments
+      WHERE deleted_at IS NULL
+        AND driver_id = @driverId
+        AND date = @date
+        AND type = @type
+        AND currency = @currency
+        AND amount = @amount
+        AND note = @note
+    )
+  `).run({ ...item, driverId });
+}
+
+async function seedTemplate() {
+  await db.prepare(`
+    INSERT INTO templates (name, format, description, content, updated_at)
+    VALUES
+      ('标准订单导出模板', '通用', '演示数据：订单导出、客户对账、司机对账可复用的基础模板', @content, CURRENT_TIMESTAMP)
+    ON CONFLICT (name) DO NOTHING
+  `).run({ content: demoExportTemplateContent() });
+}
+
+async function seedRuleItem(item) {
+  await db.prepare(`
+    INSERT INTO rule_items (rule_type, name, content, enabled)
+    SELECT @ruleType, @name, @content, @enabled
+    WHERE NOT EXISTS (
+      SELECT 1 FROM rule_items
+      WHERE deleted_at IS NULL AND rule_type = @ruleType AND name = @name
+    )
+  `).run(item);
+}
+
+async function seedMasterData(item) {
+  await db.prepare(`
+    INSERT INTO master_data (type, name, value, sort_order)
+    VALUES (@type, @name, @value, @sortOrder)
+    ON CONFLICT (type, name) DO NOTHING
+  `).run(item);
+}
+
+async function seedDispatchPlan(date) {
+  const rows = demoDispatchPlanRows(date);
+  if (rows.length === 0) return;
+  await db.prepare(`
+    INSERT INTO dispatch_plans (plan_date, rows_json, updated_at)
+    VALUES (@date, @rowsJson, CURRENT_TIMESTAMP)
+    ON CONFLICT (plan_date) DO NOTHING
+  `).run({ date, rowsJson: JSON.stringify(rows) });
+}
+
+async function seedHiddenHistoryAddress(address) {
+  const key = String(address || "").replace(/\s+/g, "").toLowerCase();
+  if (!key) return;
+  await db.prepare(`
+    INSERT INTO hidden_history_addresses (address_key, address)
+    VALUES (@key, @address)
+    ON CONFLICT (address_key) DO NOTHING
+  `).run({ key, address });
+}
+
+async function seedDemoData() {
+  for (const item of DEMO_CUSTOMERS) await seedCustomer(item);
+  for (const item of DEMO_CUSTOMER_CONTACTS) await seedCustomerContact(item);
+  for (const item of DEMO_ADDRESS_BOOK) await seedAddressBook(item);
+  for (const item of DEMO_VEHICLES) await seedVehicle(item);
+  for (const item of DEMO_DRIVERS) await seedDriver(item);
+  for (const item of DEMO_FEE_ITEMS) await seedFeeItem(item);
+  for (const item of DEMO_FREIGHT_RATES) await seedFreightRate(item);
+  for (const item of DEMO_ORDERS) await seedOrder(item);
+  for (const [orderNo, fees] of Object.entries(DEMO_ORDER_FEES)) {
+    await seedOrderFees(orderNo, fees, DEMO_ORDERS.find((item) => item.no === orderNo));
+  }
+  for (const item of DEMO_DRIVER_WAGE_RULES) await seedDriverWageRule(item);
+  for (const item of DEMO_DRIVER_ADJUSTMENTS) await seedDriverAdjustment(item);
+  for (const item of DEMO_RULE_ITEMS) await seedRuleItem(item);
+  for (const item of DEMO_MASTER_DATA) await seedMasterData(item);
+  await seedTemplate();
+  await seedDispatchPlan("2026-06-30");
+  await seedDispatchPlan("2026-08-03");
+  await seedHiddenHistoryAddress("历史地址样例：深圳 / 南山 / 科技园临时仓");
 }
 
 export async function writeAudit(action, entityType, entityId, detail = "") {

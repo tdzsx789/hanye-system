@@ -1,6 +1,7 @@
 import cors from "cors";
 import ExcelJS from "exceljs";
 import express from "express";
+import OSS from "ali-oss";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import zlib from "node:zlib";
@@ -15,7 +16,7 @@ import {
   verifyPassword
 } from "./auth.js";
 import PDFDocument from "pdfkit";
-import { db, databaseInfo, writeAudit } from "./db.js";
+import { db, databaseInfo, withAdvisoryLock, writeAudit } from "./db.js";
 
 const app = express();
 const port = Number(process.env.PORT || 5174);
@@ -29,20 +30,54 @@ const extraCorsOrigins = new Set(
 );
 const SAFE_FILE_TYPES = [
   { extensions: [".png"], mimes: ["image/png"] },
-  { extensions: [".jpg", ".jpeg"], mimes: ["image/jpeg"] },
+  { extensions: [".jpg", ".jpeg"], mimes: ["image/jpeg", "image/pjpeg"] },
   { extensions: [".webp"], mimes: ["image/webp"] },
   { extensions: [".gif"], mimes: ["image/gif"] },
-  { extensions: [".pdf"], mimes: ["application/pdf"] },
-  { extensions: [".txt"], mimes: ["text/plain"] },
-  { extensions: [".csv"], mimes: ["text/csv", "application/csv", "application/vnd.ms-excel"] },
-  { extensions: [".doc"], mimes: ["application/msword"] },
-  { extensions: [".docx"], mimes: ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"] },
-  { extensions: [".xls"], mimes: ["application/vnd.ms-excel"] },
-  { extensions: [".xlsx"], mimes: ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"] }
+  { extensions: [".bmp"], mimes: ["image/bmp", "image/x-ms-bmp"] },
+  { extensions: [".tif", ".tiff"], mimes: ["image/tiff"] },
+  { extensions: [".avif"], mimes: ["image/avif"] },
+  { extensions: [".heic"], mimes: ["image/heic", "image/heif"] },
+  { extensions: [".heif"], mimes: ["image/heif", "image/heic"] },
+  { extensions: [".svg"], mimes: ["image/svg+xml"] },
+  { extensions: [".pdf"], mimes: ["application/pdf"] }
 ];
-const PREVIEW_MIMES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif", "application/pdf", "text/plain"]);
+const PREVIEW_MIMES = new Set(SAFE_FILE_TYPES.flatMap((item) => item.mimes));
 const AUTH_TOKEN_TTL_SECONDS = Number(process.env.AUTH_TOKEN_TTL_SECONDS || 7 * 24 * 60 * 60);
 const AUTH_SECRET = process.env.HANYE_AUTH_SECRET || process.env.AUTH_SECRET || "hanye-system-local-dev-secret";
+const OSS_ACCESS_KEY_ID = String(process.env.OSS_ACCESS_KEY_ID || process.env.ALIYUN_ACCESS_KEY_ID || process.env.ALIBABA_CLOUD_ACCESS_KEY_ID || "").trim();
+const OSS_ACCESS_KEY_SECRET = String(process.env.OSS_ACCESS_KEY_SECRET || process.env.ALIYUN_ACCESS_KEY_SECRET || process.env.ALIBABA_CLOUD_ACCESS_KEY_SECRET || "").trim();
+const OSS_BUCKET = String(process.env.OSS_BUCKET || "").trim();
+const OSS_REGION = String(process.env.OSS_REGION || "").trim();
+const OSS_ENDPOINT = String(process.env.OSS_ENDPOINT || "").trim();
+const OSS_KEY_PREFIX = String(process.env.OSS_KEY_PREFIX || "hanye-system/uploads").trim();
+const OSS_SIGNED_URL_EXPIRES_SECONDS = Math.max(60, Number(process.env.OSS_SIGNED_URL_EXPIRES_SECONDS || 60 * 60));
+const OSS_CONFIG_REQUESTED = Boolean(OSS_BUCKET || OSS_REGION || OSS_ENDPOINT || OSS_ACCESS_KEY_ID || OSS_ACCESS_KEY_SECRET);
+const OSS_ENABLED = Boolean(OSS_BUCKET && (OSS_REGION || OSS_ENDPOINT) && OSS_ACCESS_KEY_ID && OSS_ACCESS_KEY_SECRET);
+const ossClient = OSS_ENABLED ? new OSS({
+  accessKeyId: OSS_ACCESS_KEY_ID,
+  accessKeySecret: OSS_ACCESS_KEY_SECRET,
+  bucket: OSS_BUCKET,
+  cname: truthyEnv(process.env.OSS_CNAME),
+  endpoint: OSS_ENDPOINT || undefined,
+  internal: truthyEnv(process.env.OSS_INTERNAL),
+  region: OSS_REGION || undefined,
+  secure: !falsyEnv(process.env.OSS_SECURE)
+}) : null;
+const fileStorageProvider = ossClient ? "oss" : "oss-unconfigured";
+
+if (OSS_CONFIG_REQUESTED && !OSS_ENABLED) {
+  console.warn("OSS config is incomplete. File uploads are disabled until OSS is configured.");
+} else if (!OSS_ENABLED) {
+  console.warn("OSS is required for file storage. File uploads are disabled until OSS is configured.");
+}
+
+function truthyEnv(value) {
+  return ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
+}
+
+function falsyEnv(value) {
+  return ["0", "false", "no", "off"].includes(String(value || "").trim().toLowerCase());
+}
 
 function base64UrlEncode(value) {
   return Buffer.from(value).toString("base64url");
@@ -190,6 +225,7 @@ function mapCustomer(row) {
     city: row.city,
     address: row.address || "",
     term: row.term,
+    settlementCurrency: row.settlement_currency || (row.type === "客户" ? "人民币结算" : ""),
     taxNo: row.tax_no || "",
     contact: row.contact || "",
     mobile: row.mobile || "",
@@ -215,14 +251,17 @@ function normalizeCustomerPayload(body, id = "") {
   const name = String(body.name || "").trim();
   const address = String(body.address || invoice.address || "").trim();
   const taxNo = String(body.taxNo || invoice.taxNo || "").trim();
+  const type = body.type === "供应商" ? "供应商" : "客户";
+  const settlementCurrency = String(body.settlementCurrency || "").trim();
   return {
     id,
-    type: body.type === "供应商" ? "供应商" : "客户",
+    type,
     name,
     province: String(body.province || "广东省").trim(),
     city: String(body.city || "深圳市").trim(),
     address,
     term: String(body.term || "月结30天").trim(),
+    settlementCurrency: type === "客户" ? (settlementCurrency || "人民币结算") : "",
     taxNo,
     contact: String(body.contact || "").trim(),
     mobile: String(body.mobile || "").trim(),
@@ -433,10 +472,19 @@ function bufferMatchesMime(buffer, mime) {
   if (!Buffer.isBuffer(buffer) || buffer.length === 0) return false;
   if (mime === "image/png") return buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
   if (mime === "image/jpeg") return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  if (mime === "image/pjpeg") return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
   if (mime === "image/gif") return buffer.subarray(0, 6).toString("ascii") === "GIF87a" || buffer.subarray(0, 6).toString("ascii") === "GIF89a";
   if (mime === "image/webp") return buffer.subarray(0, 4).toString("ascii") === "RIFF" && buffer.subarray(8, 12).toString("ascii") === "WEBP";
+  if (mime === "image/bmp" || mime === "image/x-ms-bmp") return buffer.subarray(0, 2).toString("ascii") === "BM";
+  if (mime === "image/tiff") {
+    const littleEndian = buffer.subarray(0, 4).equals(Buffer.from([0x49, 0x49, 0x2a, 0x00]));
+    const bigEndian = buffer.subarray(0, 4).equals(Buffer.from([0x4d, 0x4d, 0x00, 0x2a]));
+    return littleEndian || bigEndian;
+  }
+  if (mime === "image/avif") return buffer.subarray(4, 12).toString("ascii").startsWith("ftypavif");
+  if (mime === "image/heic" || mime === "image/heif") return /^ftyphei[cfmsx]|^ftypmif1/.test(buffer.subarray(4, 12).toString("ascii"));
+  if (mime === "image/svg+xml") return /^\s*(?:<\?xml[^>]*>\s*)?<svg[\s>]/i.test(buffer.toString("utf8", 0, Math.min(buffer.length, 2048)));
   if (mime === "application/pdf") return buffer.subarray(0, 5).toString("ascii") === "%PDF-";
-  if (mime === "text/plain" || mime === "text/csv" || mime === "application/csv") return !buffer.subarray(0, 1024).includes(0);
   return true;
 }
 
@@ -444,7 +492,7 @@ function validateStoredFilePayload(item) {
   const filename = sanitizeFilename(item.filename);
   const mime = normalizeMime(item.mime);
   const rule = fileTypeRule(filename, mime);
-  if (!rule) return { error: "不支持的文件类型，请上传图片、PDF、Word、Excel、CSV 或 TXT" };
+  if (!rule) return { error: "不支持的文件类型，请上传图片或 PDF 文件" };
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(item.contentBase64) || item.contentBase64.length % 4 !== 0) {
     return { error: "文件内容格式不正确" };
   }
@@ -456,6 +504,136 @@ function validateStoredFilePayload(item) {
   }
   if (!bufferMatchesMime(buffer, mime)) return { error: "文件类型与内容不匹配，已拒绝上传" };
   return { filename, mime, size: buffer.length, contentBase64: buffer.toString("base64") };
+}
+
+function cleanOssPrefix(value) {
+  return String(value || "")
+    .replace(/^\/+|\/+$/g, "")
+    .replace(/\/{2,}/g, "/");
+}
+
+function ossHashSegment(value) {
+  return crypto.createHash("sha1").update(String(value || "")).digest("hex").slice(0, 16);
+}
+
+function ossObjectKeyForFile(item, file) {
+  const dateParts = todayInputValue().split("-");
+  const extension = fileExtension(file.filename) || ".bin";
+  const entityType = String(item.entityType || "file").replace(/[^A-Za-z0-9_-]/g, "") || "file";
+  const entityHash = ossHashSegment(`${item.entityType}:${item.entityId}`);
+  const prefix = cleanOssPrefix(OSS_KEY_PREFIX);
+  return [
+    prefix,
+    entityType,
+    entityHash,
+    dateParts[0],
+    dateParts[1],
+    `${crypto.randomUUID()}${extension}`
+  ].filter(Boolean).join("/");
+}
+
+function contentDispositionHeader(disposition, filename) {
+  const fallback = sanitizeFilename(filename)
+    .replace(/[^\x20-\x7E]/g, "_")
+    .replace(/["\\;]/g, "_") || "download";
+  return `${disposition}; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
+}
+
+async function deleteOssObjectByKey(objectKey) {
+  if (!ossClient || !objectKey) return;
+  try {
+    await ossClient.delete(objectKey);
+  } catch (error) {
+    const status = Number(error?.status || error?.statusCode || error?.res?.status || 0);
+    if (status === 404 || error?.code === "NoSuchKey") return;
+    throw error;
+  }
+}
+
+async function deleteStoredOssObject(row) {
+  if (row?.storage_provider !== "oss" || !row?.object_key) return;
+  await deleteOssObjectByKey(row.object_key);
+}
+
+async function ossStorageForUpload(item, file) {
+  if (!ossClient) {
+    throw new Error("OSS 文件存储未配置，不能上传附件");
+  }
+  const buffer = Buffer.from(file.contentBase64, "base64");
+  const objectKey = ossObjectKeyForFile(item, file);
+  const result = await ossClient.put(objectKey, buffer, {
+    mime: file.mime,
+    headers: {
+      "Content-Disposition": contentDispositionHeader("attachment", file.filename)
+    }
+  });
+  return {
+    storageProvider: "oss",
+    bucket: OSS_BUCKET,
+    objectKey,
+    etag: String(result?.res?.headers?.etag || "").replaceAll('"', ""),
+    contentBase64: ""
+  };
+}
+
+function signedOssUrl(row, disposition = "attachment") {
+  if (!ossClient || !row?.object_key) return "";
+  return ossClient.signatureUrl(row.object_key, {
+    expires: OSS_SIGNED_URL_EXPIRES_SECONDS,
+    response: {
+      "content-disposition": contentDispositionHeader(disposition, row.filename)
+    }
+  });
+}
+
+async function migrateDatabaseFilesToOss() {
+  return withAdvisoryLock(524459, async () => {
+    const rows = await db.prepare(`
+      SELECT * FROM files
+      WHERE COALESCE(storage_provider, 'database') <> 'oss'
+        AND COALESCE(object_key, '') = ''
+        AND COALESCE(content_base64, '') <> ''
+      ORDER BY id ASC
+    `).all();
+    if (rows.length === 0) return { migrated: 0, skipped: 0 };
+    if (!ossClient) {
+      console.warn(`Found ${rows.length} database-stored file(s), but OSS is not configured. Configure OSS and restart to migrate them.`);
+      return { migrated: 0, skipped: rows.length };
+    }
+
+    let migrated = 0;
+    for (const row of rows) {
+      const file = {
+        filename: sanitizeFilename(row.filename),
+        mime: normalizeMime(row.mime),
+        contentBase64: row.content_base64
+      };
+      const objectKey = ossObjectKeyForFile({ entityType: row.entity_type, entityId: row.entity_id }, file);
+      const result = await ossClient.put(objectKey, Buffer.from(file.contentBase64, "base64"), {
+        mime: file.mime,
+        headers: {
+          "Content-Disposition": contentDispositionHeader("attachment", file.filename)
+        }
+      });
+      await db.prepare(`
+        UPDATE files
+        SET storage_provider = 'oss',
+            bucket = @bucket,
+            object_key = @objectKey,
+            etag = @etag,
+            content_base64 = ''
+        WHERE id = @id
+      `).run({
+        id: row.id,
+        bucket: OSS_BUCKET,
+        objectKey,
+        etag: String(result?.res?.headers?.etag || "").replaceAll('"', "")
+      });
+      migrated += 1;
+    }
+    console.log(`Migrated ${migrated} database-stored file(s) to OSS.`);
+    return { migrated, skipped: 0 };
+  });
 }
 
 function resolvePdfFontPath() {
@@ -1608,6 +1786,8 @@ function mapFeeItem(row) {
 function mapFreightRate(row) {
   return {
     id: row.id,
+    customerId: row.customer_id || "",
+    customerName: row.customer_name || "",
     direction: row.direction,
     level1: row.level1 || row.city || "",
     level2: row.level2 || "",
@@ -1657,6 +1837,150 @@ function mapDriverAdjustment(row) {
     status: row.status,
     note: row.note,
     createdAt: row.created_at
+  };
+}
+
+function parseJsonArrayText(value) {
+  if (Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(String(value || "[]"));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function mapDriverRouteAdjustRule(row) {
+  const driverIds = parseJsonArrayText(row.driver_ids)
+    .map((id) => Number(id))
+    .filter((id) => Number.isFinite(id) && id > 0);
+  const driverNames = parseJsonArrayText(row.driver_names)
+    .map((name) => String(name || "").trim())
+    .filter(Boolean);
+  return {
+    id: row.id,
+    sourceKey: row.source_key || "",
+    customerName: row.customer_name || "",
+    driverIds,
+    driverNames,
+    driverId: row.driver_id || "",
+    driverName: row.driver_name || "",
+    transportMode: normalizeTransportMode(row.transport_mode || ""),
+    loading: row.loading || "",
+    unloading: row.unloading || "",
+    amountHKD: row.amount_hkd || 0,
+    amountRMB: row.amount_rmb || 0,
+    note: row.note || "",
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || ""
+  };
+}
+
+function mapStatementDownload(row) {
+  return {
+    id: row.id,
+    key: row.download_key || "",
+    downloadKey: row.download_key || "",
+    type: row.statement_type || "customer",
+    statementType: row.statement_type || "customer",
+    entityName: row.entity_name || "全部",
+    start: row.start_date || "",
+    end: row.end_date || "",
+    downloadedAt: row.downloaded_at || row.updated_at || row.created_at || "",
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || ""
+  };
+}
+
+function mapCustomsBusiness(row) {
+  return {
+    id: row.id,
+    date: row.business_date || "",
+    declarationNo: row.declaration_no || "",
+    sixSheetNo: row.six_sheet_no || "",
+    company: row.company || "",
+    direction: row.direction || "",
+    itemCount: Number(row.item_count || 0),
+    pageCount: Number(row.page_count || 0),
+    customsFee: Number(row.customs_fee || 0),
+    pageFee: Number(row.page_fee || 0),
+    manifestFee: Number(row.manifest_fee || 0),
+    inspectionFee: Number(row.inspection_fee || 0),
+    checkFee: Number(row.check_fee || 0),
+    otherFee: Number(row.other_fee || 0),
+    total: Number(row.total || 0),
+    remark: row.remark || "",
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || ""
+  };
+}
+
+function normalizeCustomsBusinessDate(value) {
+  const text = String(value || "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : todayInputValue();
+}
+
+function normalizeCustomsMonth(value) {
+  const text = String(value || "").trim();
+  return /^\d{4}-\d{2}$/.test(text) ? text : todayInputValue().slice(0, 7);
+}
+
+function normalizeCustomsYear(value) {
+  const text = String(value || "").trim().slice(0, 4);
+  return /^\d{4}$/.test(text) ? text : todayInputValue().slice(0, 4);
+}
+
+function nextMonthValue(month) {
+  const [year, monthIndex] = normalizeCustomsMonth(month).split("-").map(Number);
+  const next = new Date(year, monthIndex, 1);
+  return `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function customsBusinessPeriodBounds(query = {}) {
+  const period = String(query.period || "").trim();
+  const mode = String(query.mode || "").trim();
+  if (period === "all" || mode === "all") return { start: "", end: "" };
+
+  const periodYearMatched = period.match(/^year:(\d{4})$/);
+  if (periodYearMatched || mode === "year") {
+    const year = normalizeCustomsYear(periodYearMatched?.[1] || query.year);
+    return { start: `${year}-01-01`, end: `${Number(year) + 1}-01-01` };
+  }
+
+  const month = normalizeCustomsMonth(period || query.month);
+  return { start: `${month}-01`, end: `${nextMonthValue(month)}-01` };
+}
+
+function numberField(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function normalizeCustomsBusinessPayload(body = {}) {
+  const customsFee = numberField(body.customsFee ?? body.customs_fee);
+  const pageFee = numberField(body.pageFee ?? body.page_fee);
+  const manifestFee = numberField(body.manifestFee ?? body.manifest_fee);
+  const inspectionFee = numberField(body.inspectionFee ?? body.inspection_fee);
+  const checkFee = numberField(body.checkFee ?? body.check_fee);
+  const otherFee = numberField(body.otherFee ?? body.other_fee);
+  const totalInput = body.total ?? "";
+  const computedTotal = customsFee + pageFee + manifestFee + inspectionFee + checkFee + otherFee;
+  return {
+    date: normalizeCustomsBusinessDate(body.date ?? body.businessDate ?? body.business_date),
+    declarationNo: String(body.declarationNo ?? body.declaration_no ?? "").trim(),
+    sixSheetNo: String(body.sixSheetNo ?? body.six_sheet_no ?? "").trim(),
+    company: String(body.company ?? "").trim(),
+    direction: String(body.direction ?? "").trim(),
+    itemCount: numberField(body.itemCount ?? body.item_count),
+    pageCount: numberField(body.pageCount ?? body.page_count),
+    customsFee,
+    pageFee,
+    manifestFee,
+    inspectionFee,
+    checkFee,
+    otherFee,
+    total: totalInput === "" || totalInput === null || totalInput === undefined ? computedTotal : numberField(totalInput),
+    remark: String(body.remark ?? "").trim()
   };
 }
 
@@ -1736,6 +2060,10 @@ function mapAuditLog(row) {
 }
 
 function mapFile(row) {
+  const storageProvider = row.storage_provider || "";
+  const hasOssObject = storageProvider === "oss" && Boolean(row.object_key);
+  const previewUrl = hasOssObject ? signedOssUrl(row, "inline") : "";
+  const downloadUrl = hasOssObject ? signedOssUrl(row, "attachment") : "";
   return {
     id: row.id,
     entityType: row.entity_type,
@@ -1744,6 +2072,10 @@ function mapFile(row) {
     filename: row.filename,
     mime: row.mime,
     size: row.size,
+    storageProvider,
+    previewUrl,
+    downloadUrl,
+    available: Boolean(previewUrl || downloadUrl),
     createdAt: row.created_at,
     deletedAt: row.deleted_at || ""
   };
@@ -1791,7 +2123,7 @@ async function nextOrderNo() {
 }
 
 app.get("/api/health", async (_req, res) => {
-  res.json({ ok: true, database: databaseInfo });
+  res.json({ ok: true, database: databaseInfo, fileStorage: fileStorageProvider });
 });
 
 app.post("/api/auth/login", async (req, res) => {
@@ -1815,6 +2147,10 @@ app.post("/api/auth/login", async (req, res) => {
     return;
   }
   const role = normalizeAccountRole(row.role);
+  if (role === "司机") {
+    res.status(403).json({ message: "司机账号无系统登录权限" });
+    return;
+  }
   const permissions = JSON.stringify(accountPermissionsForRole(role));
   await db.prepare(`
     UPDATE app_accounts
@@ -1851,6 +2187,10 @@ async function authenticateApiRequest(req, res, next) {
     res.status(401).json({ message: "登录状态已失效，请重新登录" });
     return;
   }
+  if (normalizeAccountRole(row.role) === "司机") {
+    res.status(401).json({ message: "司机账号无系统登录权限" });
+    return;
+  }
   req.account = mapAccount(row);
   next();
 }
@@ -1859,6 +2199,17 @@ function requiredModuleForRequest(req) {
   const path = req.path;
   if (path.startsWith("/accounts")) return "accounts";
   if (path.startsWith("/audit-logs")) return "security";
+  if (path.startsWith("/customers")) return "customers";
+  if (path.startsWith("/customer-contacts")) return "customers";
+  if (path.startsWith("/orders")) return "orders";
+  if (path.startsWith("/customs-businesses")) return "customsBusiness";
+  if (path.startsWith("/dispatch-plans")) return "dispatchBoard";
+  if (path.startsWith("/vehicles")) return "vehicleDriver";
+  if (path.startsWith("/drivers")) return "vehicleDriver";
+  if (path.startsWith("/driver-wage-rules")) return "vehicleDriver";
+  if (path.startsWith("/driver-adjustments")) return "vehicleDriver";
+  if (path.startsWith("/driver-route-adjust-rules")) return "financeWages";
+  if (path.startsWith("/statement-downloads")) return "financeCosts";
   if (path.startsWith("/rules")) return "rules";
   if (path.startsWith("/templates") && req.method !== "GET") return "templates";
   if (path.startsWith("/master-data") && req.method !== "GET") return "master";
@@ -1936,6 +2287,42 @@ app.patch("/api/auth/profile", async (req, res) => {
   res.json(mapAccount(await db.prepare("SELECT * FROM app_accounts WHERE id = ?").get(req.account.id)));
 });
 
+app.get("/api/customs-businesses", async (req, res) => {
+  const { start, end } = customsBusinessPeriodBounds(req.query);
+  const dateWhere = start && end ? "AND business_date >= ? AND business_date < ?" : "";
+  const params = start && end ? [start, end] : [];
+  const rows = await db.prepare(`
+    SELECT * FROM customs_businesses
+    WHERE deleted_at IS NULL
+      ${dateWhere}
+    ORDER BY business_date DESC, id DESC
+  `).all(...params);
+  res.json(rows.map(mapCustomsBusiness));
+});
+
+app.post("/api/customs-businesses", async (req, res) => {
+  const item = normalizeCustomsBusinessPayload(req.body || {});
+  if (!item.company) {
+    res.status(400).json({ message: "请填写公司名称" });
+    return;
+  }
+  if (!item.declarationNo && !item.sixSheetNo) {
+    res.status(400).json({ message: "请填写报关单号或六联单号" });
+    return;
+  }
+  const result = await db.prepare(`
+    INSERT INTO customs_businesses
+      (business_date, declaration_no, six_sheet_no, company, direction, item_count, page_count,
+       customs_fee, page_fee, manifest_fee, inspection_fee, check_fee, other_fee, total, remark)
+    VALUES
+      (@date, @declarationNo, @sixSheetNo, @company, @direction, @itemCount, @pageCount,
+       @customsFee, @pageFee, @manifestFee, @inspectionFee, @checkFee, @otherFee, @total, @remark)
+  `).run(item);
+  await writeAudit("create", "customs_business", String(result.lastInsertId), `${item.date}/${item.company}/${item.declarationNo || item.sixSheetNo}`);
+  const row = await db.prepare("SELECT * FROM customs_businesses WHERE id = ?").get(result.lastInsertId);
+  res.status(201).json(mapCustomsBusiness(row));
+});
+
 app.get("/api/files", async (req, res) => {
   const entityType = String(req.query.entityType || "").trim();
   const entityId = String(req.query.entityId || "").trim();
@@ -1995,6 +2382,11 @@ app.post("/api/files", async (req, res) => {
     res.status(400).json({ message: "文件名称、归属和内容不能为空" });
     return;
   }
+  if (!ossClient) {
+    await writeAudit("reject_upload", "file", `${item.entityType}/${item.entityId}`, `${item.filename}: OSS 未配置`);
+    res.status(503).json({ message: "OSS 文件存储未配置，不能上传附件" });
+    return;
+  }
   const validated = validateStoredFilePayload(item);
   if (validated.error) {
     await writeAudit("reject_upload", "file", `${item.entityType}/${item.entityId}`, `${item.filename}: ${validated.error}`);
@@ -2002,10 +2394,31 @@ app.post("/api/files", async (req, res) => {
     return;
   }
 
-  const result = await db.prepare(`
-    INSERT INTO files (entity_type, entity_id, category, filename, mime, size, content_base64)
-    VALUES (@entityType, @entityId, @category, @filename, @mime, @size, @contentBase64)
-  `).run({ ...item, ...validated });
+  let storage;
+  try {
+    storage = await ossStorageForUpload(item, validated);
+  } catch (error) {
+    console.error("OSS upload failed", error);
+    await writeAudit("reject_upload", "file", `${item.entityType}/${item.entityId}`, `${validated.filename}: OSS 上传失败`);
+    res.status(502).json({ message: "OSS 上传失败，请检查 Bucket、Region、AccessKey 和服务器网络配置" });
+    return;
+  }
+  let result;
+  try {
+    result = await db.prepare(`
+      INSERT INTO files
+        (entity_type, entity_id, category, filename, mime, size, content_base64, storage_provider, bucket, object_key, etag)
+      VALUES
+        (@entityType, @entityId, @category, @filename, @mime, @size, @contentBase64, @storageProvider, @bucket, @objectKey, @etag)
+    `).run({ ...item, ...validated, ...storage });
+  } catch (error) {
+    if (storage.storageProvider === "oss") {
+      await deleteOssObjectByKey(storage.objectKey).catch((deleteError) => {
+        console.error("Failed to clean up OSS object after database insert error", deleteError);
+      });
+    }
+    throw error;
+  }
   await writeAudit("upload", "file", String(result.lastInsertId), `${item.entityType}/${item.entityId}/${validated.filename}`);
   const row = await db.prepare("SELECT * FROM files WHERE id = ?").get(result.lastInsertId);
   res.status(201).json(mapFile(row));
@@ -2020,12 +2433,21 @@ async function sendStoredFile(req, res, disposition) {
   }
   const mime = normalizeMime(row.mime);
   const safeDisposition = disposition === "inline" && PREVIEW_MIMES.has(mime) ? "inline" : "attachment";
-  const filename = encodeURIComponent(row.filename);
-  res.setHeader("Content-Type", mime || "application/octet-stream");
-  res.setHeader("Content-Disposition", `${safeDisposition}; filename*=UTF-8''${filename}`);
-  res.setHeader("Content-Security-Policy", "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox");
-  await writeAudit(safeDisposition === "inline" ? "preview" : "download", "file", String(id), row.filename);
-  res.send(Buffer.from(row.content_base64, "base64"));
+  if (row.storage_provider === "oss" && row.object_key) {
+    if (!ossClient) {
+      res.status(503).json({ message: "OSS 文件存储未配置，暂时无法读取该附件" });
+      return;
+    }
+    const url = signedOssUrl(row, safeDisposition);
+    if (!url) {
+      res.status(503).json({ message: "OSS 签名地址生成失败，请检查 OSS 配置" });
+      return;
+    }
+    await writeAudit(safeDisposition === "inline" ? "preview" : "download", "file", String(id), row.filename);
+    res.redirect(302, url);
+    return;
+  }
+  res.status(410).json({ message: "该附件尚未迁移到 OSS，请配置 OSS 并重启服务完成迁移" });
 }
 
 app.get("/api/files/:id/preview", async (req, res) => sendStoredFile(req, res, "inline"));
@@ -2064,6 +2486,11 @@ app.delete("/api/files/:id/permanent", async (req, res) => {
     res.status(404).json({ message: "文件不存在" });
     return;
   }
+  if (row.storage_provider === "oss" && row.object_key && !ossClient) {
+    res.status(503).json({ message: "OSS 文件存储未配置，暂时无法彻底删除该附件" });
+    return;
+  }
+  await deleteStoredOssObject(row);
   await db.prepare("DELETE FROM files WHERE id = ?").run(id);
   await writeAudit("purge", "file", String(id), row.filename);
   res.json({ ok: true });
@@ -2094,6 +2521,7 @@ app.patch("/api/customers/:id", async (req, res) => {
         city = @city,
         address = @address,
         term = @term,
+        settlement_currency = @settlementCurrency,
         receivable_rmb = @receivableRMB,
         receivable_hkd = @receivableHKD,
         tax_no = @taxNo,
@@ -2126,11 +2554,11 @@ app.post("/api/customers", async (req, res) => {
 
   await db.prepare(`
     INSERT INTO customers
-      (id, type, name, province, city, address, term, receivable_rmb, receivable_hkd, recent_order, created_at,
+      (id, type, name, province, city, address, term, settlement_currency, receivable_rmb, receivable_hkd, recent_order, created_at,
        tax_no, contact, mobile, driver_wage_adjust_hkd, default_template_id,
        invoice_title, invoice_tax_no, invoice_bank, invoice_account, invoice_address_phone)
     VALUES
-      (@id, @type, @name, @province, @city, @address, @term, @receivableRMB, @receivableHKD, @recentOrder, @createdAt,
+      (@id, @type, @name, @province, @city, @address, @term, @settlementCurrency, @receivableRMB, @receivableHKD, @recentOrder, @createdAt,
        @taxNo, @contact, @mobile, @driverWageAdjustHKD, @defaultTemplateId,
        @invoiceTitle, @invoiceTaxNo, @invoiceBank, @invoiceAccount, @invoiceAddressPhone)
   `).run(item);
@@ -2241,6 +2669,28 @@ app.delete("/api/customer-contacts/:id", async (req, res) => {
 app.get("/api/orders", async (_req, res) => {
   const rows = await db.prepare("SELECT * FROM orders WHERE deleted_at IS NULL ORDER BY order_date DESC, no DESC").all();
   res.json(await hydrateOrderFees(rows.map(mapOrder)));
+});
+
+app.get("/api/dispatch-plans", async (req, res) => {
+  const { start, end } = customsBusinessPeriodBounds(req.query);
+  const dateWhere = start && end ? "WHERE plan_date >= ? AND plan_date < ?" : "";
+  const params = start && end ? [start, end] : [];
+  const records = await db.prepare(`
+    SELECT * FROM dispatch_plans
+    ${dateWhere}
+    ORDER BY plan_date DESC
+  `).all(...params);
+  const rows = records.map((row) => {
+    let planRows = [];
+    try {
+      const parsed = JSON.parse(row.rows_json || "[]");
+      planRows = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      planRows = [];
+    }
+    return { date: row.plan_date, rows: planRows, updatedAt: row.updated_at || "" };
+  });
+  res.json(rows);
 });
 
 app.get("/api/dispatch-plans/:date", async (req, res) => {
@@ -2655,6 +3105,11 @@ app.post("/api/vehicles", async (req, res) => {
     res.status(400).json({ message: "车牌不能为空" });
     return;
   }
+  const duplicate = await db.prepare("SELECT plate FROM vehicles WHERE plate = ?").get(item.plate);
+  if (duplicate) {
+    res.status(409).json({ message: "车牌已存在，不能重复" });
+    return;
+  }
   await db.prepare(`
     INSERT INTO vehicles
       (plate, brand, model, vehicle_type, purchase_date, factory_date, mainland_review_date,
@@ -2666,7 +3121,7 @@ app.post("/api/vehicles", async (req, res) => {
        @maintenanceReminder, @status, @monthlyCost, @note)
   `).run(item);
   await writeAudit("create", "vehicle", item.plate, item.note);
-  res.status(201).json(item);
+  res.status(201).json(mapVehicle(await db.prepare("SELECT * FROM vehicles WHERE plate = ?").get(item.plate)));
 });
 
 app.patch("/api/vehicles/:plate", async (req, res) => {
@@ -2779,12 +3234,17 @@ app.post("/api/drivers", async (req, res) => {
     res.status(400).json({ message: "司机姓名不能为空" });
     return;
   }
+  const duplicate = await db.prepare("SELECT id FROM drivers WHERE name = ?").get(item.name);
+  if (duplicate) {
+    res.status(409).json({ message: "司机姓名已存在，不能重复" });
+    return;
+  }
   const result = await db.prepare(`
     INSERT INTO drivers (type, name, phone, id_no, license, birthday, hire_date, leave_date, expire_at, status, default_wage, note)
     VALUES (@type, @name, @phone, @idNo, @license, @birthday, @hireDate, @leaveDate, @expireAt, @status, @defaultWage, @note)
   `).run(item);
   await writeAudit("create", "driver", String(result.lastInsertId), item.name);
-  res.status(201).json({ id: result.lastInsertId, ...item });
+  res.status(201).json(mapDriver(await db.prepare("SELECT * FROM drivers WHERE id = ?").get(result.lastInsertId)));
 });
 
 app.patch("/api/drivers/:id", async (req, res) => {
@@ -3063,6 +3523,213 @@ app.delete("/api/driver-adjustments/:id", async (req, res) => {
   res.json({ ok: true });
 });
 
+function readDriverRouteAdjustRulePayload(body, current = null) {
+  const sourceKey = String(
+    body.sourceKey ?? body.source_key ??
+    (typeof body.id === "string" && !/^\d+$/.test(body.id) ? body.id : "") ??
+    current?.source_key ?? ""
+  ).trim();
+  const rawDriverIds = Array.isArray(body.driverIds)
+    ? body.driverIds
+    : parseJsonArrayText(body.driver_ids ?? current?.driver_ids);
+  const driverIds = rawDriverIds
+    .map((id) => Number(id))
+    .filter((id) => Number.isFinite(id) && id > 0);
+  const rawDriverNames = Array.isArray(body.driverNames)
+    ? body.driverNames
+    : parseJsonArrayText(body.driver_names ?? current?.driver_names);
+  const driverNames = rawDriverNames
+    .map((name) => String(name || "").trim())
+    .filter(Boolean);
+  const driverIdValue = body.driverId ?? body.driver_id ?? current?.driver_id ?? (driverIds.length === 1 ? driverIds[0] : null);
+  const driverId = Number(driverIdValue || 0) || null;
+  const driverName = String(
+    body.driverName ?? body.driver_name ?? current?.driver_name ?? (driverNames.length === 1 ? driverNames[0] : "")
+  ).trim();
+  const transportMode = normalizeTransportMode(body.transportMode ?? body.transport_mode ?? current?.transport_mode ?? "");
+  return {
+    sourceKey,
+    customerName: String(body.customerName ?? body.customer_name ?? current?.customer_name ?? "").trim(),
+    driverIds: JSON.stringify(driverIds),
+    driverNames: JSON.stringify(driverNames),
+    driverId,
+    driverName,
+    transportMode,
+    loading: String(body.loading ?? current?.loading ?? "").trim(),
+    unloading: String(body.unloading ?? current?.unloading ?? "").trim(),
+    amountHKD: Number(body.amountHKD ?? body.amount_hkd ?? current?.amount_hkd ?? 0) || 0,
+    amountRMB: Number(body.amountRMB ?? body.amount_rmb ?? current?.amount_rmb ?? 0) || 0,
+    note: String(body.note ?? current?.note ?? "").trim()
+  };
+}
+
+function driverRouteAdjustRuleHasScope(item) {
+  const driverIds = parseJsonArrayText(item.driverIds);
+  return Boolean(item.customerName || item.loading || item.unloading || item.driverId || item.driverName || driverIds.length);
+}
+
+async function saveDriverRouteAdjustRule(item) {
+  if (item.driverId) {
+    const driver = await db.prepare("SELECT id FROM drivers WHERE id = ? AND deleted_at IS NULL").get(item.driverId);
+    if (!driver) item = { ...item, driverId: null };
+  }
+  const sql = item.sourceKey ? `
+    INSERT INTO driver_route_adjust_rules
+      (source_key, customer_name, driver_ids, driver_names, driver_id, driver_name, transport_mode, loading, unloading, amount_hkd, amount_rmb, note)
+    VALUES
+      (@sourceKey, @customerName, @driverIds, @driverNames, @driverId, @driverName, @transportMode, @loading, @unloading, @amountHKD, @amountRMB, @note)
+    ON CONFLICT (source_key) WHERE source_key <> ''
+    DO UPDATE SET
+      customer_name = excluded.customer_name,
+      driver_ids = excluded.driver_ids,
+      driver_names = excluded.driver_names,
+      driver_id = excluded.driver_id,
+      driver_name = excluded.driver_name,
+      transport_mode = excluded.transport_mode,
+      loading = excluded.loading,
+      unloading = excluded.unloading,
+      amount_hkd = excluded.amount_hkd,
+      amount_rmb = excluded.amount_rmb,
+      note = excluded.note,
+      updated_at = CURRENT_TIMESTAMP,
+      deleted_at = NULL
+  ` : `
+    INSERT INTO driver_route_adjust_rules
+      (source_key, customer_name, driver_ids, driver_names, driver_id, driver_name, transport_mode, loading, unloading, amount_hkd, amount_rmb, note)
+    VALUES
+      (@sourceKey, @customerName, @driverIds, @driverNames, @driverId, @driverName, @transportMode, @loading, @unloading, @amountHKD, @amountRMB, @note)
+  `;
+  const result = await db.prepare(sql).run(item);
+  return db.prepare("SELECT * FROM driver_route_adjust_rules WHERE id = ?").get(result.lastInsertId);
+}
+
+app.get("/api/driver-route-adjust-rules", async (_req, res) => {
+  const rows = await db.prepare(`
+    SELECT * FROM driver_route_adjust_rules
+    WHERE deleted_at IS NULL
+    ORDER BY updated_at DESC, id DESC
+  `).all();
+  res.json(rows.map(mapDriverRouteAdjustRule));
+});
+
+app.post("/api/driver-route-adjust-rules", async (req, res) => {
+  const item = readDriverRouteAdjustRulePayload(req.body);
+  if (!driverRouteAdjustRuleHasScope(item)) {
+    res.status(400).json({ message: "请至少填写客户、路线或指定司机" });
+    return;
+  }
+  const row = await saveDriverRouteAdjustRule(item);
+  await writeAudit("create", "driver_route_adjust_rule", String(row.id), `${item.customerName || "全部客户"}/${item.loading || "*"}-${item.unloading || "*"}`);
+  res.status(201).json(mapDriverRouteAdjustRule(row));
+});
+
+app.post("/api/driver-route-adjust-rules/sync", async (req, res) => {
+  const rows = Array.isArray(req.body.rows) ? req.body.rows.slice(0, 1000) : [];
+  const savedRows = [];
+  for (const source of rows) {
+    const item = readDriverRouteAdjustRulePayload(source || {});
+    if (!driverRouteAdjustRuleHasScope(item)) continue;
+    const row = await saveDriverRouteAdjustRule(item);
+    savedRows.push(mapDriverRouteAdjustRule(row));
+  }
+  if (savedRows.length > 0) {
+    await writeAudit("sync", "driver_route_adjust_rule", "legacy-localStorage", `同步 ${savedRows.length} 条`);
+  }
+  res.json(savedRows);
+});
+
+app.delete("/api/driver-route-adjust-rules/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const result = await db.prepare(`
+    UPDATE driver_route_adjust_rules
+    SET deleted_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND deleted_at IS NULL
+  `).run(id);
+  if (result.changes === 0) {
+    res.status(404).json({ message: "司机路线扣减规则不存在或已删除" });
+    return;
+  }
+  await writeAudit("delete", "driver_route_adjust_rule", String(id), "移入回收站");
+  res.json({ ok: true });
+});
+
+function normalizeStatementType(value = "") {
+  return ["customer", "driver", "supplier"].includes(String(value || "")) ? String(value || "") : "customer";
+}
+
+function statementDownloadKey(type, entityName, start, end) {
+  return [type, entityName || "全部", start || "", end || ""].join("|");
+}
+
+function readStatementDownloadPayload(body, current = null) {
+  const type = normalizeStatementType(body.type ?? body.statementType ?? body.statement_type ?? current?.statement_type ?? "customer");
+  const entityName = String(body.entityName ?? body.entity_name ?? current?.entity_name ?? "全部").trim() || "全部";
+  const start = String(body.start ?? body.startDate ?? body.start_date ?? current?.start_date ?? "").trim();
+  const end = String(body.end ?? body.endDate ?? body.end_date ?? current?.end_date ?? "").trim();
+  const downloadKey = String(
+    body.key ?? body.downloadKey ?? body.download_key ?? current?.download_key ?? statementDownloadKey(type, entityName, start, end)
+  ).trim() || statementDownloadKey(type, entityName, start, end);
+  return {
+    downloadKey,
+    statementType: type,
+    entityName,
+    start,
+    end,
+    downloadedAt: String(body.downloadedAt ?? body.downloaded_at ?? current?.downloaded_at ?? new Date().toISOString()).trim()
+  };
+}
+
+async function saveStatementDownload(item) {
+  const result = await db.prepare(`
+    INSERT INTO statement_downloads
+      (download_key, statement_type, entity_name, start_date, end_date, downloaded_at)
+    VALUES
+      (@downloadKey, @statementType, @entityName, @start, @end, @downloadedAt)
+    ON CONFLICT (download_key)
+    DO UPDATE SET
+      statement_type = excluded.statement_type,
+      entity_name = excluded.entity_name,
+      start_date = excluded.start_date,
+      end_date = excluded.end_date,
+      downloaded_at = excluded.downloaded_at,
+      updated_at = CURRENT_TIMESTAMP,
+      deleted_at = NULL
+  `).run(item);
+  return db.prepare("SELECT * FROM statement_downloads WHERE id = ?").get(result.lastInsertId);
+}
+
+app.get("/api/statement-downloads", async (_req, res) => {
+  const rows = await db.prepare(`
+    SELECT * FROM statement_downloads
+    WHERE deleted_at IS NULL
+    ORDER BY downloaded_at DESC, id DESC
+    LIMIT 300
+  `).all();
+  res.json(rows.map(mapStatementDownload));
+});
+
+app.post("/api/statement-downloads", async (req, res) => {
+  const item = readStatementDownloadPayload(req.body);
+  const row = await saveStatementDownload(item);
+  await writeAudit("download", "statement", item.downloadKey, `${item.statementType}/${item.entityName}`);
+  res.status(201).json(mapStatementDownload(row));
+});
+
+app.post("/api/statement-downloads/sync", async (req, res) => {
+  const rows = Array.isArray(req.body.rows) ? req.body.rows.slice(0, 1000) : [];
+  const savedRows = [];
+  for (const source of rows) {
+    const item = readStatementDownloadPayload(source || {});
+    const row = await saveStatementDownload(item);
+    savedRows.push(mapStatementDownload(row));
+  }
+  if (savedRows.length > 0) {
+    await writeAudit("sync", "statement", "legacy-localStorage", `同步 ${savedRows.length} 条下载记录`);
+  }
+  res.json(savedRows);
+});
+
 app.get("/api/fee-items", async (_req, res) => {
   const rows = await db.prepare("SELECT * FROM fee_items WHERE deleted_at IS NULL ORDER BY sort_order ASC, id ASC").all();
   res.json(rows.map(mapFeeItem));
@@ -3189,12 +3856,16 @@ app.delete("/api/fee-items/:id", async (req, res) => {
 });
 
 function readFreightRatePayload(body, current = null) {
+  const customerId = String(body.customerId ?? body.customer_id ?? current?.customer_id ?? "").trim();
+  const customerName = String(body.customerName ?? body.customer_name ?? current?.customer_name ?? "").trim();
   const level1 = String(body.level1 ?? current?.level1 ?? current?.city ?? "").trim();
   const level2 = String(body.level2 ?? current?.level2 ?? "").trim();
   const level3 = String(body.level3 ?? current?.level3 ?? "").trim();
   const cityValue = body.city ?? current?.city ?? "";
   const city = String(cityValue).trim() || level3 || level2 || level1;
   return {
+    customerId,
+    customerName,
     direction: String(body.direction ?? current?.direction ?? "").trim(),
     level1,
     level2,
@@ -3221,17 +3892,18 @@ app.post("/api/freight-rates", async (req, res) => {
   const duplicate = await db.prepare(`
     SELECT id FROM freight_rates
     WHERE deleted_at IS NULL
+      AND customer_id = ?
       AND direction = ? AND level1 = ? AND level2 = ? AND level3 = ? AND tonnage = ?
-  `).get(item.direction, item.level1, item.level2, item.level3, item.tonnage);
+  `).get(item.customerId, item.direction, item.level1, item.level2, item.level3, item.tonnage);
   if (duplicate) {
     res.status(409).json({ message: "同方向、目录、吨位的运费模板已存在" });
     return;
   }
   const result = await db.prepare(`
-    INSERT INTO freight_rates (direction, level1, level2, level3, city, tonnage, rmb_amount, hkd_amount, sort_order)
-    VALUES (@direction, @level1, @level2, @level3, @city, @tonnage, @rmbAmount, @hkdAmount, @sortOrder)
+    INSERT INTO freight_rates (customer_id, customer_name, direction, level1, level2, level3, city, tonnage, rmb_amount, hkd_amount, sort_order)
+    VALUES (@customerId, @customerName, @direction, @level1, @level2, @level3, @city, @tonnage, @rmbAmount, @hkdAmount, @sortOrder)
   `).run(item);
-  await writeAudit("create", "freight_rate", String(result.lastInsertId), `${item.direction}/${item.level1}/${item.level2}/${item.level3}/${item.tonnage}`);
+  await writeAudit("create", "freight_rate", String(result.lastInsertId), `${item.customerName || "公共模板"}/${item.direction}/${item.level1}/${item.level2}/${item.level3}/${item.tonnage}`);
   res.status(201).json(mapFreightRate(await db.prepare("SELECT * FROM freight_rates WHERE id = ?").get(result.lastInsertId)));
 });
 
@@ -3250,20 +3922,22 @@ app.patch("/api/freight-rates/:id", async (req, res) => {
   const duplicate = await db.prepare(`
     SELECT id FROM freight_rates
     WHERE deleted_at IS NULL AND id <> ?
+      AND customer_id = ?
       AND direction = ? AND level1 = ? AND level2 = ? AND level3 = ? AND tonnage = ?
-  `).get(id, item.direction, item.level1, item.level2, item.level3, item.tonnage);
+  `).get(id, item.customerId, item.direction, item.level1, item.level2, item.level3, item.tonnage);
   if (duplicate) {
     res.status(409).json({ message: "同方向、目录、吨位的运费模板已存在" });
     return;
   }
   await db.prepare(`
     UPDATE freight_rates
-    SET direction = @direction, level1 = @level1, level2 = @level2, level3 = @level3,
+    SET customer_id = @customerId, customer_name = @customerName,
+        direction = @direction, level1 = @level1, level2 = @level2, level3 = @level3,
         city = @city, tonnage = @tonnage,
         rmb_amount = @rmbAmount, hkd_amount = @hkdAmount, sort_order = @sortOrder
     WHERE id = @id AND deleted_at IS NULL
   `).run(item);
-  await writeAudit("update", "freight_rate", String(id), `${item.direction}/${item.level1}/${item.level2}/${item.level3}/${item.tonnage}`);
+  await writeAudit("update", "freight_rate", String(id), `${item.customerName || "公共模板"}/${item.direction}/${item.level1}/${item.level2}/${item.level3}/${item.tonnage}`);
   res.json(mapFreightRate(await db.prepare("SELECT * FROM freight_rates WHERE id = ?").get(id)));
 });
 
@@ -3730,6 +4404,13 @@ app.get("/api/audit-logs", async (_req, res) => {
   const rows = await db.prepare("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 200").all();
   res.json(rows.map(mapAuditLog));
 });
+
+try {
+  await migrateDatabaseFilesToOss();
+} catch (error) {
+  console.error("Database file OSS migration failed", error);
+  process.exit(1);
+}
 
 app.listen(port, () => {
   console.log(`Hanye API listening on http://127.0.0.1:${port}`);
