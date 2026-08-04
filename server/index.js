@@ -46,6 +46,7 @@ const AUTH_TOKEN_TTL_SECONDS = Number(process.env.AUTH_TOKEN_TTL_SECONDS || 7 * 
 const AUTH_SECRET = process.env.HANYE_AUTH_SECRET || process.env.AUTH_SECRET || "hanye-system-local-dev-secret";
 const VEHICLE_EXPENSE_TYPES = new Set(["fuel", "repair", "annual", "other"]);
 const VEHICLE_ANNUAL_EXPENSE_NAMES = new Set(["保险费", "年审费", "牌头费"]);
+const VEHICLE_PROFIT_DEFAULT_EXCHANGE_RATE = 0.88;
 const OSS_ACCESS_KEY_ID = String(process.env.OSS_ACCESS_KEY_ID || process.env.ALIYUN_ACCESS_KEY_ID || process.env.ALIBABA_CLOUD_ACCESS_KEY_ID || "").trim();
 const OSS_ACCESS_KEY_SECRET = String(process.env.OSS_ACCESS_KEY_SECRET || process.env.ALIYUN_ACCESS_KEY_SECRET || process.env.ALIBABA_CLOUD_ACCESS_KEY_SECRET || "").trim();
 const OSS_BUCKET = String(process.env.OSS_BUCKET || "").trim();
@@ -1937,7 +1938,35 @@ function mapDriver(row) {
   };
 }
 
+const FEE_ITEM_COST_SOURCE_OPTIONS = ["供应商", "司机", "其他平台", "公司自费"];
+
+function normalizeFeeItemCostSources(value = "供应商") {
+  let parsedValue = value;
+  if (typeof parsedValue === "string" && parsedValue.trim().startsWith("[")) {
+    try {
+      parsedValue = JSON.parse(parsedValue);
+    } catch {
+      parsedValue = value;
+    }
+  }
+  const rawValues = Array.isArray(parsedValue)
+    ? parsedValue
+    : String(parsedValue || "供应商")
+      .replace(/，/g, ",")
+      .replace(/、/g, ",")
+      .split(",");
+  const sources = rawValues
+    .map((source) => String(source || "").trim())
+    .filter((source, index, list) => FEE_ITEM_COST_SOURCE_OPTIONS.includes(source) && list.indexOf(source) === index);
+  return sources.length ? sources : ["供应商"];
+}
+
+function feeItemCostSourceText(value = "供应商") {
+  return normalizeFeeItemCostSources(value).join(",");
+}
+
 function mapFeeItem(row) {
+  const costSources = normalizeFeeItemCostSources(row.cost_source);
   return {
     id: row.id,
     category: row.category,
@@ -1945,6 +1974,8 @@ function mapFeeItem(row) {
     currency: row.currency,
     defaultAmount: row.default_amount,
     defaultDriverRole: row.default_driver_role || "",
+    costSource: costSources.join(","),
+    costSources,
     sortOrder: row.sort_order
   };
 }
@@ -1989,6 +2020,84 @@ function mapDriverWageRule(row) {
     waitingPerHour: row.waiting_per_hour,
     advanceFeeRates,
     note: row.note
+  };
+}
+
+function normalizeCostCenterSource(value = "") {
+  const source = String(value || "").trim();
+  return FEE_ITEM_COST_SOURCE_OPTIONS.includes(source) ? source : "";
+}
+
+function normalizeCostCenterValues(value = {}) {
+  let parsedValue = value;
+  if (typeof parsedValue === "string") {
+    try {
+      parsedValue = JSON.parse(parsedValue || "{}") || {};
+    } catch {
+      parsedValue = {};
+    }
+  }
+  return Object.fromEntries(
+    Object.entries(parsedValue || {})
+      .map(([key, amount]) => [String(key), Number(amount || 0)])
+      .filter(([key]) => key)
+  );
+}
+
+function mapCostCenterRate(row) {
+  return {
+    id: row.id,
+    source: row.source || "",
+    entityId: row.entity_id || "",
+    entityName: row.entity_name || "",
+    origin: row.origin || "",
+    destination: row.destination || "",
+    currency: row.currency || "港币",
+    costValues: normalizeCostCenterValues(row.cost_values),
+    note: row.note || "",
+    updatedAt: row.updated_at || row.created_at || ""
+  };
+}
+
+function normalizePeriodMonthKey(value = "") {
+  const matched = String(value || "").trim().match(/^(\d{4})-(\d{1,2})/);
+  if (!matched) return "";
+  const monthNumber = Number(matched[2]);
+  if (!Number.isInteger(monthNumber) || monthNumber < 1 || monthNumber > 12) return "";
+  return `${matched[1]}-${String(monthNumber).padStart(2, "0")}`;
+}
+
+function normalizeVehicleProfitExchangeRate(value = VEHICLE_PROFIT_DEFAULT_EXCHANGE_RATE) {
+  const rate = Number(value);
+  return Number.isFinite(rate) && rate > 0 ? rate : VEHICLE_PROFIT_DEFAULT_EXCHANGE_RATE;
+}
+
+function mapVehicleProfitExchangeRate(row) {
+  return {
+    id: row.id,
+    periodMonth: row.period_month || "",
+    rate: normalizeVehicleProfitExchangeRate(row.rate),
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || row.created_at || ""
+  };
+}
+
+function readCostCenterRatePayload(body = {}, current = null) {
+  const origin = String(body.origin ?? current?.origin ?? "").trim();
+  const destination = String(body.destination ?? current?.destination ?? "").trim();
+  const source = normalizeCostCenterSource(body.source ?? current?.source ?? "");
+  const entityName = String(body.entityName ?? body.entity_name ?? current?.entity_name ?? "").trim()
+    || [origin, destination].filter(Boolean).join(" - ")
+    || source;
+  return {
+    source,
+    entityId: String(body.entityId ?? body.entity_id ?? current?.entity_id ?? "").trim(),
+    entityName,
+    origin,
+    destination,
+    currency: String(body.currency ?? current?.currency ?? "港币").trim() || "港币",
+    costValues: JSON.stringify(normalizeCostCenterValues(body.costValues ?? body.cost_values ?? current?.cost_values)),
+    note: String(body.note ?? current?.note ?? "").trim()
   };
 }
 
@@ -2052,6 +2161,7 @@ function mapStatementDownload(row) {
     entityName: row.entity_name || "全部",
     start: row.start_date || "",
     end: row.end_date || "",
+    status: normalizeStatementDownloadStatus(row.status || "已导出"),
     downloadedAt: row.downloaded_at || row.updated_at || row.created_at || "",
     createdAt: row.created_at || "",
     updatedAt: row.updated_at || ""
@@ -2100,6 +2210,76 @@ function nextMonthValue(month) {
   const [year, monthIndex] = normalizeCustomsMonth(month).split("-").map(Number);
   const next = new Date(year, monthIndex, 1);
   return `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function dateInputFromDate(date) {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 10);
+}
+
+function parseInputDate(value) {
+  const text = String(value || "").trim();
+  const matched = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!matched) return null;
+  const date = new Date(Number(matched[1]), Number(matched[2]) - 1, Number(matched[3]));
+  return dateInputFromDate(date) === text ? date : null;
+}
+
+function addInputDays(value, days) {
+  const date = parseInputDate(value) || parseInputDate(todayInputValue()) || new Date();
+  date.setDate(date.getDate() + Number(days || 0));
+  return dateInputFromDate(date);
+}
+
+function normalizeDispatchPlanDate(value, fallback = todayInputValue()) {
+  const text = String(value || "").trim();
+  return parseInputDate(text) ? text : fallback;
+}
+
+function dispatchPlanPeriodBounds(query = {}) {
+  const period = String(query.period || "").trim() || "today";
+  if (period === "all") return { start: "", end: "" };
+
+  const today = parseInputDate(todayInputValue()) || new Date();
+  const singleDay = (offset) => {
+    const startDate = new Date(today);
+    startDate.setDate(today.getDate() + offset);
+    const start = dateInputFromDate(startDate);
+    return { start, end: addInputDays(start, 1) };
+  };
+
+  if (period === "yesterday") return singleDay(-1);
+  if (period === "today") return singleDay(0);
+  if (period === "tomorrow") return singleDay(1);
+
+  if (period === "week") {
+    const startDate = new Date(today);
+    startDate.setDate(today.getDate() - ((today.getDay() + 6) % 7));
+    const start = dateInputFromDate(startDate);
+    return { start, end: addInputDays(start, 7) };
+  }
+
+  if (period === "month") {
+    const start = dateInputFromDate(new Date(today.getFullYear(), today.getMonth(), 1));
+    const end = dateInputFromDate(new Date(today.getFullYear(), today.getMonth() + 1, 1));
+    return { start, end };
+  }
+
+  if (period === "lastMonth") {
+    const start = dateInputFromDate(new Date(today.getFullYear(), today.getMonth() - 1, 1));
+    const end = dateInputFromDate(new Date(today.getFullYear(), today.getMonth(), 1));
+    return { start, end };
+  }
+
+  if (period === "custom") {
+    const start = normalizeDispatchPlanDate(query.start || query.from || query.begin);
+    const end = normalizeDispatchPlanDate(query.end || query.to, start);
+    const first = start <= end ? start : end;
+    const last = start <= end ? end : start;
+    return { start: first, end: addInputDays(last, 1) };
+  }
+
+  return singleDay(0);
 }
 
 function customsBusinessPeriodBounds(query = {}) {
@@ -2373,9 +2553,11 @@ function requiredModuleForRequest(req) {
   if (path.startsWith("/vehicle-expenses")) return "vehicleDriver";
   if (path.startsWith("/vehicles")) return "vehicleDriver";
   if (path.startsWith("/drivers")) return "vehicleDriver";
-  if (path.startsWith("/driver-wage-rules")) return "vehicleDriver";
+  if (path.startsWith("/driver-wage-rules")) return "financeCostCenter";
   if (path.startsWith("/driver-adjustments")) return "vehicleDriver";
   if (path.startsWith("/driver-route-adjust-rules")) return "financeWages";
+  if (path.startsWith("/cost-center-rates")) return "financeCostCenter";
+  if (path.startsWith("/vehicle-profit-exchange-rates")) return "bossVehicleProfit";
   if (path.startsWith("/statement-downloads")) return "financeCosts";
   if (path.startsWith("/rules")) return "rules";
   if (path.startsWith("/templates") && req.method !== "GET") return "templates";
@@ -2839,7 +3021,7 @@ app.get("/api/orders", async (_req, res) => {
 });
 
 app.get("/api/dispatch-plans", async (req, res) => {
-  const { start, end } = customsBusinessPeriodBounds(req.query);
+  const { start, end } = dispatchPlanPeriodBounds(req.query);
   const dateWhere = start && end ? "WHERE plan_date >= ? AND plan_date < ?" : "";
   const params = start && end ? [start, end] : [];
   const records = await db.prepare(`
@@ -2983,14 +3165,28 @@ app.post("/api/orders/export/pdf", async (req, res) => {
 });
 
 app.post("/api/orders/audit", async (req, res) => {
-  const orderNos = Array.isArray(req.body.orderNos) ? req.body.orderNos.map(String).filter(Boolean) : [];
+  const orderNos = Array.isArray(req.body.orderNos) ? [...new Set(req.body.orderNos.map(String).filter(Boolean))] : [];
   if (orderNos.length === 0) {
     res.status(400).json({ message: "请选择需要审核的订单" });
     return;
   }
 
-  const update = await db.prepare("UPDATE orders SET status = '已审核' WHERE no = ? AND deleted_at IS NULL");
   const select = await db.prepare("SELECT * FROM orders WHERE no = ? AND deleted_at IS NULL");
+  const blockedRows = [];
+  for (const no of orderNos) {
+    const row = await select.get(no);
+    if (!row) {
+      blockedRows.push(`${no}：订单不存在`);
+    } else if (row.status !== "已签收") {
+      blockedRows.push(`${no}：${row.status || "无状态"}`);
+    }
+  }
+  if (blockedRows.length > 0) {
+    res.status(409).json({ message: `只有已签收订单才能审核：${blockedRows.slice(0, 5).join("、")}${blockedRows.length > 5 ? "等" : ""}` });
+    return;
+  }
+
+  const update = await db.prepare("UPDATE orders SET status = '已审核' WHERE no = ? AND status = '已签收' AND deleted_at IS NULL");
   const updated = [];
 
   const transaction = db.transaction(async (nos) => {
@@ -3194,10 +3390,20 @@ app.patch("/api/orders/:no", async (req, res) => {
 app.patch("/api/orders/:no/status", async (req, res) => {
   const no = String(req.params.no || "").trim();
   const status = String(req.body.status || "").trim();
-  const allowedStatuses = new Set(["待确认", "预排", "正常", "通关中", "待审核", "已审核", "缺票据", "费用待确认"]);
+  const allowedStatuses = new Set(["待确认", "预排", "正常", "通关中", "已签收", "已审核", "缺票据", "费用待确认"]);
 
   if (!allowedStatuses.has(status)) {
     res.status(400).json({ message: "订单状态无效" });
+    return;
+  }
+
+  const current = await db.prepare("SELECT status FROM orders WHERE no = ? AND deleted_at IS NULL").get(no);
+  if (!current) {
+    res.status(404).json({ message: "订单不存在或已删除" });
+    return;
+  }
+  if (status === "已审核" && current.status !== "已签收") {
+    res.status(409).json({ message: "只有已签收订单才能审核" });
     return;
   }
 
@@ -3717,6 +3923,121 @@ app.delete("/api/driver-wage-rules/:id", async (req, res) => {
   res.json({ ok: true });
 });
 
+app.get("/api/cost-center-rates", async (req, res) => {
+  const source = normalizeCostCenterSource(req.query.source);
+  const rows = source
+    ? await db.prepare(`
+        SELECT * FROM cost_center_rates
+        WHERE deleted_at IS NULL AND source = ?
+        ORDER BY origin ASC, destination ASC, entity_name ASC, id ASC
+      `).all(source)
+    : await db.prepare(`
+        SELECT * FROM cost_center_rates
+        WHERE deleted_at IS NULL
+        ORDER BY source ASC, origin ASC, destination ASC, entity_name ASC, id ASC
+      `).all();
+  res.json(rows.map(mapCostCenterRate));
+});
+
+app.post("/api/cost-center-rates", async (req, res) => {
+  const id = Number(req.body?.id || 0);
+  const current = id
+    ? await db.prepare("SELECT * FROM cost_center_rates WHERE id = ? AND deleted_at IS NULL").get(id)
+    : null;
+  if (id && !current) {
+    res.status(404).json({ message: "成本规则不存在或已删除" });
+    return;
+  }
+  const item = readCostCenterRatePayload(req.body, current);
+  if (!item.source) {
+    res.status(400).json({ message: "成本来源不能为空" });
+    return;
+  }
+  if (!item.origin || !item.destination) {
+    res.status(400).json({ message: "装货地和卸货地不能为空" });
+    return;
+  }
+  const payload = {
+    ...item,
+    entityId: item.entityId || `cost-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  };
+  if (id) {
+    await db.prepare(`
+      UPDATE cost_center_rates
+      SET source = @source,
+          entity_id = @entityId,
+          entity_name = @entityName,
+          origin = @origin,
+          destination = @destination,
+          currency = @currency,
+          cost_values = @costValues,
+          note = @note,
+          updated_at = CURRENT_TIMESTAMP,
+          deleted_at = NULL
+      WHERE id = @id
+        AND deleted_at IS NULL
+    `).run({ ...payload, id });
+    await writeAudit("update", "cost_center_rate", String(id), `${payload.source}/${payload.origin}-${payload.destination}`);
+    res.json(mapCostCenterRate(await db.prepare("SELECT * FROM cost_center_rates WHERE id = ?").get(id)));
+    return;
+  }
+  const result = await db.prepare(`
+    INSERT INTO cost_center_rates (source, entity_id, entity_name, origin, destination, currency, cost_values, note)
+    VALUES (@source, @entityId, @entityName, @origin, @destination, @currency, @costValues, @note)
+    RETURNING id
+  `).run(payload);
+  const savedId = result.lastInsertId || result.rows?.[0]?.id;
+  await writeAudit("create", "cost_center_rate", String(savedId || payload.entityId), `${payload.source}/${payload.origin}-${payload.destination}`);
+  res.json(mapCostCenterRate(await db.prepare("SELECT * FROM cost_center_rates WHERE id = ?").get(savedId)));
+});
+
+app.delete("/api/cost-center-rates/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const current = await db.prepare("SELECT * FROM cost_center_rates WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!current) {
+    res.status(404).json({ message: "成本行不存在或已删除" });
+    return;
+  }
+  await db.prepare("UPDATE cost_center_rates SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(id);
+  await writeAudit("delete", "cost_center_rate", String(id), `${current.source}/${current.entity_name}`);
+  res.json({ ok: true });
+});
+
+app.get("/api/vehicle-profit-exchange-rates", async (_req, res) => {
+  const rows = await db.prepare(`
+    SELECT * FROM vehicle_profit_exchange_rates
+    WHERE deleted_at IS NULL
+    ORDER BY period_month DESC
+    LIMIT 240
+  `).all();
+  res.json(rows.map(mapVehicleProfitExchangeRate));
+});
+
+app.post("/api/vehicle-profit-exchange-rates", async (req, res) => {
+  const periodMonth = normalizePeriodMonthKey(req.body?.periodMonth ?? req.body?.period_month ?? req.body?.month);
+  const rate = normalizeVehicleProfitExchangeRate(req.body?.rate ?? req.body?.exchangeRate);
+  if (!periodMonth) {
+    res.status(400).json({ message: "请选择有效月份" });
+    return;
+  }
+  if (!Number.isFinite(Number(req.body?.rate ?? req.body?.exchangeRate)) || Number(req.body?.rate ?? req.body?.exchangeRate) <= 0) {
+    res.status(400).json({ message: "请填写有效汇率" });
+    return;
+  }
+  await db.prepare(`
+    INSERT INTO vehicle_profit_exchange_rates (period_month, rate)
+    VALUES (@periodMonth, @rate)
+    ON CONFLICT (period_month)
+    DO UPDATE SET
+      rate = excluded.rate,
+      updated_at = CURRENT_TIMESTAMP,
+      deleted_at = NULL
+  `).run({ periodMonth, rate });
+  const row = await db.prepare("SELECT * FROM vehicle_profit_exchange_rates WHERE period_month = ?").get(periodMonth);
+  await writeAudit("update", "vehicle_profit_exchange_rate", periodMonth, `汇率 ${rate}`);
+  res.json(mapVehicleProfitExchangeRate(row));
+});
+
 function readDriverAdjustmentPayload(body, current = null) {
   return {
     driverId: body.driverId === undefined ? Number(current?.driver_id || 0) : Number(body.driverId || 0),
@@ -3936,6 +4257,15 @@ function normalizeStatementType(value = "") {
   return ["customer", "driver", "supplier"].includes(String(value || "")) ? String(value || "") : "customer";
 }
 
+function normalizeStatementDownloadStatus(value = "已导出") {
+  const text = String(value || "").trim();
+  return ["未导出", "已导出", "已发送", "已开票"].includes(text) ? text : "已导出";
+}
+
+function isEditableStatementDownloadStatus(value = "") {
+  return ["已导出", "已发送", "已开票"].includes(String(value || "").trim());
+}
+
 function statementDownloadKey(type, entityName, start, end) {
   return [type, entityName || "全部", start || "", end || ""].join("|");
 }
@@ -3954,6 +4284,7 @@ function readStatementDownloadPayload(body, current = null) {
     entityName,
     start,
     end,
+    status: normalizeStatementDownloadStatus(body.status ?? body.statementStatus ?? body.statement_status ?? current?.status ?? "已导出"),
     downloadedAt: String(body.downloadedAt ?? body.downloaded_at ?? current?.downloaded_at ?? new Date().toISOString()).trim()
   };
 }
@@ -3961,15 +4292,16 @@ function readStatementDownloadPayload(body, current = null) {
 async function saveStatementDownload(item) {
   const result = await db.prepare(`
     INSERT INTO statement_downloads
-      (download_key, statement_type, entity_name, start_date, end_date, downloaded_at)
+      (download_key, statement_type, entity_name, start_date, end_date, status, downloaded_at)
     VALUES
-      (@downloadKey, @statementType, @entityName, @start, @end, @downloadedAt)
+      (@downloadKey, @statementType, @entityName, @start, @end, @status, @downloadedAt)
     ON CONFLICT (download_key)
     DO UPDATE SET
       statement_type = excluded.statement_type,
       entity_name = excluded.entity_name,
       start_date = excluded.start_date,
       end_date = excluded.end_date,
+      status = excluded.status,
       downloaded_at = excluded.downloaded_at,
       updated_at = CURRENT_TIMESTAMP,
       deleted_at = NULL
@@ -3992,6 +4324,32 @@ app.post("/api/statement-downloads", async (req, res) => {
   const row = await saveStatementDownload(item);
   await writeAudit("download", "statement", item.downloadKey, `${item.statementType}/${item.entityName}`);
   res.status(201).json(mapStatementDownload(row));
+});
+
+app.patch("/api/statement-downloads/:id/status", async (req, res) => {
+  const id = Number(req.params.id);
+  const status = String(req.body.status ?? req.body.statementStatus ?? req.body.statement_status ?? "").trim();
+  if (!Number.isFinite(id) || id <= 0) {
+    res.status(400).json({ message: "对账单记录无效" });
+    return;
+  }
+  if (!isEditableStatementDownloadStatus(status)) {
+    res.status(400).json({ message: "请选择有效对账单状态" });
+    return;
+  }
+  const current = await db.prepare("SELECT * FROM statement_downloads WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!current) {
+    res.status(404).json({ message: "对账单下载记录不存在" });
+    return;
+  }
+  await db.prepare(`
+    UPDATE statement_downloads
+    SET status = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND deleted_at IS NULL
+  `).run(status, id);
+  const row = await db.prepare("SELECT * FROM statement_downloads WHERE id = ?").get(id);
+  await writeAudit("update", "statement", current.download_key || String(id), `状态改为${status}`);
+  res.json(mapStatementDownload(row));
 });
 
 app.post("/api/statement-downloads/sync", async (req, res) => {
@@ -4018,6 +4376,17 @@ function normalizeDefaultDriverRole(value = "") {
   return ["香港司机", "大陆骑师", "跟随订单司机", "手动指定"].includes(text) ? text : "";
 }
 
+function requestHasFeeItemCostSource(body = {}) {
+  return body.costSources !== undefined || body.costSource !== undefined || body.cost_source !== undefined;
+}
+
+function requestFeeItemCostSource(body = {}, fallback = "供应商") {
+  if (body.costSources !== undefined) return feeItemCostSourceText(body.costSources);
+  if (body.costSource !== undefined) return feeItemCostSourceText(body.costSource);
+  if (body.cost_source !== undefined) return feeItemCostSourceText(body.cost_source);
+  return feeItemCostSourceText(fallback);
+}
+
 app.post("/api/fee-items", async (req, res) => {
   const requestedSortOrder = Number(req.body.sortOrder);
   const nextSortOrder = (await db.prepare(`
@@ -4031,6 +4400,7 @@ app.post("/api/fee-items", async (req, res) => {
     currency: String(req.body.currency || "港币").trim(),
     defaultAmount: Number(req.body.defaultAmount || 0),
     defaultDriverRole: normalizeDefaultDriverRole(req.body.defaultDriverRole || req.body.default_driver_role),
+    costSource: requestFeeItemCostSource(req.body),
     sortOrder: Number.isFinite(requestedSortOrder) && requestedSortOrder > 0 ? requestedSortOrder : nextSortOrder
   };
   if (!item.name) {
@@ -4043,8 +4413,8 @@ app.post("/api/fee-items", async (req, res) => {
     return;
   }
   const result = await db.prepare(`
-    INSERT INTO fee_items (category, name, currency, default_amount, default_driver_role, sort_order)
-    VALUES (@category, @name, @currency, @defaultAmount, @defaultDriverRole, @sortOrder)
+    INSERT INTO fee_items (category, name, currency, default_amount, default_driver_role, cost_source, sort_order)
+    VALUES (@category, @name, @currency, @defaultAmount, @defaultDriverRole, @costSource, @sortOrder)
   `).run(item);
   await writeAudit("create", "fee_item", String(result.lastInsertId), item.name);
   res.status(201).json(mapFeeItem(await db.prepare("SELECT * FROM fee_items WHERE id = ?").get(result.lastInsertId)));
@@ -4098,7 +4468,10 @@ app.patch("/api/fee-items/:id", async (req, res) => {
     defaultAmount: req.body.defaultAmount === undefined ? Number(current.default_amount || 0) : Number(req.body.defaultAmount || 0),
     defaultDriverRole: req.body.defaultDriverRole === undefined && req.body.default_driver_role === undefined
       ? (current.default_driver_role || "")
-      : normalizeDefaultDriverRole(req.body.defaultDriverRole || req.body.default_driver_role)
+      : normalizeDefaultDriverRole(req.body.defaultDriverRole || req.body.default_driver_role),
+    costSource: requestHasFeeItemCostSource(req.body)
+      ? requestFeeItemCostSource(req.body, current.cost_source)
+      : feeItemCostSourceText(current.cost_source)
   };
   if (!item.name) {
     res.status(400).json({ message: "收费项目名称不能为空" });
@@ -4111,7 +4484,7 @@ app.patch("/api/fee-items/:id", async (req, res) => {
   }
   const result = await db.prepare(`
     UPDATE fee_items
-    SET category = @category, name = @name, currency = @currency, default_amount = @defaultAmount, default_driver_role = @defaultDriverRole
+    SET category = @category, name = @name, currency = @currency, default_amount = @defaultAmount, default_driver_role = @defaultDriverRole, cost_source = @costSource
     WHERE id = @id AND deleted_at IS NULL
   `).run(item);
   if (result.changes === 0) {

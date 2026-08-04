@@ -117,7 +117,9 @@ const idReturningTables = new Set([
   "customer_contacts",
   "driver_route_adjust_rules",
   "statement_downloads",
-  "vehicle_expenses"
+  "vehicle_expenses",
+  "cost_center_rates",
+  "vehicle_profit_exchange_rates"
 ]);
 
 function withReturningId(sql) {
@@ -314,7 +316,7 @@ async function initializeSchema() {
       order_date TEXT NOT NULL DEFAULT (CURRENT_DATE::text),
       receivable_hkd DOUBLE PRECISION NOT NULL DEFAULT 0,
       receivable_rmb DOUBLE PRECISION NOT NULL DEFAULT 0,
-      status TEXT NOT NULL DEFAULT '待审核',
+      status TEXT NOT NULL DEFAULT '待确认',
       remark TEXT NOT NULL DEFAULT '',
       trip_no_enabled INTEGER NOT NULL DEFAULT 0,
       trip_no TEXT NOT NULL DEFAULT '',
@@ -412,6 +414,7 @@ async function initializeSchema() {
       default_amount DOUBLE PRECISION NOT NULL DEFAULT 0,
       sort_order INTEGER NOT NULL DEFAULT 0,
       default_driver_role TEXT NOT NULL DEFAULT '',
+      cost_source TEXT NOT NULL DEFAULT '供应商',
       deleted_at TEXT
     );
 
@@ -538,6 +541,31 @@ async function initializeSchema() {
       deleted_at TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS cost_center_rates (
+      id BIGSERIAL PRIMARY KEY,
+      source TEXT NOT NULL DEFAULT '',
+      entity_id TEXT NOT NULL DEFAULT '',
+      entity_name TEXT NOT NULL DEFAULT '',
+      origin TEXT NOT NULL DEFAULT '',
+      destination TEXT NOT NULL DEFAULT '',
+      currency TEXT NOT NULL DEFAULT '港币',
+      cost_values TEXT NOT NULL DEFAULT '{}',
+      note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      deleted_at TEXT,
+      UNIQUE(source, entity_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS vehicle_profit_exchange_rates (
+      id BIGSERIAL PRIMARY KEY,
+      period_month TEXT NOT NULL UNIQUE,
+      rate DOUBLE PRECISION NOT NULL DEFAULT 0.88,
+      created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      deleted_at TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS driver_adjustments (
       id BIGSERIAL PRIMARY KEY,
       driver_id BIGINT REFERENCES drivers(id) ON DELETE CASCADE,
@@ -609,6 +637,7 @@ async function initializeSchema() {
       entity_name TEXT NOT NULL DEFAULT '',
       start_date TEXT NOT NULL DEFAULT '',
       end_date TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT '已导出',
       downloaded_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
       created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
       updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
@@ -632,6 +661,8 @@ async function initializeSchema() {
     CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
     CREATE INDEX IF NOT EXISTS idx_driver_route_adjust_deleted ON driver_route_adjust_rules(deleted_at, id);
     CREATE INDEX IF NOT EXISTS idx_statement_downloads_deleted ON statement_downloads(deleted_at, downloaded_at);
+    CREATE INDEX IF NOT EXISTS idx_cost_center_rates_source ON cost_center_rates(source, deleted_at, entity_name);
+    CREATE INDEX IF NOT EXISTS idx_vehicle_profit_exchange_rates_month ON vehicle_profit_exchange_rates(period_month);
   `);
 
   const migrations = {
@@ -651,6 +682,14 @@ async function initializeSchema() {
     driver_wage_rules: [
       "transport_mode TEXT NOT NULL DEFAULT '单司机'",
       "advance_fee_rates TEXT NOT NULL DEFAULT '{}'"
+    ],
+    cost_center_rates: [
+      "origin TEXT NOT NULL DEFAULT ''",
+      "destination TEXT NOT NULL DEFAULT ''",
+      "currency TEXT NOT NULL DEFAULT '港币'"
+    ],
+    statement_downloads: [
+      "status TEXT NOT NULL DEFAULT '已导出'"
     ],
     drivers: [
       "type TEXT NOT NULL DEFAULT '香港司机'",
@@ -676,7 +715,8 @@ async function initializeSchema() {
     ],
     fee_items: [
       "sort_order INTEGER NOT NULL DEFAULT 0",
-      "default_driver_role TEXT NOT NULL DEFAULT ''"
+      "default_driver_role TEXT NOT NULL DEFAULT ''",
+      "cost_source TEXT NOT NULL DEFAULT '供应商'"
     ],
     order_fees: [
       "unit_price DOUBLE PRECISION NOT NULL DEFAULT 0",
@@ -815,6 +855,12 @@ async function initializeSchema() {
       AND (default_driver_role IS NULL OR default_driver_role = '')
   `).run();
 
+  await db.prepare(`
+    UPDATE fee_items
+    SET cost_source = '供应商'
+    WHERE cost_source IS NULL OR TRIM(cost_source) = ''
+  `).run();
+
   const contactRows = await db.prepare(`
     SELECT id, remark
     FROM customer_contacts
@@ -846,6 +892,9 @@ async function initializeSchema() {
     SET province = '广东省'
     WHERE deleted_at IS NULL AND COALESCE(province, '') = ''
   `).run();
+
+  await ensureOrderStatusMasterData();
+  await reconcileLegacyPendingReviewOrders();
 
   if (seedDemoDataEnabled) {
     await seedDemoData();
@@ -1098,7 +1147,7 @@ const DEMO_ORDERS = [
     date: "2026-06-30",
     receivableHKD: 2380,
     receivableRMB: 0,
-    status: "待审核",
+    status: "正常",
     remark: "模板预览样例：外派车辆出口运输",
     tripNoEnabled: 1,
     tripNo: "TRIP-0630-01",
@@ -1160,7 +1209,7 @@ const DEMO_ORDERS = [
     date: "2026-06-29",
     receivableHKD: 4200,
     receivableRMB: 0,
-    status: "待审核",
+    status: "正常",
     remark: "模板预览样例：口岸转国内车",
     tripNoEnabled: 0,
     tripNo: "",
@@ -1328,10 +1377,13 @@ const DEMO_MASTER_DATA = [
   { type: "城市", name: "深圳", value: "深圳", sortOrder: 1 },
   { type: "城市", name: "香港", value: "香港", sortOrder: 2 },
   { type: "订单状态", name: "待确认", value: "待确认", sortOrder: 1 },
-  { type: "订单状态", name: "待审核", value: "待审核", sortOrder: 2 },
-  { type: "订单状态", name: "通关中", value: "通关中", sortOrder: 3 },
-  { type: "订单状态", name: "已审核", value: "已审核", sortOrder: 4 },
-  { type: "订单状态", name: "缺票据", value: "缺票据", sortOrder: 5 }
+  { type: "订单状态", name: "预排", value: "预排", sortOrder: 2 },
+  { type: "订单状态", name: "正常", value: "正常", sortOrder: 3 },
+  { type: "订单状态", name: "通关中", value: "通关中", sortOrder: 4 },
+  { type: "订单状态", name: "已签收", value: "已签收", sortOrder: 5 },
+  { type: "订单状态", name: "已审核", value: "已审核", sortOrder: 6 },
+  { type: "订单状态", name: "缺票据", value: "缺票据", sortOrder: 7 },
+  { type: "订单状态", name: "费用待确认", value: "费用待确认", sortOrder: 8 }
 ];
 
 function demoExportTemplateContent() {
@@ -1493,10 +1545,10 @@ async function seedDriver(item) {
 
 async function seedFeeItem(item) {
   await db.prepare(`
-    INSERT INTO fee_items (category, name, currency, default_amount, default_driver_role, sort_order)
-    VALUES (@category, @name, @currency, @defaultAmount, @defaultDriverRole, @sortOrder)
+    INSERT INTO fee_items (category, name, currency, default_amount, default_driver_role, cost_source, sort_order)
+    VALUES (@category, @name, @currency, @defaultAmount, @defaultDriverRole, @costSource, @sortOrder)
     ON CONFLICT (name) DO NOTHING
-  `).run(item);
+  `).run({ ...item, costSource: item.costSource || "供应商" });
 }
 
 async function seedFreightRate(item) {
@@ -1633,6 +1685,74 @@ async function seedMasterData(item) {
     VALUES (@type, @name, @value, @sortOrder)
     ON CONFLICT (type, name) DO NOTHING
   `).run(item);
+}
+
+async function ensureOrderStatusMasterData() {
+  const statuses = [
+    { type: "订单状态", name: "待确认", value: "待确认", sortOrder: 1 },
+    { type: "订单状态", name: "预排", value: "预排", sortOrder: 2 },
+    { type: "订单状态", name: "正常", value: "正常", sortOrder: 3 },
+    { type: "订单状态", name: "通关中", value: "通关中", sortOrder: 4 },
+    { type: "订单状态", name: "已签收", value: "已签收", sortOrder: 5 },
+    { type: "订单状态", name: "已审核", value: "已审核", sortOrder: 6 },
+    { type: "订单状态", name: "缺票据", value: "缺票据", sortOrder: 7 },
+    { type: "订单状态", name: "费用待确认", value: "费用待确认", sortOrder: 8 }
+  ];
+  await db.prepare(`
+    UPDATE master_data
+    SET deleted_at = CURRENT_TIMESTAMP
+    WHERE type = '订单状态' AND name = '待审核' AND deleted_at IS NULL
+  `).run();
+  for (const item of statuses) {
+    await seedMasterData(item);
+    await db.prepare(`
+      UPDATE master_data
+      SET value = @value, sort_order = @sortOrder, deleted_at = NULL
+      WHERE type = @type AND name = @name
+    `).run(item);
+  }
+}
+
+async function reconcileLegacyPendingReviewOrders() {
+  await db.exec("ALTER TABLE orders ALTER COLUMN status SET DEFAULT '待确认'");
+  await db.prepare(`
+    WITH dispatch_rows AS (
+      SELECT
+        row->>'orderNo' AS order_no,
+        row->>'dispatchNo' AS dispatch_no,
+        COALESCE(NULLIF(row->>'status', ''), '预排') AS dispatch_status
+      FROM dispatch_plans
+      CROSS JOIN LATERAL jsonb_array_elements(rows_json::jsonb) AS row
+    ),
+    mapped AS (
+      SELECT
+        o.no,
+        CASE
+          WHEN BOOL_OR(dispatch_rows.dispatch_status IN ('已签收', '完成结算')) THEN '已签收'
+          WHEN BOOL_OR(dispatch_rows.dispatch_status = '通关中') THEN '通关中'
+          WHEN BOOL_OR(dispatch_rows.dispatch_status = '异常滞留') THEN '费用待确认'
+          WHEN BOOL_OR(dispatch_rows.dispatch_status IN ('预排', '待预排', '已预排', '已派车', '待派车')) THEN '预排'
+          ELSE '正常'
+        END AS next_status
+      FROM orders o
+      JOIN dispatch_rows
+        ON dispatch_rows.order_no = o.no
+        OR (o.dispatch_no <> '' AND dispatch_rows.dispatch_no = o.dispatch_no)
+      WHERE o.deleted_at IS NULL AND o.status = '待审核'
+      GROUP BY o.no
+    )
+    UPDATE orders
+    SET status = mapped.next_status
+    FROM mapped
+    WHERE orders.no = mapped.no
+      AND orders.deleted_at IS NULL
+      AND orders.status = '待审核'
+  `).run();
+  await db.prepare(`
+    UPDATE orders
+    SET status = '已签收'
+    WHERE deleted_at IS NULL AND status = '待审核'
+  `).run();
 }
 
 async function seedDispatchPlan(date) {

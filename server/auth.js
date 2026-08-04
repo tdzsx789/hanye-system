@@ -33,6 +33,7 @@ const ALL_MODULES = [
   "dispatchBoard",
   "financeWages",
   "financeCosts",
+  "financeCostCenter",
   "financeDaily",
   ...BOSS_MODULES,
   "freight",
@@ -45,7 +46,7 @@ const ALL_MODULES = [
 const BUSINESS_MODULES = ["home", "customers", "orders", "customsBusiness"];
 const VEHICLE_DRIVER_MODULES = ["vehicleDriver", ...VEHICLE_EXPENSE_MODULES];
 const DISPATCH_MODULES = ["dispatchBoard"];
-const FINANCE_MODULES = ["financeWages", "financeCosts", "financeDaily"];
+const FINANCE_MODULES = ["financeWages", "financeCosts", "financeCostCenter", "financeDaily"];
 const SYSTEM_MODULES = ["freight", "templates", "master", "security", "accounts"];
 
 export const ROLE_ALLOWED_MODULES = {
@@ -68,6 +69,7 @@ const MODULE_LABELS = {
   dispatchBoard: "排车表",
   financeWages: "工资统计",
   financeCosts: "对账单管理",
+  financeCostCenter: "成本中心",
   financeDaily: "日常收支",
   bossDashboard: "老板看板",
   bossCompanyProfit: "公司利润",
