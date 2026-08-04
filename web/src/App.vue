@@ -32,6 +32,8 @@ const SESSION_EXPIRES_KEY = "hanye_session_expires_at";
 const ACCOUNT_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const LEGACY_STATEMENT_DOWNLOAD_ROWS_KEY = "hanye_statement_download_rows";
 const LEGACY_DRIVER_ROUTE_ADJUST_RULES_KEY = "hanye_driver_route_adjust_rules";
+const STATEMENT_CUSTOMER_EXCHANGE_RATES_KEY = "hanye_statement_customer_exchange_rates";
+const STATEMENT_DEFAULT_EXCHANGE_RATE = "0.88";
 const ROUTE_ALIASES = {
   customer: "customers",
   customerList: "customers",
@@ -51,6 +53,13 @@ const ROUTE_ALIASES = {
   customsBusiness: "customsBusiness"
 };
 const ACCOUNT_ROLES = ["司机", "跟单员", "财务", "管理员"];
+const VEHICLE_EXPENSE_MODULES = [
+  "vehicleFuelExpenses",
+  "vehicleRepairExpenses",
+  "vehicleAnnualExpenses",
+  "vehicleOtherExpenses"
+];
+const VEHICLE_DRIVER_MODULES = ["vehicleDriver", ...VEHICLE_EXPENSE_MODULES];
 const BOSS_CENTER_MODULES = [
   "bossDashboard",
   "bossCompanyProfit",
@@ -62,7 +71,7 @@ const SYSTEM_CONFIG_MODULES = ["freight", "templates", "master", "security", "ac
 const ROLE_ALLOWED_MODULES = {
   管理员: [
     ...BUSINESS_MODULES,
-    "vehicleDriver",
+    ...VEHICLE_DRIVER_MODULES,
     "dispatchBoard",
     "financeWages",
     "financeCosts",
@@ -70,16 +79,25 @@ const ROLE_ALLOWED_MODULES = {
     ...BOSS_CENTER_MODULES,
     ...SYSTEM_CONFIG_MODULES
   ],
-  财务: [...BUSINESS_MODULES, "vehicleDriver", "dispatchBoard", "financeWages", "financeCosts", "financeDaily", ...SYSTEM_CONFIG_MODULES],
-  跟单员: [...BUSINESS_MODULES, "vehicleDriver", "dispatchBoard", ...SYSTEM_CONFIG_MODULES],
-  司机: []
+  财务: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, "dispatchBoard", "financeWages", "financeCosts", "financeDaily", ...SYSTEM_CONFIG_MODULES],
+  跟单员: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, "dispatchBoard", ...SYSTEM_CONFIG_MODULES],
+  司机: VEHICLE_DRIVER_MODULES
 };
 const ROLE_PERMISSION_LABELS = {
   管理员: "全部权限",
   财务: "业务、车辆司机、财务中心、系统配置",
   跟单员: "业务、车辆司机、系统配置",
-  司机: "无系统登录权限"
+  司机: "车辆司机"
 };
+const VEHICLE_EXPENSE_CONFIGS = [
+  { moduleId: "vehicleFuelExpenses", type: "fuel", title: "加油费管理", addLabel: "增加加油费", defaultName: "加油费", timeLabel: "时间" },
+  { moduleId: "vehicleRepairExpenses", type: "repair", title: "维修费管理", addLabel: "增加维修费", defaultName: "维修费", timeLabel: "时间" },
+  { moduleId: "vehicleAnnualExpenses", type: "annual", title: "保险年审牌头费", addLabel: "增加保险年审牌头费", defaultName: "保险费", timeLabel: "年份" },
+  { moduleId: "vehicleOtherExpenses", type: "other", title: "其他支出", addLabel: "增加其他支出", defaultName: "", timeLabel: "时间" }
+];
+const VEHICLE_EXPENSE_CONFIG_BY_MODULE = Object.fromEntries(VEHICLE_EXPENSE_CONFIGS.map((item) => [item.moduleId, item]));
+const VEHICLE_EXPENSE_CONFIG_BY_TYPE = Object.fromEntries(VEHICLE_EXPENSE_CONFIGS.map((item) => [item.type, item]));
+const VEHICLE_ANNUAL_EXPENSE_NAMES = ["保险费", "年审费", "牌头费"];
 const AUDIT_ACTION_LABELS = {
   create: "新增",
   update: "修改",
@@ -118,7 +136,8 @@ const AUDIT_ENTITY_LABELS = {
   rule: "规则",
   statement: "对账单",
   template: "模板",
-  vehicle: "车辆"
+  vehicle: "车辆",
+  vehicle_expense: "车辆支出"
 };
 const AUDIT_RECORD_PREFIXES = {
   account: "账号ID",
@@ -142,7 +161,8 @@ const AUDIT_RECORD_PREFIXES = {
   rule: "规则ID",
   statement: "对账记录",
   template: "模板ID",
-  vehicle: "车牌"
+  vehicle: "车牌",
+  vehicle_expense: "支出ID"
 };
 const TONNAGE_OPTIONS = ["3T", "5T", "8T", "10T", "12T", "20尺柜", "40尺柜"];
 const DIRECTION_OPTIONS = ["出口", "进口"];
@@ -272,34 +292,17 @@ const TEMPLATE_PREVIEW_SAMPLE_ORDERS = [
     status: "待审核"
   }
 ];
-const bossDashboardKpis = [
-  { label: "本月净利润", value: "RMB 149,200", note: "较上月 +12.4%" },
-  { label: "营业收入", value: "HKD 386,200 / RMB 268,900", note: "运输、报关、外派合计" },
-  { label: "待收款", value: "RMB 86,500", note: "超过账期 3 笔" },
-  { label: "综合利润率", value: "22.8%", note: "目标 20%" }
-];
 const bossCompanyProfitRows = [
   { period: "2026-08", transportRevenue: "RMB 426,800", customsRevenue: "RMB 72,400", vehicleCost: "RMB 281,700", expenses: "RMB 68,300", netProfit: "RMB 149,200", margin: "22.8%" },
   { period: "2026-07", transportRevenue: "RMB 398,600", customsRevenue: "RMB 65,900", vehicleCost: "RMB 263,200", expenses: "RMB 61,500", netProfit: "RMB 132,700", margin: "21.4%" },
   { period: "2026-06", transportRevenue: "RMB 366,100", customsRevenue: "RMB 58,600", vehicleCost: "RMB 247,400", expenses: "RMB 59,800", netProfit: "RMB 117,500", margin: "20.1%" },
   { period: "2026-05", transportRevenue: "RMB 342,300", customsRevenue: "RMB 51,800", vehicleCost: "RMB 229,600", expenses: "RMB 55,400", netProfit: "RMB 109,100", margin: "19.8%" }
 ];
-const bossVehicleProfitRows = [
-  { plate: "粤ZFC62港", driver: "李永洪", orderCount: 38, revenue: "RMB 96,500", driverPay: "RMB 37,200", upkeep: "RMB 18,900", profit: "RMB 40,400", margin: "41.9%" },
-  { plate: "粤ZYR22港", driver: "廖永贤", orderCount: 31, revenue: "RMB 84,200", driverPay: "RMB 32,600", upkeep: "RMB 21,500", profit: "RMB 30,100", margin: "35.7%" },
-  { plate: "粤Z1234港", driver: "陈志强", orderCount: 29, revenue: "RMB 76,800", driverPay: "RMB 29,400", upkeep: "RMB 17,800", profit: "RMB 29,600", margin: "38.5%" },
-  { plate: "港AU7421", driver: "黄启明", orderCount: 24, revenue: "RMB 63,900", driverPay: "RMB 25,800", upkeep: "RMB 16,700", profit: "RMB 21,400", margin: "33.5%" }
-];
 const bossCompanyExpenseRows = [
   { date: "2026-08", category: "人工工资", amount: "RMB 38,000", status: "已入账", note: "办公室、财务、跟单人员工资" },
   { date: "2026-08", category: "车辆固定成本", amount: "RMB 18,900", status: "待复核", note: "保险、年审、维修保养预估" },
   { date: "2026-08", category: "场地办公", amount: "RMB 7,600", status: "已入账", note: "租金、水电、办公用品" },
   { date: "2026-08", category: "系统与服务", amount: "RMB 3,800", status: "已入账", note: "服务器、软件订阅、短信服务" }
-];
-const bossCustomerProfitRows = [
-  { customer: "深圳市汉业国际货运代理有限公司", orderCount: 42, revenue: "RMB 118,600", profit: "RMB 36,900", margin: "31.1%" },
-  { customer: "深圳市文永供应链管理有限公司", orderCount: 35, revenue: "RMB 94,200", profit: "RMB 27,400", margin: "29.1%" },
-  { customer: "深圳市环联程物流有限公司", orderCount: 28, revenue: "RMB 78,500", profit: "RMB 20,800", margin: "26.5%" }
 ];
 const FONT_PRESETS = [
   {
@@ -835,6 +838,10 @@ function moduleIcon(moduleId) {
     vehicleDriver: "truck",
     vehicleManage: "car",
     driverManage: "users",
+    vehicleFuelExpenses: "finance",
+    vehicleRepairExpenses: "checklist",
+    vehicleAnnualExpenses: "shield",
+    vehicleOtherExpenses: "file",
     dispatchBoard: "truck",
     financeWages: "finance",
     financeCosts: "finance",
@@ -1121,8 +1128,9 @@ const statementExportEntity = ref("");
 const statementExportStart = ref(localStorage.getItem("hanye_statement_export_start") || "");
 const statementExportEnd = ref(localStorage.getItem("hanye_statement_export_end") || "");
 const statementSettlementCurrency = ref(localStorage.getItem("hanye_statement_settlement_currency") || "人民币");
-const statementExchangeRate = ref(localStorage.getItem("hanye_statement_exchange_rate") || "0.92");
+const statementExchangeRate = ref(localStorage.getItem("hanye_statement_exchange_rate") || STATEMENT_DEFAULT_EXCHANGE_RATE);
 const statementDownloadRows = ref([]);
+const statementCustomerExchangeRates = reactive(loadStoredJson(STATEMENT_CUSTOMER_EXCHANGE_RATES_KEY, {}));
 const customsBusinessRows = ref([]);
 const driverRouteAdjustRules = ref([]);
 const driverRouteAdjustForm = reactive({
@@ -1179,6 +1187,7 @@ const customerRows = ref([]);
 const customerContactRows = ref([]);
 const orderRows = ref([]);
 const vehicleRows = ref([]);
+const vehicleExpenseRows = ref([]);
 const driverRows = ref([]);
 const driverWageRuleRows = ref([]);
 const driverAdjustmentRows = ref([]);
@@ -1247,12 +1256,14 @@ const saveFreightTemplateModalOpen = ref(false);
 const recycleModalOpen = ref(false);
 const attachmentRecycleModalOpen = ref(false);
 const vehicleModalOpen = ref(false);
+const vehicleExpenseModalOpen = ref(false);
 const driverModalOpen = ref(false);
 const filePreviewOpen = ref(false);
 const orderCustomerPickerOpen = ref(false);
 const customerOrderExportMenuOpen = ref(false);
 const orderExportMenuOpen = ref(false);
 const statementExportMenuOpen = ref(false);
+const statementExportMenuCustomerKey = ref("");
 const customerOrderColumnMenuOpen = ref(false);
 const orderColumnMenuOpen = ref(false);
 const dispatchColumnMenuOpen = ref(false);
@@ -1266,6 +1277,7 @@ const accountProfileSaving = ref(false);
 const accountCreateSaving = ref(false);
 const accountEditSaving = ref(false);
 const customsBusinessSaving = ref(false);
+const vehicleExpenseSaving = ref(false);
 const orderExportExchangeMode = ref("");
 const orderExportExchangeRate = ref("");
 const orderCustomerKeyword = ref("");
@@ -1277,6 +1289,7 @@ const editingContactRowId = ref(null);
 const newContactRowActive = ref(false);
 const editingOrderNo = ref("");
 const editingVehiclePlate = ref("");
+const editingVehicleExpenseId = ref(null);
 const editingDriverId = ref(null);
 const feeItemFormOpen = ref(false);
 const editingFeeItemRowId = ref(null);
@@ -1571,6 +1584,17 @@ const vehicleForm = reactive({
   note: ""
 });
 
+const vehicleExpenseForm = reactive({
+  type: "fuel",
+  name: "",
+  plate: "",
+  date: todayInputValue(),
+  year: Number(currentPeriodMonthKey().slice(0, 4)),
+  currency: "人民币",
+  amount: "",
+  note: ""
+});
+
 const driverForm = reactive({
   id: null,
   type: "香港司机",
@@ -1832,6 +1856,10 @@ const modules = [
   { id: "customsBusiness", label: "报关业务", group: "业务" },
   { id: "vehicleManage", label: "车辆管理", group: "车辆司机" },
   { id: "driverManage", label: "司机管理", group: "车辆司机" },
+  { id: "vehicleFuelExpenses", label: "加油费管理", group: "车辆司机" },
+  { id: "vehicleRepairExpenses", label: "维修费管理", group: "车辆司机" },
+  { id: "vehicleAnnualExpenses", label: "保险年审牌头费", group: "车辆司机" },
+  { id: "vehicleOtherExpenses", label: "其他支出", group: "车辆司机" },
   { id: "dispatchBoard", label: "排车表", group: "车辆司机" },
   { id: "financeWages", label: "工资统计", group: "财务中心" },
   { id: "financeCosts", label: "对账单管理", group: "财务中心" },
@@ -2418,6 +2446,73 @@ const visibleDrivers = computed(() => {
   );
   return sortRowsByTable(rows, "drivers");
 });
+
+function isVehicleExpenseModule(moduleId = activeModule.value) {
+  return Boolean(VEHICLE_EXPENSE_CONFIG_BY_MODULE[moduleId]);
+}
+
+const activeVehicleExpenseConfig = computed(() =>
+  VEHICLE_EXPENSE_CONFIG_BY_MODULE[activeModule.value] || VEHICLE_EXPENSE_CONFIGS[0]
+);
+
+const visibleVehicleExpenses = computed(() => {
+  const config = activeVehicleExpenseConfig.value;
+  const keyword = vehicleDriverSearch.value.trim().toLowerCase();
+  const rows = vehicleExpenseRows.value.filter((item) => item.type === config.type);
+  const searchedRows = !keyword ? rows : rows.filter((item) =>
+    [item.name, item.plate, item.date, item.year, item.currency, item.amount, item.note]
+      .some((value) => String(value || "").toLowerCase().includes(keyword))
+  );
+  return sortRowsByTable(searchedRows, "vehicleExpenses");
+});
+
+const selectedVehicleExpenses = computed(() => {
+  const plate = selectedVehicle.value?.plate;
+  if (!plate) return [];
+  return sortRowsByTable(
+    vehicleExpenseRows.value.filter((item) => item.plate === plate),
+    "vehicleDetailExpenses"
+  );
+});
+
+const selectedVehicleExpenseTotal = computed(() =>
+  selectedVehicleExpenses.value.reduce((sum, item) => {
+    if (item.currency === "港币") {
+      sum.hkd += Number(item.amount || 0);
+    } else {
+      sum.rmb += Number(item.amount || 0);
+    }
+    return sum;
+  }, { hkd: 0, rmb: 0 })
+);
+
+function vehicleExpenseTypeLabel(type) {
+  return VEHICLE_EXPENSE_CONFIG_BY_TYPE[type]?.title || "车辆支出";
+}
+
+function vehicleExpenseDateText(item = {}) {
+  return item.type === "annual" ? `${item.year || String(item.date || "").slice(0, 4) || "-"}年` : (item.date || "-");
+}
+
+function vehicleExpenseAllocationText(item = {}) {
+  if (item.type !== "annual") return "计入费用日期所在月份";
+  const monthlyAmount = Number(item.amount || 0) / 12;
+  return `按年录入，每月计入 ${item.currency || "人民币"} ${money(monthlyAmount)}`;
+}
+
+function vehicleExpenseYearOptions() {
+  const currentYear = Number(currentPeriodMonthKey().slice(0, 4));
+  const years = new Set([currentYear]);
+  vehicleExpenseRows.value.forEach((item) => {
+    if (item.year) years.add(Number(item.year));
+    const dateYear = Number(String(item.date || "").slice(0, 4));
+    if (dateYear) years.add(dateYear);
+  });
+  for (let offset = -5; offset <= 2; offset += 1) {
+    years.add(currentYear + offset);
+  }
+  return Array.from(years).filter(Number.isFinite).sort((left, right) => right - left);
+}
 
 const selectedVehicleOrders = computed(() => {
   if (!selectedVehicle.value) return [];
@@ -4005,6 +4100,7 @@ function periodSourceDates(scope) {
   if (scope === "boss") return [
     ...orderRows.value.map((item) => item.date),
     ...driverAdjustmentRows.value.map((item) => item.date),
+    ...vehicleExpenseRows.value.map((item) => item.type === "annual" ? `${item.year || currentPeriodMonthKey().slice(0, 4)}-01-01` : item.date),
     ...bossCompanyProfitRows.map((item) => `${item.period}-01`),
     ...bossCompanyExpenseRows.map((item) => `${item.date}-01`)
   ];
@@ -4721,6 +4817,90 @@ function vehicleFixedCostRMB(vehicle, sourceOrders, filterKey) {
   return monthlyCost * periodMonthSpanForRows(filterKey, sourceOrders);
 }
 
+function vehicleExpenseAmountBreakdown(expense = {}, filterKey = currentPeriodMonthKey()) {
+  if (!expense?.plate) return { hkd: 0, rmb: 0 };
+  const amount = Number(expense.amount || 0);
+  if (!amount) return { hkd: 0, rmb: 0 };
+  if (expense.type === "annual") {
+    const { mode, year } = periodFilterParts(filterKey);
+    const expenseYear = String(expense.year || String(expense.date || "").slice(0, 4));
+    if (mode !== "all" && expenseYear !== year) return { hkd: 0, rmb: 0 };
+    const periodAmount = mode === "month" ? amount / 12 : amount;
+    return expense.currency === "港币" ? { hkd: periodAmount, rmb: 0 } : { hkd: 0, rmb: periodAmount };
+  }
+  if (!dateMatchesPeriodFilter(expense.date, filterKey)) return { hkd: 0, rmb: 0 };
+  return expense.currency === "港币" ? { hkd: amount, rmb: 0 } : { hkd: 0, rmb: amount };
+}
+
+function vehicleExpenseAppliesToPeriod(expense = {}, filterKey = currentPeriodMonthKey()) {
+  const amount = vehicleExpenseAmountBreakdown(expense, filterKey);
+  return Boolean(amount.hkd || amount.rmb);
+}
+
+function vehicleExpenseBreakdownForPlate(plate, filterKey = currentPeriodMonthKey()) {
+  return vehicleExpenseRows.value
+    .filter((expense) => String(expense.plate || "").trim() === String(plate || "").trim())
+    .reduce((sum, expense) => {
+      const amount = vehicleExpenseAmountBreakdown(expense, filterKey);
+      return {
+        hkd: sum.hkd + amount.hkd,
+        rmb: sum.rmb + amount.rmb
+      };
+    }, { hkd: 0, rmb: 0 });
+}
+
+function vehicleExpenseBreakdownByTypeForPlate(plate, filterKey = currentPeriodMonthKey()) {
+  const breakdowns = VEHICLE_EXPENSE_CONFIGS.reduce((result, config) => {
+    result[config.type] = { hkd: 0, rmb: 0 };
+    return result;
+  }, {});
+  breakdowns.insurance = { hkd: 0, rmb: 0 };
+  breakdowns.review = { hkd: 0, rmb: 0 };
+  breakdowns.plateHead = { hkd: 0, rmb: 0 };
+  vehicleExpenseRows.value
+    .filter((expense) => String(expense.plate || "").trim() === String(plate || "").trim())
+    .forEach((expense) => {
+      const amount = vehicleExpenseAmountBreakdown(expense, filterKey);
+      const typeBucket = breakdowns[expense.type] || breakdowns.other;
+      typeBucket.hkd += amount.hkd;
+      typeBucket.rmb += amount.rmb;
+      if (expense.type === "annual") {
+        const annualName = String(expense.name || "").trim();
+        const annualBucket = annualName === "年审费"
+          ? breakdowns.review
+          : annualName === "牌头费"
+            ? breakdowns.plateHead
+            : breakdowns.insurance;
+        annualBucket.hkd += amount.hkd;
+        annualBucket.rmb += amount.rmb;
+      }
+    });
+  return breakdowns;
+}
+
+const BOSS_VEHICLE_FREIGHT_INCOME_FEE_NAMES = new Set(["中港运费", "基础运费"]);
+
+function bossVehicleFeeName(fee = {}) {
+  return String(feeItemForFee(fee)?.name || fee.name || "").trim();
+}
+
+function isBossVehicleFreightIncomeFee(fee = {}) {
+  return BOSS_VEHICLE_FREIGHT_INCOME_FEE_NAMES.has(bossVehicleFeeName(fee));
+}
+
+function bossVehicleOrderFeeBreakdown(order) {
+  return (Array.isArray(order?.fees) ? order.fees : [])
+    .filter((fee) => bossVehicleFeeName(fee))
+    .reduce((sum, fee) => {
+      const target = isBossVehicleFreightIncomeFee(fee) ? "revenue" : "expense";
+      return {
+        ...sum,
+        [`${target}HKD`]: sum[`${target}HKD`] + feeAmountHKD(fee),
+        [`${target}RMB`]: sum[`${target}RMB`] + feeAmountRMB(fee)
+      };
+    }, { revenueHKD: 0, revenueRMB: 0, expenseHKD: 0, expenseRMB: 0 });
+}
+
 const bossVehicleProfitDisplayRows = computed(() => {
   const groups = new Map();
   bossOrderRows.value
@@ -4733,33 +4913,61 @@ const bossVehicleProfitDisplayRows = computed(() => {
         orders: [],
         revenueHKD: 0,
         revenueRMB: 0,
-        driverPayHKD: 0,
-        driverPayRMB: 0
+        expenseHKD: 0,
+        expenseRMB: 0
       };
+      const feeBreakdown = bossVehicleOrderFeeBreakdown(order);
       row.orders.push(order);
-      row.revenueHKD += Number(order.receivableHKD || 0);
-      row.revenueRMB += Number(order.receivableRMB || 0);
+      row.revenueHKD += feeBreakdown.revenueHKD;
+      row.revenueRMB += feeBreakdown.revenueRMB;
+      row.expenseHKD += feeBreakdown.expenseHKD;
+      row.expenseRMB += feeBreakdown.expenseRMB;
       orderDriverRows(order).forEach((driver) => {
         if (driver.name) row.driverNames.add(driver.name);
       });
-      const driverPay = orderDriverPayBreakdown(order);
-      row.driverPayHKD += driverPay.hkd;
-      row.driverPayRMB += driverPay.rmb;
       groups.set(plate, row);
+    });
+  vehicleExpenseRows.value
+    .filter((expense) => vehicleExpenseAppliesToPeriod(expense, bossPeriodFilter.value) && String(expense.plate || "").trim())
+    .forEach((expense) => {
+      const plate = String(expense.plate || "").trim();
+      if (!groups.has(plate)) {
+        groups.set(plate, {
+          plate,
+          driverNames: new Set(),
+          orders: [],
+          revenueHKD: 0,
+          revenueRMB: 0,
+          expenseHKD: 0,
+          expenseRMB: 0
+        });
+      }
     });
   return Array.from(groups.values())
     .map((row) => {
       const vehicle = vehicleRows.value.find((item) => item.plate === row.plate) || null;
-      const fixedCostRMB = vehicleFixedCostRMB(vehicle, row.orders, bossPeriodFilter.value);
-      const profitHKD = row.revenueHKD - row.driverPayHKD;
-      const profitRMB = row.revenueRMB - row.driverPayRMB - fixedCostRMB;
+      const vehicleExpenseByType = vehicleExpenseBreakdownByTypeForPlate(row.plate, bossPeriodFilter.value);
+      const vehicleExpense = Object.values(vehicleExpenseByType).reduce((sum, item) => ({
+        hkd: sum.hkd + item.hkd,
+        rmb: sum.rmb + item.rmb
+      }), { hkd: 0, rmb: 0 });
+      const expenseHKD = row.expenseHKD + vehicleExpense.hkd;
+      const expenseRMB = row.expenseRMB + vehicleExpense.rmb;
+      const profitHKD = row.revenueHKD - expenseHKD;
+      const profitRMB = row.revenueRMB - expenseRMB;
       return {
         plate: row.plate,
         driver: Array.from(row.driverNames).join("、") || vehicle?.driver || "-",
         orderCount: row.orders.length,
         revenue: moneyPairDisplay(row.revenueHKD, row.revenueRMB),
-        driverPay: moneyPairDisplay(row.driverPayHKD, row.driverPayRMB),
-        upkeep: fixedCostRMB ? `RMB ${money(fixedCostRMB)}` : "-",
+        orderExpense: moneyPairDisplay(row.expenseHKD, row.expenseRMB),
+        fuelExpense: moneyPairDisplay(vehicleExpenseByType.fuel.hkd, vehicleExpenseByType.fuel.rmb),
+        repairExpense: moneyPairDisplay(vehicleExpenseByType.repair.hkd, vehicleExpenseByType.repair.rmb),
+        insuranceExpense: moneyPairDisplay(vehicleExpenseByType.insurance.hkd, vehicleExpenseByType.insurance.rmb),
+        reviewExpense: moneyPairDisplay(vehicleExpenseByType.review.hkd, vehicleExpenseByType.review.rmb),
+        plateHeadExpense: moneyPairDisplay(vehicleExpenseByType.plateHead.hkd, vehicleExpenseByType.plateHead.rmb),
+        vehicleOtherExpense: moneyPairDisplay(vehicleExpenseByType.other.hkd, vehicleExpenseByType.other.rmb),
+        expense: moneyPairDisplay(expenseHKD, expenseRMB),
         profit: moneyPairDisplay(profitHKD, profitRMB),
         margin: marginText(profitHKD, profitRMB, row.revenueHKD, row.revenueRMB),
         profitEquivalent: rmbEquivalent(profitHKD, profitRMB)
@@ -4923,7 +5131,8 @@ function buildFinanceCustomerRows(sourceOrders, limit = 0) {
   const groups = new Map();
   sourceOrders.forEach((order) => {
     const key = order.customer || "未填写客户";
-    const row = groups.get(key) || { customer: key, count: 0, hkd: 0, rmb: 0 };
+    const row = groups.get(key) || { customer: key, customerId: order.customerId || "", count: 0, hkd: 0, rmb: 0 };
+    if (!row.customerId && order.customerId) row.customerId = order.customerId;
     row.count += 1;
     row.hkd += Number(order.receivableHKD || 0);
     row.rmb += Number(order.receivableRMB || 0);
@@ -4935,6 +5144,80 @@ function buildFinanceCustomerRows(sourceOrders, limit = 0) {
 
 const financeCustomerRanking = computed(() => buildFinanceCustomerRows(financeOrderRows.value, 12));
 const statementCustomerRows = computed(() => buildFinanceCustomerRows(statementOrderRows.value));
+
+function statementCustomerRecord(row = {}) {
+  return customerRows.value.find((item) =>
+    item.type === "客户" &&
+    (
+      (row.customerId && item.id === row.customerId) ||
+      item.name === row.customer
+    )
+  ) || null;
+}
+
+function statementCustomerRowKey(row = {}) {
+  const customer = statementCustomerRecord(row);
+  return customer?.id || row.customerId || row.customer || "";
+}
+
+function statementCustomerSettlementCurrency(row = {}) {
+  const raw = statementCustomerRecord(row)?.settlementCurrency || "人民币结算";
+  return String(raw || "").includes("港") ? "港币" : "人民币";
+}
+
+function statementCustomerExchangeRate(row = {}) {
+  const key = statementCustomerRowKey(row);
+  const saved = key ? statementCustomerExchangeRates[key] : "";
+  return String(saved || STATEMENT_DEFAULT_EXCHANGE_RATE);
+}
+
+function setStatementCustomerExchangeRate(row = {}, value = "") {
+  const key = statementCustomerRowKey(row);
+  if (!key) return;
+  const raw = String(value || "").trim();
+  const parsed = Number(raw);
+  const nextValue = Number.isFinite(parsed) && parsed > 0 ? raw : STATEMENT_DEFAULT_EXCHANGE_RATE;
+  statementCustomerExchangeRates[key] = nextValue;
+  saveStoredJson(STATEMENT_CUSTOMER_EXCHANGE_RATES_KEY, { ...statementCustomerExchangeRates });
+  if (statementExportMenuCustomerKey.value === key) {
+    statementExchangeRate.value = nextValue;
+    saveStatementExportSettings();
+  }
+}
+
+function closeStatementExportMenu() {
+  statementExportMenuOpen.value = false;
+  statementExportMenuCustomerKey.value = "";
+}
+
+function applyStatementCustomerExportContext(row = {}) {
+  statementExportType.value = "customer";
+  statementExportEntity.value = row.customer || "";
+  statementSettlementCurrency.value = statementCustomerSettlementCurrency(row);
+  statementExchangeRate.value = statementCustomerExchangeRate(row);
+  syncStatementExportRange(activeStatementMonthFilter.value);
+  saveStatementExportSettings();
+}
+
+async function openStatementCustomerExportMenu(row = {}) {
+  const key = statementCustomerRowKey(row);
+  if (!key || !row.customer) {
+    notify("当前客户信息不完整，无法导出对账单");
+    return;
+  }
+  if (statementExportMenuOpen.value && statementExportMenuCustomerKey.value === key) {
+    closeStatementExportMenu();
+    return;
+  }
+  applyStatementCustomerExportContext(row);
+  await ensureTemplateRowsLoaded({ silent: true });
+  statementExportMenuCustomerKey.value = key;
+  statementExportMenuOpen.value = true;
+}
+
+const activeStatementExportCustomerRow = computed(() =>
+  statementCustomerRows.value.find((row) => statementCustomerRowKey(row) === statementExportMenuCustomerKey.value) || null
+);
 
 function statementDownloadKey(type, entityName, start, end) {
   return [type, entityName || "全部", start || "", end || ""].join("|");
@@ -8854,6 +9137,7 @@ async function loadDatabaseData(options = {}) {
   const canLoadOrders = canAccessModule("orders");
   const canLoadCustomsBusiness = canAccessModule("customsBusiness");
   const canLoadVehicleDriver = canAccessModule("vehicleDriver");
+  const canLoadVehicleExpenses = canLoadVehicleDriver || VEHICLE_EXPENSE_MODULES.some((moduleId) => canAccessModule(moduleId));
   const canLoadMasterData = canAccessModule("master");
   const canLoadAccounts = canAccessModule("accounts");
   const canLoadAuditLogs = canAccessModule("security");
@@ -8878,6 +9162,7 @@ async function loadDatabaseData(options = {}) {
       customerContactData,
       orderData,
       vehicleData,
+      vehicleExpenseData,
       driverData,
       driverWageRuleData,
       driverAdjustmentData,
@@ -8896,6 +9181,7 @@ async function loadDatabaseData(options = {}) {
       canLoadCustomers ? apiFetchList("/customer-contacts", "联系人") : Promise.resolve([]),
       canLoadOrders ? apiFetchList("/orders", "订单") : Promise.resolve([]),
       canLoadVehicleDriver ? apiFetchList("/vehicles", "车辆") : Promise.resolve([]),
+      canLoadVehicleExpenses ? apiFetchList("/vehicle-expenses", "车辆支出") : Promise.resolve([]),
       canLoadVehicleDriver ? apiFetchList("/drivers", "司机") : Promise.resolve([]),
       canLoadVehicleDriver ? apiFetchList("/driver-wage-rules", "司机费用规则") : Promise.resolve([]),
       canLoadVehicleDriver ? apiFetchList("/driver-adjustments", "司机预支/报销") : Promise.resolve([]),
@@ -8914,6 +9200,7 @@ async function loadDatabaseData(options = {}) {
     customerContactRows.value = customerContactData;
     orderRows.value = orderData;
     vehicleRows.value = vehicleData;
+    vehicleExpenseRows.value = vehicleExpenseData;
     driverRows.value = driverData;
     driverWageRuleRows.value = driverWageRuleData;
     driverAdjustmentRows.value = driverAdjustmentData;
@@ -9094,6 +9381,7 @@ function closeTransientUi() {
   orderModalOpen.value = false;
   recycleModalOpen.value = false;
   vehicleModalOpen.value = false;
+  vehicleExpenseModalOpen.value = false;
   driverModalOpen.value = false;
   closeFilePreview();
   dispatchMessageOpen.value = false;
@@ -10536,6 +10824,66 @@ async function saveVehicle() {
   }
 }
 
+function resetVehicleExpenseForm(config = activeVehicleExpenseConfig.value) {
+  Object.assign(vehicleExpenseForm, {
+    type: config.type,
+    name: config.type === "annual" ? config.defaultName : (config.type === "other" ? "" : config.defaultName),
+    plate: selectedVehiclePlate.value || vehicleRows.value[0]?.plate || "",
+    date: todayInputValue(),
+    year: Number(currentPeriodMonthKey().slice(0, 4)),
+    currency: "人民币",
+    amount: "",
+    note: ""
+  });
+}
+
+function openVehicleExpenseModal(item = null) {
+  const config = item ? (VEHICLE_EXPENSE_CONFIG_BY_TYPE[item.type] || activeVehicleExpenseConfig.value) : activeVehicleExpenseConfig.value;
+  editingVehicleExpenseId.value = item?.id || null;
+  Object.assign(vehicleExpenseForm, {
+    type: config.type,
+    name: item?.name || (config.type === "other" ? "" : config.defaultName),
+    plate: item?.plate || selectedVehiclePlate.value || vehicleRows.value[0]?.plate || "",
+    date: item?.date || todayInputValue(),
+    year: Number(item?.year || String(item?.date || currentPeriodMonthKey()).slice(0, 4) || currentPeriodMonthKey().slice(0, 4)),
+    currency: item?.currency || "人民币",
+    amount: item?.amount || "",
+    note: item?.note || ""
+  });
+  vehicleExpenseModalOpen.value = true;
+}
+
+async function saveVehicleExpense() {
+  try {
+    vehicleExpenseSaving.value = true;
+    const method = editingVehicleExpenseId.value ? "PATCH" : "POST";
+    const path = editingVehicleExpenseId.value ? `/vehicle-expenses/${editingVehicleExpenseId.value}` : "/vehicle-expenses";
+    const item = await apiFetch(path, { method, body: JSON.stringify(vehicleExpenseForm) });
+    vehicleExpenseRows.value = editingVehicleExpenseId.value
+      ? vehicleExpenseRows.value.map((row) => row.id === item.id ? item : row)
+      : [item, ...vehicleExpenseRows.value];
+    selectedVehiclePlate.value = item.plate || selectedVehiclePlate.value;
+    vehicleExpenseModalOpen.value = false;
+    notify(`已保存${vehicleExpenseTypeLabel(item.type)}：${item.plate}`);
+  } catch (error) {
+    notify(error.message);
+  } finally {
+    vehicleExpenseSaving.value = false;
+  }
+}
+
+async function deleteVehicleExpense(item) {
+  if (!item?.id) return;
+  if (!window.confirm(`确定删除 ${item.plate} 的 ${item.name || vehicleExpenseTypeLabel(item.type)}？`)) return;
+  try {
+    await apiFetch(`/vehicle-expenses/${item.id}`, { method: "DELETE" });
+    vehicleExpenseRows.value = vehicleExpenseRows.value.filter((row) => row.id !== item.id);
+    notify("车辆支出已删除");
+  } catch (error) {
+    notify(error.message);
+  }
+}
+
 function openDriverModal(driver = null) {
   if (!canAccessModule("vehicleDriver")) {
     notify("当前账号无权管理司机");
@@ -11669,7 +12017,7 @@ async function toggleStatementExportMenu() {
 }
 
 async function exportStatementByFormat(format, templateRow = selectedTemplate.value) {
-  statementExportMenuOpen.value = false;
+  closeStatementExportMenu();
   const entityName = ensureStatementEntity();
   const { start, end } = statementDateRange();
   const orders = selectedStatementOrders();
@@ -11832,12 +12180,31 @@ function exportVehicleDriver() {
   notify(`已导出${activeVehicleTab.value}`);
 }
 
+function exportVehicleExpenses() {
+  const config = activeVehicleExpenseConfig.value;
+  exportCsv(
+    `${config.title}导出-${todayInputValue()}.csv`,
+    ["名称", "车牌", config.type === "annual" ? "年份" : "时间", "币种", "金额", "分摊说明", "备注"],
+    visibleVehicleExpenses.value.map((item) => [
+      item.name || config.defaultName || vehicleExpenseTypeLabel(item.type),
+      item.plate,
+      vehicleExpenseDateText(item),
+      currencyCodeDisplay(item.currency),
+      item.amount,
+      vehicleExpenseAllocationText(item),
+      item.note
+    ])
+  );
+  notify(`已导出${config.title}`);
+}
+
 function exportLocalBackup() {
   const snapshot = {
     exportedAt: new Date().toISOString(),
     customers: customerRows.value,
     orders: orderRows.value,
     vehicles: vehicleRows.value,
+    vehicleExpenses: vehicleExpenseRows.value,
     drivers: driverRows.value,
     feeItems: feeItemRows.value,
     freightRates: freightRateRows.value,
@@ -15809,12 +16176,30 @@ function orderDetailFeeRows(order = {}) {
                   </tbody>
                 </table>
               </div>
-              <table v-else-if="activeVehicleDetailTab === '费用记录'" class="data-table compact">
-                <thead><tr><th>月份</th><th>类型</th><th>金额</th><th>备注</th></tr></thead>
-                <tbody>
-                  <tr><td>本月</td><td>车辆费用</td><td>HKD {{ money(selectedVehicle?.monthlyCost || 0) }}</td><td>{{ selectedVehicle?.note || '-' }}</td></tr>
-                </tbody>
-              </table>
+              <div v-else-if="activeVehicleDetailTab === '费用记录'" class="vehicle-detail-expense-panel">
+                <div class="related-order-summary">
+                  <span>费用记录 {{ selectedVehicleExpenses.length }} 条</span>
+                  <strong>{{ moneyPairDisplay(selectedVehicleExpenseTotal.hkd, selectedVehicleExpenseTotal.rmb) }}</strong>
+                </div>
+                <table class="data-table compact">
+                  <thead><tr><th>名称</th><th>类型</th><th>时间</th><th>金额</th><th>分摊说明</th><th>备注</th><th>操作</th></tr></thead>
+                  <tbody>
+                    <tr v-for="item in selectedVehicleExpenses" :key="item.id">
+                      <td>{{ item.name || vehicleExpenseTypeLabel(item.type) }}</td>
+                      <td>{{ vehicleExpenseTypeLabel(item.type) }}</td>
+                      <td>{{ vehicleExpenseDateText(item) }}</td>
+                      <td>{{ currencyCodeDisplay(item.currency) }} {{ money(item.amount) }}</td>
+                      <td>{{ vehicleExpenseAllocationText(item) }}</td>
+                      <td>{{ item.note || "-" }}</td>
+                      <td class="row-actions">
+                        <button class="icon-btn icon-only" type="button" title="编辑费用" aria-label="编辑费用" @click="openVehicleExpenseModal(item)"><IconSvg name="edit" /></button>
+                        <button class="icon-btn icon-only danger" type="button" title="删除费用" aria-label="删除费用" @click="deleteVehicleExpense(item)"><IconSvg name="trash" /></button>
+                      </td>
+                    </tr>
+                    <tr v-if="selectedVehicleExpenses.length === 0"><td colspan="7">暂无费用记录</td></tr>
+                  </tbody>
+                </table>
+              </div>
               <table v-else-if="activeVehicleDetailTab === '维修保养'" class="data-table compact">
                 <thead><tr><th>保养提醒</th><th>状态</th><th>备注</th></tr></thead>
                 <tbody><tr><td>{{ selectedVehicle?.maintenanceReminder || '-' }}</td><td>{{ selectedVehicle?.status || '-' }}</td><td>{{ selectedVehicle?.note || '-' }}</td></tr></tbody>
@@ -16081,6 +16466,81 @@ function orderDetailFeeRows(order = {}) {
         </div>
       </section>
 
+      <section v-else-if="isVehicleExpenseModule(activeModule)" class="work-page vehicle-expense-page">
+        <div class="toolbar vehicle-driver-toolbar">
+          <div class="vehicle-driver-title">
+            <p class="eyebrow">车辆司机</p>
+            <h2>{{ activeVehicleExpenseConfig.title }}</h2>
+          </div>
+          <input
+            v-model.trim="vehicleDriverSearch"
+            class="search-input vehicle-driver-search"
+            :placeholder="activeVehicleExpenseConfig.type === 'annual' ? '车牌 / 年份 / 备注' : '车牌 / 时间 / 名称 / 备注'"
+          />
+          <div class="vehicle-driver-actions">
+            <button class="ghost-btn" type="button" @click="exportVehicleExpenses"><IconSvg name="download" />导出</button>
+            <button class="primary-btn" type="button" @click="openVehicleExpenseModal()">
+              <IconSvg name="plus" />{{ activeVehicleExpenseConfig.addLabel }}
+            </button>
+          </div>
+        </div>
+
+        <div class="table-card full-height vehicle-expense-card">
+          <div class="data-table-toolbar vehicle-expense-summary">
+            <div class="data-table-tool-group">
+              <strong class="data-table-title">{{ activeVehicleExpenseConfig.title }}</strong>
+              <span>共 {{ visibleVehicleExpenses.length }} 条</span>
+            </div>
+            <span v-if="activeVehicleExpenseConfig.type === 'annual'" class="finance-period-chip">年费按月进入车辆利润</span>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table compact vehicle-expense-table">
+              <thead>
+                <tr>
+                  <th
+                    v-for="column in [
+                      { key: 'name', label: '名称' },
+                      { key: 'plate', label: '车牌' },
+                      { key: 'date', label: activeVehicleExpenseConfig.type === 'annual' ? '年份' : '时间' },
+                      { key: 'currency', label: '币种' },
+                      { key: 'amount', label: '金额' },
+                      { key: 'allocation', label: '分摊说明' },
+                      { key: 'note', label: '备注' },
+                      { key: 'actions', label: '操作' }
+                    ]"
+                    :key="column.key"
+                    :class="['sortable', { sorted: tableSortDirection('vehicleExpenses', column.key) }]"
+                    @click="toggleTableSort('vehicleExpenses', column)"
+                  >
+                    <button v-if="column.key !== 'actions'" class="table-sort-trigger" type="button">
+                      <span>{{ column.label }}</span>
+                      <span class="sort-mark">{{ tableSortDirection('vehicleExpenses', column.key) === 'asc' ? '↑' : tableSortDirection('vehicleExpenses', column.key) === 'desc' ? '↓' : '' }}</span>
+                    </button>
+                    <span v-else>{{ column.label }}</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="item in visibleVehicleExpenses" :key="item.id">
+                  <td>{{ item.name || activeVehicleExpenseConfig.defaultName || vehicleExpenseTypeLabel(item.type) }}</td>
+                  <td>{{ item.plate }}</td>
+                  <td>{{ vehicleExpenseDateText(item) }}</td>
+                  <td>{{ currencyCodeDisplay(item.currency) }}</td>
+                  <td>{{ money(item.amount) }}</td>
+                  <td>{{ vehicleExpenseAllocationText(item) }}</td>
+                  <td>{{ item.note || "-" }}</td>
+                  <td class="row-actions">
+                    <button class="icon-btn icon-only" type="button" title="编辑费用" aria-label="编辑费用" @click="openVehicleExpenseModal(item)"><IconSvg name="edit" /></button>
+                    <button class="icon-btn icon-only danger" type="button" title="删除费用" aria-label="删除费用" @click="deleteVehicleExpense(item)"><IconSvg name="trash" /></button>
+                  </td>
+                </tr>
+                <tr v-if="visibleVehicleExpenses.length === 0"><td colspan="8">暂无{{ activeVehicleExpenseConfig.title }}记录</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <section v-else-if="activeModule === 'financeWages'" class="work-page finance-page finance-wage-page">
         <div class="section-head">
           <div>
@@ -16328,78 +16788,47 @@ function orderDetailFeeRows(order = {}) {
           <div class="finance-summary-card"><span>应收人民币</span><strong>RMB {{ money(statementSummary.receivableRMB) }}</strong></div>
           <div class="finance-summary-card"><span>外派成本</span><strong>{{ moneyPair(statementSummary.supplierPayableHKD, statementSummary.supplierPayableRMB) }}</strong></div>
         </div>
-        <div class="finance-insight-grid">
-          <div class="table-card finance-tool-card">
+        <div class="finance-insight-grid statement-customer-section" @click="closeStatementExportMenu">
+          <div class="table-card finance-tool-card statement-customer-card">
             <div class="table-card-head">
               <div>
                 <strong>客户账单列表</strong>
                 <span>{{ statementMonthRangeLabel() }} · 当期有订单客户</span>
               </div>
             </div>
-            <table class="data-table compact">
-              <thead><tr><th>排名</th><th>客户</th><th>份数</th><th>港币</th><th>人民币</th></tr></thead>
+            <table class="data-table compact statement-customer-table">
+              <thead><tr><th>排名</th><th>客户</th><th>结算类别</th><th>汇率</th><th>份数</th><th>港币</th><th>人民币</th><th>操作</th></tr></thead>
               <tbody>
                 <tr v-for="(row, index) in statementCustomerRows" :key="row.customer">
                   <td>{{ index + 1 }}</td>
                   <td>{{ row.customer }}</td>
+                  <td><span class="statement-settlement-chip" :class="{ hkd: statementCustomerSettlementCurrency(row) === '港币' }">{{ statementCustomerSettlementCurrency(row) }}</span></td>
+                  <td>
+                    <input
+                      class="statement-exchange-rate-input"
+                      type="number"
+                      min="0"
+                      step="0.0001"
+                      :value="statementCustomerExchangeRate(row)"
+                      @click.stop
+                      @input="setStatementCustomerExchangeRate(row, $event.target.value)"
+                      @change="setStatementCustomerExchangeRate(row, $event.target.value)"
+                    />
+                  </td>
                   <td>{{ row.count }}</td>
                   <td>HKD {{ money(row.hkd) }}</td>
                   <td>RMB {{ money(row.rmb) }}</td>
+                  <td class="row-actions statement-customer-actions">
+                    <span class="order-export-wrap statement-export-wrap" @click.stop>
+                      <button class="primary-btn small" type="button" @click="openStatementCustomerExportMenu(row)">
+                        <IconSvg name="download" />导出对账单<IconSvg name="chevronDown" />
+                      </button>
+                    </span>
+                  </td>
                 </tr>
-                <tr v-if="statementCustomerRows.length === 0"><td colspan="5">暂无客户账单</td></tr>
+                <tr v-if="statementCustomerRows.length === 0"><td colspan="8">暂无客户账单</td></tr>
               </tbody>
             </table>
-          </div>
-        </div>
-        <div class="finance-operations-grid" @click="statementExportMenuOpen = false">
-          <div class="table-card finance-tool-card">
-            <div class="table-card-head">
-              <div>
-                <strong>对账单导出</strong>
-                <span>客户、司机、供应商都可按当前范围下载</span>
-              </div>
-              <span class="order-export-wrap statement-export-wrap" @click.stop>
-                <button class="primary-btn small" type="button" @click="toggleStatementExportMenu">
-                  <IconSvg name="download" />导出对账单<IconSvg name="chevronDown" />
-                </button>
-                <div v-if="statementExportMenuOpen" class="order-export-menu statement-export-menu">
-                  <div class="order-export-menu-title">选择导出模板</div>
-                  <div class="statement-export-menu-meta">
-                    <span>{{ statementExportTypeLabel() }}</span>
-                    <span>汇总：{{ statementSettlementCurrency }}</span>
-                    <span>汇率：{{ statementExchangeRate || "-" }}</span>
-                  </div>
-                  <div v-for="template in orderExportTemplateOptions()" :key="template.id" class="order-export-template-row">
-                    <span :title="template.name">{{ template.name }}</span>
-                    <button type="button" title="导出 Excel" aria-label="导出 Excel" @click="exportStatementByFormat('excel', template)">Excel</button>
-                    <button type="button" title="导出 PDF" aria-label="导出 PDF" @click="exportStatementByFormat('pdf', template)">PDF</button>
-                  </div>
-                </div>
-              </span>
-            </div>
-            <div class="statement-export-grid">
-              <label>类型
-                <select v-model="statementExportType" @change="statementExportEntity = ''; saveStatementExportSettings()">
-                  <option value="customer">客户对账单</option>
-                  <option value="driver">司机对账单</option>
-                  <option value="supplier">供应商对账单</option>
-                </select>
-              </label>
-              <label>对象
-                <select v-model="statementExportEntity">
-                  <option v-for="item in statementEntityOptions" :key="item.id || item.name" :value="item.name">{{ item.name }}</option>
-                </select>
-              </label>
-              <label>开始日期<input v-model="statementExportStart" type="date" @change="saveStatementExportSettings" /></label>
-              <label>结束日期<input v-model="statementExportEnd" type="date" @change="saveStatementExportSettings" /></label>
-              <label>汇总币种
-                <select v-model="statementSettlementCurrency" @change="saveStatementExportSettings">
-                  <option value="人民币">RMB</option>
-                  <option value="港币">HKD</option>
-                </select>
-              </label>
-              <label>汇率 HKD→RMB<input v-model="statementExchangeRate" type="number" min="0" step="0.0001" @change="saveStatementExportSettings" /></label>
-            </div>
           </div>
         </div>
         <div class="table-card finance-table-card">
@@ -16412,6 +16841,35 @@ function orderDetailFeeRows(order = {}) {
             </tbody>
           </table>
         </div>
+        <Teleport to="body">
+          <div
+            v-if="activeModule === 'financeCosts' && statementExportMenuOpen && activeStatementExportCustomerRow"
+            class="modal-backdrop statement-export-backdrop"
+            @click.self="closeStatementExportMenu"
+          >
+            <section class="modal-card compact-modal statement-export-dialog">
+              <div class="modal-head">
+                <div>
+                  <h2>导出对账单</h2>
+                  <p class="modal-subtitle">{{ activeStatementExportCustomerRow.customer }}</p>
+                </div>
+                <button type="button" class="icon-btn" @click="closeStatementExportMenu"><IconSvg name="close" />关闭</button>
+              </div>
+              <div class="statement-export-dialog-meta">
+                <span>客户对账单</span>
+                <span>汇总：{{ statementCustomerSettlementCurrency(activeStatementExportCustomerRow) }}</span>
+                <span>汇率：{{ statementCustomerExchangeRate(activeStatementExportCustomerRow) }}</span>
+              </div>
+              <div class="statement-export-template-list">
+                <div v-for="template in orderExportTemplateOptions()" :key="template.id" class="statement-export-template-row">
+                  <span :title="template.name">{{ template.name }}</span>
+                  <button type="button" title="导出 Excel" aria-label="导出 Excel" @click="exportStatementByFormat('excel', template)">Excel</button>
+                  <button type="button" title="导出 PDF" aria-label="导出 PDF" @click="exportStatementByFormat('pdf', template)">PDF</button>
+                </div>
+              </div>
+            </section>
+          </div>
+        </Teleport>
       </section>
 
       <section v-else-if="activeModule === 'financeDaily'" class="work-page finance-page">
@@ -16553,7 +17011,7 @@ function orderDetailFeeRows(order = {}) {
             </div>
           </div>
           <table class="data-table compact">
-            <thead><tr><th>排名</th><th>车牌</th><th>司机</th><th>订单数</th><th>收入</th><th>净利润</th><th>利润率</th></tr></thead>
+            <thead><tr><th>排名</th><th>车牌</th><th>司机</th><th>订单数</th><th>中港运费收入</th><th>净利润</th><th>利润率</th></tr></thead>
             <tbody>
               <tr v-for="(row, index) in bossVehicleProfitDisplayRows" :key="row.plate">
                 <td>{{ index + 1 }}</td>
@@ -16663,23 +17121,46 @@ function orderDetailFeeRows(order = {}) {
           <div class="finance-summary-card"><span>最高单车利润</span><strong>{{ bossTopVehicleProfitRow.profit }}</strong></div>
           <div class="finance-summary-card"><span>最高利润率</span><strong>{{ bossTopVehicleProfitRow.margin }}</strong></div>
         </div>
-        <div class="table-card finance-table-card">
-          <table class="data-table compact boss-data-table">
-            <thead><tr><th>车牌</th><th>司机</th><th>订单数</th><th>收入</th><th>司机工资</th><th>保养/固定成本</th><th>净利润</th><th>利润率</th></tr></thead>
-            <tbody>
-              <tr v-for="row in bossVehicleProfitDisplayRows" :key="row.plate">
-                <td>{{ row.plate }}</td>
-                <td>{{ row.driver }}</td>
-                <td>{{ row.orderCount }}</td>
-                <td>{{ row.revenue }}</td>
-                <td>{{ row.driverPay }}</td>
-                <td>{{ row.upkeep }}</td>
-                <td><strong>{{ row.profit }}</strong></td>
-                <td>{{ row.margin }}</td>
-              </tr>
-              <tr v-if="bossVehicleProfitDisplayRows.length === 0"><td colspan="8">暂无车辆利润数据</td></tr>
-            </tbody>
-          </table>
+        <div class="table-card finance-table-card boss-vehicle-profit-card">
+          <div class="boss-vehicle-profit-table-wrap">
+            <table class="data-table compact boss-data-table boss-vehicle-profit-table">
+              <thead>
+                <tr>
+                  <th>车牌</th>
+                  <th>司机</th>
+                  <th>订单数</th>
+                  <th>中港运费收入</th>
+                  <th>订单内开支</th>
+                  <th>加油费</th>
+                  <th>维修费</th>
+                  <th>保险费</th>
+                  <th>年审费</th>
+                  <th>牌头费</th>
+                  <th>其他支出</th>
+                  <th class="sticky-profit-col">净利润</th>
+                  <th class="sticky-margin-col">利润率</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in bossVehicleProfitDisplayRows" :key="row.plate">
+                  <td>{{ row.plate }}</td>
+                  <td>{{ row.driver }}</td>
+                  <td>{{ row.orderCount }}</td>
+                  <td>{{ row.revenue }}</td>
+                  <td>{{ row.orderExpense }}</td>
+                  <td>{{ row.fuelExpense }}</td>
+                  <td>{{ row.repairExpense }}</td>
+                  <td>{{ row.insuranceExpense }}</td>
+                  <td>{{ row.reviewExpense }}</td>
+                  <td>{{ row.plateHeadExpense }}</td>
+                  <td>{{ row.vehicleOtherExpense }}</td>
+                  <td class="sticky-profit-col"><strong>{{ row.profit }}</strong></td>
+                  <td class="sticky-margin-col">{{ row.margin }}</td>
+                </tr>
+                <tr v-if="bossVehicleProfitDisplayRows.length === 0"><td colspan="13">暂无车辆利润数据</td></tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </section>
 
@@ -19444,6 +19925,65 @@ function orderDetailFeeRows(order = {}) {
           <div class="modal-actions">
             <button type="button" class="ghost-btn" @click="driverModalOpen = false">取消</button>
             <button class="primary-btn" :disabled="loading"><IconSvg name="save" />保存司机</button>
+          </div>
+        </form>
+      </div>
+
+      <div v-if="vehicleExpenseModalOpen" class="modal-backdrop" @click.self="vehicleExpenseModalOpen = false">
+        <form class="modal-card compact-modal vehicle-expense-modal" @submit.prevent="saveVehicleExpense">
+          <div class="modal-head">
+            <div>
+              <p class="eyebrow">车辆支出</p>
+              <h2>{{ editingVehicleExpenseId ? '编辑费用' : activeVehicleExpenseConfig.addLabel }}</h2>
+            </div>
+            <button type="button" class="icon-btn" @click="vehicleExpenseModalOpen = false"><IconSvg name="close" />关闭</button>
+          </div>
+          <div class="modal-body">
+            <div class="form-grid vehicle-expense-form-grid">
+              <label v-if="vehicleExpenseForm.type === 'annual'">费用类型
+                <select v-model="vehicleExpenseForm.name" required>
+                  <option v-for="name in VEHICLE_ANNUAL_EXPENSE_NAMES" :key="name" :value="name">{{ name }}</option>
+                </select>
+              </label>
+              <label v-else-if="vehicleExpenseForm.type === 'other'">名称
+                <input v-model.trim="vehicleExpenseForm.name" placeholder="例如：停车费、过路费" required />
+              </label>
+              <label v-else>费用类型
+                <input v-model.trim="vehicleExpenseForm.name" readonly />
+              </label>
+              <label>车牌
+                <select v-model="vehicleExpenseForm.plate" required>
+                  <option value="">请选择车牌</option>
+                  <option v-for="vehicle in vehicleRows" :key="vehicle.plate" :value="vehicle.plate">{{ vehicle.plate }} · {{ vehicle.type || '车辆' }}</option>
+                </select>
+              </label>
+              <label v-if="vehicleExpenseForm.type === 'annual'">年份
+                <select v-model.number="vehicleExpenseForm.year" required>
+                  <option v-for="year in vehicleExpenseYearOptions()" :key="year" :value="year">{{ year }}年</option>
+                </select>
+              </label>
+              <label v-else>时间
+                <input v-model="vehicleExpenseForm.date" type="date" required />
+              </label>
+              <label>币种
+                <select v-model="vehicleExpenseForm.currency">
+                  <option value="人民币">RMB</option>
+                  <option value="港币">HKD</option>
+                </select>
+              </label>
+              <label>费用
+                <input v-model.number="vehicleExpenseForm.amount" type="number" min="0.01" step="0.01" required />
+              </label>
+              <label class="span-2">备注
+                <input v-model.trim="vehicleExpenseForm.note" placeholder="票据号、供应商或说明" />
+              </label>
+            </div>
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="ghost-btn" @click="vehicleExpenseModalOpen = false">取消</button>
+            <button class="primary-btn" type="submit" :disabled="vehicleExpenseSaving || vehicleRows.length === 0">
+              <IconSvg name="save" />{{ vehicleExpenseSaving ? '保存中' : '保存费用' }}
+            </button>
           </div>
         </form>
       </div>

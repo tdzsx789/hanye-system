@@ -116,7 +116,8 @@ const idReturningTables = new Set([
   "address_book",
   "customer_contacts",
   "driver_route_adjust_rules",
-  "statement_downloads"
+  "statement_downloads",
+  "vehicle_expenses"
 ]);
 
 function withReturningId(sql) {
@@ -371,6 +372,21 @@ async function initializeSchema() {
       deleted_at TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS vehicle_expenses (
+      id BIGSERIAL PRIMARY KEY,
+      expense_type TEXT NOT NULL CHECK (expense_type IN ('fuel', 'repair', 'annual', 'other')),
+      name TEXT NOT NULL DEFAULT '',
+      plate TEXT NOT NULL REFERENCES vehicles(plate) ON UPDATE CASCADE,
+      expense_date TEXT NOT NULL DEFAULT (CURRENT_DATE::text),
+      expense_year INTEGER,
+      currency TEXT NOT NULL DEFAULT '人民币',
+      amount DOUBLE PRECISION NOT NULL DEFAULT 0,
+      note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      deleted_at TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS drivers (
       id BIGSERIAL PRIMARY KEY,
       type TEXT NOT NULL DEFAULT '香港司机',
@@ -608,6 +624,9 @@ async function initializeSchema() {
     CREATE INDEX IF NOT EXISTS idx_orders_customer_id ON orders(customer_id);
     CREATE INDEX IF NOT EXISTS idx_orders_deleted_order_date ON orders(deleted_at, order_date);
     CREATE INDEX IF NOT EXISTS idx_order_fees_order_no ON order_fees(order_no);
+    CREATE INDEX IF NOT EXISTS idx_vehicle_expenses_type_date ON vehicle_expenses(expense_type, deleted_at, expense_date);
+    CREATE INDEX IF NOT EXISTS idx_vehicle_expenses_plate_date ON vehicle_expenses(plate, deleted_at, expense_date);
+    CREATE INDEX IF NOT EXISTS idx_vehicle_expenses_year ON vehicle_expenses(expense_year, deleted_at);
     CREATE INDEX IF NOT EXISTS idx_files_entity ON files(entity_type, entity_id);
     CREATE INDEX IF NOT EXISTS idx_customs_businesses_date ON customs_businesses(deleted_at, business_date);
     CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);

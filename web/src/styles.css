@@ -1964,6 +1964,72 @@ select {
   gap: 8px;
 }
 
+.vehicle-expense-page {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+}
+
+.vehicle-expense-card {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.vehicle-expense-summary {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.vehicle-expense-table {
+  min-width: 980px;
+  table-layout: fixed;
+}
+
+.vehicle-expense-table th:nth-child(1),
+.vehicle-expense-table td:nth-child(1) {
+  width: 13%;
+}
+
+.vehicle-expense-table th:nth-child(2),
+.vehicle-expense-table td:nth-child(2) {
+  width: 14%;
+}
+
+.vehicle-expense-table th:nth-child(3),
+.vehicle-expense-table td:nth-child(3),
+.vehicle-expense-table th:nth-child(4),
+.vehicle-expense-table td:nth-child(4),
+.vehicle-expense-table th:nth-child(5),
+.vehicle-expense-table td:nth-child(5) {
+  width: 11%;
+}
+
+.vehicle-expense-table th:nth-child(6),
+.vehicle-expense-table td:nth-child(6) {
+  width: 20%;
+}
+
+.vehicle-expense-table th:nth-child(8),
+.vehicle-expense-table td:nth-child(8) {
+  width: 84px;
+}
+
+.vehicle-expense-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vehicle-detail-expense-panel {
+  display: grid;
+  gap: 8px;
+}
+
+.vehicle-expense-form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .home-page {
   overflow: auto;
   padding-right: 2px;
@@ -2823,6 +2889,160 @@ select {
   overflow: auto;
 }
 
+.statement-customer-card {
+  overflow: visible;
+}
+
+.statement-customer-table {
+  min-width: 960px;
+}
+
+.statement-customer-table th:first-child,
+.statement-customer-table td:first-child {
+  width: 54px;
+}
+
+.statement-customer-table th:nth-child(3),
+.statement-customer-table td:nth-child(3) {
+  width: 88px;
+}
+
+.statement-customer-table th:nth-child(4),
+.statement-customer-table td:nth-child(4) {
+  width: 96px;
+}
+
+.statement-customer-table th:last-child,
+.statement-customer-table td:last-child {
+  width: 150px;
+}
+
+.statement-settlement-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 52px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: #eef6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.statement-settlement-chip.hkd {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.statement-exchange-rate-input {
+  width: 78px;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.statement-customer-actions {
+  display: table-cell;
+  vertical-align: middle;
+  justify-content: flex-start;
+  overflow: visible;
+  white-space: nowrap;
+}
+
+.statement-customer-actions .statement-export-wrap {
+  display: inline-flex;
+}
+
+.statement-customer-actions .statement-export-menu {
+  z-index: 30;
+}
+
+.statement-export-backdrop {
+  z-index: 120;
+}
+
+.statement-export-dialog {
+  width: min(520px, calc(100vw - 32px));
+  overflow: visible;
+}
+
+.statement-export-dialog-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: #f8fbff;
+}
+
+.statement-export-dialog-meta span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: #fff;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.statement-export-template-list {
+  display: grid;
+  gap: 0;
+  padding: 8px;
+}
+
+.statement-export-template-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 68px 58px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 8px;
+}
+
+.statement-export-template-row + .statement-export-template-row {
+  border-top: 1px solid #eef2f7;
+  border-radius: 0;
+}
+
+.statement-export-template-row span {
+  min-width: 0;
+  overflow: hidden;
+  color: #1f2a44;
+  font-size: 13px;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statement-export-template-row button {
+  height: 30px;
+  border: 1px solid #dbe7f5;
+  border-radius: 7px;
+  background: #fff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.statement-export-template-row button:hover {
+  border-color: #8ab7ff;
+  background: #eef6ff;
+}
+
 .finance-tool-card .table-card-head {
   min-height: 0;
   padding: 9px 10px;
@@ -2858,6 +3078,88 @@ select {
 
 .boss-data-table {
   min-width: 760px;
+}
+
+.boss-vehicle-profit-card {
+  overflow: hidden;
+}
+
+.boss-vehicle-profit-table-wrap {
+  width: 100%;
+  overflow: auto;
+}
+
+.boss-vehicle-profit-table {
+  min-width: 1960px;
+  table-layout: fixed;
+}
+
+.boss-vehicle-profit-table th,
+.boss-vehicle-profit-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.boss-vehicle-profit-table th:nth-child(1),
+.boss-vehicle-profit-table td:nth-child(1) {
+  width: 120px;
+}
+
+.boss-vehicle-profit-table th:nth-child(2),
+.boss-vehicle-profit-table td:nth-child(2) {
+  width: 130px;
+}
+
+.boss-vehicle-profit-table th:nth-child(3),
+.boss-vehicle-profit-table td:nth-child(3) {
+  width: 76px;
+}
+
+.boss-vehicle-profit-table th:nth-child(4),
+.boss-vehicle-profit-table td:nth-child(4),
+.boss-vehicle-profit-table th:nth-child(5),
+.boss-vehicle-profit-table td:nth-child(5),
+.boss-vehicle-profit-table th:nth-child(6),
+.boss-vehicle-profit-table td:nth-child(6),
+.boss-vehicle-profit-table th:nth-child(7),
+.boss-vehicle-profit-table td:nth-child(7),
+.boss-vehicle-profit-table th:nth-child(8),
+.boss-vehicle-profit-table td:nth-child(8),
+.boss-vehicle-profit-table th:nth-child(9),
+.boss-vehicle-profit-table td:nth-child(9),
+.boss-vehicle-profit-table th:nth-child(10),
+.boss-vehicle-profit-table td:nth-child(10),
+.boss-vehicle-profit-table th:nth-child(11),
+.boss-vehicle-profit-table td:nth-child(11) {
+  width: 170px;
+}
+
+.boss-vehicle-profit-table .sticky-profit-col,
+.boss-vehicle-profit-table .sticky-margin-col {
+  position: sticky;
+  background: #fff;
+  box-shadow: -1px 0 0 var(--border);
+}
+
+.boss-vehicle-profit-table thead .sticky-profit-col,
+.boss-vehicle-profit-table thead .sticky-margin-col {
+  z-index: 5;
+}
+
+.boss-vehicle-profit-table tbody .sticky-profit-col,
+.boss-vehicle-profit-table tbody .sticky-margin-col {
+  z-index: 3;
+}
+
+.boss-vehicle-profit-table .sticky-margin-col {
+  right: 0;
+  width: 92px;
+}
+
+.boss-vehicle-profit-table .sticky-profit-col {
+  right: 92px;
+  width: 180px;
 }
 
 .boss-insight-grid .data-table {

@@ -44,6 +44,8 @@ const SAFE_FILE_TYPES = [
 const PREVIEW_MIMES = new Set(SAFE_FILE_TYPES.flatMap((item) => item.mimes));
 const AUTH_TOKEN_TTL_SECONDS = Number(process.env.AUTH_TOKEN_TTL_SECONDS || 7 * 24 * 60 * 60);
 const AUTH_SECRET = process.env.HANYE_AUTH_SECRET || process.env.AUTH_SECRET || "hanye-system-local-dev-secret";
+const VEHICLE_EXPENSE_TYPES = new Set(["fuel", "repair", "annual", "other"]);
+const VEHICLE_ANNUAL_EXPENSE_NAMES = new Set(["保险费", "年审费", "牌头费"]);
 const OSS_ACCESS_KEY_ID = String(process.env.OSS_ACCESS_KEY_ID || process.env.ALIYUN_ACCESS_KEY_ID || process.env.ALIBABA_CLOUD_ACCESS_KEY_ID || "").trim();
 const OSS_ACCESS_KEY_SECRET = String(process.env.OSS_ACCESS_KEY_SECRET || process.env.ALIYUN_ACCESS_KEY_SECRET || process.env.ALIBABA_CLOUD_ACCESS_KEY_SECRET || "").trim();
 const OSS_BUCKET = String(process.env.OSS_BUCKET || "").trim();
@@ -636,24 +638,20 @@ async function migrateDatabaseFilesToOss() {
   });
 }
 
-function resolvePdfFontPath() {
+function resolvePdfFontConfig() {
+  const envPath = String(process.env.PDF_FONT_PATH || "").trim();
+  const envFamily = String(process.env.PDF_FONT_FAMILY || "").trim();
   return [
-    "C:/Windows/Fonts/msyh.ttc",
-    "C:/Windows/Fonts/simsun.ttc",
-    "C:/Windows/Fonts/nsimsun.ttc",
-    "C:/Windows/Fonts/simhei.ttf",
-    "/Library/Fonts/Arial Unicode.ttf",
-    "/Library/Fonts/Microsoft Yahei.ttf",
-    "/Library/Fonts/Songti.ttc",
-    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-    "/System/Library/Fonts/STHeiti Medium.ttc",
-    "/System/Library/Fonts/Supplemental/Songti.ttc",
-    "/System/Library/Fonts/PingFang.ttc",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
-    "/usr/share/fonts/truetype/arphic/uming.ttc",
-    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"
-  ].find((fontPath) => fs.existsSync(fontPath));
+    envPath ? { path: envPath, family: envFamily || undefined } : null,
+    { path: "/usr/share/fonts/noto/NotoSansCJK-Regular.ttc", family: "NotoSansCJKsc-Regular" },
+    { path: "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", family: "NotoSansCJKsc-Regular" },
+    { path: "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc", family: "NotoSerifCJKsc-Regular" },
+    { path: "/Library/Fonts/Arial Unicode.ttf" },
+    { path: "/System/Library/Fonts/Supplemental/Arial Unicode.ttf" },
+    { path: "C:/Windows/Fonts/msyh.ttc", family: "MicrosoftYaHei" },
+    { path: "C:/Windows/Fonts/simsun.ttc", family: "SimSun" },
+    { path: "C:/Windows/Fonts/simhei.ttf" }
+  ].filter(Boolean).find((item) => fs.existsSync(item.path)) || null;
 }
 
 function textValue(value) {
@@ -1096,7 +1094,7 @@ function exportCellLineCount(value, columnWidth = 76) {
   const estimated = explicitLines.reduce((sum, line) => {
     return sum + Math.max(1, Math.ceil(stringDisplayWidth(line) / maxCharsPerLine));
   }, 0);
-  return Math.min(2, Math.max(1, estimated));
+  return Math.min(10, Math.max(1, estimated));
 }
 
 function isExportFeeItemColumn(column = {}) {
@@ -1175,6 +1173,80 @@ function excelColumnWidthForExport(column = {}, headerValue = "", rowValues = []
   return Math.max(6, Math.min(maxWidth, Math.ceil(Math.max(headerWidth, bodyWidth) + 2)));
 }
 
+function excelCellLineCount(value, excelColumnWidth = 12) {
+  const width = Math.max(4, Number(excelColumnWidth || 12));
+  const maxCharsPerLine = Math.max(1, Math.floor(width * 1.7));
+  return textValue(value).split(/\r?\n/).reduce((sum, line) => {
+    return sum + Math.max(1, Math.ceil(stringDisplayWidth(line) / maxCharsPerLine));
+  }, 0);
+}
+
+function excelRowHeightForText(value, fontSize = 10, excelColumnWidth = 12, minHeight = 18) {
+  const lines = excelCellLineCount(value, excelColumnWidth);
+  return Math.min(260, Math.max(minHeight, Math.ceil(lines * Number(fontSize || 10) * 1.35 + 8)));
+}
+
+function applyExcelTemplateLogo(workbook, worksheet, template, headerBlockRows, columnWidths = []) {
+  const image = template?.logo ? dataUrlImage(template.logo) : null;
+  if (!image) return;
+  try {
+    const imageId = workbook.addImage(image);
+    const logoWidth = Math.max(36, Math.min(180, Number(template.logoWidth || 92)));
+    const logoHeight = Math.max(24, Math.min(120, Number(template.logoHeight || 56)));
+    const logoX = Math.max(0, Number(template.logoX || 0));
+    const logoY = Math.max(0, Number(template.logoY || 0));
+    worksheet.addImage(imageId, {
+      tl: { col: logoX / 72, row: logoY / 20 },
+      ext: { width: logoWidth, height: logoHeight },
+      editAs: "oneCell"
+    });
+    const firstLogoRow = Math.max(1, Math.min(headerBlockRows, 1 + Math.floor(logoY / 20)));
+    const row = worksheet.getRow(firstLogoRow);
+    row.height = Math.max(Number(row.height || 0), Math.ceil(logoHeight * 0.75) + 6);
+    if (columnWidths.length) {
+      const firstLogoColumn = Math.max(1, Math.min(columnWidths.length, 1 + Math.floor(logoX / 72)));
+      const currentWidth = worksheet.getColumn(firstLogoColumn).width || columnWidths[firstLogoColumn - 1] || 10;
+      worksheet.getColumn(firstLogoColumn).width = Math.max(currentWidth, Math.ceil(logoWidth / 7));
+    }
+  } catch {
+    // Ignore unsupported image payloads so data export still succeeds.
+  }
+}
+
+function pdfTextHeight(doc, value, width, fontSize, options = {}) {
+  doc.fontSize(Number(fontSize || 8));
+  return doc.heightOfString(textValue(value), {
+    width: Math.max(1, Number(width || 1)),
+    lineGap: Number(options.lineGap ?? 1)
+  });
+}
+
+function pdfRowHeightForValues(doc, values = [], columns = [], template = null) {
+  const baseHeight = template?.orientation === "fluid"
+    ? Math.max(22, Number(template?.tableFontSize || 8) * 1.35 + 12)
+    : Math.max(28, Number(template?.tableFontSize || 8) * 2.35 + 12);
+  const contentHeight = values.reduce((max, value, index) => {
+    const column = columns[index] || {};
+    const height = pdfTextHeight(doc, value, Number(column.width || 0) - 6, column.fontSize || template?.tableFontSize || 8, { lineGap: 1 });
+    return Math.max(max, height + 12);
+  }, baseHeight);
+  return Math.min(180, Math.max(baseHeight, Math.ceil(contentHeight)));
+}
+
+function pdfTemplatePageHeight(template = null) {
+  return template?.orientation === "portrait" ? 842 : 595;
+}
+
+function pdfFooterItemY(item = {}, template = null) {
+  const rawY = Number(item.y || 0);
+  const footerHeight = Math.max(28, Math.min(140, Number(template?.footerHeight || 70)));
+  const pageHeight = pdfTemplatePageHeight(template);
+  if (!Number.isFinite(rawY) || rawY < 0) return 0;
+  if (rawY > pageHeight * 1.5) return 0;
+  if (rawY >= pageHeight - footerHeight) return Math.max(0, rawY - (pageHeight - footerHeight));
+  return Math.max(0, Math.min(rawY, footerHeight - 4));
+}
+
 async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePayload = null, exchange = null) {
   const template = normalizeExportTemplate(templatePayload);
   const columns = exportColumnsForOrders(templatePayload, orders);
@@ -1208,13 +1280,16 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
     pages: 1
   };
 
-  columns.forEach((column, index) => {
-    worksheet.getColumn(index + 1).width = excelColumnWidthForExport(
+  const excelColumnWidths = columns.map((column, index) =>
+    excelColumnWidthForExport(
       column,
       headers[index],
       rows.map((row) => row[index]),
       template
-    );
+    )
+  );
+  excelColumnWidths.forEach((width, index) => {
+    worksheet.getColumn(index + 1).width = width;
   });
 
   const headerHeight = template?.headerHeight || 72;
@@ -1228,24 +1303,29 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
     )
     : [{ text: title, fontSize: 15, bold: true }, { text: `导出时间：${todayInputValue()}    订单数：${orders.length}`, fontSize: 9, color: "#64748b" }];
 
-  // Excel is stricter than browsers/PDF readers about drawing anchors. Keep the
-  // workbook drawing-free so exported files open without repair prompts.
+  applyExcelTemplateLogo(workbook, worksheet, template, headerBlockRows, excelColumnWidths);
 
   headerItems.forEach((item, itemIndex) => {
     const text = templateText(item.text, context);
     if (!text) return;
     const rowNumber = Math.max(1, Math.min(headerBlockRows, 1 + Math.floor(Number(item.y ?? itemIndex * 18) / 20)));
     const columnNumber = Math.max(1, Math.min(mergeEndColumn, 1 + Math.floor(Number(item.x || 0) / 72)));
+    const fontSize = Number(item.fontSize || template?.headerFontSize || 14);
     const cell = worksheet.getCell(rowNumber, columnNumber);
     cell.value = text;
     cell.font = {
       name: "Microsoft YaHei",
-      size: Number(item.fontSize || template?.headerFontSize || 14),
+      size: fontSize,
       bold: Boolean(item.bold),
       color: { argb: excelArgb(item.color || template?.headerTextColor || "#17233c") }
     };
     cell.alignment = { vertical: "middle", horizontal: excelAlignment(item.align), wrapText: true };
-    worksheet.getRow(rowNumber).height = Math.max(20, Math.ceil(Number(item.fontSize || 14) * 1.8));
+    const mergedWidth = excelColumnWidths.slice(columnNumber - 1).reduce((sum, width) => sum + Number(width || 0), 0);
+    const row = worksheet.getRow(rowNumber);
+    row.height = Math.max(
+      Number(row.height || 0),
+      excelRowHeightForText(text, fontSize, Math.max(mergedWidth, excelColumnWidths[columnNumber - 1] || 12), 20)
+    );
     if (columnNumber < mergeEndColumn) {
       try {
         worksheet.mergeCells(rowNumber, columnNumber, rowNumber, mergeEndColumn);
@@ -1289,7 +1369,18 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
     const sourceOrder = sortedOrders[rowIndex] || null;
     const row = worksheet.getRow(tableStartRow + 1 + rowIndex);
     row.values = rowValues;
-    row.height = Math.max(22, Number(template?.tableFontSize || 8) * 1.9 + 12);
+    row.height = rowValues.reduce((height, value, columnIndex) => {
+      const column = columns[columnIndex] || {};
+      return Math.max(
+        height,
+        excelRowHeightForText(
+          value,
+          Number(column.fontSize || template?.tableFontSize || 8),
+          excelColumnWidths[columnIndex] || 12,
+          Math.max(22, Number(template?.tableFontSize || 8) * 1.9 + 12)
+        )
+      );
+    }, Math.max(22, Number(template?.tableFontSize || 8) * 1.9 + 12));
     row.eachCell((cell, columnNumber) => {
       const column = columns[columnNumber - 1] || {};
       if (isExportAmountColumn(column)) {
@@ -1316,7 +1407,7 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
           fgColor: { argb: excelArgb(template?.tableHeaderBgColor || "#f1f5f9") }
         };
       }
-      cell.alignment = { vertical: "middle", horizontal: excelAlignment(template?.tableAlign), wrapText: false };
+      cell.alignment = { vertical: "middle", horizontal: excelAlignment(template?.tableAlign), wrapText: true };
       if (!isTotalRow && sourceOrder) {
         const comment = exportOrderColumnComment(sourceOrder, column);
         if (comment) {
@@ -1344,6 +1435,10 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
         color: { argb: excelArgb(item.color || template?.footerTextColor || "#64748b") }
       };
       cell.alignment = { vertical: "middle", horizontal: excelAlignment(item.align), wrapText: true };
+      row.height = Math.max(
+        Number(row.height || 0),
+        excelRowHeightForText(line, Number(item.fontSize || template?.footerFontSize || 9), excelColumnWidths.reduce((sum, width) => sum + Number(width || 0), 0), 18)
+      );
       if (mergeEndColumn > 1) worksheet.mergeCells(footerRowNumber, 1, footerRowNumber, mergeEndColumn);
       footerRowNumber += 1;
     });
@@ -1468,8 +1563,19 @@ function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = 
     margin: 24,
     bufferPages: true
   });
-  const fontPath = resolvePdfFontPath();
-  if (fontPath) doc.font(fontPath);
+  const fontConfig = resolvePdfFontConfig();
+  let fontUnavailable = false;
+  function usePdfFont() {
+    if (!fontConfig || fontUnavailable) return;
+    try {
+      if (fontConfig.family) doc.font(fontConfig.path, fontConfig.family);
+      else doc.font(fontConfig.path);
+    } catch (error) {
+      fontUnavailable = true;
+      console.warn(`PDF font unavailable: ${fontConfig.path}`, error.message);
+    }
+  }
+  usePdfFont();
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename || `${title}-${todayInputValue()}.pdf`)}`);
   doc.pipe(res);
@@ -1482,9 +1588,6 @@ function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = 
     fontSize: Number(column.fontSize || template?.tableFontSize || 8)
   }));
   const startX = doc.page.margins.left;
-  const rowHeight = template?.orientation === "fluid"
-    ? Math.max(22, Number(template?.tableFontSize || 8) * 1.35 + 12)
-    : Math.max(28, Number(template?.tableFontSize || 8) * 2.35 + 12);
   const tableHeaderHeight = Math.max(30, Number(template?.tableFontSize || 8) * 2.45 + 12);
   const headerHeight = template?.headerHeight || 58;
   const footerHeight = template?.footerHeight || 28;
@@ -1497,13 +1600,14 @@ function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = 
 
   function measureFooterReserve() {
     if (!template?.footerTextItems?.length) return footerHeight;
+    usePdfFont();
     const reserve = template.footerTextItems.reduce((max, item) => {
       doc.fontSize(Number(item.fontSize || footerFontSize));
       const textHeight = doc.heightOfString(templateText(item.text, { ...contextBase, page: 999, pages: 999 }), {
         width: pageWidth - Number(item.x || 0),
         lineGap: 2
       });
-      return Math.max(max, Number(item.y || 0) + Math.ceil(textHeight) + 8);
+      return Math.max(max, pdfFooterItemY(item, template) + Math.ceil(textHeight) + 8);
     }, footerHeight);
     return Math.max(footerHeight, reserve);
   }
@@ -1521,6 +1625,7 @@ function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = 
             ? { cover: [logoWidth, logoHeight] }
             : { fit: [logoWidth, logoHeight] };
           doc.image(logoBuffer, startX + template.logoX, doc.page.margins.top + template.logoY, logoBox);
+          usePdfFont();
         } catch {
           // Ignore invalid image payloads so export still succeeds.
         }
@@ -1528,6 +1633,7 @@ function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = 
       if (template.headerTextItems.length) {
         template.headerTextItems.forEach((item) => {
           const fontSize = Number(item.fontSize || template.headerFontSize || 14);
+          usePdfFont();
           doc.fontSize(fontSize).fillColor(item.color || template.headerTextColor || "#17233c");
           doc.text(
             templateText(item.text, contextBase),
@@ -1541,6 +1647,7 @@ function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = 
           );
         });
       } else {
+        usePdfFont();
         doc.fontSize(template.headerFontSize).fillColor(template.headerTextColor || "#17233c").text(
           templateText(template.header || "{{title}}\n日期：{{date}}", contextBase),
           startX,
@@ -1549,12 +1656,14 @@ function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = 
         );
       }
     } else {
+      usePdfFont();
       doc.fontSize(15).fillColor("#17233c").text(title, startX, 18, { continued: false });
       doc.fontSize(9).fillColor("#64748b").text(`导出时间：${todayInputValue()}    订单数：${orders.length}`, startX, 38);
     }
     let x = startX;
     const y = doc.page.margins.top + headerHeight;
     doc.rect(startX, y, columns.reduce((sum, column) => sum + column.width, 0), tableHeaderHeight).fill(template?.tableHeaderBgColor || "#f1f5f9");
+    usePdfFont();
     doc.fillColor(template?.tableHeaderTextColor || "#1f2a44").fontSize(template?.tableFontSize || 8);
     columns.forEach((column, columnIndex) => {
       doc.lineWidth(template?.tableBorderWidth ?? 1).rect(x, y, column.width, tableHeaderHeight).strokeColor(template?.tableBorderColor || "#d9e3f2").stroke();
@@ -1589,30 +1698,32 @@ function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = 
   ];
   let y = drawHeader();
   pdfRows.forEach((rowData) => {
-    if (y + rowHeight > doc.page.height - doc.page.margins.bottom - footerReserve) {
+    usePdfFont();
+    const currentRowHeight = pdfRowHeightForValues(doc, rowData.values, columns, template);
+    if (y + currentRowHeight > doc.page.height - doc.page.margins.bottom - footerReserve) {
       doc.addPage();
       y = drawHeader();
     }
     let x = startX;
     doc.fillColor(template?.tableTextColor || "#17233c");
     columns.forEach((column, columnIndex) => {
+      usePdfFont();
       doc.fontSize(column.fontSize || template?.tableFontSize || 7.3);
       if (rowData.total) {
-        doc.rect(x, y, column.width, rowHeight).fill(template?.tableHeaderBgColor || "#f1f5f9");
+        doc.rect(x, y, column.width, currentRowHeight).fill(template?.tableHeaderBgColor || "#f1f5f9");
         doc.fillColor(template?.tableTextColor || "#17233c");
       }
-      doc.lineWidth(template?.tableBorderWidth ?? 1).rect(x, y, column.width, rowHeight).strokeColor(template?.tableBorderColor || "#e9eef6").stroke();
+      doc.lineWidth(template?.tableBorderWidth ?? 1).rect(x, y, column.width, currentRowHeight).strokeColor(template?.tableBorderColor || "#e9eef6").stroke();
       const textOptions = {
         width: column.width - 6,
         align: template?.tableAlign || "left",
         lineGap: 1,
-        lineBreak: false
+        height: currentRowHeight - 8
       };
-      if (template?.orientation !== "fluid") textOptions.height = rowHeight - 8;
       doc.text(textValue(rowData.values[columnIndex]), x + 3, y + 6, textOptions);
       x += column.width;
     });
-    y += rowHeight;
+    y += currentRowHeight;
   });
 
   const range = doc.bufferedPageRange();
@@ -1621,11 +1732,12 @@ function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = 
     const page = index + 1 - range.start;
     if (template?.footerTextItems?.length) {
       template.footerTextItems.forEach((item) => {
+        usePdfFont();
         doc.fontSize(Number(item.fontSize || footerFontSize)).fillColor(item.color || template.footerTextColor || "#64748b");
         doc.text(
           templateText(item.text, { ...contextBase, page, pages: range.count }),
           doc.page.margins.left + Number(item.x || 0),
-          doc.page.height - doc.page.margins.bottom - footerReserve + Number(item.y || 0),
+          doc.page.height - doc.page.margins.bottom - footerReserve + pdfFooterItemY(item, template),
           {
             width: Math.min(Number(item.width || 280), pageWidth - Number(item.x || 0)),
             align: item.align || "left",
@@ -1635,6 +1747,7 @@ function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = 
       });
     } else {
       const footerText = `第 ${page} / ${range.count} 页`;
+      usePdfFont();
       doc.fontSize(footerFontSize);
       const footerTextHeight = doc.heightOfString(footerText, {
         width: pageWidth,
@@ -1750,6 +1863,59 @@ function mapVehicle(row) {
     status: row.status,
     monthlyCost: row.monthly_cost,
     note: row.note
+  };
+}
+
+function mapVehicleExpense(row) {
+  return {
+    id: row.id,
+    type: row.expense_type,
+    name: row.name || "",
+    plate: row.plate || "",
+    date: row.expense_date || "",
+    year: row.expense_year || "",
+    currency: row.currency || "人民币",
+    amount: Number(row.amount || 0),
+    note: row.note || "",
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || ""
+  };
+}
+
+function normalizeVehicleExpenseCurrency(value = "") {
+  const text = String(value || "").trim().toUpperCase();
+  if (text === "HKD" || text === "港币") return "港币";
+  return "人民币";
+}
+
+function normalizeVehicleExpensePayload(body = {}, current = null) {
+  const type = VEHICLE_EXPENSE_TYPES.has(String(body.type || body.expenseType || current?.expense_type || "fuel"))
+    ? String(body.type || body.expenseType || current?.expense_type || "fuel")
+    : "fuel";
+  const rawName = String(body.name ?? current?.name ?? "").trim();
+  const yearValue = Number(body.year ?? body.expenseYear ?? current?.expense_year ?? new Date().getFullYear());
+  const year = Number.isInteger(yearValue) && yearValue >= 2000 && yearValue <= 2100 ? yearValue : new Date().getFullYear();
+  const date = type === "annual"
+    ? `${year}-01-01`
+    : String(body.date || body.expenseDate || current?.expense_date || todayInputValue()).trim();
+  const defaultNames = {
+    fuel: "加油费",
+    repair: "维修费",
+    annual: "保险费",
+    other: ""
+  };
+  const name = type === "annual"
+    ? (VEHICLE_ANNUAL_EXPENSE_NAMES.has(rawName) ? rawName : "保险费")
+    : (rawName || defaultNames[type]);
+  return {
+    type,
+    name,
+    plate: String(body.plate ?? current?.plate ?? "").trim(),
+    date,
+    year: type === "annual" ? year : null,
+    currency: normalizeVehicleExpenseCurrency(body.currency ?? current?.currency ?? "人民币"),
+    amount: Number(body.amount ?? current?.amount ?? 0),
+    note: String(body.note ?? current?.note ?? "").trim()
   };
 }
 
@@ -2204,6 +2370,7 @@ function requiredModuleForRequest(req) {
   if (path.startsWith("/orders")) return "orders";
   if (path.startsWith("/customs-businesses")) return "customsBusiness";
   if (path.startsWith("/dispatch-plans")) return "dispatchBoard";
+  if (path.startsWith("/vehicle-expenses")) return "vehicleDriver";
   if (path.startsWith("/vehicles")) return "vehicleDriver";
   if (path.startsWith("/drivers")) return "vehicleDriver";
   if (path.startsWith("/driver-wage-rules")) return "vehicleDriver";
@@ -3177,6 +3344,7 @@ app.patch("/api/vehicles/:plate", async (req, res) => {
     if (item.plate !== originalPlate) {
       await db.prepare("UPDATE orders SET plate = ? WHERE plate = ? AND deleted_at IS NULL").run(item.plate, originalPlate);
       await db.prepare("UPDATE files SET entity_id = ? WHERE entity_type = 'vehicle' AND entity_id = ? AND deleted_at IS NULL").run(item.plate, originalPlate);
+      await db.prepare("UPDATE vehicle_expenses SET plate = ?, updated_at = CURRENT_TIMESTAMP WHERE plate = ? AND deleted_at IS NULL").run(item.plate, originalPlate);
     }
   });
   try {
@@ -3201,12 +3369,122 @@ app.delete("/api/vehicles/:plate", async (req, res) => {
     res.status(409).json({ message: "车辆已有订单记录，不允许删除" });
     return;
   }
+  const expenseCount = (await db.prepare("SELECT COUNT(*) AS count FROM vehicle_expenses WHERE plate = ? AND deleted_at IS NULL").get(plate)).count;
+  if (expenseCount > 0) {
+    res.status(409).json({ message: "车辆已有费用记录，不允许删除" });
+    return;
+  }
   const result = await db.prepare("UPDATE vehicles SET deleted_at = CURRENT_TIMESTAMP WHERE plate = ? AND deleted_at IS NULL").run(plate);
   if (result.changes === 0) {
     res.status(404).json({ message: "车辆不存在或已删除" });
     return;
   }
   await writeAudit("delete", "vehicle", plate, "移入回收站");
+  res.json({ ok: true });
+});
+
+app.get("/api/vehicle-expenses", async (req, res) => {
+  const type = String(req.query.type || "").trim();
+  const rows = VEHICLE_EXPENSE_TYPES.has(type)
+    ? await db.prepare(`
+      SELECT * FROM vehicle_expenses
+      WHERE deleted_at IS NULL AND expense_type = ?
+      ORDER BY expense_date DESC, id DESC
+    `).all(type)
+    : await db.prepare(`
+      SELECT * FROM vehicle_expenses
+      WHERE deleted_at IS NULL
+      ORDER BY expense_date DESC, id DESC
+    `).all();
+  res.json(rows.map(mapVehicleExpense));
+});
+
+app.post("/api/vehicle-expenses", async (req, res) => {
+  const item = normalizeVehicleExpensePayload(req.body || {});
+  if (!item.plate) {
+    res.status(400).json({ message: "请选择车牌" });
+    return;
+  }
+  const vehicle = await db.prepare("SELECT plate FROM vehicles WHERE plate = ? AND deleted_at IS NULL").get(item.plate);
+  if (!vehicle) {
+    res.status(404).json({ message: "车辆不存在或已删除" });
+    return;
+  }
+  if (item.type === "other" && !item.name) {
+    res.status(400).json({ message: "请填写支出名称" });
+    return;
+  }
+  if (!Number.isFinite(item.amount) || item.amount <= 0) {
+    res.status(400).json({ message: "请填写大于 0 的费用金额" });
+    return;
+  }
+  if (item.type !== "annual" && !/^\d{4}-\d{2}-\d{2}$/.test(item.date)) {
+    res.status(400).json({ message: "请填写正确的费用日期" });
+    return;
+  }
+  const result = await db.prepare(`
+    INSERT INTO vehicle_expenses (expense_type, name, plate, expense_date, expense_year, currency, amount, note)
+    VALUES (@type, @name, @plate, @date, @year, @currency, @amount, @note)
+  `).run(item);
+  await writeAudit("create", "vehicle_expense", String(result.lastInsertId), `${item.plate}/${item.name}/${item.amount}`);
+  res.status(201).json(mapVehicleExpense(await db.prepare("SELECT * FROM vehicle_expenses WHERE id = ?").get(result.lastInsertId)));
+});
+
+app.patch("/api/vehicle-expenses/:id", async (req, res) => {
+  const id = Number(req.params.id || 0);
+  const current = await db.prepare("SELECT * FROM vehicle_expenses WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!current) {
+    res.status(404).json({ message: "费用记录不存在或已删除" });
+    return;
+  }
+  const item = normalizeVehicleExpensePayload(req.body || {}, current);
+  if (!item.plate) {
+    res.status(400).json({ message: "请选择车牌" });
+    return;
+  }
+  const vehicle = await db.prepare("SELECT plate FROM vehicles WHERE plate = ? AND deleted_at IS NULL").get(item.plate);
+  if (!vehicle) {
+    res.status(404).json({ message: "车辆不存在或已删除" });
+    return;
+  }
+  if (item.type === "other" && !item.name) {
+    res.status(400).json({ message: "请填写支出名称" });
+    return;
+  }
+  if (!Number.isFinite(item.amount) || item.amount <= 0) {
+    res.status(400).json({ message: "请填写大于 0 的费用金额" });
+    return;
+  }
+  if (item.type !== "annual" && !/^\d{4}-\d{2}-\d{2}$/.test(item.date)) {
+    res.status(400).json({ message: "请填写正确的费用日期" });
+    return;
+  }
+  await db.prepare(`
+    UPDATE vehicle_expenses
+    SET expense_type = @type,
+        name = @name,
+        plate = @plate,
+        expense_date = @date,
+        expense_year = @year,
+        currency = @currency,
+        amount = @amount,
+        note = @note,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = @id AND deleted_at IS NULL
+  `).run({ id, ...item });
+  await writeAudit("update", "vehicle_expense", String(id), `${item.plate}/${item.name}/${item.amount}`);
+  res.json(mapVehicleExpense(await db.prepare("SELECT * FROM vehicle_expenses WHERE id = ?").get(id)));
+});
+
+app.delete("/api/vehicle-expenses/:id", async (req, res) => {
+  const id = Number(req.params.id || 0);
+  const row = await db.prepare("SELECT * FROM vehicle_expenses WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!row) {
+    res.status(404).json({ message: "费用记录不存在或已删除" });
+    return;
+  }
+  await db.prepare("UPDATE vehicle_expenses SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(id);
+  await writeAudit("delete", "vehicle_expense", String(id), `${row.plate}/${row.name}`);
   res.json({ ok: true });
 });
 
