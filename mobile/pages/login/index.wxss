@@ -1,0 +1,57 @@
+.login-page {
+  min-height: 100vh;
+  padding: 96rpx 36rpx 48rpx;
+  background: #f4f6f9;
+}
+
+.brand {
+  margin-bottom: 44rpx;
+}
+
+.brand-title {
+  display: block;
+  color: #14213d;
+  font-size: 46rpx;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.brand-subtitle {
+  display: block;
+  margin-top: 12rpx;
+  color: #607089;
+  font-size: 26rpx;
+}
+
+.login-panel {
+  padding: 32rpx;
+  border: 1rpx solid #e2e8f0;
+  border-radius: 8rpx;
+  background: #ffffff;
+  box-shadow: 0 16rpx 42rpx rgba(21, 37, 64, 0.08);
+}
+
+.loading-panel {
+  color: #607089;
+}
+
+.form-line {
+  margin-bottom: 24rpx;
+}
+
+.server-line {
+  margin-top: 8rpx;
+}
+
+.field-label {
+  display: block;
+  margin-bottom: 12rpx;
+  color: #4b5d78;
+  font-size: 24rpx;
+  font-weight: 700;
+}
+
+.login-btn {
+  width: 100%;
+  margin-top: 12rpx;
+}

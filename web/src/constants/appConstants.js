@@ -195,6 +195,7 @@ export const FEE_DRIVER_ROLE_LABELS = {
   跟随订单司机: "跟随订单司机",
   手动指定: "手动指定"
 };
+export const FEE_ITEM_CATEGORY_OPTIONS = ["正常", "代垫", "公司自费"];
 export const FEE_ITEM_COST_SOURCE_OPTIONS = ["供应商", "香港司机", "大陆骑师", "公司自费"];
 export const DISPATCH_STATUS_TO_ORDER_STATUS = {
   预排: "预排",

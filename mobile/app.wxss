@@ -1,0 +1,153 @@
+page {
+  min-height: 100%;
+  background: #f4f6f9;
+  color: #172033;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 28rpx;
+}
+
+view,
+text,
+input,
+textarea,
+button,
+picker {
+  box-sizing: border-box;
+}
+
+button {
+  margin: 0;
+  border: 0;
+  border-radius: 8rpx;
+  line-height: 1.2;
+}
+
+button::after {
+  border: 0;
+}
+
+input,
+textarea {
+  width: 100%;
+  min-height: 72rpx;
+  border: 1rpx solid #d9e1ec;
+  border-radius: 8rpx;
+  background: #ffffff;
+  padding: 0 24rpx;
+  color: #172033;
+  font-size: 28rpx;
+}
+
+textarea {
+  min-height: 156rpx;
+  padding-top: 18rpx;
+  padding-bottom: 18rpx;
+  line-height: 1.55;
+}
+
+.placeholder {
+  color: #9aa7b8;
+}
+
+.page-shell {
+  min-height: 100vh;
+  padding: 24rpx 24rpx calc(32rpx + env(safe-area-inset-bottom));
+}
+
+.panel {
+  margin-bottom: 20rpx;
+  border: 1rpx solid #e3e9f2;
+  border-radius: 8rpx;
+  background: #ffffff;
+}
+
+.primary-btn,
+.ghost-btn,
+.danger-btn,
+.quiet-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 72rpx;
+  padding: 0 28rpx;
+  font-size: 26rpx;
+  font-weight: 700;
+}
+
+.primary-btn {
+  background: #1769e0;
+  color: #ffffff;
+}
+
+.ghost-btn {
+  border: 1rpx solid #cbd7e7;
+  background: #ffffff;
+  color: #29405f;
+}
+
+.quiet-btn {
+  background: #eef3f9;
+  color: #38516f;
+}
+
+.danger-btn {
+  background: #fff1f2;
+  color: #b42318;
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 88rpx;
+  height: 44rpx;
+  padding: 0 16rpx;
+  border-radius: 999rpx;
+  font-size: 22rpx;
+  font-weight: 700;
+}
+
+.status-all {
+  background: #edf2f7;
+  color: #314158;
+}
+
+.status-planned {
+  background: #e8f1ff;
+  color: #1d4ed8;
+}
+
+.status-dispatched {
+  background: #e2fbff;
+  color: #0e7490;
+}
+
+.status-crossing {
+  background: #fff2df;
+  color: #c2410c;
+}
+
+.status-signed {
+  background: #e5faef;
+  color: #047857;
+}
+
+.status-exception {
+  background: #ffe8ea;
+  color: #b91c1c;
+}
+
+.source-own {
+  background: #eaf7ef;
+  color: #166534;
+}
+
+.source-outsourced {
+  background: #fff6d9;
+  color: #92400e;
+}
+
+.source-empty {
+  background: #edf2f7;
+  color: #4a5870;
+}

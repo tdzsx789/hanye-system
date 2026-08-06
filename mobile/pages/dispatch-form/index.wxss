@@ -1,0 +1,164 @@
+.form-page {
+  padding-bottom: calc(132rpx + env(safe-area-inset-bottom));
+}
+
+.form-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 22rpx;
+}
+
+.form-title {
+  display: block;
+  color: #14213d;
+  font-size: 38rpx;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.form-subtitle {
+  display: block;
+  margin-top: 8rpx;
+  color: #607089;
+  font-size: 24rpx;
+}
+
+.loading-panel {
+  padding: 36rpx 20rpx;
+  color: #607089;
+  text-align: center;
+}
+
+.form-panel {
+  padding: 24rpx;
+}
+
+.section-title {
+  margin-bottom: 20rpx;
+  color: #172033;
+  font-size: 28rpx;
+  font-weight: 800;
+}
+
+.section-title.inline {
+  margin-bottom: 0;
+}
+
+.section-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.section-arrow {
+  color: #1769e0;
+  font-size: 24rpx;
+  font-weight: 800;
+}
+
+.field-row {
+  position: relative;
+  margin-bottom: 22rpx;
+}
+
+.field-row:last-child {
+  margin-bottom: 0;
+}
+
+.field-label {
+  display: block;
+  margin-bottom: 10rpx;
+  color: #4b5d78;
+  font-size: 24rpx;
+  font-weight: 700;
+}
+
+.picker-box {
+  min-height: 72rpx;
+  border: 1rpx solid #d9e1ec;
+  border-radius: 8rpx;
+  background: #ffffff;
+  padding: 18rpx 24rpx;
+  color: #172033;
+  font-size: 28rpx;
+}
+
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 16rpx;
+}
+
+.suggestion-box {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  margin-top: 8rpx;
+  border: 1rpx solid #d9e1ec;
+  border-radius: 8rpx;
+  background: #ffffff;
+  box-shadow: 0 18rpx 38rpx rgba(21, 37, 64, 0.14);
+  overflow: hidden;
+}
+
+.suggestion-item {
+  padding: 18rpx 22rpx;
+  border-bottom: 1rpx solid #edf2f7;
+}
+
+.suggestion-item text {
+  display: block;
+}
+
+.suggestion-item text:first-child {
+  color: #172033;
+  font-size: 26rpx;
+  font-weight: 800;
+}
+
+.suggestion-item text:last-child {
+  margin-top: 4rpx;
+  color: #7b8798;
+  font-size: 22rpx;
+}
+
+.suggestion-empty {
+  padding: 22rpx;
+  color: #8a97aa;
+  font-size: 24rpx;
+}
+
+.suggestion-close {
+  width: 100%;
+  border-radius: 0;
+}
+
+.readonly-line {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8rpx;
+  padding: 16rpx;
+  border-radius: 8rpx;
+  background: #f4f7fb;
+  color: #52627a;
+  font-size: 24rpx;
+}
+
+.bottom-actions {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: grid;
+  grid-template-columns: 1fr 1.3fr;
+  column-gap: 16rpx;
+  padding: 18rpx 24rpx calc(18rpx + env(safe-area-inset-bottom));
+  border-top: 1rpx solid #e2e8f0;
+  background: rgba(255, 255, 255, 0.96);
+}
+
+.bottom-btn {
+  width: 100%;
+}

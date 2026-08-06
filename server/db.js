@@ -338,12 +338,16 @@ async function initializeSchema() {
     CREATE TABLE IF NOT EXISTS order_fees (
       id BIGSERIAL PRIMARY KEY,
       order_no TEXT NOT NULL REFERENCES orders(no) ON DELETE CASCADE,
-      category TEXT NOT NULL DEFAULT '正常' CHECK (category IN ('正常', '代垫')),
+      category TEXT NOT NULL DEFAULT '正常' CHECK (category IN ('正常', '代垫', '公司自费')),
       name TEXT NOT NULL,
-      quantity DOUBLE PRECISION NOT NULL DEFAULT 0,
+      quantity DOUBLE PRECISION NOT NULL DEFAULT 1,
       unit_price DOUBLE PRECISION NOT NULL DEFAULT 0,
+      unit_price_manual BOOLEAN NOT NULL DEFAULT false,
       currency TEXT NOT NULL DEFAULT '港币',
       amount DOUBLE PRECISION NOT NULL DEFAULT 0,
+      amount_manual BOOLEAN NOT NULL DEFAULT false,
+      cost DOUBLE PRECISION DEFAULT NULL,
+      cost_manual BOOLEAN NOT NULL DEFAULT false,
       remark TEXT NOT NULL DEFAULT '',
       driver_role TEXT NOT NULL DEFAULT '',
       driver_name TEXT NOT NULL DEFAULT ''
@@ -378,6 +382,7 @@ async function initializeSchema() {
       id BIGSERIAL PRIMARY KEY,
       expense_type TEXT NOT NULL CHECK (expense_type IN ('fuel', 'repair', 'annual', 'other')),
       name TEXT NOT NULL DEFAULT '',
+      fuel_station TEXT NOT NULL DEFAULT '',
       plate TEXT NOT NULL REFERENCES vehicles(plate) ON UPDATE CASCADE,
       expense_date TEXT NOT NULL DEFAULT (CURRENT_DATE::text),
       expense_year INTEGER,
@@ -408,7 +413,7 @@ async function initializeSchema() {
 
     CREATE TABLE IF NOT EXISTS fee_items (
       id BIGSERIAL PRIMARY KEY,
-      category TEXT NOT NULL DEFAULT '正常' CHECK (category IN ('正常', '代垫')),
+      category TEXT NOT NULL DEFAULT '正常' CHECK (category IN ('正常', '代垫', '公司自费')),
       name TEXT NOT NULL UNIQUE,
       currency TEXT NOT NULL DEFAULT '港币',
       default_amount DOUBLE PRECISION NOT NULL DEFAULT 0,
@@ -719,7 +724,12 @@ async function initializeSchema() {
       "cost_source TEXT NOT NULL DEFAULT '供应商'"
     ],
     order_fees: [
+      "quantity DOUBLE PRECISION NOT NULL DEFAULT 1",
       "unit_price DOUBLE PRECISION NOT NULL DEFAULT 0",
+      "unit_price_manual BOOLEAN NOT NULL DEFAULT false",
+      "amount_manual BOOLEAN NOT NULL DEFAULT false",
+      "cost DOUBLE PRECISION DEFAULT NULL",
+      "cost_manual BOOLEAN NOT NULL DEFAULT false",
       "driver_role TEXT NOT NULL DEFAULT ''",
       "driver_name TEXT NOT NULL DEFAULT ''"
     ],
@@ -750,6 +760,9 @@ async function initializeSchema() {
       "bucket TEXT NOT NULL DEFAULT ''",
       "object_key TEXT NOT NULL DEFAULT ''",
       "etag TEXT NOT NULL DEFAULT ''"
+    ],
+    vehicle_expenses: [
+      "fuel_station TEXT NOT NULL DEFAULT ''"
     ]
   };
 
@@ -762,6 +775,16 @@ async function initializeSchema() {
   await ensureTextColumn("orders", "quantity");
 
   await db.exec(`
+    ALTER TABLE order_fees ALTER COLUMN quantity SET DEFAULT 1;
+    UPDATE order_fees SET quantity = 1 WHERE quantity IS NULL OR quantity <= 0;
+    ALTER TABLE order_fees DROP CONSTRAINT IF EXISTS order_fees_category_check;
+    ALTER TABLE order_fees
+      ADD CONSTRAINT order_fees_category_check
+      CHECK (category IN ('正常', '代垫', '公司自费'));
+    ALTER TABLE fee_items DROP CONSTRAINT IF EXISTS fee_items_category_check;
+    ALTER TABLE fee_items
+      ADD CONSTRAINT fee_items_category_check
+      CHECK (category IN ('正常', '代垫', '公司自费'));
     ALTER TABLE files ALTER COLUMN storage_provider SET DEFAULT 'oss';
     CREATE INDEX IF NOT EXISTS idx_files_object_key ON files(storage_provider, object_key);
     CREATE INDEX IF NOT EXISTS idx_freight_rates_customer_scope
@@ -860,6 +883,75 @@ async function initializeSchema() {
     SET cost_source = '供应商'
     WHERE cost_source IS NULL OR TRIM(cost_source) = ''
   `).run();
+
+  await db.prepare(`
+    UPDATE cost_center_rates
+    SET source = CASE
+      WHEN source = '司机' THEN '香港司机'
+      WHEN source = '其他平台' THEN '大陆骑师'
+      ELSE source
+    END
+    WHERE source IN ('司机', '其他平台')
+  `).run();
+
+  await db.prepare(`
+    UPDATE fee_items
+    SET cost_source = regexp_replace(
+      regexp_replace(cost_source, '(^|[,，、])其他平台([,，、]|$)', '\\1大陆骑师\\2', 'g'),
+      '(^|[,，、])司机([,，、]|$)',
+      '\\1香港司机\\2',
+      'g'
+    )
+    WHERE cost_source LIKE '%司机%'
+       OR cost_source LIKE '%其他平台%'
+  `).run();
+
+  await db.exec(`
+    UPDATE fee_items
+    SET category = '公司自费',
+        cost_source = '公司自费'
+    WHERE COALESCE(cost_source, '') LIKE '%公司自费%';
+
+    UPDATE fee_items
+    SET cost_source = '公司自费'
+    WHERE category = '公司自费';
+
+    UPDATE order_fees AS order_fee
+    SET category = '公司自费'
+    FROM fee_items AS fee_item
+    WHERE order_fee.name = fee_item.name
+      AND fee_item.category = '公司自费'
+      AND order_fee.category <> '公司自费';
+
+    UPDATE orders AS order_row
+    SET receivable_hkd = COALESCE((
+          SELECT SUM(
+            CASE
+              WHEN order_fee.currency IN ('人民币', 'RMB') THEN 0
+              ELSE COALESCE(order_fee.amount, 0)
+            END
+          )
+          FROM order_fees AS order_fee
+          WHERE order_fee.order_no = order_row.no
+            AND order_fee.category <> '公司自费'
+        ), 0),
+        receivable_rmb = COALESCE((
+          SELECT SUM(
+            CASE
+              WHEN order_fee.currency IN ('人民币', 'RMB') THEN COALESCE(order_fee.amount, 0)
+              ELSE 0
+            END
+          )
+          FROM order_fees AS order_fee
+          WHERE order_fee.order_no = order_row.no
+            AND order_fee.category <> '公司自费'
+        ), 0)
+    WHERE EXISTS (
+      SELECT 1
+      FROM order_fees AS order_fee
+      WHERE order_fee.order_no = order_row.no
+    );
+  `);
 
   const contactRows = await db.prepare(`
     SELECT id, remark
@@ -1600,11 +1692,18 @@ async function seedOrderFees(orderNo, fees, sourceOrder = null) {
   if (Number(existing?.count || 0) > 0) return;
 
   const insert = db.prepare(`
-    INSERT INTO order_fees (order_no, category, name, quantity, unit_price, currency, amount, remark, driver_role, driver_name)
-    VALUES (@orderNo, @category, @name, @quantity, @unitPrice, @currency, @amount, @remark, @driverRole, @driverName)
+    INSERT INTO order_fees (order_no, category, name, quantity, unit_price, unit_price_manual, currency, amount, amount_manual, cost, cost_manual, remark, driver_role, driver_name)
+    VALUES (@orderNo, @category, @name, @quantity, @unitPrice, @unitPriceManual, @currency, @amount, @amountManual, @cost, @costManual, @remark, @driverRole, @driverName)
   `);
   for (const fee of fees) {
-    await insert.run({ orderNo, ...fee });
+    await insert.run({
+      orderNo,
+      ...fee,
+      unitPriceManual: Boolean(fee.unitPriceManual || fee.unit_price_manual),
+      amountManual: Boolean(fee.amountManual || fee.amount_manual),
+      cost: fee.cost ?? null,
+      costManual: Boolean(fee.costManual || fee.cost_manual)
+    });
   }
 }
 

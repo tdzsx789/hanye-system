@@ -1849,14 +1849,17 @@ function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = 
 }
 
 function mapOrderFee(row) {
+  const quantity = Number(row.quantity || 0) > 0 ? Number(row.quantity) : 1;
   return {
     id: row.id,
     category: row.category,
     name: row.name,
-    quantity: row.quantity,
+    quantity,
     unitPrice: row.unit_price || 0,
+    unitPriceManual: Boolean(row.unit_price_manual),
     currency: row.currency,
     amount: row.amount,
+    amountManual: Boolean(row.amount_manual),
     cost: row.cost == null ? null : Number(row.cost || 0),
     costManual: Boolean(row.cost_manual),
     remark: row.remark,
@@ -1956,6 +1959,7 @@ function mapVehicleExpense(row) {
     id: row.id,
     type: row.expense_type,
     name: row.name || "",
+    fuelStation: row.fuel_station || "",
     plate: row.plate || "",
     date: row.expense_date || "",
     year: row.expense_year || "",
@@ -1995,6 +1999,9 @@ function normalizeVehicleExpensePayload(body = {}, current = null) {
   return {
     type,
     name,
+    fuelStation: type === "fuel"
+      ? String(body.fuelStation ?? body.fuel_station ?? current?.fuel_station ?? "").trim()
+      : "",
     plate: String(body.plate ?? current?.plate ?? "").trim(),
     date,
     year: type === "annual" ? year : null,
@@ -2022,7 +2029,13 @@ function mapDriver(row) {
   };
 }
 
+const FEE_ITEM_CATEGORY_OPTIONS = ["正常", "代垫", "公司自费"];
 const FEE_ITEM_COST_SOURCE_OPTIONS = ["供应商", "香港司机", "大陆骑师", "公司自费"];
+
+function normalizeFeeItemCategory(value = "", fallback = "正常") {
+  const category = String(value || "").trim();
+  return FEE_ITEM_CATEGORY_OPTIONS.includes(category) ? category : fallback;
+}
 
 function normalizeFeeItemCostSourceToken(value = "") {
   const source = String(value || "").trim();
@@ -2056,11 +2069,29 @@ function feeItemCostSourceText(value = "供应商") {
   return normalizeFeeItemCostSources(value).join(",");
 }
 
+function feeItemIsCompanySelfPay(row = {}) {
+  return normalizeFeeItemCategory(row.category) === "公司自费"
+    || normalizeFeeItemCostSources(row.cost_source ?? row.costSource ?? row.costSources).includes("公司自费");
+}
+
+function feeItemCategoryValue(category = "", costSource = "供应商") {
+  const normalizedCategory = normalizeFeeItemCategory(category);
+  return feeItemIsCompanySelfPay({ category: normalizedCategory, cost_source: costSource })
+    ? "公司自费"
+    : normalizedCategory;
+}
+
+function feeItemCostSourceValue(category = "", value = "供应商") {
+  return normalizeFeeItemCategory(category) === "公司自费"
+    ? "公司自费"
+    : feeItemCostSourceText(value);
+}
+
 function mapFeeItem(row) {
   const costSources = normalizeFeeItemCostSources(row.cost_source);
   return {
     id: row.id,
-    category: row.category,
+    category: feeItemCategoryValue(row.category, row.cost_source),
     name: row.name,
     currency: row.currency,
     defaultAmount: row.default_amount,
@@ -2119,7 +2150,29 @@ function normalizeCostCenterSource(value = "") {
   return FEE_ITEM_COST_SOURCE_OPTIONS.includes(source) ? source : "";
 }
 
-function normalizeCostCenterValues(value = {}) {
+function normalizeCostCenterCurrency(value = "", fallback = "港币") {
+  const text = String(value || "").trim().toUpperCase();
+  if (text === "RMB" || text === "人民币") return "人民币";
+  if (text === "HKD" || text === "港币") return "港币";
+  return fallback === "人民币" ? "人民币" : "港币";
+}
+
+function normalizeCostCenterValue(value = 0, fallbackCurrency = "港币") {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const amount = Number(value.amount ?? value.value ?? value.cost ?? 0);
+    return {
+      amount: Number.isFinite(amount) && amount >= 0 ? amount : 0,
+      currency: normalizeCostCenterCurrency(value.currency, fallbackCurrency)
+    };
+  }
+  const amount = Number(value || 0);
+  return {
+    amount: Number.isFinite(amount) && amount >= 0 ? amount : 0,
+    currency: normalizeCostCenterCurrency("", fallbackCurrency)
+  };
+}
+
+function normalizeCostCenterValues(value = {}, fallbackCurrency = "港币") {
   let parsedValue = value;
   if (typeof parsedValue === "string") {
     try {
@@ -2130,7 +2183,7 @@ function normalizeCostCenterValues(value = {}) {
   }
   return Object.fromEntries(
     Object.entries(parsedValue || {})
-      .map(([key, amount]) => [String(key), Number(amount || 0)])
+      .map(([key, amount]) => [String(key), normalizeCostCenterValue(amount, fallbackCurrency)])
       .filter(([key]) => key)
   );
 }
@@ -2144,7 +2197,7 @@ function mapCostCenterRate(row) {
     origin: row.origin || "",
     destination: row.destination || "",
     currency: row.currency || "港币",
-    costValues: normalizeCostCenterValues(row.cost_values),
+    costValues: normalizeCostCenterValues(row.cost_values, row.currency || "港币"),
     note: row.note || "",
     updatedAt: row.updated_at || row.created_at || ""
   };
@@ -2186,8 +2239,11 @@ function readCostCenterRatePayload(body = {}, current = null) {
     entityName,
     origin,
     destination,
-    currency: String(body.currency ?? current?.currency ?? "港币").trim() || "港币",
-    costValues: JSON.stringify(normalizeCostCenterValues(body.costValues ?? body.cost_values ?? current?.cost_values)),
+    currency: normalizeCostCenterCurrency(body.currency ?? current?.currency ?? "港币"),
+    costValues: JSON.stringify(normalizeCostCenterValues(
+      body.costValues ?? body.cost_values ?? current?.cost_values,
+      body.currency ?? current?.currency ?? "港币"
+    )),
     note: String(body.note ?? current?.note ?? "").trim()
   };
 }
@@ -3415,6 +3471,17 @@ app.post("/api/orders", async (req, res) => {
 
 function normalizeOrderFee(fee, fallbackCurrency) {
   const driverRole = String(fee.driverRole || fee.driver_role || "").trim();
+  const rawQuantity = Number(fee.quantity);
+  const quantity = Number.isFinite(rawQuantity) && rawQuantity > 0 ? rawQuantity : 1;
+  const rawUnitPrice = Number(fee.unitPrice ?? fee.unit_price ?? 0);
+  const unitPrice = Number.isFinite(rawUnitPrice) && rawUnitPrice >= 0 ? rawUnitPrice : 0;
+  const unitPriceManual = booleanFlag(fee.unitPriceManual ?? fee.unit_price_manual ?? fee.manualUnitPrice ?? fee._manualUnitPrice, false);
+  const amountManual = booleanFlag(fee.amountManual ?? fee.amount_manual ?? fee.manualAmount ?? fee._manualAmount, false);
+  const rawAmount = Number(fee.amount ?? 0);
+  const calculatedAmount = Number((quantity * unitPrice).toFixed(2));
+  const amount = amountManual && Number.isFinite(rawAmount) && rawAmount >= 0
+    ? rawAmount
+    : calculatedAmount;
   const rawCost = fee.cost ?? fee.costValue ?? fee.cost_value ?? fee.costAmount ?? fee.cost_amount;
   const rawCostManual = fee.costManual ?? fee.cost_manual ?? fee.manualCost ?? fee._manualCost;
   const costNumber = rawCost === undefined || rawCost === null || String(rawCost).trim() === ""
@@ -3422,12 +3489,14 @@ function normalizeOrderFee(fee, fallbackCurrency) {
     : Number(rawCost);
   const cost = Number.isFinite(costNumber) && costNumber >= 0 ? costNumber : null;
   return {
-    category: fee.category === "代垫" ? "代垫" : "正常",
+    category: normalizeFeeItemCategory(fee.category),
     name: String(fee.name || "").trim(),
-    quantity: Number(fee.quantity || 0),
-    unitPrice: Number(fee.unitPrice || fee.unit_price || 0),
+    quantity,
+    unitPrice,
+    unitPriceManual,
     currency: String(fee.currency || fallbackCurrency || "港币").trim(),
-    amount: Number(fee.amount || 0),
+    amount,
+    amountManual,
     cost,
     costManual: cost == null ? false : booleanFlag(rawCostManual, false),
     remark: String(fee.remark || "").trim(),
@@ -3441,6 +3510,9 @@ function calculateOrderReceivables(fees, fallbackCurrency) {
     .map((fee) => normalizeOrderFee(fee, fallbackCurrency))
     .filter((fee) => fee.name)
     .reduce((totals, fee) => {
+      if (fee.category === "公司自费") {
+        return totals;
+      }
       if (fee.currency === "人民币" || fee.currency === "RMB") {
         totals.receivableRMB += fee.amount;
       } else {
@@ -3452,8 +3524,8 @@ function calculateOrderReceivables(fees, fallbackCurrency) {
 
 async function saveOrderFees(orderNo, fees, fallbackCurrency) {
   const insert = await db.prepare(`
-    INSERT INTO order_fees (order_no, category, name, quantity, unit_price, currency, amount, cost, cost_manual, remark, driver_role, driver_name)
-    VALUES (@orderNo, @category, @name, @quantity, @unitPrice, @currency, @amount, @cost, @costManual, @remark, @driverRole, @driverName)
+    INSERT INTO order_fees (order_no, category, name, quantity, unit_price, unit_price_manual, currency, amount, amount_manual, cost, cost_manual, remark, driver_role, driver_name)
+    VALUES (@orderNo, @category, @name, @quantity, @unitPrice, @unitPriceManual, @currency, @amount, @amountManual, @cost, @costManual, @remark, @driverRole, @driverName)
   `);
   await db.prepare("DELETE FROM order_fees WHERE order_no = ?").run(orderNo);
   const normalizedFees = fees
@@ -3750,8 +3822,8 @@ app.post("/api/vehicle-expenses", async (req, res) => {
     return;
   }
   const result = await db.prepare(`
-    INSERT INTO vehicle_expenses (expense_type, name, plate, expense_date, expense_year, currency, amount, note)
-    VALUES (@type, @name, @plate, @date, @year, @currency, @amount, @note)
+    INSERT INTO vehicle_expenses (expense_type, name, fuel_station, plate, expense_date, expense_year, currency, amount, note)
+    VALUES (@type, @name, @fuelStation, @plate, @date, @year, @currency, @amount, @note)
   `).run(item);
   await writeAudit("create", "vehicle_expense", String(result.lastInsertId), `${item.plate}/${item.name}/${item.amount}`);
   res.status(201).json(mapVehicleExpense(await db.prepare("SELECT * FROM vehicle_expenses WHERE id = ?").get(result.lastInsertId)));
@@ -3790,6 +3862,7 @@ app.patch("/api/vehicle-expenses/:id", async (req, res) => {
     UPDATE vehicle_expenses
     SET expense_type = @type,
         name = @name,
+        fuel_station = @fuelStation,
         plate = @plate,
         expense_date = @date,
         expense_year = @year,
@@ -4516,12 +4589,15 @@ app.post("/api/fee-items", async (req, res) => {
     WHERE deleted_at IS NULL
   `).get()).value;
   const item = {
-    category: req.body.category === "代垫" ? "代垫" : "正常",
+    category: normalizeFeeItemCategory(req.body.category),
     name: String(req.body.name || "").trim(),
     currency: String(req.body.currency || "港币").trim(),
     defaultAmount: Number(req.body.defaultAmount || 0),
     defaultDriverRole: normalizeDefaultDriverRole(req.body.defaultDriverRole || req.body.default_driver_role),
-    costSource: requestFeeItemCostSource(req.body),
+    costSource: feeItemCostSourceValue(
+      normalizeFeeItemCategory(req.body.category),
+      requestFeeItemCostSource(req.body)
+    ),
     sortOrder: Number.isFinite(requestedSortOrder) && requestedSortOrder > 0 ? requestedSortOrder : nextSortOrder
   };
   if (!item.name) {
@@ -4583,16 +4659,23 @@ app.patch("/api/fee-items/:id", async (req, res) => {
   }
   const item = {
     id,
-    category: req.body.category === undefined ? current.category : (req.body.category === "代垫" ? "代垫" : "正常"),
+    category: req.body.category === undefined
+      ? feeItemCategoryValue(current.category, current.cost_source)
+      : normalizeFeeItemCategory(req.body.category),
     name: req.body.name === undefined ? current.name : String(req.body.name || "").trim(),
     currency: req.body.currency === undefined ? current.currency : String(req.body.currency || "港币").trim(),
     defaultAmount: req.body.defaultAmount === undefined ? Number(current.default_amount || 0) : Number(req.body.defaultAmount || 0),
     defaultDriverRole: req.body.defaultDriverRole === undefined && req.body.default_driver_role === undefined
       ? (current.default_driver_role || "")
       : normalizeDefaultDriverRole(req.body.defaultDriverRole || req.body.default_driver_role),
-    costSource: requestHasFeeItemCostSource(req.body)
-      ? requestFeeItemCostSource(req.body, current.cost_source)
-      : feeItemCostSourceText(current.cost_source)
+    costSource: feeItemCostSourceValue(
+      req.body.category === undefined
+        ? feeItemCategoryValue(current.category, current.cost_source)
+        : normalizeFeeItemCategory(req.body.category),
+      requestHasFeeItemCostSource(req.body)
+        ? requestFeeItemCostSource(req.body, current.cost_source)
+        : feeItemCostSourceText(current.cost_source)
+    )
   };
   if (!item.name) {
     res.status(400).json({ message: "收费项目名称不能为空" });

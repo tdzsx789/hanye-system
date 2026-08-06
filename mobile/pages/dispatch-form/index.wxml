@@ -1,0 +1,167 @@
+<view class="page-shell form-page">
+  <view class="form-head">
+    <view>
+      <text class="form-title">{{title}}</text>
+      <text class="form-subtitle">排车单号：{{form.dispatchNo || '保存时生成'}}</text>
+    </view>
+    <text class="status-chip {{form.status === '已签收' ? 'status-signed' : form.status === '通关中' ? 'status-crossing' : form.status === '异常滞留' ? 'status-exception' : form.status === '已派车' ? 'status-dispatched' : 'status-planned'}}">{{form.status || '预排'}}</text>
+  </view>
+
+  <view wx:if="{{loadingRefs}}" class="panel loading-panel">正在读取客户、车辆和司机资料...</view>
+
+  <block wx:else>
+    <view class="panel form-panel">
+      <view class="section-title">基础信息</view>
+      <view class="field-row">
+        <text class="field-label">排车日期</text>
+        <picker mode="date" value="{{form.date}}" bindchange="onFormDateChange">
+          <view class="picker-box">{{form.date || '请选择日期'}}</view>
+        </picker>
+      </view>
+      <view class="field-row">
+        <text class="field-label">经营单位</text>
+        <input placeholder="搜索并选择客户" placeholder-class="placeholder" value="{{form.customer}}" data-field="customer" bindfocus="onCustomerFocus" bindinput="onFieldInput" />
+        <view wx:if="{{customerPickerOpen}}" class="suggestion-box">
+          <view wx:for="{{customerSuggestions}}" wx:key="id" class="suggestion-item" data-id="{{item.id}}" bindtap="selectCustomer">
+            <text>{{item.name}}</text>
+            <text>{{item.id}}</text>
+          </view>
+          <view wx:if="{{!customerSuggestions.length}}" class="suggestion-empty">没有匹配客户，请先在 PC 端维护客户资料</view>
+          <button class="quiet-btn suggestion-close" bindtap="closeCustomerPicker">收起</button>
+        </view>
+      </view>
+      <view class="field-row">
+        <text class="field-label">业务类型</text>
+        <picker range="{{businessTypeOptions}}" data-field="businessType" data-options-key="businessTypeOptions" bindchange="onPickerChange">
+          <view class="picker-box">{{form.businessType || '运输'}}</view>
+        </picker>
+      </view>
+      <view wx:if="{{form.orderNo}}" class="readonly-line">
+        <text>关联订单</text>
+        <text>{{form.orderNo}}</text>
+      </view>
+    </view>
+
+    <view class="panel form-panel">
+      <view class="section-title">车辆与口岸</view>
+      <view class="field-row">
+        <text class="field-label">车辆来源</text>
+        <picker range="{{vehicleSourceOptions}}" data-field="vehicleSource" data-options-key="vehicleSourceOptions" bindchange="onPickerChange">
+          <view class="picker-box">{{form.vehicleSource || '请选择车辆来源'}}</view>
+        </picker>
+      </view>
+      <view class="field-row">
+        <text class="field-label">车牌</text>
+        <picker wx:if="{{form.vehicleSource === '本公司车辆' && plateOptions.length}}" range="{{plateOptions}}" data-field="plate" data-options-key="plateOptions" bindchange="onPickerChange">
+          <view class="picker-box">{{form.plate || '请选择车牌'}}</view>
+        </picker>
+        <input wx:else placeholder="输入车牌/待定" placeholder-class="placeholder" value="{{form.plate}}" data-field="plate" bindinput="onFieldInput" />
+      </view>
+      <view wx:if="{{form.vehicleSource === '外派车辆'}}" class="field-row">
+        <text class="field-label">外派供应商</text>
+        <picker wx:if="{{supplierOptions.length}}" range="{{supplierOptions}}" data-field="supplier" data-options-key="supplierOptions" bindchange="onPickerChange">
+          <view class="picker-box">{{form.supplier || '请选择供应商'}}</view>
+        </picker>
+        <input wx:else placeholder="输入供应商名称" placeholder-class="placeholder" value="{{form.supplier}}" data-field="supplier" bindinput="onFieldInput" />
+      </view>
+      <view class="two-col">
+        <view class="field-row">
+          <text class="field-label">口岸</text>
+          <picker range="{{portOptions}}" data-field="port" data-options-key="portOptions" bindchange="onPickerChange">
+            <view class="picker-box">{{form.port || '请选择'}}</view>
+          </picker>
+        </view>
+        <view class="field-row">
+          <text class="field-label">进出口</text>
+          <picker range="{{directionOptions}}" data-field="direction" data-options-key="directionOptions" bindchange="onPickerChange">
+            <view class="picker-box">{{form.direction || '请选择'}}</view>
+          </picker>
+        </view>
+      </view>
+      <view class="two-col">
+        <view class="field-row">
+          <text class="field-label">吨位</text>
+          <picker range="{{tonnageOptions}}" data-field="tonnage" data-options-key="tonnageOptions" bindchange="onPickerChange">
+            <view class="picker-box">{{form.tonnage || '请选择'}}</view>
+          </picker>
+        </view>
+        <view class="field-row">
+          <text class="field-label">装车时间</text>
+          <picker range="{{timeOptions}}" data-field="loadTime" data-options-key="timeOptions" bindchange="onPickerChange">
+            <view class="picker-box">{{form.loadTime || '未定'}}</view>
+          </picker>
+        </view>
+      </view>
+    </view>
+
+    <view class="panel form-panel">
+      <view class="section-title">货物与路线</view>
+      <view class="two-col">
+        <view class="field-row">
+          <text class="field-label">件数/板数</text>
+          <input placeholder="例如：20件 / 4板" placeholder-class="placeholder" value="{{form.quantity}}" data-field="quantity" bindinput="onFieldInput" />
+        </view>
+        <view class="field-row">
+          <text class="field-label">重量</text>
+          <input placeholder="例如：1200kg" placeholder-class="placeholder" value="{{form.weight}}" data-field="weight" bindinput="onFieldInput" />
+        </view>
+      </view>
+      <view class="field-row">
+        <text class="field-label">装货地</text>
+        <textarea placeholder="可填写多个装货地址，每行一个" placeholder-class="placeholder" value="{{form.loading}}" data-field="loading" bindinput="onFieldInput" />
+      </view>
+      <view class="field-row">
+        <text class="field-label">卸货地</text>
+        <textarea placeholder="可填写多个卸货地址，每行一个" placeholder-class="placeholder" value="{{form.unloading}}" data-field="unloading" bindinput="onFieldInput" />
+      </view>
+      <view class="field-row">
+        <text class="field-label">备注</text>
+        <input placeholder="排车备注" placeholder-class="placeholder" value="{{form.note}}" data-field="note" bindinput="onFieldInput" />
+      </view>
+    </view>
+
+    <view class="panel form-panel">
+      <view class="section-row" bindtap="toggleAdvanced">
+        <text class="section-title inline">高级字段</text>
+        <text class="section-arrow">{{advancedOpen ? '收起' : '展开'}}</text>
+      </view>
+      <view wx:if="{{advancedOpen}}">
+        <view class="field-row">
+          <text class="field-label">排车状态</text>
+          <picker range="{{statusOptions}}" data-field="status" data-options-key="statusOptions" bindchange="onPickerChange">
+            <view class="picker-box">{{form.status || '预排'}}</view>
+          </picker>
+        </view>
+        <view class="field-row">
+          <text class="field-label">运输模式</text>
+          <picker range="{{transportModeOptions}}" data-field="transportMode" data-options-key="transportModeOptions" bindchange="onPickerChange">
+            <view class="picker-box">{{form.transportMode || '未指定'}}</view>
+          </picker>
+        </view>
+        <view class="field-row">
+          <text class="field-label">司机</text>
+          <input placeholder="单司机模式可填写司机" placeholder-class="placeholder" value="{{form.driver}}" data-field="driver" bindinput="onFieldInput" />
+        </view>
+        <view class="two-col">
+          <view class="field-row">
+            <text class="field-label">香港司机</text>
+            <input placeholder="香港司机" placeholder-class="placeholder" value="{{form.hkDriver}}" data-field="hkDriver" bindinput="onFieldInput" />
+          </view>
+          <view class="field-row">
+            <text class="field-label">大陆骑师</text>
+            <input placeholder="大陆骑师" placeholder-class="placeholder" value="{{form.mainlandDriver}}" data-field="mainlandDriver" bindinput="onFieldInput" />
+          </view>
+        </view>
+        <view class="field-row">
+          <text class="field-label">币种</text>
+          <input placeholder="港币 / 人民币" placeholder-class="placeholder" value="{{form.currency}}" data-field="currency" bindinput="onFieldInput" />
+        </view>
+      </view>
+    </view>
+  </block>
+
+  <view class="bottom-actions">
+    <button class="ghost-btn bottom-btn" bindtap="cancelForm" disabled="{{saving}}">取消</button>
+    <button class="primary-btn bottom-btn" bindtap="submitForm" loading="{{saving}}" disabled="{{loadingRefs || saving}}">保存排车单</button>
+  </view>
+</view>

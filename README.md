@@ -4,6 +4,11 @@
 
 - `web/`：前端 Vue/Vite 项目。
 - `server/`：后端 Express API，生产环境连接 PostgreSQL。
+- `mobile/`：原生微信小程序端，给跟单员在外移动排车/派车使用。
+
+## 小程序端
+
+`mobile/` 已加入微信小程序原生工程，排车表功能复用现有 `/api/dispatch-plans`、`/api/orders`、`/api/customers`、`/api/vehicles`、`/api/drivers` 接口。用微信开发者工具打开 `mobile/` 后，可在登录页配置服务器 API 地址；生产上线需改正式 AppID，并在微信公众平台配置 HTTPS request 合法域名。
 
 ## 本地开发启动
 

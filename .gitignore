@@ -8,3 +8,4 @@ dist/
 server/data/
 .env
 backups/
+mobile/project.private.config.json
