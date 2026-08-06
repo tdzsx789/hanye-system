@@ -1,12 +1,15 @@
 .dispatch-page {
   padding-bottom: calc(40rpx + env(safe-area-inset-bottom));
+  overflow-x: hidden;
 }
 
 .page-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  margin-bottom: 22rpx;
+  margin-bottom: 26rpx;
+  padding-top: 8rpx;
+  column-gap: 18rpx;
 }
 
 .page-title {
@@ -24,58 +27,92 @@
   font-size: 24rpx;
 }
 
-.head-btn {
-  min-height: 60rpx;
-  padding: 0 20rpx;
+.logout-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-width: 152rpx;
+  min-height: 58rpx;
+  margin-top: 4rpx;
+  padding: 0 24rpx;
+  border: 1rpx solid #d5dfec;
+  border-radius: 999rpx;
+  background: linear-gradient(180deg, #ffffff 0%, #f6f9fd 100%);
+  color: #29405f;
+  font-size: 23rpx;
+  font-weight: 900;
+  box-shadow: 0 10rpx 24rpx rgba(21, 37, 64, 0.11);
 }
 
 .date-panel {
+  padding: 18rpx;
+}
+
+.date-panel picker {
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
+
+.date-actions {
   display: grid;
-  grid-template-columns: 1fr 1.4fr 1fr 0.8fr;
-  align-items: center;
-  padding: 16rpx;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.78fr) minmax(0, 1fr);
   column-gap: 12rpx;
+  margin-top: 14rpx;
+  width: 100%;
+  min-width: 0;
 }
 
 .date-nav,
 .today-btn {
+  width: 100%;
+  min-width: 0;
   min-height: 64rpx;
-  padding: 0 16rpx;
+  padding: 0 8rpx;
   font-size: 24rpx;
-}
-
-.date-picker {
-  min-height: 68rpx;
-  border: 1rpx solid #d9e1ec;
-  border-radius: 8rpx;
-  background: #ffffff;
-  padding: 10rpx 16rpx;
-  text-align: center;
-}
-
-.date-picker text {
-  display: block;
-  font-size: 26rpx;
   font-weight: 800;
 }
 
+.date-picker {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 84rpx;
+  width: 100%;
+  min-width: 0;
+  border: 1rpx solid #d9e1ec;
+  border-radius: 8rpx;
+  background: #f8fbff;
+  padding: 0 24rpx;
+}
+
+.date-picker text {
+  display: inline-block;
+  font-size: 26rpx;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
 .date-picker-sub {
-  margin-top: 4rpx;
   color: #607089;
-  font-size: 20rpx !important;
-  font-weight: 500 !important;
+  font-size: 24rpx !important;
+  font-weight: 700 !important;
 }
 
 .toolbar {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr 0.72fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  row-gap: 12rpx;
   column-gap: 12rpx;
   margin-bottom: 20rpx;
 }
 
 .toolbar-btn {
+  width: 100%;
+  min-width: 0;
   min-height: 68rpx;
-  padding: 0 14rpx;
+  padding: 0 10rpx;
   font-size: 24rpx;
 }
 
@@ -83,21 +120,17 @@
   font-size: 22rpx;
 }
 
-.summary-scroll {
-  width: 100%;
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12rpx;
   margin-bottom: 20rpx;
-  white-space: nowrap;
-}
-
-.summary-track {
-  display: flex;
 }
 
 .summary-card {
-  flex: 0 0 auto;
-  width: 154rpx;
-  margin-right: 12rpx;
-  padding: 16rpx;
+  min-width: 0;
+  min-height: 96rpx;
+  padding: 14rpx 16rpx;
   border: 2rpx solid transparent;
   border-radius: 8rpx;
 }
@@ -111,11 +144,13 @@
   display: block;
   font-size: 22rpx;
   font-weight: 700;
+  line-height: 1.1;
+  white-space: nowrap;
 }
 
 .summary-number {
   margin-top: 8rpx;
-  font-size: 34rpx !important;
+  font-size: 32rpx !important;
   font-weight: 800 !important;
 }
 
@@ -161,6 +196,8 @@
 }
 
 .tab-btn {
+  width: 100%;
+  min-width: 0;
   min-height: 70rpx;
   border-radius: 0;
   background: #ffffff;
@@ -301,14 +338,18 @@
 
 .card-actions {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   column-gap: 12rpx;
   margin-top: 18rpx;
+  width: 100%;
+  min-width: 0;
 }
 
 .card-btn {
+  width: 100%;
+  min-width: 0;
   min-height: 62rpx;
-  padding: 0 12rpx;
+  padding: 0 4rpx;
   font-size: 24rpx;
 }
 

@@ -25,7 +25,7 @@ PGHOST=127.0.0.1 PGPORT=5432 PGDATABASE=hanye PGUSER=hanye PGPASSWORD=hanye_dev_
 ```
 
 2. 用微信开发者工具打开 `/Users/tree/Desktop/code/hanye-system/mobile`。
-3. 登录页的“服务器地址”默认是 `http://127.0.0.1:5174/api`。如果后端端口不同，直接在登录页改成对应地址。
+3. 登录页的“服务器地址”默认是 `http://localhost:8080/api`，对应 Docker Web 代理后的后端 API。如果你直接运行后端，也可以改成对应端口，例如 `http://127.0.0.1:5174/api`。
 
 ## 上线配置
 

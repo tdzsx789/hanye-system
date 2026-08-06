@@ -14,10 +14,27 @@ const {
   hasDispatchAccess,
   normalizeTransportMode,
   presentDispatchRows,
-  presentUnplannedOrders,
   sanitizeDispatchRow,
   sortDispatchRows
 } = require("../../utils/dispatch");
+
+const MAIN_STATUS_RANK = {
+  预排: 0,
+  已派车: 1,
+  通关中: 2,
+  异常滞留: 3
+};
+
+function orderMainDispatchRows(rows) {
+  return rows.slice()
+    .sort((left, right) => {
+      const leftRank = MAIN_STATUS_RANK[dispatchStatusValueForRow(left)] ?? 9;
+      const rightRank = MAIN_STATUS_RANK[dispatchStatusValueForRow(right)] ?? 9;
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      return (left.index ?? 0) - (right.index ?? 0);
+    })
+    .map((row, index) => Object.assign({}, row, { displayIndex: index + 1 }));
+}
 
 Page({
   data: {
@@ -33,8 +50,8 @@ Page({
     rawRows: [],
     saving: false,
     searchKeyword: "",
+    signedRows: [],
     summaryCards: [],
-    unplannedOrders: [],
     vehicles: [],
     drivers: [],
     warnings: []
@@ -105,18 +122,24 @@ Page({
     const summaryCards = dispatchSummaryCards(rawRows).map((card) => Object.assign({}, card, {
       active: this.data.activeStatus === card.key
     }));
-    const displayRows = presentDispatchRows(rawRows, this.data.orders, date, {
+    const mainRows = rawRows.filter((row) => dispatchStatusValueForRow(row) !== "已签收");
+    const mainStatus = this.data.activeStatus === "已签收" ? "all" : this.data.activeStatus;
+    const displayRows = orderMainDispatchRows(presentDispatchRows(mainRows, this.data.orders, date, {
       expandedIds: this.data.expandedIds,
       keyword: this.data.searchKeyword,
-      status: this.data.activeStatus
+      status: mainStatus
+    }));
+    const signedRows = presentDispatchRows(rawRows, this.data.orders, date, {
+      expandedIds: this.data.expandedIds,
+      keyword: this.data.searchKeyword,
+      status: "已签收"
     });
-    const unplannedOrders = presentUnplannedOrders(rawRows, this.data.orders, date, this.data.searchKeyword);
     const warnings = buildDispatchWarnings(rawRows, this.data.orders, this.data.vehicles, this.data.drivers, date);
     this.setData({
       dateLabel: formatDateLabel(date),
       displayRows,
+      signedRows,
       summaryCards,
-      unplannedOrders,
       warnings
     });
   },
@@ -156,12 +179,21 @@ Page({
   },
 
   setStatusFilter(event) {
-    this.setData({ activeStatus: event.currentTarget.dataset.status || "all" });
+    const activeStatus = event.currentTarget.dataset.status || "all";
+    this.setData({
+      activeStatus,
+      activeTab: activeStatus === "已签收" ? "signed" : "dispatch"
+    });
     this.refreshDerivedData();
   },
 
   switchTab(event) {
-    this.setData({ activeTab: event.currentTarget.dataset.tab || "dispatch" });
+    const activeTab = event.currentTarget.dataset.tab || "dispatch";
+    const patch = { activeTab };
+    if (activeTab === "signed") patch.activeStatus = "已签收";
+    if (activeTab === "dispatch" && this.data.activeStatus === "已签收") patch.activeStatus = "all";
+    this.setData(patch);
+    this.refreshDerivedData();
   },
 
   toggleExpand(event) {
@@ -180,6 +212,8 @@ Page({
   rowById(id) {
     const displayRow = (this.data.displayRows || []).find((row) => row.id === id);
     if (displayRow) return displayRow;
+    const signedRow = (this.data.signedRows || []).find((row) => row.id === id);
+    if (signedRow) return signedRow;
     const rawRow = (this.data.rawRows || []).find((row) => row.id === id);
     return rawRow || null;
   },
@@ -368,11 +402,12 @@ Page({
   },
 
   copyVisibleDispatchText() {
-    if (!this.data.displayRows.length) {
+    const rows = this.data.activeTab === "signed" ? this.data.signedRows : this.data.displayRows;
+    if (!rows.length) {
       wx.showToast({ title: "当前列表暂无排车内容", icon: "none" });
       return;
     }
-    const text = dispatchMessageText(this.data.displayRows, this.data.orders, this.data.dispatchDate);
+    const text = dispatchMessageText(rows, this.data.orders, this.data.dispatchDate);
     wx.setClipboardData({ data: text });
   },
 

@@ -12,7 +12,7 @@ const {
   TRANSPORT_MODE_OPTIONS,
   VEHICLE_SOURCE_OPTIONS
 } = require("./constants");
-const { isBeforeDate, todayInputValue } = require("./date");
+const { daysUntilInputDate, todayInputValue } = require("./date");
 
 function valueText(value) {
   return value === undefined || value === null ? "" : String(value).trim();
@@ -363,8 +363,9 @@ function presentUnplannedOrders(rows, orders, date, keyword) {
 
 function dispatchSummaryCards(rows) {
   const normalized = normalizeDispatchRows(rows || [], "");
-  const cards = [{ key: "all", label: "全部", value: normalized.length, className: "status-all" }];
-  DISPATCH_STATUS_OPTIONS.forEach((status) => {
+  const statusOrder = ["预排", "已派车", "通关中", "已签收", "异常滞留"];
+  const cards = [];
+  statusOrder.forEach((status) => {
     cards.push({
       key: status,
       label: status,
@@ -372,15 +373,23 @@ function dispatchSummaryCards(rows) {
       className: dispatchStatusClass(status)
     });
   });
+  cards.push({ key: "all", label: "全部", value: normalized.length, className: "status-all" });
   return cards;
+}
+
+function certificateExpiryWarning(owner, certificateName, expireDate, referenceDate) {
+  const days = daysUntilInputDate(expireDate, referenceDate);
+  if (days === null || days > 30) return "";
+  if (days < 0) return `${owner} ${certificateName}已过期 ${Math.abs(days)} 天`;
+  if (days === 0) return `${owner} ${certificateName}今天到期`;
+  return `${owner} ${certificateName}到期还剩 ${days} 天`;
 }
 
 function buildDispatchWarnings(rows, orders, vehicles, drivers, date) {
   const warnings = [];
-  const plateCounts = {};
-  const driverCounts = {};
   const vehicleMap = {};
   const driverMap = {};
+  const warnedKeys = {};
   (vehicles || []).forEach((vehicle) => {
     if (vehicle && vehicle.plate) vehicleMap[vehicle.plate] = vehicle;
   });
@@ -390,33 +399,31 @@ function buildDispatchWarnings(rows, orders, vehicles, drivers, date) {
   normalizeDispatchRows(rows, date).forEach((row) => {
     const order = getRowOrder(row, orders) || {};
     const plate = valueText(row.plate || order.plate);
-    if (plate) plateCounts[plate] = (plateCounts[plate] || 0) + 1;
-    uniqueTextList([row.driver, row.hkDriver, row.mainlandDriver, order.driver, order.hkDriver, order.mainlandDriver])
-      .forEach((name) => {
-        driverCounts[name] = (driverCounts[name] || 0) + 1;
-      });
-  });
-  Object.keys(plateCounts).forEach((plate) => {
-    if (plateCounts[plate] > 1) warnings.push(`车牌 ${plate} 当天安排了 ${plateCounts[plate]} 次`);
-  });
-  Object.keys(driverCounts).forEach((name) => {
-    if (driverCounts[name] > 1) warnings.push(`司机 ${name} 当天安排了 ${driverCounts[name]} 次`);
-  });
-  normalizeDispatchRows(rows, date).forEach((row) => {
-    if (row.orderNo && !getRowOrder(row, orders)) {
-      warnings.push(`${row.dispatchNo || "未编号排车单"} 关联订单 ${row.orderNo} 不存在或已删除`);
-    }
-    const vehicle = vehicleMap[row.plate];
+    const vehicle = vehicleMap[plate];
     if (vehicle) {
-      if (vehicle.status && vehicle.status !== "正常") warnings.push(`${row.plate} 车辆状态：${vehicle.status}`);
-      if (vehicle.mainlandInsuranceDate && isBeforeDate(vehicle.mainlandInsuranceDate, date)) warnings.push(`${row.plate} 大陆保险已过期`);
-      if (vehicle.hkInsuranceDate && isBeforeDate(vehicle.hkInsuranceDate, date)) warnings.push(`${row.plate} 香港保险已过期`);
+      [
+        ["mainlandReviewDate", "大陆年审"],
+        ["hkReviewDate", "香港年审"],
+        ["mainlandInsuranceDate", "大陆保险"],
+        ["hkInsuranceDate", "香港保险"]
+      ].forEach(([field, label]) => {
+        const key = `vehicle:${plate}:${field}`;
+        const message = certificateExpiryWarning(plate, label, vehicle[field], date);
+        if (message && !warnedKeys[key]) {
+          warnings.push(message);
+          warnedKeys[key] = true;
+        }
+      });
     }
-    uniqueTextList([row.driver, row.hkDriver, row.mainlandDriver]).forEach((name) => {
+    uniqueTextList([row.driver, row.hkDriver, row.mainlandDriver, order.driver, order.hkDriver, order.mainlandDriver]).forEach((name) => {
       const driver = driverMap[name];
       if (!driver) return;
-      if (driver.status && driver.status !== "正常") warnings.push(`${name} 司机状态：${driver.status}`);
-      if (driver.expireAt && isBeforeDate(driver.expireAt, date)) warnings.push(`${name} 证件已过期`);
+      const key = `driver:${name}:expireAt`;
+      const message = certificateExpiryWarning(name, `${driver.type || "司机"}证件`, driver.expireAt, date);
+      if (message && !warnedKeys[key]) {
+        warnings.push(message);
+        warnedKeys[key] = true;
+      }
     });
   });
   return warnings;
@@ -574,9 +581,17 @@ function orderPayloadFromForm(form, customer, includeFees) {
 
 function hasDispatchAccess(account) {
   if (!account) return false;
-  if (account.role === "司机") return false;
-  if (Array.isArray(account.permissions)) return account.permissions.indexOf("dispatchBoard") >= 0;
-  return true;
+  const role = valueText(account.role);
+  if (role === "司机") return false;
+  if (["管理员", "财务", "跟单员"].indexOf(role) >= 0) return true;
+
+  const allowedModules = Array.isArray(account.allowedModules) ? account.allowedModules : [];
+  if (allowedModules.indexOf("dispatchBoard") >= 0) return true;
+
+  const permissions = Array.isArray(account.permissions)
+    ? account.permissions
+    : valueText(account.permissions).split(/[，,、\s]+/).filter(Boolean);
+  return permissions.indexOf("dispatchBoard") >= 0 || permissions.indexOf("排车表") >= 0;
 }
 
 module.exports = {

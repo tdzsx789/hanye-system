@@ -40,8 +40,16 @@ function isBeforeDate(left, right) {
   return leftDate.getTime() < rightDate.getTime();
 }
 
+function daysUntilInputDate(target, reference) {
+  const targetDate = parseInputDate(target);
+  const referenceDate = parseInputDate(reference) || parseInputDate(todayInputValue());
+  if (!targetDate || !referenceDate) return null;
+  return Math.round((targetDate.getTime() - referenceDate.getTime()) / 86400000);
+}
+
 module.exports = {
   addDaysToInputDate,
+  daysUntilInputDate,
   formatDateLabel,
   inputDateFromDate,
   isBeforeDate,
