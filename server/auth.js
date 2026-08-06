@@ -26,13 +26,14 @@ const VEHICLE_EXPENSE_MODULES = [
 const ALL_MODULES = [
   "home",
   "customers",
+  "dispatchBoard",
   "orders",
   "customsBusiness",
   "vehicleDriver",
   ...VEHICLE_EXPENSE_MODULES,
-  "dispatchBoard",
   "financeWages",
   "financeCosts",
+  "financeSupplierStatements",
   "financeCostCenter",
   "financeDaily",
   ...BOSS_MODULES,
@@ -43,16 +44,15 @@ const ALL_MODULES = [
   "accounts"
 ];
 
-const BUSINESS_MODULES = ["home", "customers", "orders", "customsBusiness"];
+const BUSINESS_MODULES = ["home", "customers", "dispatchBoard", "orders", "customsBusiness"];
 const VEHICLE_DRIVER_MODULES = ["vehicleDriver", ...VEHICLE_EXPENSE_MODULES];
-const DISPATCH_MODULES = ["dispatchBoard"];
-const FINANCE_MODULES = ["financeWages", "financeCosts", "financeCostCenter", "financeDaily"];
+const FINANCE_MODULES = ["financeWages", "financeCosts", "financeSupplierStatements", "financeCostCenter", "financeDaily"];
 const SYSTEM_MODULES = ["freight", "templates", "master", "security", "accounts"];
 
 export const ROLE_ALLOWED_MODULES = {
   管理员: ALL_MODULES,
-  财务: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...DISPATCH_MODULES, ...FINANCE_MODULES, ...SYSTEM_MODULES],
-  跟单员: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...DISPATCH_MODULES, ...SYSTEM_MODULES],
+  财务: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_MODULES, ...SYSTEM_MODULES],
+  跟单员: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...SYSTEM_MODULES],
   司机: VEHICLE_DRIVER_MODULES
 };
 
@@ -68,7 +68,8 @@ const MODULE_LABELS = {
   vehicleOtherExpenses: "其他支出",
   dispatchBoard: "排车表",
   financeWages: "工资统计",
-  financeCosts: "对账单管理",
+  financeCosts: "客户对账单",
+  financeSupplierStatements: "供应商对账单",
   financeCostCenter: "成本中心",
   financeDaily: "日常收支",
   bossDashboard: "老板看板",

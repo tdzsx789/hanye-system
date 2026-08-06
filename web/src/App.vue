@@ -75,6 +75,7 @@ import {
   SESSION_USER_KEY,
   SHARED_DIRECTION,
   STATEMENT_CUSTOMER_EXCHANGE_RATES_KEY,
+  STATEMENT_CUSTOMER_UNRECEIVED_AMOUNTS_KEY,
   STATEMENT_DEFAULT_EXCHANGE_RATE,
   SUPPLIER_COST_SHARED_DIRECTION,
   SYSTEM_CONFIG_MODULES,
@@ -403,6 +404,7 @@ function moduleIcon(moduleId) {
     dispatchBoard: "truck",
     financeWages: "finance",
     financeCosts: "finance",
+    financeSupplierStatements: "finance",
     financeCostCenter: "database",
     financeDaily: "finance",
     bossDashboard: "database",
@@ -753,6 +755,7 @@ const statementExchangeRate = ref(localStorage.getItem("hanye_statement_exchange
 const statementDownloadRows = ref([]);
 const STATEMENT_DOWNLOAD_STATUS_OPTIONS = ["已导出", "已发送", "已开票"];
 const statementCustomerExchangeRates = reactive(loadStoredJson(STATEMENT_CUSTOMER_EXCHANGE_RATES_KEY, {}));
+const statementCustomerUnreceivedAmounts = reactive(loadStoredJson(STATEMENT_CUSTOMER_UNRECEIVED_AMOUNTS_KEY, {}));
 const customsBusinessRows = ref([]);
 const driverRouteAdjustRules = ref([]);
 const driverRouteAdjustForm = reactive({
@@ -833,6 +836,10 @@ const orderAttachmentUploadTone = ref("busy");
 const customerFileRows = ref([]);
 const attachmentRecycleRows = ref([]);
 const vehicleFileRows = ref([]);
+const vehicleExpenseReceiptRows = ref([]);
+const vehicleExpenseReceiptUploading = ref(false);
+const vehicleExpenseReceiptUploadStatus = ref("");
+const vehicleExpenseReceiptUploadTone = ref("busy");
 const driverFileRows = ref([]);
 
 const selectedCustomerId = ref(customerRows.value[0]?.id || "");
@@ -879,6 +886,8 @@ const apiStatus = ref("本地数据库连接中");
 const notice = ref("");
 let noticeTimer;
 let orderAttachmentUploadStatusTimer;
+let orderFeeCostSyncTimer;
+let vehicleExpenseReceiptUploadStatusTimer;
 let bossVehicleExchangeRateSaveTimer = null;
 let bossVehicleExchangeRateSaveRequestId = 0;
 let customerOrderResizeState = null;
@@ -913,7 +922,8 @@ const orderCustomerPickerOpen = ref(false);
 const customerOrderExportMenuOpen = ref(false);
 const orderExportMenuOpen = ref(false);
 const statementExportMenuOpen = ref(false);
-const statementExportMenuCustomerKey = ref("");
+const statementExportMenuType = ref("customer");
+const statementExportMenuKey = ref("");
 const customerOrderColumnMenuOpen = ref(false);
 const orderColumnMenuOpen = ref(false);
 const dispatchColumnMenuOpen = ref(false);
@@ -1503,9 +1513,10 @@ const accountCreateForm = reactive(blankAccountForm());
 const currentAllowedModuleIds = computed(() => {
   const roleModules = allowedModulesForRole(currentAccount.value?.role);
   const accountModules = currentAccount.value?.allowedModules;
-  return Array.isArray(accountModules) && accountModules.length
-    ? roleModules.filter((moduleId) => accountModules.includes(moduleId))
-    : roleModules;
+  if (!Array.isArray(accountModules) || !accountModules.length) return roleModules;
+  const moduleSet = new Set(accountModules);
+  if (moduleSet.has("financeCosts")) moduleSet.add("financeSupplierStatements");
+  return roleModules.filter((moduleId) => moduleSet.has(moduleId));
 });
 
 const visibleModules = computed(() =>
@@ -2140,6 +2151,167 @@ function vehicleExpenseYearOptions() {
     years.add(currentYear + offset);
   }
   return Array.from(years).filter(Number.isFinite).sort((left, right) => right - left);
+}
+
+function vehicleExpenseReceiptCategory() {
+  return "车辆支出票据";
+}
+
+function resetVehicleExpenseReceiptState() {
+  vehicleExpenseReceiptRows.value = [];
+  vehicleExpenseReceiptUploading.value = false;
+  clearVehicleExpenseReceiptUploadStatus();
+}
+
+async function loadVehicleExpenseReceiptFiles(expenseId = editingVehicleExpenseId.value) {
+  vehicleExpenseReceiptRows.value = expenseId ? await loadFiles("vehicle_expense", String(expenseId)) : [];
+}
+
+function vehicleExpenseFormValidationMessage() {
+  const type = String(vehicleExpenseForm.type || "").trim();
+  if (!VEHICLE_EXPENSE_CONFIG_BY_TYPE[type]) return "请选择费用类型";
+  if (!String(vehicleExpenseForm.plate || "").trim()) return "请选择车牌";
+  if (type === "annual" && !String(vehicleExpenseForm.name || "").trim()) return "请选择费用类型";
+  if (type === "other" && !String(vehicleExpenseForm.name || "").trim()) return "请填写支出名称";
+  if (type === "annual" && !Number(vehicleExpenseForm.year || 0)) return "请选择年份";
+  if (type !== "annual" && !/^\d{4}-\d{2}-\d{2}$/.test(String(vehicleExpenseForm.date || ""))) {
+    return "请填写正确的费用日期";
+  }
+  const amount = Number(vehicleExpenseForm.amount);
+  if (!Number.isFinite(amount) || amount <= 0) return "请填写大于 0 的费用金额";
+  return "";
+}
+
+async function persistVehicleExpenseFromModal(options = {}) {
+  const validationMessage = vehicleExpenseFormValidationMessage();
+  if (validationMessage) {
+    options.form?.reportValidity?.();
+    setVehicleExpenseReceiptUploadStatus(validationMessage, "error");
+    notify(validationMessage);
+    return null;
+  }
+  const currentExpenseId = editingVehicleExpenseId.value;
+  if (options.statusMessage) {
+    setVehicleExpenseReceiptUploadStatus(options.statusMessage, "busy");
+  }
+  vehicleExpenseSaving.value = true;
+  try {
+    const item = await vehiclesApi.saveVehicleExpense(currentExpenseId, vehicleExpenseForm);
+    const rowExists = vehicleExpenseRows.value.some((row) => row.id === item.id);
+    vehicleExpenseRows.value = currentExpenseId || rowExists
+      ? vehicleExpenseRows.value.map((row) => row.id === item.id ? item : row)
+      : [item, ...vehicleExpenseRows.value];
+    selectedVehiclePlate.value = item.plate || selectedVehiclePlate.value;
+    editingVehicleExpenseId.value = item.id;
+    return item;
+  } finally {
+    vehicleExpenseSaving.value = false;
+  }
+}
+
+async function ensureVehicleExpenseForReceiptUpload(form) {
+  if (editingVehicleExpenseId.value) return editingVehicleExpenseId.value;
+  const item = await persistVehicleExpenseFromModal({
+    form,
+    statusMessage: "正在保存费用记录，用于上传票据"
+  });
+  if (!item?.id) return "";
+  setVehicleExpenseReceiptUploadStatus("费用已保存，开始上传票据", "success");
+  notify(`已创建${vehicleExpenseTypeLabel(item.type)}，开始上传票据`);
+  return item.id;
+}
+
+async function uploadVehicleExpenseReceiptFiles(expenseId, files = []) {
+  if (!files.length) return { success: 0, failed: 0 };
+  if (!expenseId) {
+    setVehicleExpenseReceiptUploadStatus("请先保存费用，再上传票据", "error");
+    return { success: 0, failed: files.length };
+  }
+  if (vehicleExpenseReceiptUploading.value) {
+    notify("票据正在上传，请稍候");
+    return { success: 0, failed: files.length };
+  }
+
+  const validFiles = [];
+  let failed = 0;
+  files.forEach((file) => {
+    const validationMessage = uploadFileValidationMessage(file);
+    if (validationMessage) {
+      failed += 1;
+      notify(`${file.name}：${validationMessage}`);
+    } else {
+      validFiles.push(file);
+    }
+  });
+  if (!validFiles.length) {
+    setVehicleExpenseReceiptUploadStatus("未上传，所选文件仅支持图片或 PDF，且不能超过 8MB", "error");
+    scheduleClearVehicleExpenseReceiptUploadStatus(7000);
+    return { success: 0, failed };
+  }
+
+  vehicleExpenseReceiptUploading.value = true;
+  let success = 0;
+
+  try {
+    for (const [index, file] of validFiles.entries()) {
+      setVehicleExpenseReceiptUploadStatus(`正在上传票据 ${index + 1}/${validFiles.length}：${file.name}`, "busy");
+      const uploaded = await uploadStoredFileFor(
+        "vehicle_expense",
+        String(expenseId),
+        vehicleExpenseReceiptCategory(),
+        file,
+        vehicleExpenseReceiptRows,
+        {
+          missingEntityMessage: "请先保存费用，再上传票据",
+          onStatus(message, tone) {
+            setVehicleExpenseReceiptUploadStatus(message, tone);
+          }
+        }
+      );
+      if (uploaded) {
+        success += 1;
+      } else {
+        failed += 1;
+      }
+    }
+  } finally {
+    vehicleExpenseReceiptUploading.value = false;
+  }
+
+  const tone = failed ? "error" : "success";
+  const message = failed
+    ? `已上传 ${success} 张，${failed} 张失败`
+    : `已上传 ${success} 张票据`;
+  setVehicleExpenseReceiptUploadStatus(message, tone);
+  scheduleClearVehicleExpenseReceiptUploadStatus(failed ? 7000 : 4200);
+  return { success, failed };
+}
+
+async function handleVehicleExpenseReceiptFiles(event) {
+  const files = Array.from(event.target.files || []);
+  event.target.value = "";
+  if (!files.length) return;
+  if (vehicleExpenseSaving.value || vehicleExpenseReceiptUploading.value) {
+    notify("票据正在上传，请稍候");
+    return;
+  }
+  try {
+    const expenseId = await ensureVehicleExpenseForReceiptUpload(event.target.form);
+    if (!expenseId) return;
+    await uploadVehicleExpenseReceiptFiles(expenseId, files);
+  } catch (error) {
+    setVehicleExpenseReceiptUploadStatus(`票据上传失败：${error.message}`, "error");
+    notify(error.message);
+  }
+}
+
+function closeVehicleExpenseModal() {
+  if (vehicleExpenseSaving.value || vehicleExpenseReceiptUploading.value) {
+    notify("费用或票据正在保存，请稍候");
+    return;
+  }
+  vehicleExpenseModalOpen.value = false;
+  resetVehicleExpenseReceiptState();
 }
 
 const selectedVehicleOrders = computed(() => {
@@ -3093,7 +3265,8 @@ function toggleAllDispatchPlanSelection(checked) {
 
 function dispatchShortLocation(value = "") {
   const parts = String(value || "")
-    .split("/")
+    .replace(/\r/g, "\n")
+    .split(/[\n；;\/]+/)
     .map((part) => part.trim())
     .filter(Boolean);
   if (!parts.length) return "";
@@ -4751,6 +4924,15 @@ function vehicleExpenseBreakdownByTypeForPlate(plate, filterKey = currentPeriodM
   return breakdowns;
 }
 
+function bossVehicleExpenseTotalFromBreakdown(breakdown = {}) {
+  return ["fuel", "repair", "insurance", "review", "plateHead", "other"]
+    .map((key) => breakdown[key] || { hkd: 0, rmb: 0 })
+    .reduce((sum, item) => ({
+      hkd: sum.hkd + Number(item.hkd || 0),
+      rmb: sum.rmb + Number(item.rmb || 0)
+    }), { hkd: 0, rmb: 0 });
+}
+
 const BOSS_VEHICLE_FREIGHT_INCOME_FEE_NAMES = new Set(["中港运费", "基础运费"]);
 
 function bossVehicleFeeName(fee = {}) {
@@ -4791,7 +4973,7 @@ function bossVehicleOrderDriver(order = {}) {
 }
 
 function bossVehicleDriverCostRuleMatchesOrder(rule = {}, order = {}, driver = null) {
-  if (rule.source !== "司机") return false;
+  if (!["香港司机", "司机"].includes(rule.source)) return false;
   const driverName = bossVehicleOrderDriverName(order);
   const ruleDriverName = String(rule.entityName || "").trim();
   const ruleEntityId = String(rule.entityId || "").trim();
@@ -4935,10 +5117,7 @@ const bossVehicleProfitDisplayRows = computed(() => {
     .map((row) => {
       const vehicle = vehicleRows.value.find((item) => item.plate === row.plate) || null;
       const vehicleExpenseByType = vehicleExpenseBreakdownByTypeForPlate(row.plate, bossPeriodFilter.value);
-      const vehicleExpense = Object.values(vehicleExpenseByType).reduce((sum, item) => ({
-        hkd: sum.hkd + item.hkd,
-        rmb: sum.rmb + item.rmb
-      }), { hkd: 0, rmb: 0 });
+      const vehicleExpense = bossVehicleExpenseTotalFromBreakdown(vehicleExpenseByType);
       const expenseHKD = vehicleExpense.hkd;
       const expenseRMB = vehicleExpense.rmb;
       const profitHKD = row.orderProfitHKD - expenseHKD;
@@ -5138,6 +5317,35 @@ function buildFinanceCustomerRows(sourceOrders, limit = 0) {
 const financeCustomerRanking = computed(() => buildFinanceCustomerRows(financeOrderRows.value, 12));
 const statementCustomerRows = computed(() => buildFinanceCustomerRows(statementOrderRows.value));
 
+function buildStatementSupplierRows(sourceOrders) {
+  const groups = new Map();
+  sourceOrders
+    .filter((order) => order.vehicleSource === "外派车辆" && order.supplier)
+    .forEach((order) => {
+      const key = order.supplier || "未填写供应商";
+      const payable = supplierOrderPayableBreakdown(order);
+      const row = groups.get(key) || { supplier: key, count: 0, hkd: 0, rmb: 0, missingRuleCount: 0, matchedRuleCount: 0 };
+      row.count += 1;
+      row.hkd += Number(payable.payableHKD || 0);
+      row.rmb += Number(payable.payableRMB || 0);
+      if (payable.rule) row.matchedRuleCount += 1;
+      else row.missingRuleCount += 1;
+      groups.set(key, row);
+    });
+  return Array.from(groups.values()).sort((a, b) =>
+    b.count - a.count || b.hkd - a.hkd || b.rmb - a.rmb || a.supplier.localeCompare(b.supplier, "zh-Hans-CN")
+  );
+}
+
+const statementSupplierRows = computed(() => buildStatementSupplierRows(statementOrderRows.value));
+const statementSupplierSummary = computed(() => ({
+  supplierCount: statementSupplierRows.value.length,
+  orderCount: statementSupplierRows.value.reduce((sum, row) => sum + Number(row.count || 0), 0),
+  payableHKD: statementSupplierRows.value.reduce((sum, row) => sum + Number(row.hkd || 0), 0),
+  payableRMB: statementSupplierRows.value.reduce((sum, row) => sum + Number(row.rmb || 0), 0),
+  missingRuleCount: statementSupplierRows.value.reduce((sum, row) => sum + Number(row.missingRuleCount || 0), 0)
+}));
+
 function statementCustomerRecord(row = {}) {
   return customerRows.value.find((item) =>
     item.type === "客户" &&
@@ -5172,15 +5380,54 @@ function setStatementCustomerExchangeRate(row = {}, value = "") {
   const nextValue = Number.isFinite(parsed) && parsed > 0 ? raw : STATEMENT_DEFAULT_EXCHANGE_RATE;
   statementCustomerExchangeRates[key] = nextValue;
   saveStoredJson(STATEMENT_CUSTOMER_EXCHANGE_RATES_KEY, { ...statementCustomerExchangeRates });
-  if (statementExportMenuCustomerKey.value === key) {
+  if (statementExportMenuType.value === "customer" && statementExportMenuKey.value === key) {
     statementExchangeRate.value = nextValue;
     saveStatementExportSettings();
   }
 }
 
+function statementCustomerUnreceivedKey(row = {}) {
+  const customerKey = statementCustomerRowKey(row);
+  if (!customerKey) return "";
+  const { start, end } = statementDateRangeBounds(activeStatementMonthFilter.value);
+  return [customerKey, start || "all", end || "all"].join("|");
+}
+
+function statementCustomerUnreceivedRecord(row = {}) {
+  const key = statementCustomerUnreceivedKey(row);
+  const record = key ? statementCustomerUnreceivedAmounts[key] : null;
+  return record && typeof record === "object" ? record : {};
+}
+
+function statementCustomerUnreceivedDefault(row = {}, currency = "hkd") {
+  return currency === "rmb" ? Number(row.rmb || 0) : Number(row.hkd || 0);
+}
+
+function statementCustomerUnreceivedAmount(row = {}, currency = "hkd") {
+  const field = currency === "rmb" ? "rmb" : "hkd";
+  const saved = Number(statementCustomerUnreceivedRecord(row)[field]);
+  return Number.isFinite(saved) ? saved : statementCustomerUnreceivedDefault(row, field);
+}
+
+function setStatementCustomerUnreceivedAmount(row = {}, currency = "hkd", value = "") {
+  const key = statementCustomerUnreceivedKey(row);
+  if (!key) return;
+  const field = currency === "rmb" ? "rmb" : "hkd";
+  const parsed = Number(String(value ?? "").trim());
+  const nextValue = Number.isFinite(parsed) && parsed >= 0
+    ? parsed
+    : statementCustomerUnreceivedDefault(row, field);
+  statementCustomerUnreceivedAmounts[key] = {
+    ...statementCustomerUnreceivedRecord(row),
+    [field]: nextValue
+  };
+  saveStoredJson(STATEMENT_CUSTOMER_UNRECEIVED_AMOUNTS_KEY, { ...statementCustomerUnreceivedAmounts });
+}
+
 function closeStatementExportMenu() {
   statementExportMenuOpen.value = false;
-  statementExportMenuCustomerKey.value = "";
+  statementExportMenuKey.value = "";
+  statementExportMenuType.value = "customer";
 }
 
 function applyStatementCustomerExportContext(row = {}) {
@@ -5198,19 +5445,74 @@ async function openStatementCustomerExportMenu(row = {}) {
     notify("当前客户信息不完整，无法导出对账单");
     return;
   }
-  if (statementExportMenuOpen.value && statementExportMenuCustomerKey.value === key) {
+  if (statementExportMenuOpen.value && statementExportMenuType.value === "customer" && statementExportMenuKey.value === key) {
     closeStatementExportMenu();
     return;
   }
   applyStatementCustomerExportContext(row);
   await ensureTemplateRowsLoaded({ silent: true });
-  statementExportMenuCustomerKey.value = key;
+  statementExportMenuType.value = "customer";
+  statementExportMenuKey.value = key;
   statementExportMenuOpen.value = true;
 }
 
-const activeStatementExportCustomerRow = computed(() =>
-  statementCustomerRows.value.find((row) => statementCustomerRowKey(row) === statementExportMenuCustomerKey.value) || null
-);
+function statementSupplierRowKey(row = {}) {
+  return row.supplier || "";
+}
+
+function applyStatementSupplierExportContext(row = {}) {
+  statementExportType.value = "supplier";
+  statementExportEntity.value = row.supplier || "";
+  statementSettlementCurrency.value = "港币";
+  statementExchangeRate.value = STATEMENT_DEFAULT_EXCHANGE_RATE;
+  syncStatementExportRange(activeStatementMonthFilter.value);
+  saveStatementExportSettings();
+}
+
+async function openStatementSupplierExportMenu(row = {}) {
+  const key = statementSupplierRowKey(row);
+  if (!key || !row.supplier) {
+    notify("当前供应商信息不完整，无法导出对账单");
+    return;
+  }
+  if (statementExportMenuOpen.value && statementExportMenuType.value === "supplier" && statementExportMenuKey.value === key) {
+    closeStatementExportMenu();
+    return;
+  }
+  applyStatementSupplierExportContext(row);
+  await ensureTemplateRowsLoaded({ silent: true });
+  statementExportMenuType.value = "supplier";
+  statementExportMenuKey.value = key;
+  statementExportMenuOpen.value = true;
+}
+
+const activeStatementExportRow = computed(() => {
+  if (statementExportMenuType.value === "supplier") {
+    return statementSupplierRows.value.find((row) => statementSupplierRowKey(row) === statementExportMenuKey.value) || null;
+  }
+  return statementCustomerRows.value.find((row) => statementCustomerRowKey(row) === statementExportMenuKey.value) || null;
+});
+
+const activeStatementExportEntityName = computed(() => {
+  const row = activeStatementExportRow.value || {};
+  return statementExportMenuType.value === "supplier" ? row.supplier : row.customer;
+});
+
+const statementExportDialogMetaItems = computed(() => {
+  const row = activeStatementExportRow.value || {};
+  if (statementExportMenuType.value === "supplier") {
+    return [
+      "供应商对账单",
+      `订单：${Number(row.count || 0)} 单`,
+      `金额：${moneyPair(row.hkd || 0, row.rmb || 0)}`
+    ];
+  }
+  return [
+    "客户对账单",
+    `结算：${statementCustomerSettlementCurrency(row)}`,
+    `汇率：${statementCustomerExchangeRate(row)}`
+  ];
+});
 
 function statementDownloadKey(type, entityName, start, end) {
   return [type, entityName || "全部", start || "", end || ""].join("|");
@@ -5238,14 +5540,26 @@ async function markStatementDownloaded(type, entityName, start, end) {
   }
 }
 
-function statementDownloadRecordForCustomerRow(row = {}) {
+function statementDownloadRecordForEntity(type = "customer", entityName = "") {
   const { start, end } = statementDateRangeBounds(activeStatementMonthFilter.value);
-  const key = statementDownloadKey("customer", row.customer || "全部", start || "", end || "");
+  const key = statementDownloadKey(type, entityName || "全部", start || "", end || "");
   return statementDownloadRows.value.find((item) => (item.key || item.downloadKey) === key) || null;
+}
+
+function statementDownloadRecordForCustomerRow(row = {}) {
+  return statementDownloadRecordForEntity("customer", row.customer || "全部");
+}
+
+function statementDownloadRecordForSupplierRow(row = {}) {
+  return statementDownloadRecordForEntity("supplier", row.supplier || "全部");
 }
 
 function statementCustomerStatementStatus(row = {}) {
   return statementDownloadRecordForCustomerRow(row)?.status || "未导出";
+}
+
+function statementSupplierStatementStatus(row = {}) {
+  return statementDownloadRecordForSupplierRow(row)?.status || "未导出";
 }
 
 function statementDownloadStatusClass(status = "") {
@@ -5255,8 +5569,7 @@ function statementDownloadStatusClass(status = "") {
   return "";
 }
 
-async function updateCustomerStatementStatus(row = {}, status = "") {
-  const record = statementDownloadRecordForCustomerRow(row);
+async function updateStatementStatusRecord(record, status = "") {
   if (!record?.id) {
     notify("请先导出这份对账单，再修改发送或开票状态");
     return;
@@ -5271,6 +5584,14 @@ async function updateCustomerStatementStatus(row = {}, status = "") {
   } catch (error) {
     notify(`对账单状态更新失败：${error.message}`);
   }
+}
+
+async function updateCustomerStatementStatus(row = {}, status = "") {
+  await updateStatementStatusRecord(statementDownloadRecordForCustomerRow(row), status);
+}
+
+async function updateSupplierStatementStatus(row = {}, status = "") {
+  await updateStatementStatusRecord(statementDownloadRecordForSupplierRow(row), status);
 }
 
 const statementEntityOptions = computed(() => {
@@ -5738,6 +6059,8 @@ function createBlankFeeRow() {
     unitPrice: "",
     currency: "",
     amount: "",
+    cost: 0,
+    _manualCost: false,
     remark: ""
   };
 }
@@ -5782,6 +6105,36 @@ function normalizeFeeUnitPrice(fee = {}) {
   return Number.isFinite(number) && number > 0 ? number : "";
 }
 
+function normalizeFeeCost(fee = {}) {
+  const value = fee.cost ?? fee.costValue ?? fee.cost_value ?? fee.costAmount ?? fee.cost_amount;
+  if (value === undefined || value === null || String(value).trim() === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : 0;
+}
+
+function booleanFlag(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  const text = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(text)) return true;
+  if (["0", "false", "no", "off"].includes(text)) return false;
+  return fallback;
+}
+
+function feeCostQuantity(fee = {}) {
+  const rawQuantity = String(fee.quantity ?? "").trim();
+  if (!rawQuantity) return 1;
+  const quantity = quantityNumber(rawQuantity);
+  return quantity > 0 ? quantity : 0;
+}
+
+function setOrderFeeCost(fee, value = 0) {
+  const number = Number(value);
+  fee.cost = Number.isFinite(number) && number >= 0 ? number : 0;
+  fee._manualCost = true;
+}
+
 function calculateFeeAmountFromUnitPrice(fee = {}) {
   const quantity = Number(fee.quantity || 0);
   const unitPrice = Number(fee.unitPrice || 0);
@@ -5794,6 +6147,7 @@ function syncFeeAmountFromUnitPrice(fee) {
   if (amount === "") return;
   fee.amount = amount;
   if (isFreightFeeRow(fee)) fee._manualFreightAmount = true;
+  refreshOrderFeeCost(fee);
 }
 
 function normalizeLocationText(value) {
@@ -6043,6 +6397,7 @@ function syncAutoFreightFee() {
     _autoFreightAmount: keepManualAmount ? (previousAutoAmount || templateAmount || "") : amount,
     _manualFreightAmount: keepManualAmount
   });
+  refreshOrderFeeCost(targetFee);
 }
 
 async function ensureReferenceDataLoaded() {
@@ -6054,9 +6409,13 @@ function scheduleAutoFreightSync() {
   if (!orderModalOpen.value) return;
   nextTick(() => {
     syncAutoFreightFee();
+    syncOrderFeeCosts();
   });
   window.setTimeout(() => {
-    if (orderModalOpen.value) syncAutoFreightFee();
+    if (orderModalOpen.value) {
+      syncAutoFreightFee();
+      syncOrderFeeCosts();
+    }
   }, 80);
 }
 
@@ -6126,7 +6485,12 @@ function normalizeFeeItemCostSources(value = ["供应商"]) {
       .replace(/、/g, ",")
       .split(",");
   const sources = rawValues
-    .map((source) => String(source || "").trim())
+    .map((source) => {
+      const text = String(source || "").trim();
+      if (text === "司机") return "香港司机";
+      if (text === "其他平台") return "大陆骑师";
+      return text;
+    })
     .filter((source, index, list) => FEE_ITEM_COST_SOURCE_OPTIONS.includes(source) && list.indexOf(source) === index);
   return sources.length ? sources : ["供应商"];
 }
@@ -6145,7 +6509,8 @@ const advanceFeeItemRows = computed(() =>
 );
 
 function feeItemIncludesCostSource(item = {}, source = "") {
-  return normalizeFeeItemCostSources(item.costSources || item.costSource || item.cost_source).includes(source);
+  const normalizedSource = normalizeFeeItemCostSources([source])[0] || source;
+  return normalizeFeeItemCostSources(item.costSources || item.costSource || item.cost_source).includes(normalizedSource);
 }
 
 function costCenterFeeItemsForSource(source = activeCostCenterSource.value) {
@@ -6283,7 +6648,7 @@ function hasCostCenterRuleRoute(row = {}) {
 
 const activeCostCenterRuleRows = computed(() =>
   costCenterRateRows.value
-    .filter((item) => item.source === activeCostCenterSource.value && hasCostCenterRuleRoute(item))
+    .filter((item) => normalizeCostCenterSourceLabel(item.source) === activeCostCenterSource.value && hasCostCenterRuleRoute(item))
     .sort((a, b) =>
       String(a.origin || "").localeCompare(String(b.origin || ""), "zh-Hans-CN")
       || String(a.destination || "").localeCompare(String(b.destination || ""), "zh-Hans-CN")
@@ -6303,11 +6668,27 @@ const costCenterDriverOptions = computed(() =>
     .sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "zh-Hans-CN"))
 );
 
+const costCenterHongKongDriverOptions = computed(() =>
+  costCenterDriverOptions.value.filter((item) => (item.type || "香港司机") === "香港司机")
+);
+
+const costCenterMainlandRiderOptions = computed(() =>
+  costCenterDriverOptions.value.filter((item) => item.type === "大陆骑师")
+);
+
+function normalizeCostCenterSourceLabel(source = "") {
+  const text = String(source || "").trim();
+  if (text === "司机") return "香港司机";
+  if (text === "其他平台") return "大陆骑师";
+  return text;
+}
+
 function costCenterEntityLabelForSource(source = activeCostCenterSource.value) {
-  if (source === "供应商") return "供应商";
-  if (source === "司机") return "司机";
-  if (source === "其他平台") return "平台名称";
-  if (source === "公司自费") return "费用名称";
+  const normalizedSource = normalizeCostCenterSourceLabel(source);
+  if (normalizedSource === "供应商") return "供应商";
+  if (normalizedSource === "香港司机") return "香港司机";
+  if (normalizedSource === "大陆骑师") return "大陆骑师";
+  if (normalizedSource === "公司自费") return "费用名称";
   return "成本对象";
 }
 
@@ -6315,9 +6696,15 @@ const activeCostCenterEntityLabel = computed(() => costCenterEntityLabelForSourc
 const costCenterRuleEntityLabel = computed(() => costCenterEntityLabelForSource(costCenterRuleForm.source));
 
 function costCenterEntityOptionsForSource(source = costCenterRuleForm.source) {
-  if (source === "供应商") return costCenterSupplierOptions.value;
-  if (source === "司机") return costCenterDriverOptions.value;
+  const normalizedSource = normalizeCostCenterSourceLabel(source);
+  if (normalizedSource === "供应商") return costCenterSupplierOptions.value;
+  if (normalizedSource === "香港司机") return costCenterHongKongDriverOptions.value;
+  if (normalizedSource === "大陆骑师") return costCenterMainlandRiderOptions.value;
   return [];
+}
+
+function costCenterSourceRequiresEntitySelection(source = costCenterRuleForm.source) {
+  return ["供应商", "香港司机", "大陆骑师"].includes(normalizeCostCenterSourceLabel(source));
 }
 
 function costCenterEntityOptionId(item = {}) {
@@ -6337,8 +6724,8 @@ function findCostCenterEntityRefId(source = "", entityName = "") {
 }
 
 function syncCostCenterRuleEntityName() {
-  const source = costCenterRuleForm.source;
-  if (!["供应商", "司机"].includes(source)) return;
+  const source = normalizeCostCenterSourceLabel(costCenterRuleForm.source);
+  if (!costCenterSourceRequiresEntitySelection(source)) return;
   const option = costCenterEntityOptionsForSource(source)
     .find((item) => costCenterEntityOptionId(item) === String(costCenterRuleForm.entityRefId || ""));
   costCenterRuleForm.entityName = option ? costCenterEntityOptionName(option) : "";
@@ -6352,8 +6739,9 @@ function costCenterRuleEntityDisplay(row = {}) {
 }
 
 function setActiveCostCenterSource(source) {
-  if (!FEE_ITEM_COST_SOURCE_OPTIONS.includes(source)) return;
-  activeCostCenterSource.value = source;
+  const normalizedSource = normalizeCostCenterSourceLabel(source);
+  if (!FEE_ITEM_COST_SOURCE_OPTIONS.includes(normalizedSource)) return;
+  activeCostCenterSource.value = normalizedSource;
 }
 
 function costCenterRuleEntityName(rule = costCenterRuleForm) {
@@ -6372,7 +6760,7 @@ function createCostCenterRuleValues(source = activeCostCenterSource.value, saved
 }
 
 function resetCostCenterRuleForm(item = null) {
-  const source = item?.source || activeCostCenterSource.value;
+  const source = normalizeCostCenterSourceLabel(item?.source || activeCostCenterSource.value);
   const costValues = createCostCenterRuleValues(source, normalizeCostCenterValues(item?.costValues));
   const originParts = splitCostCenterRouteValue(item?.origin || "");
   const destinationParts = splitCostCenterRouteValue(item?.destination || "");
@@ -6417,12 +6805,182 @@ function costCenterRuleRowValue(row = {}, item = {}) {
   return Number(normalizeCostCenterValues(row.costValues)?.[costCenterFeeValueKey(item)] || 0);
 }
 
+function costCenterRouteMatchScore(ruleRoute = "", orderRoute = "") {
+  const ruleValue = supplierCostRuleAreaValue(ruleRoute);
+  if (!ruleValue) return 0;
+  if (!supplierCostRuleAreaMatches(ruleRoute, orderRoute)) return -1;
+  return ruleValue.split("/").filter(Boolean).length * 100 + ruleValue.length;
+}
+
+function uniqueOrderCostNames(values = []) {
+  return Array.from(new Set(values.map((value) => String(value || "").trim()).filter(Boolean)));
+}
+
+function orderCostDriverNamesForFee(order = orderForm, fee = {}) {
+  if (fee.driverName) return uniqueOrderCostNames([fee.driverName]);
+  const item = feeItemForFee(fee) || {};
+  const role = String(fee.driverRole || item.defaultDriverRole || "").trim();
+  const mode = normalizeTransportMode(order.transportMode || "单司机") || "单司机";
+  const driver = String(order.driver || "").trim();
+  const hkDriver = String(order.hkDriver || driver || "").trim();
+  const mainlandDriver = String(order.mainlandDriver || "").trim();
+  if (role === "手动指定") return [];
+  if (role === "香港司机") return uniqueOrderCostNames([hkDriver, driver]);
+  if (role === "大陆骑师") return uniqueOrderCostNames([mainlandDriver]);
+  if (role === "跟随订单司机") return uniqueOrderCostNames([driver, hkDriver, mainlandDriver, ...driver.split("/")]);
+  if (mode === "双司机") return uniqueOrderCostNames([hkDriver, mainlandDriver]);
+  if (isDomesticTransferMode(mode)) return uniqueOrderCostNames([hkDriver, driver]);
+  return uniqueOrderCostNames([driver, hkDriver, mainlandDriver, ...driver.split("/")]);
+}
+
+function orderCostEntityNamesForSource(source = "", order = orderForm, fee = {}) {
+  const item = feeItemForFee(fee) || {};
+  const normalizedSource = normalizeCostCenterSourceLabel(source);
+  if (normalizedSource === "供应商") return uniqueOrderCostNames([order.supplier]);
+  if (normalizedSource === "香港司机") return uniqueOrderCostNames([order.hkDriver || order.driver, order.driver]);
+  if (normalizedSource === "大陆骑师") return uniqueOrderCostNames([order.mainlandDriver]);
+  if (normalizedSource === "公司自费") return uniqueOrderCostNames([fee.name, item.name, "公司自费"]);
+  return [];
+}
+
+function costCenterRuleEntityMatches(rule = {}, entityNames = []) {
+  const ruleName = String(rule.entityName || "").trim();
+  return Boolean(ruleName && entityNames.includes(ruleName));
+}
+
+function matchedOrderFeeCost(fee = {}, order = orderForm) {
+  const item = feeItemForFee(fee);
+  if (!item) return { amount: 0, matched: false, label: "未选择收费项目" };
+  const sources = normalizeFeeItemCostSources(item.costSources || item.costSource || item.cost_source);
+  const candidates = [];
+  sources.forEach((source, sourceIndex) => {
+    const entityNames = orderCostEntityNamesForSource(source, order, fee);
+    if (!entityNames.length) return;
+    costCenterRateRows.value
+      .filter((rule) => normalizeCostCenterSourceLabel(rule.source) === source)
+      .forEach((rule) => {
+        if (!costCenterRuleEntityMatches(rule, entityNames)) return;
+        const originScore = costCenterRouteMatchScore(rule.origin, order.loading);
+        const destinationScore = costCenterRouteMatchScore(rule.destination, order.unloading);
+        if (originScore < 0 || destinationScore < 0) return;
+        const unitCost = costCenterRuleRowValue(rule, item);
+        const quantity = feeCostQuantity(fee);
+        candidates.push({
+          rule,
+          source,
+          sourceIndex,
+          routeScore: originScore + destinationScore,
+          unitCost,
+          quantity,
+          amount: Number((unitCost * quantity).toFixed(2))
+        });
+      });
+  });
+  candidates.sort((left, right) =>
+    left.sourceIndex - right.sourceIndex
+    || right.routeScore - left.routeScore
+    || Number(right.unitCost > 0) - Number(left.unitCost > 0)
+    || Number(left.rule.id || 0) - Number(right.rule.id || 0)
+  );
+  const matched = candidates[0];
+  if (!matched) return { amount: 0, matched: false, label: "未匹配到成本" };
+  const costText = matched.quantity > 1
+    ? `${money(matched.unitCost)} x ${money(matched.quantity)}`
+    : "";
+  return {
+    amount: Number(matched.amount || 0),
+    matched: true,
+    label: [
+      matched.source,
+      matched.rule.entityName,
+      [matched.rule.origin, matched.rule.destination].filter(Boolean).join(" - "),
+      costText
+    ].filter(Boolean).join(" / ")
+  };
+}
+
+function assignOrderFeeCostSnapshot(fee, matched) {
+  const cost = Number(matched.amount || 0);
+  const matchedFlag = Boolean(matched.matched);
+  const sourceText = String(matched.label || "");
+  if (Number(fee.cost || 0) !== cost) fee.cost = cost;
+  if (fee._costMatched !== matchedFlag) fee._costMatched = matchedFlag;
+  if (fee._costSourceText !== sourceText) fee._costSourceText = sourceText;
+}
+
+function refreshOrderFeeCost(fee, options = {}) {
+  if (!fee) return;
+  if (options.force) fee._manualCost = false;
+  if (!String(fee.name || "").trim()) {
+    assignOrderFeeCostSnapshot(fee, { amount: 0, matched: false, label: "" });
+    return;
+  }
+  if (fee._manualCost && !options.force) return;
+  assignOrderFeeCostSnapshot(fee, matchedOrderFeeCost(fee));
+}
+
+function syncOrderFeeCosts(options = {}) {
+  orderFees.value.forEach((fee) => refreshOrderFeeCost(fee, options));
+}
+
+function orderFeeCostDependencySignature() {
+  const orderSignature = [
+    orderModalOpen.value,
+    orderForm.transportMode,
+    orderForm.driver,
+    orderForm.hkDriver,
+    orderForm.mainlandDriver,
+    orderForm.loading,
+    orderForm.unloading,
+    orderForm.vehicleSource,
+    orderForm.supplier
+  ];
+  const feeSignature = orderFees.value.map((fee) => [
+    fee.feeItemId,
+    fee.name,
+    fee.quantity,
+    fee.driverRole,
+    fee.driverName
+  ]);
+  const ruleSignature = costCenterRateRows.value.map((rule) => [
+    rule.id,
+    rule.source,
+    rule.entityId,
+    rule.entityName,
+    rule.origin,
+    rule.destination,
+    rule.currency,
+    Object.entries(normalizeCostCenterValues(rule.costValues))
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, value]) => `${key}:${value}`)
+      .join(",")
+  ]);
+  const itemSignature = feeItemRows.value.map((item) => [
+    item.id,
+    item.name,
+    item.category,
+    item.currency,
+    item.defaultDriverRole,
+    normalizeFeeItemCostSources(item.costSources || item.costSource || item.cost_source).join(",")
+  ]);
+  return JSON.stringify([orderSignature, feeSignature, ruleSignature, itemSignature]);
+}
+
+function scheduleOrderFeeCostSync(options = {}) {
+  if (!orderModalOpen.value) return;
+  window.clearTimeout(orderFeeCostSyncTimer);
+  nextTick(() => syncOrderFeeCosts(options));
+  orderFeeCostSyncTimer = window.setTimeout(() => {
+    if (orderModalOpen.value) syncOrderFeeCosts(options);
+  }, 80);
+}
+
 function createCostCenterRuleEntityId() {
   return `cost-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 async function saveCostCenterRule() {
-  if (["供应商", "司机"].includes(costCenterRuleForm.source)) {
+  if (costCenterSourceRequiresEntitySelection(costCenterRuleForm.source)) {
     syncCostCenterRuleEntityName();
   }
   syncCostCenterRouteValue("origin");
@@ -6430,7 +6988,7 @@ async function saveCostCenterRule() {
   const origin = String(costCenterRuleForm.origin || "").trim();
   const destination = String(costCenterRuleForm.destination || "").trim();
   const entityName = String(costCenterRuleForm.entityName || "").trim();
-  if (["供应商", "司机"].includes(costCenterRuleForm.source) && !costCenterRuleForm.entityRefId) {
+  if (costCenterSourceRequiresEntitySelection(costCenterRuleForm.source) && !costCenterRuleForm.entityRefId) {
     notify(`请选择${costCenterRuleEntityLabel.value}`);
     return;
   }
@@ -6459,7 +7017,7 @@ async function saveCostCenterRule() {
   }
   const payload = {
     id: costCenterRuleForm.id || undefined,
-    source: costCenterRuleForm.source || activeCostCenterSource.value,
+    source: normalizeCostCenterSourceLabel(costCenterRuleForm.source || activeCostCenterSource.value),
     entityId: costCenterRuleForm.entityId || createCostCenterRuleEntityId(),
     entityName,
     origin,
@@ -8060,6 +8618,12 @@ watch(
   { flush: "post" }
 );
 
+watch(
+  orderFeeCostDependencySignature,
+  () => scheduleOrderFeeCostSync(),
+  { flush: "post" }
+);
+
 watch([freightDirectionFilter, freightDirectoryLevel, freightLevel1Options], () => {
   if (!freightParentLevel1.value || !freightLevel1Options.value.includes(freightParentLevel1.value)) {
     freightParentLevel1.value = freightLevel1Options.value[0] || "";
@@ -8162,6 +8726,26 @@ function scheduleClearOrderAttachmentUploadStatus(delay = 4200) {
   orderAttachmentUploadStatusTimer = window.setTimeout(() => {
     orderAttachmentUploadStatus.value = "";
     orderAttachmentUploadTone.value = "busy";
+  }, delay);
+}
+
+function setVehicleExpenseReceiptUploadStatus(message, tone = "busy") {
+  window.clearTimeout(vehicleExpenseReceiptUploadStatusTimer);
+  vehicleExpenseReceiptUploadStatus.value = message;
+  vehicleExpenseReceiptUploadTone.value = tone;
+}
+
+function clearVehicleExpenseReceiptUploadStatus() {
+  window.clearTimeout(vehicleExpenseReceiptUploadStatusTimer);
+  vehicleExpenseReceiptUploadStatus.value = "";
+  vehicleExpenseReceiptUploadTone.value = "busy";
+}
+
+function scheduleClearVehicleExpenseReceiptUploadStatus(delay = 4200) {
+  window.clearTimeout(vehicleExpenseReceiptUploadStatusTimer);
+  vehicleExpenseReceiptUploadStatusTimer = window.setTimeout(() => {
+    vehicleExpenseReceiptUploadStatus.value = "";
+    vehicleExpenseReceiptUploadTone.value = "busy";
   }, delay);
 }
 
@@ -8846,6 +9430,51 @@ function currentLocationForm() {
   return locationPicker.owner === "dispatch" ? dispatchForm : orderForm;
 }
 
+function addressBookOptionValue(option = {}) {
+  return String(option.value || option.address || option.pathLabel || "").trim();
+}
+
+function splitAddressBookLocationValue(value = "") {
+  return String(value || "")
+    .replace(/\r/g, "\n")
+    .split(/[\n；;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function selectedAddressBookOptionsForApply() {
+  const optionsById = new Map(customerContactAddressOptions.value.map((item) => [item.id, item]));
+  return selectedAddressBookIds.value
+    .map((id) => optionsById.get(id))
+    .filter(Boolean);
+}
+
+function syncAddressBookSelectionFromLocationValue(value = "") {
+  const values = splitAddressBookLocationValue(value);
+  if (!values.length) {
+    selectedAddressBookIds.value = [];
+    return;
+  }
+  const optionIdsByValue = new Map();
+  customerContactAddressOptions.value.forEach((option) => {
+    [
+      addressBookOptionValue(option),
+      option.address,
+      option.pathLabel,
+      [option.area, option.address].filter(Boolean).join(" / ")
+    ].forEach((candidate) => {
+      const key = normalizeLocationText(candidate);
+      if (key && !optionIdsByValue.has(key)) optionIdsByValue.set(key, option.id);
+    });
+  });
+  const selectedIds = [];
+  values.forEach((value) => {
+    const id = optionIdsByValue.get(normalizeLocationText(value));
+    if (id && !selectedIds.includes(id)) selectedIds.push(id);
+  });
+  selectedAddressBookIds.value = selectedIds;
+}
+
 function openLocationPicker(target, mode = "template", owner = "order") {
   locationPicker.owner = owner;
   locationPicker.target = target;
@@ -8856,6 +9485,7 @@ function openLocationPicker(target, mode = "template", owner = "order") {
   if (mode === "addressBook") {
     resetAddressBookForm();
     addressBookFormOpen.value = false;
+    syncAddressBookSelectionFromLocationValue(form[target]);
   }
   const [level1 = "", level2 = "", level3 = ""] = String(form[target] || "")
     .split("/")
@@ -9008,6 +9638,41 @@ function toggleAddressBookSelection(id, checked) {
 
 function toggleAllAddressBookSelection(checked) {
   selectedAddressBookIds.value = checked ? [...visibleSavedAddressBookIds.value] : [];
+}
+
+function applySelectedAddressBookEntries() {
+  const selectedOptions = selectedAddressBookOptionsForApply();
+  if (!selectedOptions.length) {
+    notify("请先勾选地址");
+    return;
+  }
+  const seen = new Set();
+  const values = selectedOptions
+    .map((option) => addressBookOptionValue(option))
+    .filter((value) => {
+      const key = normalizeLocationText(value);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  if (!values.length) {
+    notify("请选择有效地址");
+    return;
+  }
+  const form = currentLocationForm();
+  form[locationPicker.target] = values.join("\n");
+  const firstOption = selectedOptions[0] || {};
+  if (locationPicker.owner === "order" && locationPicker.target === "unloading") {
+    orderForm.unloadingContact = firstOption.contact || "";
+    orderForm.unloadingPhone = firstOption.phone || "";
+  } else if (locationPicker.owner === "order") {
+    orderForm.loadingContact = firstOption.contact || "";
+    orderForm.loadingPhone = firstOption.phone || "";
+  }
+  closeLocationPicker();
+  if (locationPicker.owner === "order") {
+    scheduleAutoFreightSync();
+  }
 }
 
 async function deleteSelectedAddressBookEntries() {
@@ -9415,12 +10080,10 @@ async function loadDeletedFiles(entityType, entityId) {
   return filesApi.listFiles(entityType, entityId, { deletedOnly: true });
 }
 
-async function uploadFileFor(entityType, entityId, category, event, targetRows, options = {}) {
-  const file = event.target.files?.[0];
-  event.target.value = "";
+async function uploadStoredFileFor(entityType, entityId, category, file, targetRows, options = {}) {
   if (!file) return false;
   if (!entityId) {
-    notify("请先保存资料，再上传附件");
+    notify(options.missingEntityMessage || "请先保存资料，再上传附件");
     return false;
   }
   const validationMessage = uploadFileValidationMessage(file);
@@ -9453,7 +10116,7 @@ async function uploadFileFor(entityType, entityId, category, event, targetRows, 
       : `已上传：${file.name}`;
     options.onStatus?.(successMessage, "success");
     notify(successMessage);
-    return true;
+    return uploaded;
   } catch (error) {
     options.onStatus?.(`上传失败：${error.message}`, "error");
     notify(error.message);
@@ -9462,6 +10125,12 @@ async function uploadFileFor(entityType, entityId, category, event, targetRows, 
     loading.value = false;
     options.onFinish?.();
   }
+}
+
+async function uploadFileFor(entityType, entityId, category, event, targetRows, options = {}) {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  return uploadStoredFileFor(entityType, entityId, category, file, targetRows, options);
 }
 
 async function deleteFile(file, targetRows) {
@@ -9542,7 +10211,7 @@ async function loadDatabaseData(options = {}) {
   const canLoadAccounts = canAccessModule("accounts");
   const canLoadAuditLogs = canAccessModule("security");
   const canLoadDriverRouteAdjustRules = canAccessModule("financeWages");
-  const canLoadStatementDownloads = canAccessModule("financeCosts");
+  const canLoadStatementDownloads = canAccessModule("financeCosts") || canAccessModule("financeSupplierStatements");
   const previousSelection = {
     customerId: selectedCustomerId.value,
     vehiclePlate: selectedVehiclePlate.value,
@@ -10306,6 +10975,8 @@ async function openOrderModal(customer = null, order = null) {
       }
     ]).map((fee) => {
       const amount = normalizeFeeAmount(fee);
+      const savedCost = normalizeFeeCost(fee);
+      const hasCostManualFlag = fee.costManual !== undefined || fee.cost_manual !== undefined || fee.manualCost !== undefined || fee._manualCost !== undefined;
       const row = {
         id: fee.id || "",
         feeItemId: fee.feeItemId || fee.fee_item_id || "",
@@ -10315,6 +10986,7 @@ async function openOrderModal(customer = null, order = null) {
         unitPrice: normalizeFeeUnitPrice(fee),
         currency: fee.currency || "",
         amount,
+        cost: savedCost ?? 0,
         remark: fee.remark || "",
         driverRole: fee.driverRole || fee.driver_role || "",
         driverName: fee.driverName || fee.driver_name || "",
@@ -10322,7 +10994,8 @@ async function openOrderModal(customer = null, order = null) {
       };
       return {
         ...row,
-        _manualFreightAmount: isFreightFeeRow(row) && amount !== "" && !row.autoFreight
+        _manualFreightAmount: isFreightFeeRow(row) && amount !== "" && !row.autoFreight,
+        _manualCost: hasCostManualFlag ? booleanFlag(fee.costManual ?? fee.cost_manual ?? fee.manualCost ?? fee._manualCost, false) : savedCost !== null
       };
     });
     loadOrderFiles(order.no);
@@ -10343,6 +11016,7 @@ async function openOrderModal(customer = null, order = null) {
   orderCustomerPickerOpen.value = false;
   orderModalOpen.value = true;
   scheduleAutoFreightSync();
+  scheduleOrderFeeCostSync();
 }
 
 async function saveOrder() {
@@ -10359,11 +11033,18 @@ async function saveOrder() {
       handleOrderVehicleSourceChange();
     }
     normalizeOrderDriversForSave();
+    syncOrderFeeCosts();
     const payload = {
       ...orderForm,
       remark: mergeCustomsRemark(orderForm.remark),
       fees: orderFees.value
-        .map((fee) => ({ ...fee, amount: normalizeFeeAmount(fee), unitPrice: normalizeFeeUnitPrice(fee) }))
+        .map((fee) => ({
+          ...fee,
+          amount: normalizeFeeAmount(fee),
+          unitPrice: normalizeFeeUnitPrice(fee),
+          cost: normalizeFeeCost(fee) ?? 0,
+          costManual: Boolean(fee._manualCost)
+        }))
         .filter((fee) => fee.name || fee.amount || fee.quantity || fee.remark)
     };
     const item = editingOrderNo.value
@@ -10561,16 +11242,9 @@ function uploadDriverFile(event) {
 }
 
 function addFeeRow() {
-  orderFees.value.push({
-    feeItemId: "",
-    category: "正常",
-    name: "",
-    quantity: "",
-    unitPrice: "",
-    currency: orderForm.currency || "",
-    amount: "",
-    remark: ""
-  });
+  const row = createBlankFeeRow();
+  row.currency = orderForm.currency || "";
+  orderFees.value.push(row);
 }
 
 function ensureTrailingBlankFeeRow() {
@@ -10954,6 +11628,76 @@ async function exportOrderRowsAsPdf(orders, title = "订单导出", templateRow 
   }
 }
 
+async function exportOrderSnapshotsAsExcel(orders, title = "订单导出", templateRow = selectedTemplate.value, exchangeOverride = null, filename = "") {
+  if (orders.length === 0) {
+    notify("没有可导出的订单");
+    return false;
+  }
+  const templateName = templateRow?.name || "默认模板";
+  try {
+    loading.value = true;
+    const fullTemplateRow = await ensureTemplateContent(templateRow);
+    const template = parseVisualExportTemplate(fullTemplateRow);
+    const response = await fetch(`${API_BASE}/orders/export/excel`, {
+      method: "POST",
+      headers: apiRequestHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        orders,
+        title: `${title}-${templateName}`,
+        template,
+        exchange: exchangeOverride || null
+      })
+    });
+    if (!response.ok) {
+      throw new Error(await apiDownloadErrorMessage(response, "Excel 导出失败"));
+    }
+    const blob = await response.blob();
+    downloadBlob(blob, filename || orderExportFilename(orders, "xlsx"));
+    notify(`已按模板导出 Excel：${templateName}`);
+    return true;
+  } catch (error) {
+    notify(error.message || "Excel 导出失败");
+    return false;
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function exportOrderSnapshotsAsPdf(orders, title = "订单导出", templateRow = selectedTemplate.value, exchangeOverride = null, filename = "") {
+  if (orders.length === 0) {
+    notify("没有可导出的订单");
+    return false;
+  }
+  try {
+    loading.value = true;
+    const fullTemplateRow = await ensureTemplateContent(templateRow);
+    const template = parseVisualExportTemplate(fullTemplateRow);
+    const response = await fetch(`${API_BASE}/orders/export/pdf`, {
+      method: "POST",
+      headers: apiRequestHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        orders,
+        title,
+        template,
+        exchange: exchangeOverride || null
+      })
+    });
+    if (!response.ok) {
+      throw new Error(await apiDownloadErrorMessage(response, "PDF 导出失败"));
+    }
+    const blob = await response.blob();
+    const templateName = fullTemplateRow?.name || "默认模板";
+    downloadBlob(blob, filename || orderExportFilename(orders, "pdf"));
+    notify(`已按模板导出 PDF：${templateName}`);
+    return true;
+  } catch (error) {
+    notify(error.message);
+    return false;
+  } finally {
+    loading.value = false;
+  }
+}
+
 function customerOrderExportScope() {
   return selectedCustomerScopedOrders.value.length ? selectedCustomerScopedOrders.value : selectedCustomerOrders.value;
 }
@@ -11001,6 +11745,77 @@ function supplierOrderPayableDetailText(order) {
     lines.push(`${item.name || "代垫项目"} ${currencyCodeDisplay(item.currency || "港币")} ${money(amount)}`);
   });
   return lines.join("；") || "-";
+}
+
+function supplierStatementFeeRows(order, payable = supplierOrderPayableBreakdown(order)) {
+  const rule = payable.rule || outsourcedCostRuleForOrder(order);
+  if (!rule) return [];
+  const currency = payable.currency || supplierCostRuleCurrency(rule, order) || order.currency || "港币";
+  const rows = [];
+  const pushFee = (name, amount, feeCurrency = currency, extra = {}) => {
+    const value = Number(amount || 0);
+    if (!value) return;
+    rows.push({
+      name,
+      currency: feeCurrency || currency,
+      amount: value,
+      category: extra.category || "正常",
+      feeItemId: extra.feeItemId || "",
+      driverRole: "",
+      driverName: "",
+      note: extra.note || ""
+    });
+  };
+  const base = currency === "人民币" ? Number(rule.baseRMB || 0) : Number(rule.baseHKD || 0);
+  pushFee("基础运费", base);
+  [
+    ["loadPerBoard", "装货费", "板"],
+    ["unloadPerBoard", "卸货费", "板"],
+    ["crossSeaFee", "过海费", ""],
+    ["addPointFee", "加点费", ""],
+    ["waitingPerHour", "等候费", "小时"]
+  ].forEach(([field, label, unit]) => {
+    if (!orderHasActualDriverExtraFee(order, field)) return;
+    const rate = Number(rule[field] || 0);
+    if (!rate) return;
+    const quantity = ["loadPerBoard", "unloadPerBoard"].includes(field)
+      ? orderDriverExtraQuantity(order, field)
+      : 1;
+    pushFee(label, quantity * rate, currency, unit ? { note: `${money(quantity)}${unit} x ${money(rate)}` } : {});
+  });
+  advanceFeeItemRows.value.forEach((item) => {
+    if (!orderHasFeeItem(order, item)) return;
+    const amount = advanceFeeRateValue(rule.advanceFeeRates, item);
+    pushFee(item.name || "代垫项目", amount, item.currency || currency, {
+      category: "代垫",
+      feeItemId: item.id || ""
+    });
+  });
+  return rows;
+}
+
+function supplierStatementTemplateOrder(order) {
+  const payable = supplierOrderPayableBreakdown(order);
+  const detail = supplierOrderPayableDetailText(order);
+  return {
+    ...order,
+    currency: payable.currency || order.currency || "港币",
+    receivableHKD: payable.payableHKD,
+    receivableRMB: payable.payableRMB,
+    payableHKD: payable.payableHKD,
+    payableRMB: payable.payableRMB,
+    supplierPayableHKD: payable.payableHKD,
+    supplierPayableRMB: payable.payableRMB,
+    quoteMatchStatus: payable.rule ? "已匹配报价" : "未匹配报价",
+    payableDetail: detail,
+    supplierPayableDetail: detail,
+    statementDetail: detail,
+    fees: supplierStatementFeeRows(order, payable)
+  };
+}
+
+function supplierStatementTemplateOrders(orders = []) {
+  return orders.map((order) => supplierStatementTemplateOrder(order));
 }
 
 function exportSupplierCustomerOrdersCsv() {
@@ -11249,10 +12064,12 @@ function resetVehicleExpenseForm(config = activeVehicleExpenseConfig.value) {
     amount: "",
     note: ""
   });
+  resetVehicleExpenseReceiptState();
 }
 
 function openVehicleExpenseModal(item = null) {
   const config = item ? (VEHICLE_EXPENSE_CONFIG_BY_TYPE[item.type] || activeVehicleExpenseConfig.value) : activeVehicleExpenseConfig.value;
+  resetVehicleExpenseReceiptState();
   editingVehicleExpenseId.value = item?.id || null;
   Object.assign(vehicleExpenseForm, {
     type: config.type,
@@ -11265,22 +12082,30 @@ function openVehicleExpenseModal(item = null) {
     note: item?.note || ""
   });
   vehicleExpenseModalOpen.value = true;
+  if (item?.id) {
+    setVehicleExpenseReceiptUploadStatus("正在加载票据", "busy");
+    loadVehicleExpenseReceiptFiles(item.id)
+      .then(() => scheduleClearVehicleExpenseReceiptUploadStatus(1200))
+      .catch((error) => {
+        setVehicleExpenseReceiptUploadStatus(`票据加载失败：${error.message}`, "error");
+        notify(error.message);
+      });
+  }
 }
 
 async function saveVehicleExpense() {
+  if (vehicleExpenseReceiptUploading.value) {
+    notify("票据正在上传，请稍候再保存");
+    return;
+  }
   try {
-    vehicleExpenseSaving.value = true;
-    const item = await vehiclesApi.saveVehicleExpense(editingVehicleExpenseId.value, vehicleExpenseForm);
-    vehicleExpenseRows.value = editingVehicleExpenseId.value
-      ? vehicleExpenseRows.value.map((row) => row.id === item.id ? item : row)
-      : [item, ...vehicleExpenseRows.value];
-    selectedVehiclePlate.value = item.plate || selectedVehiclePlate.value;
+    const item = await persistVehicleExpenseFromModal();
+    if (!item) return;
     vehicleExpenseModalOpen.value = false;
+    resetVehicleExpenseReceiptState();
     notify(`已保存${vehicleExpenseTypeLabel(item.type)}：${item.plate}`);
   } catch (error) {
     notify(error.message);
-  } finally {
-    vehicleExpenseSaving.value = false;
   }
 }
 
@@ -12395,6 +13220,7 @@ async function exportStatementCsv() {
 }
 
 function statementExportExchangePayload() {
+  if (statementExportType.value !== "customer") return null;
   const rate = Number(statementExchangeRate.value || 0);
   if (!Number.isFinite(rate) || rate <= 0) return null;
   return {
@@ -12407,6 +13233,11 @@ function statementExportTypeLabel() {
   if (statementExportType.value === "supplier") return "供应商对账单";
   if (statementExportType.value === "driver") return "司机对账单";
   return "客户对账单";
+}
+
+function statementExportFilename(entityName = "对账对象", start = "", end = "", extension = "xlsx") {
+  const typeLabel = statementExportTypeLabel().replace("对账单", "对账");
+  return `${exportFilenamePart(entityName)}_${typeLabel}_${start || "全部"}_${end || "全部"}.${extension}`;
 }
 
 async function toggleStatementExportMenu() {
@@ -12433,6 +13264,14 @@ async function exportStatementByFormat(format, templateRow = selectedTemplate.va
   if (templateRow?.id) selectedTemplateId.value = templateRow.id;
   const title = `${statementExportTypeLabel()}-${entityName}`;
   const exchange = statementExportExchangePayload();
+  if (statementExportType.value === "supplier") {
+    const exportOrders = supplierStatementTemplateOrders(orders);
+    const ok = format === "pdf"
+      ? await exportOrderSnapshotsAsPdf(exportOrders, title, templateRow, exchange, statementExportFilename(entityName, start, end, "pdf"))
+      : await exportOrderSnapshotsAsExcel(exportOrders, title, templateRow, exchange, statementExportFilename(entityName, start, end, "xlsx"));
+    if (ok) await markStatementDownloaded(statementExportType.value, entityName, start, end);
+    return;
+  }
   const ok = format === "pdf"
     ? await exportOrderRowsAsPdf(orders, title, templateRow, exchange)
     : await exportOrderRowsAsCsv(orders, title, templateRow, exchange);
@@ -13301,21 +14140,25 @@ function loadFeeTemplate() {
   const templateRows = sortedFeeItemRows.value
     .filter((item) => item.name !== autoFreightFee?.name)
     .slice(0, 3)
-    .map((item) => ({
-      feeItemId: item.id,
-      category: item.category,
-      name: item.name,
-      quantity: 1,
-      unitPrice: Number(item.defaultAmount || 0),
-      currency: item.currency,
-      amount: Number(item.defaultAmount || 0),
-      remark: ""
-    }));
+      .map((item) => ({
+        feeItemId: item.id,
+        category: item.category,
+        name: item.name,
+        quantity: 1,
+        unitPrice: Number(item.defaultAmount || 0),
+        currency: item.currency,
+        amount: Number(item.defaultAmount || 0),
+        cost: 0,
+        costManual: false,
+        _manualCost: false,
+        remark: ""
+      }));
   orderFees.value = [
     ...(autoFreightFee ? [{ ...autoFreightFee }] : []),
     ...templateRows
   ];
   if (orderFees.value.length === 0) addFeeRow();
+  scheduleOrderFeeCostSync();
   notify("已载入收费项目模板");
 }
 
@@ -13331,6 +14174,9 @@ function parseOrderFreightTemplate(item) {
 function applyFeeTemplateRows(fees) {
   orderFees.value = (Array.isArray(fees) ? fees : []).map((fee) => {
     const amount = normalizeFeeAmount(fee);
+    const savedCost = normalizeFeeCost(fee);
+    const hasManualCost = Boolean(fee.costManual || fee.manualCost || fee._manualCost);
+    const hasManualCostFlag = fee.costManual !== undefined || fee.cost_manual !== undefined || fee.manualCost !== undefined || fee._manualCost !== undefined;
     const row = {
       feeItemId: fee.feeItemId || fee.fee_item_id || feeItemRows.value.find((row) => row.name === fee.name)?.id || "",
       category: fee.category || "正常",
@@ -13339,6 +14185,7 @@ function applyFeeTemplateRows(fees) {
       unitPrice: normalizeFeeUnitPrice(fee),
       currency: fee.currency || orderForm.currency || "",
       amount,
+      cost: savedCost ?? 0,
       remark: fee.remark || "",
       driverRole: fee.driverRole || "",
       driverName: fee.driverName || "",
@@ -13346,10 +14193,12 @@ function applyFeeTemplateRows(fees) {
     };
     return {
       ...row,
-      _manualFreightAmount: isFreightFeeRow(row) && amount !== ""
+      _manualFreightAmount: isFreightFeeRow(row) && amount !== "",
+      _manualCost: hasManualCostFlag ? booleanFlag(fee.costManual ?? fee.cost_manual ?? fee.manualCost ?? fee._manualCost, false) : (hasManualCost && savedCost !== null)
     };
   });
   if (!orderFees.value.length) addFeeRow();
+  scheduleOrderFeeCostSync();
 }
 
 function applyOrderTemplateFields(order = {}) {
@@ -13470,6 +14319,8 @@ async function saveCurrentFeesAsTemplate() {
         unitPrice: normalizeFeeUnitPrice(fee),
         currency: fee.currency || orderForm.currency || "港币",
         amount: Number(normalizeFeeAmount(fee) || 0),
+        cost: normalizeFeeCost(fee) ?? 0,
+        costManual: Boolean(fee._manualCost),
         remark: fee.remark || "",
         driverRole: fee.driverRole || "",
         driverName: fee.driverName || "",
@@ -13550,6 +14401,8 @@ function fillFeeFromItem(fee, id) {
       currency: "",
       unitPrice: "",
       amount: "",
+      cost: 0,
+      _manualCost: false,
       driverRole: "",
       driverName: "",
       remark: fee.remark || ""
@@ -13564,10 +14417,13 @@ function fillFeeFromItem(fee, id) {
     unitPrice: Number(item.defaultAmount || 0) || "",
     currency: item.currency,
     amount: "",
+    cost: 0,
+    _manualCost: false,
     driverRole: item.category === "代垫" ? (item.defaultDriverRole || "") : "",
     driverName: ""
   });
   syncFeeAmountFromUnitPrice(fee);
+  refreshOrderFeeCost(fee, { force: true });
 }
 
 function buildTemplateDesignerContent() {
@@ -17146,24 +18002,16 @@ function orderDetailFeeRows(order = {}) {
             </div>
             <div class="modal-body cost-center-rule-body">
               <div class="cost-center-rule-grid">
-                <label v-if="costCenterRuleForm.source === '供应商'">{{ costCenterRuleEntityLabel }}
+                <label v-if="costCenterSourceRequiresEntitySelection(costCenterRuleForm.source)">{{ costCenterRuleEntityLabel }}
                   <select v-model="costCenterRuleForm.entityRefId" required @change="syncCostCenterRuleEntityName">
-                    <option value="">请选择供应商</option>
-                    <option v-for="supplier in costCenterSupplierOptions" :key="supplier.id" :value="costCenterEntityOptionId(supplier)">
-                      {{ supplier.name }}
-                    </option>
-                  </select>
-                </label>
-                <label v-else-if="costCenterRuleForm.source === '司机'">{{ costCenterRuleEntityLabel }}
-                  <select v-model="costCenterRuleForm.entityRefId" required @change="syncCostCenterRuleEntityName">
-                    <option value="">请选择司机</option>
-                    <option v-for="driver in costCenterDriverOptions" :key="driver.id" :value="costCenterEntityOptionId(driver)">
-                      {{ driver.name }}{{ driver.type ? ` · ${driver.type}` : '' }}
+                    <option value="">请选择{{ costCenterRuleEntityLabel }}</option>
+                    <option v-for="entity in costCenterEntityOptionsForSource(costCenterRuleForm.source)" :key="costCenterEntityOptionId(entity)" :value="costCenterEntityOptionId(entity)">
+                      {{ costCenterEntityOptionName(entity) }}{{ entity.type ? ` · ${entity.type}` : '' }}
                     </option>
                   </select>
                 </label>
                 <label v-else>{{ costCenterRuleEntityLabel }}
-                  <input v-model.trim="costCenterRuleForm.entityName" required :placeholder="costCenterRuleForm.source === '其他平台' ? '请输入平台名称' : '请输入费用名称'" />
+                  <input v-model.trim="costCenterRuleForm.entityName" required placeholder="请输入费用名称" />
                 </label>
                 <div class="cost-center-route-field">
                   <span>装货地</span>
@@ -17249,7 +18097,7 @@ function orderDetailFeeRows(order = {}) {
         <div class="section-head">
           <div>
             <p class="eyebrow">财务中心</p>
-            <h2>对账单管理</h2>
+            <h2>客户对账单</h2>
           </div>
         </div>
         <div class="finance-filter-bar">
@@ -17291,7 +18139,7 @@ function orderDetailFeeRows(order = {}) {
               </div>
             </div>
             <table class="data-table compact statement-customer-table">
-              <thead><tr><th>排名</th><th>客户</th><th>结算类别</th><th>汇率</th><th>份数</th><th>港币</th><th>人民币</th><th>操作</th><th>状态</th></tr></thead>
+              <thead><tr><th>排名</th><th>客户</th><th>结算类别</th><th>汇率</th><th>份数</th><th>应收港币</th><th>应收人民币</th><th>未收港币</th><th>未收人民币</th><th>操作</th><th>状态</th></tr></thead>
               <tbody>
                 <tr v-for="(row, index) in statementCustomerRows" :key="row.customer">
                   <td>{{ index + 1 }}</td>
@@ -17312,6 +18160,30 @@ function orderDetailFeeRows(order = {}) {
                   <td>{{ row.count }}</td>
                   <td>HKD {{ money(row.hkd) }}</td>
                   <td>RMB {{ money(row.rmb) }}</td>
+                  <td>
+                    <input
+                      class="statement-unreceived-input"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      :value="statementCustomerUnreceivedAmount(row, 'hkd')"
+                      @click.stop
+                      @input="setStatementCustomerUnreceivedAmount(row, 'hkd', $event.target.value)"
+                      @change="setStatementCustomerUnreceivedAmount(row, 'hkd', $event.target.value)"
+                    />
+                  </td>
+                  <td>
+                    <input
+                      class="statement-unreceived-input"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      :value="statementCustomerUnreceivedAmount(row, 'rmb')"
+                      @click.stop
+                      @input="setStatementCustomerUnreceivedAmount(row, 'rmb', $event.target.value)"
+                      @change="setStatementCustomerUnreceivedAmount(row, 'rmb', $event.target.value)"
+                    />
+                  </td>
                   <td class="row-actions statement-customer-actions">
                     <span class="order-export-wrap statement-export-wrap" @click.stop>
                       <button class="primary-btn small" type="button" @click="openStatementCustomerExportMenu(row)">
@@ -17333,7 +18205,7 @@ function orderDetailFeeRows(order = {}) {
                     <span v-else class="statement-status-text">未导出</span>
                   </td>
                 </tr>
-                <tr v-if="statementCustomerRows.length === 0"><td colspan="9">暂无客户账单</td></tr>
+                <tr v-if="statementCustomerRows.length === 0"><td colspan="11">暂无客户账单</td></tr>
               </tbody>
             </table>
           </div>
@@ -17350,7 +18222,7 @@ function orderDetailFeeRows(order = {}) {
         </div>
         <Teleport to="body">
           <div
-            v-if="activeModule === 'financeCosts' && statementExportMenuOpen && activeStatementExportCustomerRow"
+            v-if="activeModule === 'financeCosts' && statementExportMenuOpen && activeStatementExportRow"
             class="modal-backdrop statement-export-backdrop"
             @click.self="closeStatementExportMenu"
           >
@@ -17358,14 +18230,124 @@ function orderDetailFeeRows(order = {}) {
               <div class="modal-head">
                 <div>
                   <h2>导出对账单</h2>
-                  <p class="modal-subtitle">{{ activeStatementExportCustomerRow.customer }}</p>
+                  <p class="modal-subtitle">{{ activeStatementExportEntityName }}</p>
                 </div>
                 <button type="button" class="icon-btn" @click="closeStatementExportMenu"><IconSvg name="close" />关闭</button>
               </div>
               <div class="statement-export-dialog-meta">
-                <span>客户对账单</span>
-                <span>汇总：{{ statementCustomerSettlementCurrency(activeStatementExportCustomerRow) }}</span>
-                <span>汇率：{{ statementCustomerExchangeRate(activeStatementExportCustomerRow) }}</span>
+                <span v-for="item in statementExportDialogMetaItems" :key="item">{{ item }}</span>
+              </div>
+              <div class="statement-export-template-list">
+                <div v-for="template in orderExportTemplateOptions()" :key="template.id" class="statement-export-template-row">
+                  <span :title="template.name">{{ template.name }}</span>
+                  <button type="button" title="导出 Excel" aria-label="导出 Excel" @click="exportStatementByFormat('excel', template)">Excel</button>
+                  <button type="button" title="导出 PDF" aria-label="导出 PDF" @click="exportStatementByFormat('pdf', template)">PDF</button>
+                </div>
+              </div>
+            </section>
+          </div>
+        </Teleport>
+        </FinanceCenterPage>
+      </section>
+
+      <section v-else-if="activeModule === 'financeSupplierStatements'" class="work-page finance-page">
+        <FinanceCenterPage>
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">财务中心</p>
+            <h2>供应商对账单</h2>
+          </div>
+        </div>
+        <div class="finance-filter-bar">
+          <div class="statement-date-selects">
+            <div class="segmented statement-mode-tabs">
+              <button
+                v-for="mode in STATEMENT_PERIOD_MODES"
+                :key="mode.key"
+                type="button"
+                :class="{ active: statementPeriodMode === mode.key }"
+                @click="setStatementPeriodMode(mode.key)"
+              >{{ mode.label }}</button>
+            </div>
+            <label v-if="statementPeriodMode !== 'all'">年份
+              <select v-model="statementSelectedYear">
+                <option v-for="year in statementYearOptions" :key="year" :value="year">{{ year }}年</option>
+              </select>
+            </label>
+            <label v-if="statementPeriodMode === 'month'">月份
+              <select v-model="statementSelectedMonth">
+                <option v-for="item in statementMonthOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
+              </select>
+            </label>
+          </div>
+          <span class="finance-period-chip">当前范围：{{ statementMonthRangeLabel() }}</span>
+        </div>
+        <div class="finance-summary-grid">
+          <div class="finance-summary-card"><span>供应商数</span><strong>{{ statementSupplierSummary.supplierCount }}</strong></div>
+          <div class="finance-summary-card"><span>订单数</span><strong>{{ statementSupplierSummary.orderCount }}</strong></div>
+          <div class="finance-summary-card"><span>港币</span><strong>HKD {{ money(statementSupplierSummary.payableHKD) }}</strong></div>
+          <div class="finance-summary-card"><span>人民币</span><strong>RMB {{ money(statementSupplierSummary.payableRMB) }}</strong></div>
+          <div class="finance-summary-card"><span>未匹配报价</span><strong>{{ statementSupplierSummary.missingRuleCount }}</strong></div>
+        </div>
+        <div class="finance-insight-grid statement-supplier-section" @click="closeStatementExportMenu">
+          <div class="table-card finance-tool-card statement-supplier-card">
+            <div class="table-card-head">
+              <div>
+                <strong>供应商账单列表</strong>
+                <span>{{ statementMonthRangeLabel() }} · 外派车辆供应商</span>
+              </div>
+            </div>
+            <table class="data-table compact statement-supplier-table">
+              <thead><tr><th>排名</th><th>供应商</th><th>份数</th><th>港币</th><th>人民币</th><th>操作</th><th>状态</th></tr></thead>
+              <tbody>
+                <tr v-for="(row, index) in statementSupplierRows" :key="row.supplier">
+                  <td>{{ index + 1 }}</td>
+                  <td>{{ row.supplier }}</td>
+                  <td>{{ row.count }}</td>
+                  <td>HKD {{ money(row.hkd) }}</td>
+                  <td>RMB {{ money(row.rmb) }}</td>
+                  <td class="row-actions statement-customer-actions">
+                    <span class="order-export-wrap statement-export-wrap" @click.stop>
+                      <button class="primary-btn small" type="button" @click="openStatementSupplierExportMenu(row)">
+                        <IconSvg name="download" />导出对账单<IconSvg name="chevronDown" />
+                      </button>
+                    </span>
+                  </td>
+                  <td>
+                    <select
+                      v-if="statementDownloadRecordForSupplierRow(row)"
+                      class="statement-status-select"
+                      :class="statementDownloadStatusClass(statementSupplierStatementStatus(row))"
+                      :value="statementSupplierStatementStatus(row)"
+                      @click.stop
+                      @change.stop="updateSupplierStatementStatus(row, $event.target.value)"
+                    >
+                      <option v-for="status in STATEMENT_DOWNLOAD_STATUS_OPTIONS" :key="status" :value="status">{{ status }}</option>
+                    </select>
+                    <span v-else class="statement-status-text">未导出</span>
+                  </td>
+                </tr>
+                <tr v-if="statementSupplierRows.length === 0"><td colspan="7">暂无供应商账单</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <Teleport to="body">
+          <div
+            v-if="activeModule === 'financeSupplierStatements' && statementExportMenuOpen && activeStatementExportRow"
+            class="modal-backdrop statement-export-backdrop"
+            @click.self="closeStatementExportMenu"
+          >
+            <section class="modal-card compact-modal statement-export-dialog">
+              <div class="modal-head">
+                <div>
+                  <h2>导出对账单</h2>
+                  <p class="modal-subtitle">{{ activeStatementExportEntityName }}</p>
+                </div>
+                <button type="button" class="icon-btn" @click="closeStatementExportMenu"><IconSvg name="close" />关闭</button>
+              </div>
+              <div class="statement-export-dialog-meta">
+                <span v-for="item in statementExportDialogMetaItems" :key="item">{{ item }}</span>
               </div>
               <div class="statement-export-template-list">
                 <div v-for="template in orderExportTemplateOptions()" :key="template.id" class="statement-export-template-row">
@@ -19499,13 +20481,13 @@ function orderDetailFeeRows(order = {}) {
               <label v-if="dispatchForm.vehicleSource === '外派车辆'">外派供应商<select v-model="dispatchForm.supplier"><option value=""></option><option v-for="customer in customerRows.filter((item) => item.type === '供应商')" :key="customer.id" :value="customer.name">{{ customer.name }}</option></select></label>
               <label class="span-2">装货地
                 <span class="location-input-row dispatch-location-row" @click.stop>
-                  <input v-model.trim="dispatchForm.loading" placeholder="例如：深圳 / 南山区" />
+                  <textarea v-model.trim="dispatchForm.loading" rows="2" placeholder="例如：深圳 / 南山区"></textarea>
                   <button class="table-op icon-only address-book-trigger" type="button" title="地址本列表" aria-label="地址本列表" @click.stop="openDispatchLocationPicker('loading')"><IconSvg name="contacts" /></button>
                 </span>
               </label>
               <label class="span-2">卸货地
                 <span class="location-input-row dispatch-location-row" @click.stop>
-                  <input v-model.trim="dispatchForm.unloading" placeholder="例如：香港 / 沙田区" />
+                  <textarea v-model.trim="dispatchForm.unloading" rows="2" placeholder="例如：香港 / 沙田区"></textarea>
                   <button class="table-op icon-only address-book-trigger" type="button" title="地址本列表" aria-label="地址本列表" @click.stop="openDispatchLocationPicker('unloading')"><IconSvg name="contacts" /></button>
                 </span>
               </label>
@@ -19606,7 +20588,7 @@ function orderDetailFeeRows(order = {}) {
                     </tr>
                   </thead>
                   <tbody>
-                    <tr v-for="option in addressBookListOptions" :key="option.key" @dblclick="applyAddressBookEntry(option)">
+                    <tr v-for="option in addressBookListOptions" :key="option.key">
                       <td>
                         <input
                           v-if="option.source === '联系人'"
@@ -19623,7 +20605,6 @@ function orderDetailFeeRows(order = {}) {
                       <td class="address-picker-value">{{ option.address || option.value }}</td>
                       <td>{{ option.note || '-' }}</td>
                       <td class="row-actions">
-                        <button class="icon-btn icon-only" type="button" title="使用地址" aria-label="使用地址" @click="applyAddressBookEntry(option)"><IconSvg name="check" /></button>
                         <button v-if="option.source === '联系人'" class="icon-btn icon-only" type="button" title="编辑地址" aria-label="编辑地址" @click="editAddressBookEntry(option)"><IconSvg name="edit" /></button>
                         <button v-if="option.source === '联系人'" class="icon-btn icon-only danger" type="button" title="删除地址" aria-label="删除地址" @click="deleteAddressBookEntry(option.id)"><IconSvg name="trash" /></button>
                       </td>
@@ -19634,7 +20615,11 @@ function orderDetailFeeRows(order = {}) {
                   </tbody>
                 </table>
               </div>
-              <p class="address-picker-hint">地址来自当前经营单位的联系人；新建地址会同步到该客户联系人资料。双击或点勾选图标可使用地址。</p>
+              <div class="address-picker-actions">
+                <button type="button" class="ghost-btn" @click="closeLocationPicker">取消</button>
+                <button class="primary-btn" type="button" :disabled="selectedAddressBookIds.length === 0" @click="applySelectedAddressBookEntries"><IconSvg name="check" />确定</button>
+              </div>
+              <p class="address-picker-hint">地址来自当前经营单位的联系人；新建地址会同步到该客户联系人资料。</p>
             </div>
           </section>
         </div>
@@ -19948,6 +20933,7 @@ function orderDetailFeeRows(order = {}) {
                     <th class="invoice-category-col">类别</th>
 	                    <th class="invoice-qty-col">数量</th>
 	                    <th class="invoice-price-col">单价</th>
+	                    <th class="invoice-cost-col">成本</th>
 	                    <th class="invoice-amount-col">金额</th>
 	                    <th class="invoice-driver-col">归属司机</th>
 	                    <th class="invoice-remark-col">备注</th>
@@ -20000,6 +20986,17 @@ function orderDetailFeeRows(order = {}) {
                     <td class="invoice-category-cell"><span class="fee-category-badge" :class="{ advance: feeCategoryLabel(fee) === '代垫' }">{{ feeCategoryLabel(fee) }}</span></td>
                     <td><input v-model.number="fee.quantity" type="number" min="0" @input="syncFeeAmountFromUnitPrice(fee)" /></td>
                     <td class="invoice-price-cell"><input v-model.number="fee.unitPrice" type="number" min="0" step="0.01" @input="syncFeeAmountFromUnitPrice(fee)" /></td>
+                    <td class="invoice-cost-cell">
+                      <input
+                        class="invoice-cost-input"
+                        :value="fee.cost ?? 0"
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        :title="fee._manualCost ? '手动成本' : (fee._costSourceText || '未匹配到成本')"
+                        @input="setOrderFeeCost(fee, $event.target.value)"
+                      />
+                    </td>
 	                    <td class="invoice-amount-cell">
 	                      <label class="fee-money-input">
 	                        <input v-model.trim="fee.amount" type="number" min="0" @input="markFeeAmountManual(fee)" />
@@ -20448,14 +21445,14 @@ function orderDetailFeeRows(order = {}) {
         </form>
       </div>
 
-      <div v-if="vehicleExpenseModalOpen" class="modal-backdrop" @click.self="vehicleExpenseModalOpen = false">
+      <div v-if="vehicleExpenseModalOpen" class="modal-backdrop" @click.self="closeVehicleExpenseModal">
         <form class="modal-card compact-modal vehicle-expense-modal" @submit.prevent="saveVehicleExpense">
           <div class="modal-head">
             <div>
               <p class="eyebrow">车辆支出</p>
               <h2>{{ editingVehicleExpenseId ? '编辑费用' : activeVehicleExpenseConfig.addLabel }}</h2>
             </div>
-            <button type="button" class="icon-btn" @click="vehicleExpenseModalOpen = false"><IconSvg name="close" />关闭</button>
+            <button type="button" class="icon-btn" @click="closeVehicleExpenseModal"><IconSvg name="close" />关闭</button>
           </div>
           <div class="modal-body">
             <div class="form-grid vehicle-expense-form-grid">
@@ -20493,14 +21490,53 @@ function orderDetailFeeRows(order = {}) {
               <label>费用
                 <input v-model.number="vehicleExpenseForm.amount" type="number" min="0.01" step="0.01" required />
               </label>
+              <div class="vehicle-expense-receipt-panel span-2">
+                <div class="vehicle-expense-receipt-head">
+                  <strong>票据</strong>
+                  <label
+                    class="fee-row-upload vehicle-expense-receipt-upload"
+                    :class="{ 'is-uploading': vehicleExpenseReceiptUploading, 'is-disabled': vehicleExpenseSaving || vehicleRows.length === 0 }"
+                    title="上传票据"
+                    aria-label="上传票据"
+                  >
+                    <IconSvg name="paperclip" />
+                    <input
+                      type="file"
+                      multiple
+                      :accept="FILE_UPLOAD_ACCEPT"
+                      :disabled="vehicleExpenseSaving || vehicleExpenseReceiptUploading || vehicleRows.length === 0"
+                      @change="handleVehicleExpenseReceiptFiles"
+                    />
+                  </label>
+                </div>
+                <div v-if="vehicleExpenseReceiptUploadStatus" class="upload-status-pill vehicle-expense-upload-status" :class="`is-${vehicleExpenseReceiptUploadTone}`" aria-live="polite">
+                  <span class="upload-status-dot" aria-hidden="true"></span>
+                  <span>{{ vehicleExpenseReceiptUploadStatus }}</span>
+                </div>
+                <p class="hint">支持图片或 PDF，可一次选择多张；选择后立即上传。</p>
+                <div v-if="vehicleExpenseReceiptRows.length" class="vehicle-expense-receipt-list">
+                  <span
+                    v-for="file in vehicleExpenseReceiptRows"
+                    :key="`uploaded-${file.id}`"
+                    class="fee-row-file-chip vehicle-expense-receipt-chip"
+                    :title="file.filename"
+                  >
+                    <span class="vehicle-expense-receipt-name">{{ file.filename }}</span>
+                    <button type="button" title="预览" @click="openStoredFile(file, 'preview')"><IconSvg name="eye" /></button>
+                    <button type="button" title="下载" @click="openStoredFile(file, 'download')"><IconSvg name="download" /></button>
+                    <button type="button" title="删除" @click="deleteFile(file, vehicleExpenseReceiptRows)"><IconSvg name="trash" /></button>
+                  </span>
+                </div>
+                <p v-else class="vehicle-expense-receipt-empty">暂无票据</p>
+              </div>
               <label class="span-2">备注
                 <input v-model.trim="vehicleExpenseForm.note" placeholder="票据号、供应商或说明" />
               </label>
             </div>
           </div>
           <div class="modal-actions">
-            <button type="button" class="ghost-btn" @click="vehicleExpenseModalOpen = false">取消</button>
-            <button class="primary-btn" type="submit" :disabled="vehicleExpenseSaving || vehicleRows.length === 0">
+            <button type="button" class="ghost-btn" @click="closeVehicleExpenseModal">取消</button>
+            <button class="primary-btn" type="submit" :disabled="vehicleExpenseSaving || vehicleExpenseReceiptUploading || vehicleRows.length === 0">
               <IconSvg name="save" />{{ vehicleExpenseSaving ? '保存中' : '保存费用' }}
             </button>
           </div>

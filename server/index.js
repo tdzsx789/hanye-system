@@ -144,6 +144,16 @@ function normalizeTransportMode(value = "") {
   return ["单司机", "双司机", "口岸转国内车"].includes(text) ? text : "";
 }
 
+function booleanFlag(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  const text = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(text)) return true;
+  if (["0", "false", "no", "off"].includes(text)) return false;
+  return fallback;
+}
+
 function requestHasTransitDeletePermission(req) {
   if (roleLevelFor(req.account?.role) >= roleLevelFor("管理员")) return true;
   const decodeHeaderValue = (value) => {
@@ -1552,6 +1562,78 @@ async function loadExportOrders(orderNos = []) {
   return hydrateOrderFees(rows.map(mapOrder));
 }
 
+function normalizeExportOrderFee(fee = {}) {
+  if (!fee || typeof fee !== "object") return null;
+  const amount = Number(fee.amount || 0);
+  const name = String(fee.name || "").trim();
+  if (!name && !amount) return null;
+  return {
+    name,
+    currency: String(fee.currency || "港币").trim() || "港币",
+    amount,
+    category: String(fee.category || "正常").trim() || "正常",
+    feeItemId: String(fee.feeItemId || fee.fee_item_id || "").trim(),
+    driverRole: String(fee.driverRole || fee.driver_role || "").trim(),
+    driverName: String(fee.driverName || fee.driver_name || "").trim(),
+    note: String(fee.note || "").trim()
+  };
+}
+
+function normalizeExportBoolean(value = false) {
+  return value === true || value === 1 || value === "1" || value === "true";
+}
+
+function normalizeExportOrderSnapshot(order = {}) {
+  const snapshot = {};
+  Object.entries(order || {}).forEach(([key, value]) => {
+    if (key === "fees") return;
+    if (value === null || value === undefined) return;
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      snapshot[key] = value;
+    }
+  });
+  snapshot.dispatchNo = String(snapshot.dispatchNo || order.dispatchNo || "");
+  snapshot.no = String(snapshot.no || order.no || "");
+  snapshot.customer = String(snapshot.customer || order.customer || "");
+  snapshot.businessType = String(snapshot.businessType || order.businessType || "");
+  snapshot.port = String(snapshot.port || order.port || "");
+  snapshot.direction = String(snapshot.direction || order.direction || "");
+  snapshot.tonnage = String(snapshot.tonnage || order.tonnage || "");
+  snapshot.currency = String(snapshot.currency || order.currency || "港币");
+  snapshot.quantity = snapshot.quantity ?? order.quantity ?? "";
+  snapshot.weight = String(snapshot.weight || order.weight || "");
+  snapshot.vehicleSource = String(snapshot.vehicleSource || order.vehicleSource || "");
+  snapshot.plate = String(snapshot.plate || order.plate || "");
+  snapshot.driver = String(snapshot.driver || order.driver || "");
+  snapshot.hkDriver = String(snapshot.hkDriver || order.hkDriver || order.hk_driver || "");
+  snapshot.mainlandDriver = String(snapshot.mainlandDriver || order.mainlandDriver || order.mainland_driver || "");
+  snapshot.transportMode = String(snapshot.transportMode || order.transportMode || "");
+  snapshot.supplier = String(snapshot.supplier || order.supplier || "");
+  snapshot.loading = String(snapshot.loading || order.loading || "");
+  snapshot.unloading = String(snapshot.unloading || order.unloading || "");
+  snapshot.date = String(snapshot.date || order.date || "");
+  snapshot.receivableHKD = Number(snapshot.receivableHKD ?? order.receivableHKD ?? 0);
+  snapshot.receivableRMB = Number(snapshot.receivableRMB ?? order.receivableRMB ?? 0);
+  snapshot.status = String(snapshot.status || order.status || "");
+  snapshot.remark = String(snapshot.remark || order.remark || "");
+  snapshot.tripNoEnabled = normalizeExportBoolean(snapshot.tripNoEnabled ?? order.tripNoEnabled ?? order.trip_no_enabled);
+  snapshot.tripNo = String(snapshot.tripNo || order.tripNo || order.trip_no || "");
+  snapshot.sixSheetEnabled = normalizeExportBoolean(snapshot.sixSheetEnabled ?? order.sixSheetEnabled ?? order.six_sheet_enabled);
+  snapshot.sixSheetNo = String(snapshot.sixSheetNo || order.sixSheetNo || order.six_sheet_no || "");
+  snapshot.fees = Array.isArray(order.fees)
+    ? order.fees.map(normalizeExportOrderFee).filter(Boolean)
+    : [];
+  return snapshot;
+}
+
+async function loadExportOrdersFromRequest(body = {}, orderNos = []) {
+  const snapshotOrders = Array.isArray(body.orders)
+    ? body.orders.map(normalizeExportOrderSnapshot).filter((order) => order.no || order.dispatchNo || order.customer || order.supplier)
+    : [];
+  if (snapshotOrders.length > 0) return snapshotOrders;
+  return loadExportOrders(orderNos);
+}
+
 function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = null, filename = "", exchange = null) {
   const template = normalizeExportTemplate(templatePayload);
   const sourceColumns = exportColumnsForOrders(templatePayload, orders);
@@ -1775,6 +1857,8 @@ function mapOrderFee(row) {
     unitPrice: row.unit_price || 0,
     currency: row.currency,
     amount: row.amount,
+    cost: row.cost == null ? null : Number(row.cost || 0),
+    costManual: Boolean(row.cost_manual),
     remark: row.remark,
     driverRole: row.driver_role || "",
     driverName: row.driver_name || ""
@@ -1938,7 +2022,14 @@ function mapDriver(row) {
   };
 }
 
-const FEE_ITEM_COST_SOURCE_OPTIONS = ["供应商", "司机", "其他平台", "公司自费"];
+const FEE_ITEM_COST_SOURCE_OPTIONS = ["供应商", "香港司机", "大陆骑师", "公司自费"];
+
+function normalizeFeeItemCostSourceToken(value = "") {
+  const source = String(value || "").trim();
+  if (source === "司机") return "香港司机";
+  if (source === "其他平台") return "大陆骑师";
+  return source;
+}
 
 function normalizeFeeItemCostSources(value = "供应商") {
   let parsedValue = value;
@@ -1956,7 +2047,7 @@ function normalizeFeeItemCostSources(value = "供应商") {
       .replace(/、/g, ",")
       .split(",");
   const sources = rawValues
-    .map((source) => String(source || "").trim())
+    .map(normalizeFeeItemCostSourceToken)
     .filter((source, index, list) => FEE_ITEM_COST_SOURCE_OPTIONS.includes(source) && list.indexOf(source) === index);
   return sources.length ? sources : ["供应商"];
 }
@@ -2024,7 +2115,7 @@ function mapDriverWageRule(row) {
 }
 
 function normalizeCostCenterSource(value = "") {
-  const source = String(value || "").trim();
+  const source = normalizeFeeItemCostSourceToken(value);
   return FEE_ITEM_COST_SOURCE_OPTIONS.includes(source) ? source : "";
 }
 
@@ -2047,7 +2138,7 @@ function normalizeCostCenterValues(value = {}) {
 function mapCostCenterRate(row) {
   return {
     id: row.id,
-    source: row.source || "",
+    source: normalizeCostCenterSource(row.source),
     entityId: row.entity_id || "",
     entityName: row.entity_name || "",
     origin: row.origin || "",
@@ -3150,12 +3241,34 @@ app.get("/api/orders/export/excel", async (req, res) => {
   }
 });
 
+app.post("/api/orders/export/excel", async (req, res) => {
+  const orderNos = Array.isArray(req.body.orderNos) ? req.body.orderNos.map(String).filter(Boolean) : [];
+  const title = String(req.body.title || "订单导出").trim() || "订单导出";
+  const template = req.body.template && typeof req.body.template === "object" ? req.body.template : await exportTemplateById(req.body.templateId);
+  const exchange = normalizeExportExchange(req.body.exchange);
+  const orders = await loadExportOrdersFromRequest(req.body, orderNos);
+  if (orders.length === 0) {
+    res.status(400).type("text/plain").send("没有可导出的订单");
+    return;
+  }
+  try {
+    const body = await renderOrdersXlsxBuffer(orders, title, template, exchange);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(orderExportFilename(orders, "xlsx"))}`);
+    await writeAudit("export", "order", orderNos.join(",") || "snapshot", `Excel ${orders.length} 条`);
+    res.send(body);
+  } catch (error) {
+    console.error("Excel export failed", error);
+    res.status(500).type("text/plain").send("Excel 导出失败");
+  }
+});
+
 app.post("/api/orders/export/pdf", async (req, res) => {
   const orderNos = Array.isArray(req.body.orderNos) ? req.body.orderNos.map(String).filter(Boolean) : [];
   const title = String(req.body.title || "订单导出").trim() || "订单导出";
   const template = req.body.template && typeof req.body.template === "object" ? req.body.template : null;
   const exchange = normalizeExportExchange(req.body.exchange);
-  const orders = await loadExportOrders(orderNos);
+  const orders = await loadExportOrdersFromRequest(req.body, orderNos);
   if (orders.length === 0) {
     res.status(400).json({ message: "没有可导出的订单" });
     return;
@@ -3302,6 +3415,12 @@ app.post("/api/orders", async (req, res) => {
 
 function normalizeOrderFee(fee, fallbackCurrency) {
   const driverRole = String(fee.driverRole || fee.driver_role || "").trim();
+  const rawCost = fee.cost ?? fee.costValue ?? fee.cost_value ?? fee.costAmount ?? fee.cost_amount;
+  const rawCostManual = fee.costManual ?? fee.cost_manual ?? fee.manualCost ?? fee._manualCost;
+  const costNumber = rawCost === undefined || rawCost === null || String(rawCost).trim() === ""
+    ? null
+    : Number(rawCost);
+  const cost = Number.isFinite(costNumber) && costNumber >= 0 ? costNumber : null;
   return {
     category: fee.category === "代垫" ? "代垫" : "正常",
     name: String(fee.name || "").trim(),
@@ -3309,6 +3428,8 @@ function normalizeOrderFee(fee, fallbackCurrency) {
     unitPrice: Number(fee.unitPrice || fee.unit_price || 0),
     currency: String(fee.currency || fallbackCurrency || "港币").trim(),
     amount: Number(fee.amount || 0),
+    cost,
+    costManual: cost == null ? false : booleanFlag(rawCostManual, false),
     remark: String(fee.remark || "").trim(),
     driverRole: ["香港司机", "大陆骑师", "跟随订单司机", "手动指定"].includes(driverRole) ? driverRole : "",
     driverName: String(fee.driverName || fee.driver_name || "").trim()
@@ -3331,8 +3452,8 @@ function calculateOrderReceivables(fees, fallbackCurrency) {
 
 async function saveOrderFees(orderNo, fees, fallbackCurrency) {
   const insert = await db.prepare(`
-    INSERT INTO order_fees (order_no, category, name, quantity, unit_price, currency, amount, remark, driver_role, driver_name)
-    VALUES (@orderNo, @category, @name, @quantity, @unitPrice, @currency, @amount, @remark, @driverRole, @driverName)
+    INSERT INTO order_fees (order_no, category, name, quantity, unit_price, currency, amount, cost, cost_manual, remark, driver_role, driver_name)
+    VALUES (@orderNo, @category, @name, @quantity, @unitPrice, @currency, @amount, @cost, @costManual, @remark, @driverRole, @driverName)
   `);
   await db.prepare("DELETE FROM order_fees WHERE order_no = ?").run(orderNo);
   const normalizedFees = fees

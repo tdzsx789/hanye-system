@@ -7,6 +7,7 @@ export const ACCOUNT_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const LEGACY_STATEMENT_DOWNLOAD_ROWS_KEY = "hanye_statement_download_rows";
 export const LEGACY_DRIVER_ROUTE_ADJUST_RULES_KEY = "hanye_driver_route_adjust_rules";
 export const STATEMENT_CUSTOMER_EXCHANGE_RATES_KEY = "hanye_statement_customer_exchange_rates";
+export const STATEMENT_CUSTOMER_UNRECEIVED_AMOUNTS_KEY = "hanye_statement_customer_unreceived_amounts";
 export const STATEMENT_DEFAULT_EXCHANGE_RATE = "0.88";
 
 export const ROUTE_ALIASES = {
@@ -42,20 +43,19 @@ export const BOSS_CENTER_MODULES = [
   "bossVehicleProfit",
   "bossCompanyExpenses"
 ];
-export const FINANCE_CENTER_MODULES = ["financeWages", "financeCosts", "financeCostCenter", "financeDaily"];
-export const BUSINESS_MODULES = ["home", "customers", "orders", "customsBusiness"];
+export const FINANCE_CENTER_MODULES = ["financeWages", "financeCosts", "financeSupplierStatements", "financeCostCenter", "financeDaily"];
+export const BUSINESS_MODULES = ["home", "customers", "dispatchBoard", "orders", "customsBusiness"];
 export const SYSTEM_CONFIG_MODULES = ["freight", "templates", "master", "security", "accounts"];
 export const ROLE_ALLOWED_MODULES = {
   管理员: [
     ...BUSINESS_MODULES,
     ...VEHICLE_DRIVER_MODULES,
-    "dispatchBoard",
     ...FINANCE_CENTER_MODULES,
     ...BOSS_CENTER_MODULES,
     ...SYSTEM_CONFIG_MODULES
   ],
-  财务: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, "dispatchBoard", ...FINANCE_CENTER_MODULES, ...SYSTEM_CONFIG_MODULES],
-  跟单员: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, "dispatchBoard", ...SYSTEM_CONFIG_MODULES],
+  财务: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_CENTER_MODULES, ...SYSTEM_CONFIG_MODULES],
+  跟单员: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...SYSTEM_CONFIG_MODULES],
   司机: VEHICLE_DRIVER_MODULES
 };
 export const ROLE_PERMISSION_LABELS = {
@@ -69,9 +69,9 @@ export const MODULES = [
   { id: "home", label: "首页看板", group: "业务" },
   { id: "customerList", label: "客户", group: "业务" },
   { id: "supplierList", label: "供应商", group: "业务" },
+  { id: "dispatchBoard", label: "排车表", group: "业务" },
   { id: "orders", label: "订单管理", group: "业务" },
   { id: "customsBusiness", label: "报关业务", group: "业务" },
-  { id: "dispatchBoard", label: "排车表", group: "车辆司机" },
   { id: "vehicleManage", label: "车辆管理", group: "车辆司机" },
   { id: "driverManage", label: "司机管理", group: "车辆司机" },
   { id: "vehicleFuelExpenses", label: "加油费管理", group: "车辆司机" },
@@ -79,7 +79,8 @@ export const MODULES = [
   { id: "vehicleAnnualExpenses", label: "保险年审牌头费", group: "车辆司机" },
   { id: "vehicleOtherExpenses", label: "其他支出", group: "车辆司机" },
   { id: "financeWages", label: "工资统计", group: "财务中心" },
-  { id: "financeCosts", label: "对账单管理", group: "财务中心" },
+  { id: "financeCosts", label: "客户对账单", group: "财务中心" },
+  { id: "financeSupplierStatements", label: "供应商对账单", group: "财务中心" },
   { id: "financeCostCenter", label: "成本中心", group: "财务中心" },
   { id: "financeDaily", label: "日常收支", group: "财务中心" },
   { id: "bossDashboard", label: "老板看板", group: "老板中心" },
@@ -194,7 +195,7 @@ export const FEE_DRIVER_ROLE_LABELS = {
   跟随订单司机: "跟随订单司机",
   手动指定: "手动指定"
 };
-export const FEE_ITEM_COST_SOURCE_OPTIONS = ["供应商", "司机", "其他平台", "公司自费"];
+export const FEE_ITEM_COST_SOURCE_OPTIONS = ["供应商", "香港司机", "大陆骑师", "公司自费"];
 export const DISPATCH_STATUS_TO_ORDER_STATUS = {
   预排: "预排",
   待预排: "预排",

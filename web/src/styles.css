@@ -15,12 +15,64 @@
   box-sizing: border-box;
 }
 
+* {
+  scrollbar-color: #64748b #e8eef7;
+  scrollbar-width: auto;
+}
+
+*::-webkit-scrollbar {
+  width: 14px;
+  height: 14px;
+}
+
+*::-webkit-scrollbar-track {
+  background: #e8eef7;
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb {
+  min-height: 44px;
+  border: 3px solid #e8eef7;
+  border-radius: 999px;
+  background: #64748b;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: #334155;
+}
+
+*::-webkit-scrollbar-corner {
+  background: #e8eef7;
+}
+
 body {
   margin: 0;
   min-width: 1180px;
   color: var(--text);
   background: var(--bg);
   font-size: 14px;
+}
+
+.table-wrap,
+.detail-table-wrap,
+.customer-order-table-wrap,
+.order-table-scroll,
+.finance-table-card,
+.finance-compact-table-wrap,
+.cost-center-table-wrap,
+.boss-vehicle-profit-table-wrap,
+.supplier-cost-rule-table-wrap,
+.supplier-cost-extra-table-wrap,
+.fee-item-table-wrap,
+.address-picker-table-wrap,
+.dispatch-copy-table-wrap,
+.template-page-table,
+.modal-card,
+.full-detail-body,
+.sidebar,
+.main-panel,
+.data-table-column-popover {
+  scrollbar-gutter: stable both-edges;
 }
 
 button,
@@ -969,7 +1021,7 @@ button:disabled {
 }
 
 .invoice-name-col {
-  width: 20%;
+  width: 18%;
 }
 
 .invoice-category-col {
@@ -977,23 +1029,27 @@ button:disabled {
 }
 
 .invoice-qty-col {
-  width: 60px;
+  width: 58px;
 }
 
 .invoice-price-col {
-  width: 96px;
+  width: 88px;
+}
+
+.invoice-cost-col {
+  width: 88px;
 }
 
 .invoice-amount-col {
-  width: 178px;
+  width: 168px;
 }
 
 .invoice-driver-col {
-  width: 110px;
+  width: 104px;
 }
 
 .invoice-remark-col {
-  width: 20%;
+  width: 16%;
 }
 
 .invoice-actions-col {
@@ -1078,6 +1134,7 @@ button:disabled {
 
 .invoice-fee-table .invoice-category-cell,
 .invoice-fee-table .invoice-price-cell,
+.invoice-fee-table .invoice-cost-cell,
 .invoice-fee-table .invoice-amount-cell,
 .invoice-fee-table .invoice-actions-cell {
   padding-right: 6px;
@@ -1085,8 +1142,13 @@ button:disabled {
 }
 
 .invoice-price-cell input,
+.invoice-cost-cell input,
 .invoice-amount-cell input {
   padding-right: 6px;
+}
+
+.invoice-cost-input {
+  color: #075985;
 }
 
 .invoice-remark-cell input {
@@ -1120,7 +1182,7 @@ button:disabled {
 }
 
 .address-picker-body.is-address-book {
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
 }
 
 .address-picker-toolbar {
@@ -1259,6 +1321,14 @@ button:disabled {
   min-width: 220px;
   color: #0f172a;
   font-weight: 800;
+}
+
+.address-picker-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid #dbe7f5;
 }
 
 .address-source-badge,
@@ -2038,6 +2108,101 @@ select {
 
 .vehicle-expense-form-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.vehicle-expense-receipt-panel {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.vehicle-expense-receipt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.vehicle-expense-receipt-head strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.vehicle-expense-receipt-upload {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+}
+
+.vehicle-expense-receipt-upload.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.vehicle-expense-upload-status {
+  flex: 0 1 auto;
+  width: 100%;
+  max-width: none;
+}
+
+.vehicle-expense-receipt-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.vehicle-expense-receipt-chip {
+  max-width: min(100%, 320px);
+  gap: 4px;
+}
+
+.vehicle-expense-receipt-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vehicle-expense-receipt-chip button {
+  flex: 0 0 auto;
+}
+
+.vehicle-expense-receipt-chip small {
+  min-width: 0;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.vehicle-expense-draft-chip.is-busy {
+  color: #075985;
+  border-color: #bae6fd;
+  background: #f0f9ff;
+}
+
+.vehicle-expense-draft-chip.is-success {
+  color: #047857;
+  border-color: #a7f3d0;
+  background: #ecfdf5;
+}
+
+.vehicle-expense-draft-chip.is-error {
+  color: #b42318;
+  border-color: #fecaca;
+  background: #fff1f2;
+}
+
+.vehicle-expense-receipt-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .home-page {
@@ -3250,37 +3415,142 @@ select {
   overflow: auto;
 }
 
-.statement-customer-card {
+.table-card.statement-customer-card,
+.table-card.statement-supplier-card {
   overflow: visible;
 }
 
 .statement-customer-table {
-  min-width: 1080px;
+  width: 100%;
+  min-width: 0;
+  table-layout: fixed;
+  font-size: 12px;
+}
+
+.statement-customer-table th,
+.statement-customer-table td {
+  padding: 7px 6px;
+  vertical-align: middle;
+}
+
+.finance-tool-card .data-table.compact.statement-customer-table th,
+.finance-tool-card .data-table.compact.statement-customer-table td {
+  padding: 7px 6px;
 }
 
 .statement-customer-table th:first-child,
 .statement-customer-table td:first-child {
-  width: 54px;
+  width: 4.5%;
+  text-align: center;
+}
+
+.statement-customer-table th:nth-child(2),
+.statement-customer-table td:nth-child(2) {
+  width: 20%;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .statement-customer-table th:nth-child(3),
 .statement-customer-table td:nth-child(3) {
-  width: 88px;
+  width: 7.5%;
 }
 
 .statement-customer-table th:nth-child(4),
 .statement-customer-table td:nth-child(4) {
-  width: 96px;
+  width: 7%;
+}
+
+.statement-customer-table th:nth-child(5),
+.statement-customer-table td:nth-child(5) {
+  width: 4.5%;
+  text-align: center;
+}
+
+.statement-customer-table th:nth-child(6),
+.statement-customer-table td:nth-child(6),
+.statement-customer-table th:nth-child(7),
+.statement-customer-table td:nth-child(7) {
+  width: 8.5%;
+  white-space: nowrap;
+}
+
+.statement-customer-table th:nth-child(8),
+.statement-customer-table td:nth-child(8),
+.statement-customer-table th:nth-child(9),
+.statement-customer-table td:nth-child(9) {
+  width: 8%;
+}
+
+.statement-customer-table th:nth-child(10),
+.statement-customer-table td:nth-child(10) {
+  width: 12%;
+}
+
+.statement-customer-table th:nth-child(11),
+.statement-customer-table td:nth-child(11) {
+  width: 7.5%;
 }
 
 .statement-customer-table th:nth-last-child(2),
 .statement-customer-table td:nth-last-child(2) {
-  width: 150px;
+  white-space: nowrap;
 }
 
 .statement-customer-table th:last-child,
 .statement-customer-table td:last-child {
-  width: 118px;
+  white-space: nowrap;
+}
+
+.statement-supplier-table {
+  width: 100%;
+  min-width: 0;
+  table-layout: fixed;
+  font-size: 12px;
+}
+
+.statement-supplier-table th,
+.statement-supplier-table td {
+  padding: 7px 6px;
+  vertical-align: middle;
+}
+
+.statement-supplier-table th:first-child,
+.statement-supplier-table td:first-child {
+  width: 4.5%;
+  text-align: center;
+}
+
+.statement-supplier-table th:nth-child(2),
+.statement-supplier-table td:nth-child(2) {
+  width: 31%;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.statement-supplier-table th:nth-child(3),
+.statement-supplier-table td:nth-child(3) {
+  width: 8.5%;
+  text-align: center;
+}
+
+.statement-supplier-table th:nth-child(4),
+.statement-supplier-table td:nth-child(4),
+.statement-supplier-table th:nth-child(5),
+.statement-supplier-table td:nth-child(5) {
+  width: 12%;
+  white-space: nowrap;
+}
+
+.statement-supplier-table th:nth-child(6),
+.statement-supplier-table td:nth-child(6) {
+  width: 16%;
+}
+
+.statement-supplier-table th:nth-child(7),
+.statement-supplier-table td:nth-child(7) {
+  width: 8.5%;
+  white-space: nowrap;
 }
 
 .statement-settlement-chip {
@@ -3303,7 +3573,7 @@ select {
 }
 
 .statement-exchange-rate-input {
-  width: 78px;
+  width: 100%;
   min-width: 0;
   height: 30px;
   padding: 0 8px;
@@ -3316,6 +3586,27 @@ select {
   font-weight: 800;
 }
 
+.statement-unreceived-input {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.statement-unreceived-input:focus,
+.statement-exchange-rate-input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px rgb(11 116 222 / 10%);
+  outline: none;
+}
+
 .statement-customer-actions {
   display: table-cell;
   vertical-align: middle;
@@ -3326,6 +3617,21 @@ select {
 
 .statement-customer-actions .statement-export-wrap {
   display: inline-flex;
+  max-width: 100%;
+}
+
+.statement-customer-actions .primary-btn {
+  width: 100%;
+  min-width: 0;
+  padding: 0 7px;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.statement-customer-table .statement-status-select {
+  width: 100%;
+  padding: 0 4px;
+  border-radius: 7px;
 }
 
 .statement-customer-actions .statement-export-menu {
@@ -8064,8 +8370,21 @@ tr.selected {
   grid-column: span 2;
 }
 
-.dispatch-location-row input {
+.dispatch-location-row {
+  align-items: stretch;
+}
+
+.dispatch-location-row input,
+.dispatch-location-row textarea {
   min-width: 0;
+}
+
+.dispatch-location-row textarea {
+  box-sizing: border-box;
+  min-height: 64px;
+  padding: 8px 10px;
+  line-height: 1.45;
+  resize: vertical;
 }
 
 .dispatch-date-picker-row {
