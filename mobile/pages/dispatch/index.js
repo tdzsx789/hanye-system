@@ -12,7 +12,6 @@ const {
   dispatchStatusValueForRow,
   dispatchSummaryCards,
   hasDispatchAccess,
-  normalizeTransportMode,
   presentDispatchRows,
   sanitizeDispatchRow,
   sortDispatchRows
@@ -22,10 +21,11 @@ const MAIN_STATUS_RANK = {
   预排: 0,
   已派车: 1,
   通关中: 2,
-  异常滞留: 3
+  已签收: 3,
+  异常滞留: 4
 };
 
-function orderMainDispatchRows(rows) {
+function orderDisplayDispatchRows(rows) {
   return rows.slice()
     .sort((left, right) => {
       const leftRank = MAIN_STATUS_RANK[dispatchStatusValueForRow(left)] ?? 9;
@@ -36,21 +36,27 @@ function orderMainDispatchRows(rows) {
     .map((row, index) => Object.assign({}, row, { displayIndex: index + 1 }));
 }
 
+function emptyTextForStatus(status) {
+  if (status === "all") return "当前条件下暂无排车单";
+  if (status === "已签收") return "当前条件下暂无已签收订单";
+  return `当前条件下暂无${status}排车单`;
+}
+
 Page({
   data: {
     accountLabel: "",
     activeStatus: "all",
-    activeTab: "dispatch",
     dateLabel: "",
     dispatchDate: todayInputValue(),
     displayRows: [],
+    emptyText: "当前条件下暂无排车单",
     expandedIds: [],
     loading: false,
     orders: [],
     rawRows: [],
     saving: false,
     searchKeyword: "",
-    signedRows: [],
+    showWarningsPanel: false,
     summaryCards: [],
     vehicles: [],
     drivers: [],
@@ -122,23 +128,19 @@ Page({
     const summaryCards = dispatchSummaryCards(rawRows).map((card) => Object.assign({}, card, {
       active: this.data.activeStatus === card.key
     }));
-    const mainRows = rawRows.filter((row) => dispatchStatusValueForRow(row) !== "已签收");
-    const mainStatus = this.data.activeStatus === "已签收" ? "all" : this.data.activeStatus;
-    const displayRows = orderMainDispatchRows(presentDispatchRows(mainRows, this.data.orders, date, {
+    const activeStatus = this.data.activeStatus || "all";
+    const displayRows = orderDisplayDispatchRows(presentDispatchRows(rawRows, this.data.orders, date, {
       expandedIds: this.data.expandedIds,
       keyword: this.data.searchKeyword,
-      status: mainStatus
+      status: activeStatus
     }));
-    const signedRows = presentDispatchRows(rawRows, this.data.orders, date, {
-      expandedIds: this.data.expandedIds,
-      keyword: this.data.searchKeyword,
-      status: "已签收"
-    });
     const warnings = buildDispatchWarnings(rawRows, this.data.orders, this.data.vehicles, this.data.drivers, date);
+    const emptyText = emptyTextForStatus(activeStatus);
     this.setData({
       dateLabel: formatDateLabel(date),
       displayRows,
-      signedRows,
+      emptyText,
+      showWarningsPanel: warnings.length ? this.data.showWarningsPanel : false,
       summaryCards,
       warnings
     });
@@ -163,7 +165,8 @@ Page({
     this.setData({
       activeStatus: "all",
       dispatchDate: date,
-      expandedIds: []
+      expandedIds: [],
+      showWarningsPanel: false
     });
     await this.loadBoard();
   },
@@ -180,19 +183,7 @@ Page({
 
   setStatusFilter(event) {
     const activeStatus = event.currentTarget.dataset.status || "all";
-    this.setData({
-      activeStatus,
-      activeTab: activeStatus === "已签收" ? "signed" : "dispatch"
-    });
-    this.refreshDerivedData();
-  },
-
-  switchTab(event) {
-    const activeTab = event.currentTarget.dataset.tab || "dispatch";
-    const patch = { activeTab };
-    if (activeTab === "signed") patch.activeStatus = "已签收";
-    if (activeTab === "dispatch" && this.data.activeStatus === "已签收") patch.activeStatus = "all";
-    this.setData(patch);
+    this.setData({ activeStatus });
     this.refreshDerivedData();
   },
 
@@ -212,8 +203,6 @@ Page({
   rowById(id) {
     const displayRow = (this.data.displayRows || []).find((row) => row.id === id);
     if (displayRow) return displayRow;
-    const signedRow = (this.data.signedRows || []).find((row) => row.id === id);
-    if (signedRow) return signedRow;
     const rawRow = (this.data.rawRows || []).find((row) => row.id === id);
     return rawRow || null;
   },
@@ -227,6 +216,7 @@ Page({
   },
 
   openEditDispatch(event) {
+    if (this.data.saving) return;
     const row = this.rowById(event.currentTarget.dataset.id);
     if (!row) return;
     setDispatchFormContext({
@@ -283,6 +273,7 @@ Page({
   },
 
   async openStatusActions(event) {
+    if (this.data.saving) return;
     const row = this.rowById(event.currentTarget.dataset.id);
     if (!row) return;
     const actions = dispatchStatusActionItems(row);
@@ -370,6 +361,7 @@ Page({
   },
 
   openMoreActions(event) {
+    if (this.data.saving) return;
     const id = event.currentTarget.dataset.id;
     const rows = this.data.rawRows || [];
     const index = rows.findIndex((row) => row.id === id);
@@ -402,7 +394,7 @@ Page({
   },
 
   copyVisibleDispatchText() {
-    const rows = this.data.activeTab === "signed" ? this.data.signedRows : this.data.displayRows;
+    const rows = this.data.displayRows || [];
     if (!rows.length) {
       wx.showToast({ title: "当前列表暂无排车内容", icon: "none" });
       return;
@@ -411,50 +403,15 @@ Page({
     wx.setClipboardData({ data: text });
   },
 
-  async syncRowsToOrders() {
-    const rows = this.data.rawRows || [];
-    if (!rows.length) {
-      wx.showToast({ title: "暂无可同步排车单", icon: "none" });
-      return;
-    }
-    this.setData({ saving: true });
-    try {
-      const updatedOrders = [];
-      for (let index = 0; index < rows.length; index += 1) {
-        const row = rows[index];
-        if (!row.orderNo) continue;
-        const order = (this.data.orders || []).find((item) => item.no === row.orderNo);
-        if (!order) continue;
-        const mode = normalizeTransportMode(row.transportMode || order.transportMode || "单司机") || "单司机";
-        const payload = {
-          dispatchNo: row.dispatchNo || order.dispatchNo || "",
-          vehicleSource: order.vehicleSource || (row.plate ? "本公司车辆" : ""),
-          plate: row.plate || order.plate || "",
-          transportMode: mode,
-          driver: mode === "单司机"
-            ? (row.driver || row.hkDriver || order.driver || "")
-            : [row.hkDriver || row.driver || "", row.mainlandDriver || ""].filter(Boolean).join(" / "),
-          hkDriver: mode === "单司机" ? "" : (row.hkDriver || row.driver || ""),
-          mainlandDriver: mode === "单司机" ? "" : (row.mainlandDriver || "")
-        };
-        updatedOrders.push(await api.updateOrder(order.no, payload));
-      }
-      const orders = this.data.orders.map((order) => {
-        const updated = updatedOrders.find((item) => item.no === order.no);
-        return updated || order;
-      });
-      this.setData({ orders });
-      this.refreshDerivedData();
-      wx.showToast({ title: "排车信息已同步订单", icon: "none" });
-    } catch (error) {
-      wx.showToast({ title: error.message || "同步订单失败", icon: "none" });
-    } finally {
-      this.setData({ saving: false });
-    }
+  openWarningsPanel() {
+    this.setData({ showWarningsPanel: true });
   },
 
-  refreshTap() {
-    this.loadBoard();
+  closeWarningsPanel() {
+    this.setData({ showWarningsPanel: false });
+  },
+
+  noop() {
   },
 
   logout() {

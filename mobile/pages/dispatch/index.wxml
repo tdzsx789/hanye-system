@@ -1,6 +1,6 @@
 <view class="page-shell dispatch-page">
   <view class="page-head">
-    <view>
+    <view class="page-head-main">
       <text class="page-title">排车表</text>
       <text class="page-subtitle">{{dateLabel}} · {{accountLabel}}</text>
     </view>
@@ -15,17 +15,23 @@
       </view>
     </picker>
     <view class="date-actions">
-      <button class="ghost-btn date-nav" data-offset="-1" bindtap="changeDateByOffset">前一天</button>
-      <button class="quiet-btn today-btn" bindtap="goToday">今天</button>
-      <button class="ghost-btn date-nav" data-offset="1" bindtap="changeDateByOffset">后一天</button>
+      <view class="date-action-btn" hover-class="tap-muted" data-offset="-1" bindtap="changeDateByOffset">前一天</view>
+      <view class="date-action-btn today" hover-class="tap-muted" bindtap="goToday">今天</view>
+      <view class="date-action-btn" hover-class="tap-muted" data-offset="1" bindtap="changeDateByOffset">后一天</view>
     </view>
   </view>
 
   <view class="toolbar">
     <button class="primary-btn toolbar-btn" bindtap="openNewDispatch" disabled="{{loading || saving}}">新建排车</button>
     <button class="ghost-btn toolbar-btn" bindtap="copyVisibleDispatchText" disabled="{{loading || saving}}">复制文本</button>
-    <button class="ghost-btn toolbar-btn" bindtap="syncRowsToOrders" disabled="{{loading || saving}}">同步订单</button>
-    <button class="quiet-btn toolbar-btn small" bindtap="refreshTap" loading="{{loading}}" disabled="{{saving}}">刷新</button>
+  </view>
+
+  <view wx:if="{{warnings.length}}" class="warning-entry" bindtap="openWarningsPanel">
+    <view class="warning-entry-copy">
+      <text class="warning-entry-title">证件提醒</text>
+      <text class="warning-entry-sub">30天内到期 / 已过期</text>
+    </view>
+    <text class="warning-entry-count">{{warnings.length}}条</text>
   </view>
 
   <view class="summary-grid">
@@ -35,26 +41,16 @@
     </view>
   </view>
 
-  <view wx:if="{{warnings.length}}" class="panel warning-panel">
-    <view class="warning-title">证件到期提醒 · {{warnings.length}} 条</view>
-    <view wx:for="{{warnings}}" wx:key="*this" class="warning-line">{{item}}</view>
-  </view>
-
   <view class="search-row">
     <input placeholder="搜索客户、车牌、订单号、口岸、地址" placeholder-class="placeholder" value="{{searchKeyword}}" bindinput="onSearchInput" />
     <button wx:if="{{searchKeyword}}" class="quiet-btn clear-btn" bindtap="clearSearch">清空</button>
   </view>
 
-  <view class="tab-row">
-    <button class="tab-btn {{activeTab === 'dispatch' ? 'active' : ''}}" data-tab="dispatch" bindtap="switchTab">排车表 {{displayRows.length}}</button>
-    <button class="tab-btn {{activeTab === 'signed' ? 'active' : ''}}" data-tab="signed" bindtap="switchTab">已签收订单 {{signedRows.length}}</button>
-  </view>
-
   <view wx:if="{{loading}}" class="loading-box">正在读取排车数据...</view>
 
   <block wx:else>
-    <view wx:if="{{activeTab === 'dispatch'}}" class="list-area">
-      <view wx:if="{{!displayRows.length}}" class="empty-box">当前条件下暂无排车单</view>
+    <view class="list-area">
+      <view wx:if="{{!displayRows.length}}" class="empty-box">{{emptyText}}</view>
       <view wx:for="{{displayRows}}" wx:key="id" class="dispatch-card">
         <view class="card-head" data-id="{{item.id}}" bindtap="toggleExpand">
           <view class="card-title-wrap">
@@ -84,49 +80,26 @@
           <view class="detail-line"><text>备注</text><text>{{item.noteText || '-'}}</text></view>
         </view>
         <view class="card-actions">
-          <button class="ghost-btn card-btn" data-id="{{item.id}}" bindtap="openStatusActions" loading="{{saving}}">状态</button>
-          <button class="ghost-btn card-btn" data-id="{{item.id}}" bindtap="openEditDispatch">编辑</button>
-          <button class="quiet-btn card-btn" data-id="{{item.id}}" bindtap="openMoreActions">更多</button>
-        </view>
-      </view>
-    </view>
-
-    <view wx:if="{{activeTab === 'signed'}}" class="list-area">
-      <view wx:if="{{!signedRows.length}}" class="empty-box">当前条件下暂无已签收排车单</view>
-      <view wx:for="{{signedRows}}" wx:key="id" class="dispatch-card">
-        <view class="card-head" data-id="{{item.id}}" bindtap="toggleExpand">
-          <view class="card-title-wrap">
-            <text class="dispatch-no">{{item.dispatchNo || '未编号'}}</text>
-            <text class="order-no">订单 {{item.orderNoText}}</text>
-          </view>
-          <text class="status-chip {{item.statusClass}}">{{item.status}}</text>
-        </view>
-        <view class="customer-line">{{item.customerText}}</view>
-        <view class="meta-line">
-          <text>{{item.timeText}}</text>
-          <text>{{item.plate || '-'}}</text>
-          <text>{{item.port || '-'}}</text>
-          <text>{{item.direction || '-'}}</text>
-          <text>{{item.tonnage || '-'}}</text>
-        </view>
-        <view class="route-line">{{item.routeText}}</view>
-        <view class="tag-row">
-          <text class="source-tag {{item.sourceClass}}">{{item.sourceText}}</text>
-          <text class="driver-tag">司机 {{item.driverText}}</text>
-          <text wx:if="{{item.orderStatusText}}" class="order-status-tag">订单 {{item.orderStatusText}}</text>
-        </view>
-        <view wx:if="{{item.expanded}}" class="expanded-area">
-          <view class="detail-line"><text>装货地</text><text>{{item.loading || '-'}}</text></view>
-          <view class="detail-line"><text>卸货地</text><text>{{item.unloading || '-'}}</text></view>
-          <view class="detail-line"><text>外派供应商</text><text>{{item.supplier || '-'}}</text></view>
-          <view class="detail-line"><text>备注</text><text>{{item.noteText || '-'}}</text></view>
-        </view>
-        <view class="card-actions">
-          <button class="ghost-btn card-btn" data-id="{{item.id}}" bindtap="openStatusActions" loading="{{saving}}">状态</button>
-          <button class="ghost-btn card-btn" data-id="{{item.id}}" bindtap="openEditDispatch">编辑</button>
-          <button class="quiet-btn card-btn" data-id="{{item.id}}" bindtap="openMoreActions">更多</button>
+          <view class="card-action-btn secondary {{saving ? 'disabled' : ''}}" data-id="{{item.id}}" bindtap="openStatusActions">状态</view>
+          <view class="card-action-btn secondary {{saving ? 'disabled' : ''}}" data-id="{{item.id}}" bindtap="openEditDispatch">编辑</view>
+          <view class="card-action-btn quiet {{saving ? 'disabled' : ''}}" data-id="{{item.id}}" bindtap="openMoreActions">更多</view>
         </view>
       </view>
     </view>
   </block>
+
+  <view wx:if="{{showWarningsPanel}}" class="sheet-mask" bindtap="closeWarningsPanel">
+    <view class="warning-sheet" catchtap="noop">
+      <view class="sheet-head">
+        <view>
+          <text class="sheet-title">证件到期提醒</text>
+          <text class="sheet-subtitle">30天内到期 / 已过期</text>
+        </view>
+        <button class="quiet-btn sheet-close" bindtap="closeWarningsPanel">关闭</button>
+      </view>
+      <scroll-view scroll-y class="warning-sheet-list">
+        <view wx:for="{{warnings}}" wx:key="*this" class="warning-sheet-line">{{item}}</view>
+      </scroll-view>
+    </view>
+  </view>
 </view>
