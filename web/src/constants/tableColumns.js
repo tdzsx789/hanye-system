@@ -125,7 +125,7 @@ export function createDispatchTableColumns() {
     { key: "route", label: "装卸", width: 250, min: 140 },
     { key: "vehicleSource", label: "车辆来源", width: 116, min: 86 },
     { key: "note", label: "备注", width: 120, min: 86 },
-    { key: "actions", label: "操作", width: 148, min: 106, locked: true }
+    { key: "actions", label: "操作", width: 184, min: 144, locked: true }
   ]);
 }
 

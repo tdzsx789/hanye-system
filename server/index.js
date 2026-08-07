@@ -43,6 +43,8 @@ const SAFE_FILE_TYPES = [
 ];
 const PREVIEW_MIMES = new Set(SAFE_FILE_TYPES.flatMap((item) => item.mimes));
 const AUTH_TOKEN_TTL_SECONDS = Number(process.env.AUTH_TOKEN_TTL_SECONDS || 7 * 24 * 60 * 60);
+const VEHICLE_PROFIT_EXCHANGE_RATE_MODULES = ["bossVehicleProfit", "bossDashboard", "bossCompanyProfit", "financeWages", "financeSupplierStatements", "financeCustomsStatements"];
+const COMPANY_EXPENSE_MODULES = ["bossCompanyExpenses", "bossDashboard", "bossCompanyProfit"];
 const AUTH_SECRET = process.env.HANYE_AUTH_SECRET || process.env.AUTH_SECRET || "hanye-system-local-dev-secret";
 const VEHICLE_EXPENSE_TYPES = new Set(["fuel", "repair", "annual", "other"]);
 const VEHICLE_ANNUAL_EXPENSE_NAMES = new Set(["保险费", "年审费", "牌头费"]);
@@ -346,9 +348,10 @@ const ORDER_EXPORT_COLUMNS = [
   ["状态", "status", 50]
 ];
 const ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS = [
-  { key: "__hkdTotal", label: "HKD合计", width: 64, fontSize: 8, system: true },
-  { key: "__rmbTotal", label: "RMB合计", width: 64, fontSize: 8, system: true }
+  { key: "__rmbTotal", label: "RMB合计", width: 64, fontSize: 8, system: true },
+  { key: "__hkdTotal", label: "HKD合计", width: 64, fontSize: 8, system: true }
 ];
+const ORDER_EXPORT_SYSTEM_TOTAL_COLUMN_KEYS = new Set(ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS.map((column) => column.key));
 const ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN = { key: "__sequence", label: "序号", width: 42, fontSize: 8, system: true };
 
 function normalizeExportTemplate(template = null) {
@@ -654,6 +657,9 @@ function resolvePdfFontConfig() {
   const envFamily = String(process.env.PDF_FONT_FAMILY || "").trim();
   return [
     envPath ? { path: envPath, family: envFamily || undefined } : null,
+    { path: "/usr/share/fonts/wenquanyi/wqy-zenhei.ttc" },
+    { path: "/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttc" },
+    { path: "/usr/share/fonts/TTF/wqy-zenhei.ttc" },
     { path: "/usr/share/fonts/noto/NotoSansCJK-Regular.ttc", family: "NotoSansCJKsc-Regular" },
     { path: "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", family: "NotoSansCJKsc-Regular" },
     { path: "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc", family: "NotoSerifCJKsc-Regular" },
@@ -893,14 +899,13 @@ function exportColumnsFromTemplate(template = null) {
     ? normalized.columns
     : ORDER_EXPORT_COLUMNS.map(([label, key, width]) => ({ label, key, width }));
   const withoutSequenceColumn = columns.filter((column) => column.key !== ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key);
-  const hasConfigurableTotalColumns = ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS.some((systemColumn) =>
-    withoutSequenceColumn.some((column) => column.key === systemColumn.key)
-  );
   const visibleColumns = withoutSequenceColumn.filter((column) => column.visible !== false);
-  const totalColumns = hasConfigurableTotalColumns
-    ? []
-    : ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS.map((column) => ({ ...column }));
-  return [{ ...ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN }, ...visibleColumns, ...totalColumns];
+  const bodyColumns = visibleColumns.filter((column) => !ORDER_EXPORT_SYSTEM_TOTAL_COLUMN_KEYS.has(column.key));
+  const totalColumns = ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS.map((systemColumn) => ({
+    ...systemColumn,
+    ...(visibleColumns.find((column) => column.key === systemColumn.key) || {})
+  }));
+  return [{ ...ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN }, ...bodyColumns, ...totalColumns];
 }
 
 function normalizeFeeCurrency(value = "") {
@@ -1023,18 +1028,27 @@ function exportColumnsForOrders(templatePayload = null, orders = []) {
   const template = normalizeExportTemplate(templatePayload);
   const columns = exportColumnsFromTemplate(templatePayload);
   const sequenceColumn = columns.find((column) => column.key === ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key);
-  const bodyColumns = columns.filter((column) =>
+  const templateBodyColumns = columns.filter((column) =>
+    column.key !== ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key
+    && !ORDER_EXPORT_SYSTEM_TOTAL_COLUMN_KEYS.has(column.key)
+  );
+  const bodyColumns = templateBodyColumns.filter((column) =>
     column.key !== ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key
     && (!isExportFeeItemColumn(column) || feeColumnHasRecordedValue(column, orders))
   );
+  const totalColumns = ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS.map((systemColumn) => ({
+    ...systemColumn,
+    ...(columns.find((column) => column.key === systemColumn.key) || {})
+  }));
   const dynamicColumns = dynamicExportFeeColumns(orders, bodyColumns);
   return [
     sequenceColumn || { ...ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN },
     ...mergeExportColumnsByTemplateOrder(
-      columns.filter((column) => column.key !== ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key),
+      templateBodyColumns,
       bodyColumns,
       dynamicColumns
-    )
+    ),
+    ...totalColumns
   ].map((column) => ({
     ...column,
     width: exportColumnAutoWidth(column, orders, { fluid: template?.orientation === "fluid" })
@@ -1197,6 +1211,11 @@ function excelRowHeightForText(value, fontSize = 10, excelColumnWidth = 12, minH
   return Math.min(260, Math.max(minHeight, Math.ceil(lines * Number(fontSize || 10) * 1.35 + 8)));
 }
 
+function excelSingleLineValue(value) {
+  if (typeof value !== "string") return value;
+  return value.replace(/\s*[\r\n]+\s*/g, " ").replace(/[ \t]{2,}/g, " ").trim();
+}
+
 function applyExcelTemplateLogo(workbook, worksheet, template, headerBlockRows, columnWidths = []) {
   const image = template?.logo ? dataUrlImage(template.logo) : null;
   if (!image) return;
@@ -1356,12 +1375,18 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
     : {};
   const headerRow = worksheet.getRow(tableStartRow);
   headerRow.values = headers;
-  headerRow.height = Math.max(30, Number(template?.tableFontSize || 8) * 2.8 + 12);
+  const tableFontSize = Number(template?.tableFontSize || 8);
+  const headerRowMinHeight = Math.max(44, tableFontSize * 3.2 + 16);
+  headerRow.height = headers.reduce((height, header, index) =>
+    Math.max(
+      height,
+      excelRowHeightForText(header, tableFontSize, excelColumnWidths[index] || 12, headerRowMinHeight)
+    ), headerRowMinHeight);
   headerRow.eachCell((cell, columnNumber) => {
     const column = columns[columnNumber - 1] || {};
     cell.font = {
       name: "Microsoft YaHei",
-      size: Number(template?.tableFontSize || 8),
+      size: tableFontSize,
       bold: exportColumnHeaderBold(column, template),
       color: { argb: excelArgb(template?.tableHeaderTextColor || "#1f2a44") }
     };
@@ -1379,19 +1404,9 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
     const isTotalRow = rowIndex === rows.length - 1;
     const sourceOrder = sortedOrders[rowIndex] || null;
     const row = worksheet.getRow(tableStartRow + 1 + rowIndex);
-    row.values = rowValues;
-    row.height = rowValues.reduce((height, value, columnIndex) => {
-      const column = columns[columnIndex] || {};
-      return Math.max(
-        height,
-        excelRowHeightForText(
-          value,
-          Number(column.fontSize || template?.tableFontSize || 8),
-          excelColumnWidths[columnIndex] || 12,
-          Math.max(22, Number(template?.tableFontSize || 8) * 1.9 + 12)
-        )
-      );
-    }, Math.max(22, Number(template?.tableFontSize || 8) * 1.9 + 12));
+    const excelRowValues = rowValues.map(excelSingleLineValue);
+    row.values = excelRowValues;
+    row.height = Math.max(22, tableFontSize * 1.9 + 12);
     row.eachCell((cell, columnNumber) => {
       const column = columns[columnNumber - 1] || {};
       if (isExportAmountColumn(column)) {
@@ -1407,7 +1422,7 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
       }
       cell.font = {
         name: "Microsoft YaHei",
-        size: Number(column.fontSize || template?.tableFontSize || 8),
+        size: Number(column.fontSize || tableFontSize),
         bold: isTotalRow || Boolean(template?.tableBold),
         color: { argb: excelArgb(template?.tableTextColor || "#17233c") }
       };
@@ -1418,7 +1433,7 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
           fgColor: { argb: excelArgb(template?.tableHeaderBgColor || "#f1f5f9") }
         };
       }
-      cell.alignment = { vertical: "middle", horizontal: excelAlignment(template?.tableAlign), wrapText: true };
+      cell.alignment = { vertical: "middle", horizontal: excelAlignment(template?.tableAlign), wrapText: false };
       if (!isTotalRow && sourceOrder) {
         const comment = exportOrderColumnComment(sourceOrder, column);
         if (comment) {
@@ -2226,6 +2241,30 @@ function mapVehicleProfitExchangeRate(row) {
   };
 }
 
+function mapCompanyExpense(row) {
+  return {
+    id: row.id,
+    entryType: row.entry_type || "expense",
+    periodMonth: row.period_month || "",
+    category: row.category || "",
+    amount: Number(row.amount || 0),
+    note: row.note || "",
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || row.created_at || ""
+  };
+}
+
+function readCompanyExpensePayload(body = {}, current = null) {
+  const entryType = String(body.entryType ?? body.entry_type ?? current?.entry_type ?? "expense").trim();
+  return {
+    entryType: entryType === "income" ? "income" : "expense",
+    periodMonth: normalizePeriodMonthKey(body.periodMonth ?? body.period_month ?? body.month ?? current?.period_month ?? ""),
+    category: String(body.category ?? current?.category ?? "").trim(),
+    amount: Number(body.amount ?? current?.amount ?? 0),
+    note: String(body.note ?? current?.note ?? "").trim()
+  };
+}
+
 function readCostCenterRatePayload(body = {}, current = null) {
   const origin = String(body.origin ?? current?.origin ?? "").trim();
   const destination = String(body.destination ?? current?.destination ?? "").trim();
@@ -2442,6 +2481,291 @@ function customsBusinessPeriodBounds(query = {}) {
 
   const month = normalizeCustomsMonth(period || query.month);
   return { start: `${month}-01`, end: `${nextMonthValue(month)}-01` };
+}
+
+const CUSTOMS_STATEMENT_EXPORT_COLUMNS = [
+  { key: "__sequence", label: "序号", width: 8, pdfWidth: 26, align: "center" },
+  { key: "date", label: "日期", width: 12, pdfWidth: 52 },
+  { key: "declarationNo", label: "报关单号", width: 18, pdfWidth: 70 },
+  { key: "sixSheetNo", label: "六联单号", width: 16, pdfWidth: 60 },
+  { key: "company", label: "公司", width: 28, pdfWidth: 110 },
+  { key: "direction", label: "进出口", width: 10, pdfWidth: 42 },
+  { key: "itemCount", label: "品名项数", width: 10, pdfWidth: 34, amount: true },
+  { key: "pageCount", label: "续页", width: 8, pdfWidth: 30, amount: true },
+  { key: "customsFee", label: "报关费", width: 11, pdfWidth: 44, amount: true },
+  { key: "pageFee", label: "续页费", width: 11, pdfWidth: 44, amount: true },
+  { key: "manifestFee", label: "舱单费", width: 11, pdfWidth: 44, amount: true },
+  { key: "inspectionFee", label: "报检费", width: 11, pdfWidth: 44, amount: true },
+  { key: "checkFee", label: "查验费", width: 11, pdfWidth: 44, amount: true },
+  { key: "otherFee", label: "其他费用", width: 12, pdfWidth: 44, amount: true },
+  { key: "total", label: "合计", width: 12, pdfWidth: 48, amount: true },
+  { key: "remark", label: "备注", width: 20, pdfWidth: 66 }
+];
+
+function customsStatementSafeCompany(value = "") {
+  return String(value || "").trim() || "未填写公司";
+}
+
+function customsStatementFilename(company = "公司", start = "", end = "", extension = "xlsx") {
+  return `${exportFilenamePart(company)}_报关对账_${start || "全部"}_${end || "全部"}.${extension}`;
+}
+
+function customsStatementExportValue(row = {}, column = {}, index = 0) {
+  if (column.key === "__sequence") return index + 1;
+  const value = row[column.key];
+  if (column.amount) return Number(value || 0) || "";
+  return value ?? "";
+}
+
+function customsStatementExportRows(rows = []) {
+  return rows.map((row, index) =>
+    CUSTOMS_STATEMENT_EXPORT_COLUMNS.map((column) => customsStatementExportValue(row, column, index))
+  );
+}
+
+function customsStatementTotalRow(rows = []) {
+  const total = rows.reduce((sum, row) => sum + Number(row.total || 0), 0);
+  return CUSTOMS_STATEMENT_EXPORT_COLUMNS.map((column, index) => {
+    if (index === 0) return "合计";
+    if (column.key === "total") return total || "";
+    return "";
+  });
+}
+
+async function loadCustomsStatementExportRows(company = "", period = "") {
+  const targetCompany = customsStatementSafeCompany(company);
+  const { start, end } = customsBusinessPeriodBounds({ period });
+  const dateWhere = start && end ? "AND business_date >= ? AND business_date < ?" : "";
+  const params = start && end ? [start, end] : [];
+  const rows = await db.prepare(`
+    SELECT * FROM customs_businesses
+    WHERE deleted_at IS NULL
+      ${dateWhere}
+    ORDER BY business_date ASC, declaration_no ASC, six_sheet_no ASC, id ASC
+  `).all(...params);
+  return rows
+    .map(mapCustomsBusiness)
+    .filter((row) => customsStatementSafeCompany(row.company) === targetCompany);
+}
+
+function customsStatementExportContext(body = {}) {
+  const company = customsStatementSafeCompany(body.company);
+  const period = String(body.period || "").trim() || "all";
+  const start = String(body.start || "").trim();
+  const end = String(body.end || "").trim();
+  const rangeLabel = start || end ? `${start || "全部"} 至 ${end || "全部"}` : "全部";
+  const title = String(body.title || `${company}报关对账单`).trim() || `${company}报关对账单`;
+  return { company, period, start, end, rangeLabel, title };
+}
+
+async function renderCustomsStatementXlsxBuffer(rows = [], context = {}) {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = "汉业管理系统";
+  workbook.created = new Date();
+  const worksheet = workbook.addWorksheet("报关对账");
+  worksheet.pageSetup = {
+    paperSize: 9,
+    orientation: "landscape",
+    fitToPage: true,
+    fitToWidth: 1,
+    fitToHeight: 0,
+    horizontalCentered: true,
+    margins: {
+      left: 0.25,
+      right: 0.25,
+      top: 0.35,
+      bottom: 0.35,
+      header: 0.1,
+      footer: 0.1
+    }
+  };
+  CUSTOMS_STATEMENT_EXPORT_COLUMNS.forEach((column, index) => {
+    worksheet.getColumn(index + 1).width = column.width;
+  });
+  const mergeEndColumn = CUSTOMS_STATEMENT_EXPORT_COLUMNS.length;
+  worksheet.mergeCells(1, 1, 1, mergeEndColumn);
+  const titleCell = worksheet.getCell(1, 1);
+  titleCell.value = context.title || "报关对账单";
+  titleCell.font = { name: "Microsoft YaHei", size: 15, bold: true, color: { argb: "FF17233C" } };
+  titleCell.alignment = { vertical: "middle", horizontal: "center", wrapText: false };
+  worksheet.getRow(1).height = 28;
+
+  worksheet.mergeCells(2, 1, 2, mergeEndColumn);
+  const metaCell = worksheet.getCell(2, 1);
+  metaCell.value = `公司：${context.company || ""}    范围：${context.rangeLabel || "全部"}    记录：${rows.length} 条`;
+  metaCell.font = { name: "Microsoft YaHei", size: 9, color: { argb: "FF64748B" } };
+  metaCell.alignment = { vertical: "middle", horizontal: "center", wrapText: false };
+  worksheet.getRow(2).height = 22;
+
+  const tableStartRow = 4;
+  const headerRow = worksheet.getRow(tableStartRow);
+  headerRow.values = CUSTOMS_STATEMENT_EXPORT_COLUMNS.map((column) => column.label);
+  headerRow.height = 34;
+  headerRow.eachCell((cell) => {
+    cell.font = { name: "Microsoft YaHei", size: 8, bold: true, color: { argb: "FF1F2A44" } };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF1F5F9" } };
+    cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+    cell.border = {
+      top: { style: "thin", color: { argb: "FFD9E3F2" } },
+      left: { style: "thin", color: { argb: "FFD9E3F2" } },
+      bottom: { style: "thin", color: { argb: "FFD9E3F2" } },
+      right: { style: "thin", color: { argb: "FFD9E3F2" } }
+    };
+  });
+
+  const bodyRows = [...customsStatementExportRows(rows), customsStatementTotalRow(rows)];
+  bodyRows.forEach((values, rowIndex) => {
+    const isTotalRow = rowIndex === bodyRows.length - 1;
+    const row = worksheet.getRow(tableStartRow + 1 + rowIndex);
+    row.values = values.map(excelSingleLineValue);
+    row.height = 22;
+    row.eachCell((cell, columnNumber) => {
+      const column = CUSTOMS_STATEMENT_EXPORT_COLUMNS[columnNumber - 1] || {};
+      if (column.amount && cell.value !== "") cell.numFmt = "#,##0.##";
+      cell.font = { name: "Microsoft YaHei", size: 8, bold: isTotalRow, color: { argb: "FF17233C" } };
+      cell.alignment = {
+        vertical: "middle",
+        horizontal: column.amount ? "right" : (column.align || "left"),
+        wrapText: false
+      };
+      if (isTotalRow) {
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF1F5F9" } };
+      }
+      cell.border = {
+        top: { style: "thin", color: { argb: "FFD9E3F2" } },
+        left: { style: "thin", color: { argb: "FFD9E3F2" } },
+        bottom: { style: "thin", color: { argb: "FFD9E3F2" } },
+        right: { style: "thin", color: { argb: "FFD9E3F2" } }
+      };
+    });
+  });
+  worksheet.views = [{ state: "frozen", ySplit: tableStartRow }];
+  return workbook.xlsx.writeBuffer();
+}
+
+function customsPdfText(doc, text, x, y, options = {}, bold = false) {
+  doc.text(textValue(text), x, y, options);
+  if (bold) doc.text(textValue(text), x + 0.15, y, options);
+}
+
+function drawCustomsPdfCell(doc, text, x, y, width, height, options = {}) {
+  const fill = options.fill || "#ffffff";
+  const stroke = options.stroke || "#d9e3f2";
+  doc.save();
+  doc.rect(x, y, width, height).fillAndStroke(fill, stroke);
+  doc.restore();
+  doc.fillColor(options.color || "#17233c").fontSize(options.fontSize || 6.2);
+  customsPdfText(
+    doc,
+    text,
+    x + 2,
+    y + 4,
+    {
+      width: Math.max(4, width - 4),
+      height: Math.max(4, height - 6),
+      align: options.align || "left",
+      ellipsis: true,
+      lineGap: 0.5
+    },
+    Boolean(options.bold)
+  );
+}
+
+function customsPdfRowHeight(doc, values = [], columns = CUSTOMS_STATEMENT_EXPORT_COLUMNS, fontSize = 6.2) {
+  doc.fontSize(fontSize);
+  return Math.min(54, Math.max(18, Math.ceil(values.reduce((height, value, index) => {
+    const width = Number(columns[index]?.pdfWidth || 40) - 4;
+    return Math.max(height, doc.heightOfString(textValue(value), { width, lineGap: 0.5 }) + 8);
+  }, 0))));
+}
+
+function renderCustomsStatementPdf(res, rows = [], context = {}, filename = "") {
+  const doc = new PDFDocument({ size: "A4", layout: "landscape", margin: 18, bufferPages: true });
+  const fontConfig = resolvePdfFontConfig();
+  let fontUnavailable = false;
+  function usePdfFont() {
+    if (!fontConfig || fontUnavailable) return;
+    try {
+      if (fontConfig.family) doc.font(fontConfig.path, fontConfig.family);
+      else doc.font(fontConfig.path);
+    } catch (error) {
+      fontUnavailable = true;
+      console.warn(`PDF font unavailable: ${fontConfig.path}`, error.message);
+    }
+  }
+
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", contentDispositionHeader("attachment", filename || "报关对账单.pdf"));
+  doc.pipe(res);
+  usePdfFont();
+
+  const pageLeft = doc.page.margins.left;
+  const pageTop = doc.page.margins.top;
+  const pageBottom = doc.page.height - doc.page.margins.bottom;
+  const tableWidth = CUSTOMS_STATEMENT_EXPORT_COLUMNS.reduce((sum, column) => sum + Number(column.pdfWidth || 0), 0);
+  const tableLeft = pageLeft + Math.max(0, (doc.page.width - pageLeft - doc.page.margins.right - tableWidth) / 2);
+  let y = pageTop;
+
+  function drawTitle() {
+    usePdfFont();
+    doc.fillColor("#17233c").fontSize(15);
+    customsPdfText(doc, context.title || "报关对账单", tableLeft, y, { width: tableWidth, align: "center" }, true);
+    y += 24;
+    doc.fillColor("#64748b").fontSize(8);
+    customsPdfText(
+      doc,
+      `公司：${context.company || ""}    范围：${context.rangeLabel || "全部"}    记录：${rows.length} 条`,
+      tableLeft,
+      y,
+      { width: tableWidth, align: "center" }
+    );
+    y += 18;
+  }
+
+  function drawTableHeader() {
+    let x = tableLeft;
+    CUSTOMS_STATEMENT_EXPORT_COLUMNS.forEach((column) => {
+      drawCustomsPdfCell(doc, column.label, x, y, column.pdfWidth, 20, {
+        fill: "#f1f5f9",
+        bold: true,
+        align: "center",
+        fontSize: 6.5
+      });
+      x += column.pdfWidth;
+    });
+    y += 20;
+  }
+
+  function ensureRowSpace(height) {
+    if (y + height <= pageBottom) return;
+    doc.addPage({ size: "A4", layout: "landscape", margin: 18 });
+    y = pageTop;
+    drawTitle();
+    drawTableHeader();
+  }
+
+  drawTitle();
+  drawTableHeader();
+  const bodyRows = [...customsStatementExportRows(rows), customsStatementTotalRow(rows)];
+  bodyRows.forEach((values, rowIndex) => {
+    const isTotalRow = rowIndex === bodyRows.length - 1;
+    const height = customsPdfRowHeight(doc, values);
+    ensureRowSpace(height);
+    let x = tableLeft;
+    values.forEach((value, columnIndex) => {
+      const column = CUSTOMS_STATEMENT_EXPORT_COLUMNS[columnIndex] || {};
+      const displayValue = column.amount && value !== "" ? formatExportAmount(value, false) : value;
+      drawCustomsPdfCell(doc, displayValue, x, y, column.pdfWidth, height, {
+        fill: isTotalRow ? "#f1f5f9" : "#ffffff",
+        bold: isTotalRow,
+        align: column.amount ? "right" : (column.align || "left"),
+        fontSize: 6.2
+      });
+      x += column.pdfWidth;
+    });
+    y += height;
+  });
+  doc.end();
 }
 
 function numberField(value) {
@@ -2705,6 +3029,7 @@ function requiredModuleForRequest(req) {
   if (path.startsWith("/driver-route-adjust-rules")) return "financeWages";
   if (path.startsWith("/cost-center-rates")) return "financeCostCenter";
   if (path.startsWith("/vehicle-profit-exchange-rates")) return "bossVehicleProfit";
+  if (path.startsWith("/company-expenses")) return "bossCompanyExpenses";
   if (path.startsWith("/statement-downloads")) return "financeCosts";
   if (path.startsWith("/rules")) return "rules";
   if (path.startsWith("/templates") && req.method !== "GET") return "templates";
@@ -2714,6 +3039,26 @@ function requiredModuleForRequest(req) {
 }
 
 function authorizeApiRequest(req, res, next) {
+  if (req.path.startsWith("/vehicle-profit-exchange-rates")) {
+    const canAccessExchangeRates = VEHICLE_PROFIT_EXCHANGE_RATE_MODULES.some((moduleId) => canAccessModule(req.account?.role, moduleId));
+    if (!canAccessExchangeRates) {
+      res.status(403).json({ message: "当前账号无权访问该功能" });
+      return;
+    }
+    next();
+    return;
+  }
+  if (req.path.startsWith("/company-expenses")) {
+    const canAccessCompanyExpenses = req.method === "GET"
+      ? COMPANY_EXPENSE_MODULES.some((moduleId) => canAccessModule(req.account?.role, moduleId))
+      : canAccessModule(req.account?.role, "bossCompanyExpenses");
+    if (!canAccessCompanyExpenses) {
+      res.status(403).json({ message: "当前账号无权访问该功能" });
+      return;
+    }
+    next();
+    return;
+  }
   const moduleId = requiredModuleForRequest(req);
   if (moduleId && !canAccessModule(req.account?.role, moduleId)) {
     res.status(403).json({ message: "当前账号无权访问该功能" });
@@ -2794,6 +3139,43 @@ app.get("/api/customs-businesses", async (req, res) => {
     ORDER BY business_date DESC, id DESC
   `).all(...params);
   res.json(rows.map(mapCustomsBusiness));
+});
+
+app.post("/api/customs-businesses/export/excel", async (req, res) => {
+  const context = customsStatementExportContext(req.body || {});
+  const rows = await loadCustomsStatementExportRows(context.company, context.period);
+  if (!rows.length) {
+    res.status(400).type("text/plain").send("当前条件没有可导出的报关业务");
+    return;
+  }
+  try {
+    const filename = customsStatementFilename(context.company, context.start, context.end, "xlsx");
+    const body = await renderCustomsStatementXlsxBuffer(rows, context);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", contentDispositionHeader("attachment", filename));
+    await writeAudit("export", "customs_business", context.company, `Excel ${rows.length} 条`);
+    res.send(body);
+  } catch (error) {
+    console.error("Customs statement Excel export failed", error);
+    res.status(500).type("text/plain").send("报关对账单 Excel 导出失败");
+  }
+});
+
+app.post("/api/customs-businesses/export/pdf", async (req, res) => {
+  const context = customsStatementExportContext(req.body || {});
+  const rows = await loadCustomsStatementExportRows(context.company, context.period);
+  if (!rows.length) {
+    res.status(400).type("text/plain").send("当前条件没有可导出的报关业务");
+    return;
+  }
+  try {
+    const filename = customsStatementFilename(context.company, context.start, context.end, "pdf");
+    await writeAudit("export", "customs_business", context.company, `PDF ${rows.length} 条`);
+    renderCustomsStatementPdf(res, rows, context, filename);
+  } catch (error) {
+    console.error("Customs statement PDF export failed", error);
+    if (!res.headersSent) res.status(500).type("text/plain").send("报关对账单 PDF 导出失败");
+  }
 });
 
 app.post("/api/customs-businesses", async (req, res) => {
@@ -3234,6 +3616,7 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
       hkDriver: String(item.hkDriver || ""),
       mainlandDriver: String(item.mainlandDriver || ""),
       status: String(item.status || ""),
+      previousStatus: String(item.previousStatus || ""),
       note: String(item.note || "")
     };
   });
@@ -4230,6 +4613,85 @@ app.post("/api/vehicle-profit-exchange-rates", async (req, res) => {
   const row = await db.prepare("SELECT * FROM vehicle_profit_exchange_rates WHERE period_month = ?").get(periodMonth);
   await writeAudit("update", "vehicle_profit_exchange_rate", periodMonth, `汇率 ${rate}`);
   res.json(mapVehicleProfitExchangeRate(row));
+});
+
+app.get("/api/company-expenses", async (_req, res) => {
+  const rows = await db.prepare(`
+    SELECT * FROM company_expenses
+    WHERE deleted_at IS NULL
+    ORDER BY period_month DESC, id DESC
+    LIMIT 1200
+  `).all();
+  res.json(rows.map(mapCompanyExpense));
+});
+
+app.post("/api/company-expenses", async (req, res) => {
+  const item = readCompanyExpensePayload(req.body || {});
+  if (!item.periodMonth) {
+    res.status(400).json({ message: "请选择有效月份" });
+    return;
+  }
+  if (!item.category) {
+    res.status(400).json({ message: "请填写项目名称" });
+    return;
+  }
+  if (!Number.isFinite(item.amount) || item.amount <= 0) {
+    res.status(400).json({ message: "请填写大于 0 的金额" });
+    return;
+  }
+  const row = await db.prepare(`
+    INSERT INTO company_expenses (entry_type, period_month, category, amount, note)
+    VALUES (@entryType, @periodMonth, @category, @amount, @note)
+    RETURNING *
+  `).get(item);
+  await writeAudit("create", "company_expense", String(row.id), `${item.entryType}/${item.periodMonth}/${item.category}/${item.amount}`);
+  res.status(201).json(mapCompanyExpense(row));
+});
+
+app.patch("/api/company-expenses/:id", async (req, res) => {
+  const id = Number(req.params.id || 0);
+  const current = await db.prepare("SELECT * FROM company_expenses WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!current) {
+    res.status(404).json({ message: "记录不存在或已删除" });
+    return;
+  }
+  const item = readCompanyExpensePayload(req.body || {}, current);
+  if (!item.periodMonth) {
+    res.status(400).json({ message: "请选择有效月份" });
+    return;
+  }
+  if (!item.category) {
+    res.status(400).json({ message: "请填写项目名称" });
+    return;
+  }
+  if (!Number.isFinite(item.amount) || item.amount <= 0) {
+    res.status(400).json({ message: "请填写大于 0 的金额" });
+    return;
+  }
+  await db.prepare(`
+    UPDATE company_expenses
+    SET entry_type = @entryType,
+        period_month = @periodMonth,
+        category = @category,
+        amount = @amount,
+        note = @note,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = @id AND deleted_at IS NULL
+  `).run({ id, ...item });
+  await writeAudit("update", "company_expense", String(id), `${item.entryType}/${item.periodMonth}/${item.category}/${item.amount}`);
+  res.json(mapCompanyExpense(await db.prepare("SELECT * FROM company_expenses WHERE id = ?").get(id)));
+});
+
+app.delete("/api/company-expenses/:id", async (req, res) => {
+  const id = Number(req.params.id || 0);
+  const row = await db.prepare("SELECT * FROM company_expenses WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!row) {
+    res.status(404).json({ message: "记录不存在或已删除" });
+    return;
+  }
+  await db.prepare("UPDATE company_expenses SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(id);
+  await writeAudit("delete", "company_expense", String(id), `${row.period_month}/${row.category}`);
+  res.json({ ok: true });
 });
 
 function readDriverAdjustmentPayload(body, current = null) {

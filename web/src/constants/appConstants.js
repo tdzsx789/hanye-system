@@ -22,6 +22,9 @@ export const ROUTE_ALIASES = {
   dispatch: "dispatchBoard",
   dispatchBoard: "dispatchBoard",
   finance: "financeWages",
+  financeCustomsStatements: "financeCustomsStatements",
+  customsStatements: "financeCustomsStatements",
+  customsStatement: "financeCustomsStatements",
   boss: "bossDashboard",
   bossCenter: "bossDashboard",
   bossCustomsProfit: "customsBusiness",
@@ -43,7 +46,7 @@ export const BOSS_CENTER_MODULES = [
   "bossVehicleProfit",
   "bossCompanyExpenses"
 ];
-export const FINANCE_CENTER_MODULES = ["financeWages", "financeCosts", "financeSupplierStatements", "financeCostCenter", "financeDaily"];
+export const FINANCE_CENTER_MODULES = ["financeWages", "financeCosts", "financeSupplierStatements", "financeCustomsStatements", "financeCostCenter", "financeDaily"];
 export const BUSINESS_MODULES = ["home", "customers", "dispatchBoard", "orders", "customsBusiness"];
 export const SYSTEM_CONFIG_MODULES = ["freight", "templates", "master", "security", "accounts"];
 export const ROLE_ALLOWED_MODULES = {
@@ -81,12 +84,13 @@ export const MODULES = [
   { id: "financeWages", label: "工资统计", group: "财务中心" },
   { id: "financeCosts", label: "客户对账单", group: "财务中心" },
   { id: "financeSupplierStatements", label: "供应商对账单", group: "财务中心" },
+  { id: "financeCustomsStatements", label: "报关对账单", group: "财务中心" },
   { id: "financeCostCenter", label: "成本中心", group: "财务中心" },
   { id: "financeDaily", label: "日常收支", group: "财务中心" },
   { id: "bossDashboard", label: "老板看板", group: "老板中心" },
   { id: "bossCompanyProfit", label: "公司利润", group: "老板中心" },
   { id: "bossVehicleProfit", label: "车辆利润", group: "老板中心" },
-  { id: "bossCompanyExpenses", label: "公司支出", group: "老板中心" },
+  { id: "bossCompanyExpenses", label: "公司级收支", group: "老板中心" },
   { id: "freight", label: "运费模板", group: "系统配置" },
   { id: "templates", label: "模板中心", group: "系统配置" },
   { id: "master", label: "基础数据", group: "系统配置" },

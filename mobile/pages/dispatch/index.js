@@ -7,6 +7,7 @@ const {
   createDispatchRowFromOrder,
   dispatchMessageText,
   dispatchOrderStatusForPlanStatus,
+  dispatchReturnStatusForRow,
   dispatchStatusActionItems,
   dispatchStatusOptionsForRow,
   dispatchStatusValueForRow,
@@ -276,6 +277,7 @@ Page({
     if (this.data.saving) return;
     const row = this.rowById(event.currentTarget.dataset.id);
     if (!row) return;
+    if (row.statusActionDisabled) return;
     const actions = dispatchStatusActionItems(row);
     if (!actions.length) {
       wx.showToast({ title: "当前状态暂无可用流转", icon: "none" });
@@ -290,18 +292,25 @@ Page({
     });
   },
 
-  async updateRowStatus(id, nextStatus) {
+  async updateRowStatus(id, nextStatus, options) {
+    const source = options || {};
     const rows = this.data.rawRows.slice();
     const index = rows.findIndex((row) => row.id === id);
     if (index < 0) return;
     const row = Object.assign({}, rows[index]);
     const previousStatus = dispatchStatusValueForRow(row);
+    const previousRecordedStatus = row.previousStatus || "";
     const allowed = dispatchStatusOptionsForRow(row);
-    if (allowed.indexOf(nextStatus) < 0) {
+    if (!source.allowReturn && allowed.indexOf(nextStatus) < 0) {
       wx.showToast({ title: "当前状态不能这样切换", icon: "none" });
       return;
     }
     row.status = nextStatus;
+    if (source.clearPreviousStatus) {
+      row.previousStatus = "";
+    } else if (nextStatus !== previousStatus) {
+      row.previousStatus = previousStatus;
+    }
     rows[index] = row;
     this.setData({ saving: true });
     try {
@@ -314,11 +323,15 @@ Page({
         this.setData({ orders });
       }
       await api.saveDispatchPlan(this.data.dispatchDate, rows.map((item) => sanitizeDispatchRow(item)));
-      this.setData({ rawRows: rows.map((item) => sanitizeDispatchRow(item)) });
+      this.setData({
+        rawRows: rows.map((item) => sanitizeDispatchRow(item)),
+        ...(source.switchToStatus ? { activeStatus: nextStatus } : {})
+      });
       this.refreshDerivedData();
-      wx.showToast({ title: "排车状态已同步", icon: "none" });
+      wx.showToast({ title: source.toast || "排车状态已同步", icon: "none" });
     } catch (error) {
       row.status = previousStatus;
+      row.previousStatus = previousRecordedStatus;
       rows[index] = row;
       this.setData({ rawRows: rows.map((item) => sanitizeDispatchRow(item)) });
       this.refreshDerivedData();
@@ -326,6 +339,23 @@ Page({
     } finally {
       this.setData({ saving: false });
     }
+  },
+
+  async returnRowStatus(event) {
+    if (this.data.saving) return;
+    const row = this.rowById(event.currentTarget.dataset.id);
+    if (!row) return;
+    const previousStatus = dispatchReturnStatusForRow(row);
+    if (!previousStatus) {
+      wx.showToast({ title: "当前状态没有上一步", icon: "none" });
+      return;
+    }
+    await this.updateRowStatus(row.id, previousStatus, {
+      allowReturn: true,
+      clearPreviousStatus: true,
+      switchToStatus: true,
+      toast: `已返回到${previousStatus}`
+    });
   },
 
   async moveRow(event) {

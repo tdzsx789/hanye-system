@@ -73,3 +73,25 @@ export function saveVehicleProfitExchangeRate(payload) {
     body: JSON.stringify(payload)
   });
 }
+
+export function listCompanyExpenses() {
+  return apiFetchList("/company-expenses");
+}
+
+export function createCompanyExpense(payload) {
+  return apiFetch("/company-expenses", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function updateCompanyExpense(id, payload) {
+  return apiFetch(`/company-expenses/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function deleteCompanyExpense(id) {
+  return apiFetch(`/company-expenses/${encodeURIComponent(id)}`, { method: "DELETE" });
+}

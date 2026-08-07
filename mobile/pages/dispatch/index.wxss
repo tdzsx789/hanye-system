@@ -405,6 +405,12 @@
   color: #38516f;
 }
 
+.card-action-btn.return {
+  border: 1rpx solid #b7d5f8;
+  background: #eef6ff;
+  color: #0b74de;
+}
+
 .card-action-btn.disabled {
   opacity: 0.55;
 }

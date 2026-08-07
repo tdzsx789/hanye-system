@@ -149,3 +149,37 @@ OSS_ENDPOINT=oss-cn-shenzhen.aliyuncs.com
 3. 把 `WEB_PORT` 改成需要暴露的端口，或交给面板/Nginx 反向代理绑定域名。
 4. 设置容器自动重启，保持 `postgres_data` volume 不删除。
 5. 开启 PostgreSQL 定时备份；更高要求的灾备建议使用云数据库高可用或主从 PostgreSQL，而不是只依赖单机容器。
+
+## 阿里云 ECS 一键覆盖部署
+
+当前服务器已有站点占用 `80/443` 时，不需要改动现有 Nginx。`hanye-system` 可独立暴露到 `8081`，后端 `5174` 和 PostgreSQL `5432` 只在 Docker 内网使用，不需要对公网开放。
+
+本机部署到 ECS：
+
+```bash
+bash scripts/deploy-ecs.sh
+```
+
+脚本默认配置：
+
+```text
+ECS_HOST=120.24.163.215
+ECS_USER=root
+ECS_PORT=22
+ECS_KEY=~/.ssh/hanye_ecs_codex
+REMOTE_DIR=/opt/hanye-system
+WEB_PORT=8081
+ENABLE_BACKUP=1
+```
+
+脚本会使用 `rsync --delete` 覆盖服务器代码，但会排除 `.env`、`.git`、`node_modules`、构建产物和本地 SQLite 文件；服务器上的 PostgreSQL Docker volume 不会被删除。部署完成后访问：
+
+```text
+http://120.24.163.215:8081/
+```
+
+以后如果要换服务器或端口，可以临时覆盖变量：
+
+```bash
+ECS_HOST=你的服务器IP WEB_PORT=8082 bash scripts/deploy-ecs.sh
+```

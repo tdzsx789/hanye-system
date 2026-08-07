@@ -84,6 +84,11 @@
   font-size: 28rpx;
 }
 
+.picker-box.disabled {
+  background: #f3f6fa;
+  color: #7a889d;
+}
+
 .two-col {
   display: grid;
   grid-template-columns: 1fr 1fr;

@@ -9,6 +9,7 @@ const {
   TONNAGE_OPTIONS,
   TRANSPORT_MODE_OPTIONS,
   VEHICLE_SOURCE_OPTIONS,
+  dispatchStatusLockedForRow,
   dispatchStatusOptionsForRow,
   dispatchStatusValueForRow,
   formFromDispatchRow,
@@ -42,6 +43,7 @@ Page({
     portOptions: PORT_OPTIONS,
     saving: false,
     sourceRow: null,
+    statusPickerDisabled: false,
     statusOptions: ["预排"],
     supplierOptions: [],
     timeOptions: DISPATCH_LOAD_TIME_OPTIONS,
@@ -117,15 +119,16 @@ Page({
 
   refreshStatusOptions() {
     const current = dispatchStatusValueForRow({ status: this.data.form.status });
+    const locked = dispatchStatusLockedForRow({ status: current });
     if (this.data.mode !== "edit") {
-      this.setData({ statusOptions: [current] });
+      this.setData({ statusOptions: [current], statusPickerDisabled: true });
       return;
     }
     const next = [current];
     dispatchStatusOptionsForRow({ status: current }).forEach((status) => {
       if (next.indexOf(status) < 0) next.push(status);
     });
-    this.setData({ statusOptions: next });
+    this.setData({ statusOptions: next, statusPickerDisabled: locked });
   },
 
   refreshCustomerSuggestions() {

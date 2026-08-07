@@ -119,7 +119,8 @@ const idReturningTables = new Set([
   "statement_downloads",
   "vehicle_expenses",
   "cost_center_rates",
-  "vehicle_profit_exchange_rates"
+  "vehicle_profit_exchange_rates",
+  "company_expenses"
 ]);
 
 function withReturningId(sql) {
@@ -571,6 +572,18 @@ async function initializeSchema() {
       deleted_at TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS company_expenses (
+      id BIGSERIAL PRIMARY KEY,
+      entry_type TEXT NOT NULL DEFAULT 'expense',
+      period_month TEXT NOT NULL DEFAULT '',
+      category TEXT NOT NULL DEFAULT '',
+      amount DOUBLE PRECISION NOT NULL DEFAULT 0,
+      note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      deleted_at TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS driver_adjustments (
       id BIGSERIAL PRIMARY KEY,
       driver_id BIGINT REFERENCES drivers(id) ON DELETE CASCADE,
@@ -668,6 +681,7 @@ async function initializeSchema() {
     CREATE INDEX IF NOT EXISTS idx_statement_downloads_deleted ON statement_downloads(deleted_at, downloaded_at);
     CREATE INDEX IF NOT EXISTS idx_cost_center_rates_source ON cost_center_rates(source, deleted_at, entity_name);
     CREATE INDEX IF NOT EXISTS idx_vehicle_profit_exchange_rates_month ON vehicle_profit_exchange_rates(period_month);
+    CREATE INDEX IF NOT EXISTS idx_company_expenses_period ON company_expenses(deleted_at, period_month);
   `);
 
   const migrations = {
@@ -763,6 +777,9 @@ async function initializeSchema() {
     ],
     vehicle_expenses: [
       "fuel_station TEXT NOT NULL DEFAULT ''"
+    ],
+    company_expenses: [
+      "entry_type TEXT NOT NULL DEFAULT 'expense'"
     ]
   };
 

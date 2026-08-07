@@ -1,6 +1,6 @@
 export const TEMPLATE_SYSTEM_TOTAL_COLUMNS = [
-  { key: "__hkdTotal", label: "HKD合计", width: 64 },
-  { key: "__rmbTotal", label: "RMB合计", width: 64 }
+  { key: "__rmbTotal", label: "RMB合计", width: 64 },
+  { key: "__hkdTotal", label: "HKD合计", width: 64 }
 ];
 export const TEMPLATE_SYSTEM_SEQUENCE_COLUMN = { key: "__sequence", label: "序号", width: 42 };
 export const TEMPLATE_SYSTEM_MANAGED_COLUMNS = [

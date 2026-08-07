@@ -49,14 +49,42 @@ function dispatchStatusValueForRow(row) {
 function dispatchStatusOptionsForRow(row) {
   const currentStatus = dispatchStatusValueForRow(row);
   if (currentStatus === "预排") return ["已派车"];
-  if (currentStatus === "已派车") return ["预排", "通关中", "异常滞留"];
+  if (currentStatus === "已派车") return ["通关中"];
   if (currentStatus === DISPATCH_LOCKED_STATUS) {
-    return DISPATCH_STATUS_OPTIONS.filter((item) => item !== "已派车");
+    return ["已签收", "异常滞留"];
   }
   if (currentStatus === "已签收") {
-    return DISPATCH_STATUS_OPTIONS.filter((item) => ["已派车", "通关中"].indexOf(item) < 0);
+    return ["已签收"];
   }
+  if (currentStatus === "异常滞留") return ["已签收"];
   return DISPATCH_STATUS_OPTIONS;
+}
+
+function dispatchStatusLockedForRow(row) {
+  return dispatchStatusValueForRow(row) === "已签收";
+}
+
+const DISPATCH_STATUS_FALLBACK_PREVIOUS = {
+  已派车: "预排",
+  通关中: "已派车",
+  已签收: "通关中",
+  异常滞留: "通关中"
+};
+
+function normalizeOptionalDispatchPlanStatus(status) {
+  const text = valueText(status);
+  if (!text) return "";
+  if (text === "待预排" || text === "已预排") return DISPATCH_PLAN_DEFAULT_STATUS;
+  if (text === "完成结算") return "已签收";
+  return DISPATCH_STATUS_OPTIONS.indexOf(text) >= 0 ? text : "";
+}
+
+function dispatchReturnStatusForRow(row) {
+  const currentStatus = dispatchStatusValueForRow(row);
+  if (currentStatus === DISPATCH_PLAN_DEFAULT_STATUS) return "";
+  const previousStatus = normalizeOptionalDispatchPlanStatus(row && row.previousStatus);
+  if (previousStatus && previousStatus !== currentStatus) return previousStatus;
+  return DISPATCH_STATUS_FALLBACK_PREVIOUS[currentStatus] || "";
 }
 
 function dispatchStatusActionItems(row) {
@@ -305,6 +333,9 @@ function presentDispatchRows(rows, orders, date, options) {
       sourceText: dispatchVehicleSourceText(row),
       sourceClass: sourceClass(source),
       status,
+      previousStatus: normalizeOptionalDispatchPlanStatus(row.previousStatus),
+      statusActionDisabled: dispatchStatusLockedForRow(row),
+      returnStatus: dispatchReturnStatusForRow(row),
       statusClass: dispatchStatusClass(status),
       timeText: valueText(row.loadTime) || "未定",
       expanded: expandedIds.indexOf(row.id) >= 0,
@@ -510,6 +541,7 @@ function formFromDispatchRow(row, date) {
     hkDriver: source.hkDriver || order.hkDriver || "",
     mainlandDriver: source.mainlandDriver || order.mainlandDriver || "",
     status: dispatchStatusValueForRow(source),
+    previousStatus: normalizeOptionalDispatchPlanStatus(source.previousStatus),
     note: source.note || order.remark || "",
     tripNoEnabled: order.tripNoEnabled ? 1 : 0,
     tripNo: order.tripNo || "",
@@ -541,6 +573,7 @@ function rowFromForm(form, orderNo) {
     hkDriver: source.hkDriver,
     mainlandDriver: source.mainlandDriver,
     status: source.status || DISPATCH_PLAN_DEFAULT_STATUS,
+    previousStatus: normalizeOptionalDispatchPlanStatus(source.previousStatus),
     note: source.note
   });
 }
@@ -608,7 +641,9 @@ module.exports = {
   dispatchOrderStatusForPlanStatus,
   dispatchStatusActionItems,
   dispatchStatusClass,
+  dispatchStatusLockedForRow,
   dispatchStatusOptionsForRow,
+  dispatchReturnStatusForRow,
   dispatchStatusValueForRow,
   dispatchSummaryCards,
   dispatchVehicleSourceText,

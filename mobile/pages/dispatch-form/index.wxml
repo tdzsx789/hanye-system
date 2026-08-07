@@ -128,8 +128,8 @@
       <view wx:if="{{advancedOpen}}">
         <view class="field-row">
           <text class="field-label">排车状态</text>
-          <picker range="{{statusOptions}}" data-field="status" data-options-key="statusOptions" bindchange="onPickerChange">
-            <view class="picker-box">{{form.status || '预排'}}</view>
+          <picker range="{{statusOptions}}" disabled="{{statusPickerDisabled}}" data-field="status" data-options-key="statusOptions" bindchange="onPickerChange">
+            <view class="picker-box {{statusPickerDisabled ? 'disabled' : ''}}">{{form.status || '预排'}}</view>
           </picker>
         </view>
         <view class="field-row">

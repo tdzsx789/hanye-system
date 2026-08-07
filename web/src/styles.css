@@ -1181,11 +1181,7 @@ button:disabled {
 }
 
 .invoice-cost-breakdown {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 42px;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
+  display: block;
   color: #075985;
 }
 
@@ -1195,12 +1191,6 @@ button:disabled {
   white-space: nowrap;
   font-size: 12px;
   font-weight: 900;
-}
-
-.invoice-cost-breakdown span {
-  font-size: 11px;
-  font-weight: 900;
-  text-align: center;
 }
 
 .invoice-remark-cell input {
@@ -1541,21 +1531,6 @@ button:disabled {
 
 .muted-cell {
   color: var(--muted);
-}
-
-.auto-driver-role-cell {
-  display: inline-flex;
-  max-width: 100%;
-  align-items: center;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: #eef6ff;
-  color: #075985;
-  font-size: 12px;
-  font-weight: 900;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .table-op {
@@ -2913,6 +2888,14 @@ select {
   gap: 10px;
 }
 
+.statement-page {
+  height: 100%;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
 .finance-page .section-head {
   margin-bottom: 0;
 }
@@ -3490,7 +3473,8 @@ select {
 }
 
 .table-card.statement-customer-card,
-.table-card.statement-supplier-card {
+.table-card.statement-supplier-card,
+.table-card.statement-customs-card {
   overflow: visible;
 }
 
@@ -3627,6 +3611,57 @@ select {
   white-space: nowrap;
 }
 
+.statement-customs-table {
+  width: 100%;
+  min-width: 0;
+  table-layout: fixed;
+  font-size: 12px;
+}
+
+.statement-customs-table th,
+.statement-customs-table td {
+  padding: 7px 6px;
+  vertical-align: middle;
+}
+
+.statement-customs-table th:first-child,
+.statement-customs-table td:first-child {
+  width: 4.5%;
+  text-align: center;
+}
+
+.statement-customs-table th:nth-child(2),
+.statement-customs-table td:nth-child(2) {
+  width: 32%;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.statement-customs-table th:nth-child(3),
+.statement-customs-table td:nth-child(3),
+.statement-customs-table th:nth-child(4),
+.statement-customs-table td:nth-child(4) {
+  width: 9%;
+  text-align: center;
+}
+
+.statement-customs-table th:nth-child(5),
+.statement-customs-table td:nth-child(5) {
+  width: 15%;
+  white-space: nowrap;
+}
+
+.statement-customs-table th:nth-child(6),
+.statement-customs-table td:nth-child(6) {
+  width: 16%;
+}
+
+.statement-customs-table th:nth-child(7),
+.statement-customs-table td:nth-child(7) {
+  width: 8.5%;
+  white-space: nowrap;
+}
+
 .statement-settlement-chip {
   display: inline-flex;
   align-items: center;
@@ -3702,7 +3737,9 @@ select {
   font-size: 12px;
 }
 
-.statement-customer-table .statement-status-select {
+.statement-customer-table .statement-status-select,
+.statement-supplier-table .statement-status-select,
+.statement-customs-table .statement-status-select {
   width: 100%;
   padding: 0 4px;
   border-radius: 7px;
@@ -3813,6 +3850,20 @@ select {
   border-bottom: 1px solid var(--line);
 }
 
+.boss-page {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.boss-page > .section-head,
+.boss-page > .finance-filter-bar,
+.boss-page > .finance-summary-grid,
+.boss-page > .finance-insight-grid,
+.boss-page > .table-card {
+  flex: 0 0 auto;
+}
+
 .boss-page .table-card-head span,
 .boss-kpi-card span:last-child {
   display: block;
@@ -3822,8 +3873,117 @@ select {
   font-weight: 600;
 }
 
+.boss-kpi-card-clickable {
+  cursor: pointer;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
+}
+
+.boss-kpi-card-clickable:hover {
+  border-color: #93c5fd;
+  box-shadow: 0 8px 20px rgba(37, 99, 235, 0.12);
+  transform: translateY(-1px);
+}
+
+.boss-dashboard-detail-backdrop {
+  padding: 12px;
+}
+
+.boss-dashboard-detail-modal {
+  width: calc(100vw - 24px);
+}
+
+.boss-dashboard-detail-body {
+  gap: 14px;
+  background: #f9fbff;
+}
+
+.boss-dashboard-detail-summary {
+  grid-template-columns: repeat(3, minmax(160px, 1fr));
+  margin-bottom: 2px;
+}
+
+.boss-dashboard-detail-summary .finance-summary-card strong {
+  font-size: 16px;
+}
+
+.boss-dashboard-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+}
+
+.boss-dashboard-detail-section {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid #e6edf7;
+  overflow: visible;
+}
+
+.boss-dashboard-detail-summary + .boss-dashboard-detail-section {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.boss-dashboard-detail-section-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 0;
+  padding: 0 2px;
+}
+
+.boss-dashboard-detail-section-head strong {
+  color: #172033;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.boss-dashboard-detail-section-head span {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.boss-dashboard-detail-table-wrap {
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid #e6edf7;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.boss-dashboard-detail-table-wrap .data-table {
+  min-width: 980px;
+}
+
+.boss-dashboard-detail-table-wrap .data-table th,
+.boss-dashboard-detail-table-wrap .data-table td {
+  white-space: nowrap;
+}
+
+.boss-dashboard-detail-table-wrap .data-table th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #f7faff;
+}
+
+.boss-dashboard-month-table {
+  min-width: 1080px;
+}
+
+.boss-dashboard-order-table {
+  min-width: 1280px;
+}
+
 .boss-data-table {
-  min-width: 760px;
+  min-width: 1080px;
 }
 
 .boss-vehicle-profit-card {
@@ -3884,6 +4044,142 @@ select {
   width: 240px;
 }
 
+.boss-vehicle-profit-table th:nth-child(12),
+.boss-vehicle-profit-table td:nth-child(12) {
+  width: 132px;
+}
+
+.boss-vehicle-profit-row {
+  cursor: pointer;
+}
+
+.boss-vehicle-profit-row:hover td,
+.boss-vehicle-profit-row:hover .sticky-profit-col,
+.boss-vehicle-profit-row:hover .sticky-profit-hkd-col,
+.boss-vehicle-profit-row:hover .sticky-margin-col {
+  background: #f8fbff;
+}
+
+.boss-vehicle-profit-actions {
+  justify-content: center;
+}
+
+.boss-vehicle-analysis-board {
+  gap: 10px;
+}
+
+.boss-vehicle-analysis-card,
+.boss-vehicle-diagnosis-card {
+  overflow: hidden;
+}
+
+.boss-vehicle-analysis-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  gap: 8px;
+  padding: 10px;
+}
+
+.boss-vehicle-analysis-item {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.boss-vehicle-analysis-item span,
+.boss-vehicle-analysis-item small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.boss-vehicle-analysis-item strong {
+  color: var(--text);
+  font-size: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.boss-vehicle-diagnosis-wrap {
+  overflow: auto;
+}
+
+.boss-vehicle-diagnosis-table {
+  min-width: 1180px;
+  table-layout: fixed;
+}
+
+.boss-vehicle-diagnosis-table th:nth-child(1),
+.boss-vehicle-diagnosis-table td:nth-child(1) {
+  width: 116px;
+}
+
+.boss-vehicle-diagnosis-table th:nth-child(2),
+.boss-vehicle-diagnosis-table td:nth-child(2) {
+  width: 120px;
+}
+
+.boss-vehicle-diagnosis-table th:nth-child(3),
+.boss-vehicle-diagnosis-table td:nth-child(3),
+.boss-vehicle-diagnosis-table th:nth-child(5),
+.boss-vehicle-diagnosis-table td:nth-child(5) {
+  width: 72px;
+}
+
+.boss-vehicle-diagnosis-table th:nth-child(4),
+.boss-vehicle-diagnosis-table td:nth-child(4) {
+  width: 130px;
+}
+
+.boss-vehicle-diagnosis-table th:nth-child(6),
+.boss-vehicle-diagnosis-table td:nth-child(6) {
+  width: 190px;
+}
+
+.boss-vehicle-diagnosis-table th:nth-child(9),
+.boss-vehicle-diagnosis-table td:nth-child(9) {
+  width: 126px;
+}
+
+.boss-diagnosis-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.boss-diagnosis-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: #fff7ed;
+  color: #c2410c;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.boss-diagnosis-primary,
+.boss-diagnosis-suggestion {
+  color: var(--text);
+  line-height: 1.45;
+  white-space: normal;
+}
+
+.boss-diagnosis-primary {
+  font-weight: 800;
+}
+
+.boss-diagnosis-suggestion {
+  color: #475569;
+}
+
 .boss-vehicle-profit-table .sticky-profit-col,
 .boss-vehicle-profit-table .sticky-profit-hkd-col,
 .boss-vehicle-profit-table .sticky-margin-col {
@@ -3933,12 +4229,184 @@ select {
   font-weight: 800;
 }
 
+.monthly-exchange-rate-field {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.monthly-exchange-rate-input {
+  width: 88px;
+}
+
+.boss-vehicle-profit-detail-modal {
+  width: calc(100vw - 24px);
+  height: calc(100vh - 24px);
+  max-height: calc(100vh - 24px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.boss-vehicle-profit-detail-modal .modal-head {
+  align-items: flex-start;
+}
+
+.boss-vehicle-profit-detail-modal .modal-head > div:first-child {
+  min-width: 0;
+}
+
+.boss-vehicle-profit-detail-modal .modal-head h2,
+.boss-vehicle-profit-detail-modal .modal-subtitle {
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
+.boss-vehicle-profit-detail-modal .modal-detail-actions {
+  flex: 0 0 auto;
+}
+
+.boss-vehicle-profit-detail-body {
+  display: block;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.boss-vehicle-profit-detail-summary {
+  margin-bottom: 12px;
+  grid-template-columns: repeat(6, minmax(120px, 1fr));
+}
+
+.boss-vehicle-profit-detail-summary .finance-summary-card {
+  padding: 8px 10px;
+}
+
+.boss-vehicle-profit-detail-summary .finance-summary-card strong {
+  font-size: 15px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.boss-vehicle-profit-detail-section {
+  min-height: auto;
+}
+
+.boss-vehicle-profit-detail-section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+  min-height: 28px;
+  margin-bottom: 8px;
+}
+
+.boss-vehicle-profit-detail-section-head strong {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.boss-vehicle-profit-detail-section-head span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.boss-vehicle-profit-order-list {
+  display: grid;
+  gap: 10px;
+  min-height: auto;
+}
+
+.boss-vehicle-profit-order-group {
+  border: 1px solid #dbe7f5;
+  border-radius: 8px;
+  background: #fff;
+  overflow: visible;
+}
+
+.boss-vehicle-profit-order-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  padding: 10px 12px;
+  background: #f8fbff;
+  cursor: pointer;
+  line-height: 1.45;
+  list-style: none;
+}
+
+.boss-vehicle-profit-order-summary::-webkit-details-marker {
+  display: none;
+}
+
+.boss-vehicle-profit-order-main,
+.boss-vehicle-profit-order-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  min-width: 0;
+}
+
+.boss-vehicle-profit-order-main strong {
+  color: var(--primary);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.boss-vehicle-profit-order-main span,
+.boss-vehicle-profit-order-metrics span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.boss-vehicle-profit-order-metrics strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 900;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.boss-vehicle-profit-order-fees {
+  overflow-x: auto;
+  padding: 8px 10px 10px;
+}
+
+.boss-vehicle-profit-fee-table {
+  min-width: 820px;
+}
+
+.boss-vehicle-profit-fee-table th,
+.boss-vehicle-profit-fee-table td {
+  white-space: nowrap;
+}
+
+.boss-vehicle-profit-fee-table th:nth-child(5),
+.boss-vehicle-profit-fee-table td:nth-child(5) {
+  min-width: 180px;
+  white-space: normal;
+}
+
+.boss-vehicle-profit-order-empty {
+  margin: 0;
+  padding: 14px;
+  color: var(--muted);
+  text-align: center;
+  font-size: 13px;
+  font-weight: 800;
+}
+
 .boss-insight-grid .data-table {
   min-width: 680px;
 }
 
 .statement-export-grid,
-.route-adjust-form {
+.route-adjust-form,
+.company-expense-form {
   display: grid;
   gap: 8px;
   padding: 10px;
@@ -3951,6 +4419,14 @@ select {
 
 .route-adjust-form {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.company-expense-form {
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  align-items: end;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
 }
 
 .route-adjust-driver-picker {
@@ -4035,7 +4511,8 @@ select {
 }
 
 .statement-export-grid label,
-.route-adjust-form label {
+.route-adjust-form label,
+.company-expense-form label {
   display: grid;
   gap: 4px;
   color: var(--muted);
@@ -4046,7 +4523,9 @@ select {
 .statement-export-grid input,
 .statement-export-grid select,
 .route-adjust-form input,
-.route-adjust-form select {
+.route-adjust-form select,
+.company-expense-form input,
+.company-expense-form select {
   min-width: 0;
   height: 32px;
 }
@@ -4061,6 +4540,32 @@ select {
   justify-self: end;
   width: max-content;
   min-height: 32px;
+}
+
+.company-expense-table input,
+.company-expense-table select {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+}
+
+.company-expense-table tr.is-row-editing td {
+  background: #f8fbff;
+}
+
+.company-expense-readonly-value {
+  display: block;
+  min-height: 30px;
+  line-height: 30px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.company-expense-category-cell {
+  display: grid;
+  gap: 4px;
 }
 
 .finance-compact-table-wrap {
@@ -4082,15 +4587,32 @@ select {
   .finance-summary-grid {
     grid-template-columns: repeat(2, minmax(160px, 1fr));
   }
+
+  .boss-vehicle-analysis-grid {
+    grid-template-columns: repeat(2, minmax(180px, 1fr));
+  }
+
+  .boss-dashboard-detail-summary {
+    grid-template-columns: repeat(2, minmax(160px, 1fr));
+  }
 }
 
 @media (max-width: 760px) {
   .statement-export-grid,
-  .route-adjust-form {
+  .route-adjust-form,
+  .company-expense-form {
     grid-template-columns: 1fr;
   }
 
   .finance-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .boss-vehicle-analysis-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .boss-dashboard-detail-summary {
     grid-template-columns: 1fr;
   }
 }
@@ -6250,10 +6772,6 @@ tr.selected {
   grid-column: 1 / -1;
   justify-content: flex-end;
   gap: 5px;
-}
-
-.template-column-collapse .ui-icon {
-  transform: rotate(180deg);
 }
 
 .template-column-name {
@@ -8421,6 +8939,18 @@ tr.selected {
   padding: 0;
   flex: 0 0 28px;
   margin-right: 4px;
+}
+
+.dispatch-row-actions .dispatch-status-return-btn {
+  margin-right: 0;
+  border-color: #b7d5f8;
+  background: #eef6ff;
+  color: #0b74de;
+}
+
+.dispatch-row-actions .dispatch-status-return-btn:not(:disabled):hover {
+  border-color: #7cb4f2;
+  background: #dcecff;
 }
 
 .dispatch-edit-modal {
