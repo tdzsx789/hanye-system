@@ -4086,12 +4086,14 @@ function outsourcedCostAmountForOrder(order) {
 }
 
 const COMPANY_SELF_PAY_CATEGORY = "公司自费";
-const COMPANY_SELF_PAY_DEFAULT_REMARK = "用于国内转货、货拉拉、国内车转运及其他平台支出等公司自费成本，仅参与内部成本与利润核算，不计入客户对账单。";
+const COMPANY_SELF_PAY_DEFAULT_REMARK = "公司自费，不计入客户对账单，只用于内部成本和利润计算";
 const COMPANY_SELF_PAY_TOOLTIP = "公司自费项目仅参与内部成本与利润核算，不计入客户对账单。";
 const COMPANY_SELF_PAY_DEFAULT_REMARKS = [
   COMPANY_SELF_PAY_DEFAULT_REMARK,
   COMPANY_SELF_PAY_TOOLTIP,
-  "公司自费：不向客户收费，但由公司实际承担的成本"
+  "公司自费：不向客户收费，但由公司实际承担的成本",
+  "公司自费",
+  "用于国内转货、货拉拉、国内车转运及其他平台支出等公司自费成本，仅参与内部成本与利润核算，不计入客户对账单。"
 ];
 
 function isCompanySelfPayFeeItem(item = {}) {
@@ -4133,9 +4135,12 @@ function isAdvanceFee(fee = {}) {
   return feeItemForFee(fee)?.category === "代垫";
 }
 
+function orderFeeCategoryValue(value = "正常") {
+  return String(value || "").trim() === "代垫" ? "代垫" : "正常";
+}
+
 function feeCategoryLabel(fee = {}) {
-  if (isCompanySelfPayFee(fee)) return COMPANY_SELF_PAY_CATEGORY;
-  return feeItemForFee(fee)?.category || fee.category || "正常";
+  return orderFeeCategoryValue(feeItemForFee(fee)?.category || fee.category || "正常");
 }
 
 function feeAmountHKD(fee = {}) {
@@ -7653,6 +7658,7 @@ function syncFeeAmountFromUnitPrice(fee) {
 function normalizeOrderFeeRow(fee = {}) {
   const row = { ...fee };
   syncCompanySelfPayFeeRemark(row);
+  row.category = orderFeeCategoryValue(row.category);
   row.quantity = normalizeFeeQuantity(row);
   row.unitPrice = normalizeFeeUnitPrice(row);
   row.amount = row._manualAmount
@@ -16280,7 +16286,7 @@ function loadFeeTemplate() {
     .slice(0, 3)
       .map((item) => syncCompanySelfPayFeeRemark({
         feeItemId: item.id,
-        category: item.category,
+        category: orderFeeCategoryValue(item.category),
         name: item.name,
         quantity: 1,
         unitPrice: Number(item.defaultAmount || 0),
@@ -16326,7 +16332,7 @@ function applyFeeTemplateRows(fees) {
     const hasManualCostFlag = fee.costManual !== undefined || fee.cost_manual !== undefined || fee.manualCost !== undefined || fee._manualCost !== undefined;
     const row = normalizeOrderFeeRow({
       feeItemId: fee.feeItemId || fee.fee_item_id || feeItemRows.value.find((row) => row.name === fee.name)?.id || "",
-      category: fee.category || "正常",
+      category: orderFeeCategoryValue(fee.category || "正常"),
       name: fee.name || "",
       quantity: fee.quantity,
       unitPrice: fee.unitPrice ?? fee.unit_price,
@@ -16571,7 +16577,7 @@ function fillFeeFromItem(fee, id) {
   Object.assign(fee, {
     feeItemId: item.id,
     name: item.name,
-    category: item.category,
+    category: orderFeeCategoryValue(item.category),
     quantity: normalizeFeeQuantity(fee),
     unitPrice: Number(item.defaultAmount || 0),
     _manualUnitPrice: false,
