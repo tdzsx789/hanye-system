@@ -20,6 +20,7 @@ export const TEMPLATE_ORDER_BASE_COLUMNS = [
   { key: "vehicleSource", label: "车辆来源", width: 78 },
   { key: "plate", label: "车牌", width: 72 },
   { key: "driver", label: "司机", width: 64 },
+  { key: "createdByName", label: "创建者", width: 72 },
   { key: "transportMode", label: "运输模式", width: 76 },
   { key: "supplier", label: "外派供应商", width: 96 }
 ];
@@ -139,7 +140,6 @@ export const TEMPLATE_VARIABLES = [
 ];
 export const FREIGHT_DIRECTORY_LEVELS = [
   { value: "level1", label: "一级目录", primary: "一级目录", secondary: "说明" },
-  { value: "level2", label: "二级目录", primary: "二级目录", secondary: "所属一级" },
-  { value: "level3", label: "三级目录", primary: "三级目录", secondary: "所属二级" }
+  { value: "level2", label: "二级目录", primary: "二级目录", secondary: "所属一级" }
 ];
 export const NEW_CONTACT_ROW_ID = "__new_contact__";

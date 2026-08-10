@@ -39,6 +39,10 @@ defineProps({
     type: Boolean,
     default: false
   },
+  readonly: {
+    type: Boolean,
+    default: false
+  },
   formatSize: {
     type: Function,
     default: (size) => String(size || 0)
@@ -58,7 +62,7 @@ const columns = [
 
 <template>
   <div class="file-panel">
-    <div class="file-toolbar">
+    <div v-if="!readonly" class="file-toolbar">
       <label v-if="canUpload" class="file-upload-btn" :class="{ 'is-uploading': uploading }">
         <IconSvg name="upload" />{{ uploadLabel }}
         <input type="file" :accept="accept" :disabled="uploading" @change="emit('upload', $event)" />
@@ -77,7 +81,7 @@ const columns = [
       <template #cell-actions="{ row }">
         <button class="icon-btn" type="button" @click="emit('preview', row)"><IconSvg name="eye" />预览</button>
         <button class="icon-btn" type="button" @click="emit('download', row)"><IconSvg name="download" />下载</button>
-        <button class="icon-btn danger" type="button" @click="emit('delete', row)"><IconSvg name="trash" />删除</button>
+        <button v-if="!readonly" class="icon-btn danger" type="button" @click="emit('delete', row)"><IconSvg name="trash" />删除</button>
       </template>
     </DataTable>
   </div>

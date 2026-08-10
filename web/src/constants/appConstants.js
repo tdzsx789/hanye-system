@@ -27,6 +27,7 @@ export const ROUTE_ALIASES = {
   customsStatement: "financeCustomsStatements",
   boss: "bossDashboard",
   bossCenter: "bossDashboard",
+  bossSupplierProfit: "bossSupplierProfit",
   bossCustomsProfit: "customsBusiness",
   customs: "customsBusiness",
   customsBusiness: "customsBusiness"
@@ -44,6 +45,7 @@ export const BOSS_CENTER_MODULES = [
   "bossDashboard",
   "bossCompanyProfit",
   "bossVehicleProfit",
+  "bossSupplierProfit",
   "bossCompanyExpenses"
 ];
 export const FINANCE_CENTER_MODULES = ["financeWages", "financeCosts", "financeSupplierStatements", "financeCustomsStatements", "financeCostCenter", "financeDaily"];
@@ -90,6 +92,7 @@ export const MODULES = [
   { id: "bossDashboard", label: "老板看板", group: "老板中心" },
   { id: "bossCompanyProfit", label: "公司利润", group: "老板中心" },
   { id: "bossVehicleProfit", label: "车辆利润", group: "老板中心" },
+  { id: "bossSupplierProfit", label: "供应商利润", group: "老板中心" },
   { id: "bossCompanyExpenses", label: "公司级收支", group: "老板中心" },
   { id: "freight", label: "运费模板", group: "系统配置" },
   { id: "templates", label: "模板中心", group: "系统配置" },
@@ -99,9 +102,9 @@ export const MODULES = [
 ];
 
 export const VEHICLE_EXPENSE_CONFIGS = [
-  { moduleId: "vehicleFuelExpenses", type: "fuel", title: "加油费管理", addLabel: "增加加油费", defaultName: "加油费", timeLabel: "时间" },
+  { moduleId: "vehicleFuelExpenses", type: "fuel", title: "加油费管理", addLabel: "增加加油记录", defaultName: "加油记录", timeLabel: "时间" },
   { moduleId: "vehicleRepairExpenses", type: "repair", title: "维修费管理", addLabel: "增加维修费", defaultName: "维修费", timeLabel: "时间" },
-  { moduleId: "vehicleAnnualExpenses", type: "annual", title: "保险年审牌头费", addLabel: "增加保险年审牌头费", defaultName: "保险费", timeLabel: "年份" },
+  { moduleId: "vehicleAnnualExpenses", type: "annual", title: "保险年审牌头费", addLabel: "增加保险年审牌头费", defaultName: "保险费", timeLabel: "时间范围" },
   { moduleId: "vehicleOtherExpenses", type: "other", title: "其他支出", addLabel: "增加其他支出", defaultName: "", timeLabel: "时间" }
 ];
 export const VEHICLE_EXPENSE_CONFIG_BY_MODULE = Object.fromEntries(VEHICLE_EXPENSE_CONFIGS.map((item) => [item.moduleId, item]));
@@ -177,7 +180,7 @@ export const AUDIT_RECORD_PREFIXES = {
   vehicle_expense: "支出ID"
 };
 
-export const TONNAGE_OPTIONS = ["3T", "5T", "8T", "10T", "12T", "20尺柜", "40尺柜"];
+export const TONNAGE_OPTIONS = ["3T", "5T", "8T", "10T", "12T", "20尺柜", "40尺柜", "45尺柜"];
 export const DIRECTION_OPTIONS = ["出口", "进口"];
 export const SHARED_DIRECTION = "进出口通用";
 export const FREIGHT_QUOTE_TAB = "报价";
@@ -199,8 +202,8 @@ export const FEE_DRIVER_ROLE_LABELS = {
   跟随订单司机: "跟随订单司机",
   手动指定: "手动指定"
 };
-export const FEE_ITEM_CATEGORY_OPTIONS = ["正常", "代垫", "公司自费"];
-export const FEE_ITEM_COST_SOURCE_OPTIONS = ["供应商", "香港司机", "大陆骑师", "公司自费"];
+export const FEE_ITEM_CATEGORY_OPTIONS = ["正常", "代垫"];
+export const FEE_ITEM_COST_SOURCE_OPTIONS = ["供应商", "香港司机", "大陆骑师", "公司自费", "其他支出"];
 export const DISPATCH_STATUS_TO_ORDER_STATUS = {
   预排: "预排",
   待预排: "预排",

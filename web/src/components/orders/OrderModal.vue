@@ -21,6 +21,22 @@ defineProps({
   loading: {
     type: Boolean,
     default: false
+  },
+  title: {
+    type: String,
+    default: ""
+  },
+  submitLabel: {
+    type: String,
+    default: "保存订单"
+  },
+  submitIcon: {
+    type: String,
+    default: "save"
+  },
+  showSubmit: {
+    type: Boolean,
+    default: true
   }
 });
 
@@ -32,7 +48,7 @@ const emit = defineEmits(["close", "submit", "panelClick"]);
     <form class="modal-card order-modal-card" @click="emit('panelClick')" @submit.prevent="emit('submit')">
       <div class="modal-head">
         <h2>
-          {{ editing ? '编辑订单' : '新建订单' }}
+          {{ title || (editing ? '编辑订单' : '新建订单') }}
           <span class="order-title-meta">经营单位：{{ customer || "-" }}</span>
           <span class="order-title-meta">订单号：{{ orderNo }}</span>
         </h2>
@@ -40,8 +56,8 @@ const emit = defineEmits(["close", "submit", "panelClick"]);
       </div>
       <slot />
       <div class="modal-actions">
-        <button type="button" class="ghost-btn" @click="emit('close')">取消</button>
-        <button class="primary-btn" type="submit" :disabled="loading"><IconSvg name="save" />保存订单</button>
+        <button type="button" class="ghost-btn" @click="emit('close')">{{ showSubmit ? '取消' : '关闭' }}</button>
+        <button v-if="showSubmit" class="primary-btn" type="submit" :disabled="loading"><IconSvg :name="submitIcon" />{{ submitLabel }}</button>
       </div>
     </form>
     <slot name="after" />

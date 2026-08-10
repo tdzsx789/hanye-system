@@ -22,12 +22,16 @@ const props = defineProps({
   formatSize: {
     type: Function,
     required: true
+  },
+  readonly: {
+    type: Boolean,
+    default: false
   }
 });
 
 const emit = defineEmits(["upload", "preview", "download", "delete", "recycle", "disabledUpload"]);
 
-const canUpload = computed(() => Boolean(props.orderNo));
+const canUpload = computed(() => Boolean(props.orderNo) && !props.readonly);
 const hint = computed(() =>
   props.orderNo
     ? "单据图片、照片、PDF 上传后会自动归档到当前订单。"
@@ -45,7 +49,8 @@ const hint = computed(() =>
     upload-label="上传订单附件"
     empty-text="暂无订单附件"
     :hint="hint"
-    :show-recycle="true"
+    :show-recycle="!readonly"
+    :readonly="readonly"
     :format-size="formatSize"
     @upload="emit('upload', $event)"
     @disabled-upload="emit('disabledUpload')"

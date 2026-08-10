@@ -18,6 +18,13 @@ export function updateStatementDownloadStatus(id, status) {
   });
 }
 
+export function saveStatementPayment(payload) {
+  return apiFetch("/statement-downloads/payment", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
 export function syncStatementDownloads(rows = []) {
   return apiFetch("/statement-downloads/sync", {
     method: "POST",

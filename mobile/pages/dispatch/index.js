@@ -247,8 +247,11 @@ Page({
       : sortDispatchRows(rows, this.data.orders, date);
     this.setData({ saving: true });
     try {
-      await api.saveDispatchPlan(date, nextRows);
-      this.setData({ rawRows: nextRows });
+      const savedPlan = await api.saveDispatchPlan(date, nextRows);
+      const savedRows = savedPlan && Array.isArray(savedPlan.rows)
+        ? sortDispatchRows(savedPlan.rows, this.data.orders, date)
+        : nextRows;
+      this.setData({ rawRows: savedRows });
       this.refreshDerivedData();
       if (source.toast) wx.showToast({ title: source.toast, icon: "none" });
       return true;
@@ -322,9 +325,12 @@ Page({
         const orders = this.data.orders.map((order) => order.no === updatedOrder.no ? updatedOrder : order);
         this.setData({ orders });
       }
-      await api.saveDispatchPlan(this.data.dispatchDate, rows.map((item) => sanitizeDispatchRow(item)));
+      const savedPlan = await api.saveDispatchPlan(this.data.dispatchDate, rows.map((item) => sanitizeDispatchRow(item)));
+      const savedRows = savedPlan && Array.isArray(savedPlan.rows)
+        ? savedPlan.rows.map((item) => sanitizeDispatchRow(item))
+        : rows.map((item) => sanitizeDispatchRow(item));
       this.setData({
-        rawRows: rows.map((item) => sanitizeDispatchRow(item)),
+        rawRows: savedRows,
         ...(source.switchToStatus ? { activeStatus: nextStatus } : {})
       });
       this.refreshDerivedData();

@@ -43,7 +43,7 @@ const SAFE_FILE_TYPES = [
 ];
 const PREVIEW_MIMES = new Set(SAFE_FILE_TYPES.flatMap((item) => item.mimes));
 const AUTH_TOKEN_TTL_SECONDS = Number(process.env.AUTH_TOKEN_TTL_SECONDS || 7 * 24 * 60 * 60);
-const VEHICLE_PROFIT_EXCHANGE_RATE_MODULES = ["bossVehicleProfit", "bossDashboard", "bossCompanyProfit", "financeWages", "financeSupplierStatements", "financeCustomsStatements"];
+const VEHICLE_PROFIT_EXCHANGE_RATE_MODULES = ["bossVehicleProfit", "bossSupplierProfit", "bossDashboard", "bossCompanyProfit", "financeWages", "financeSupplierStatements", "financeCustomsStatements"];
 const COMPANY_EXPENSE_MODULES = ["bossCompanyExpenses", "bossDashboard", "bossCompanyProfit"];
 const AUTH_SECRET = process.env.HANYE_AUTH_SECRET || process.env.AUTH_SECRET || "hanye-system-local-dev-secret";
 const VEHICLE_EXPENSE_TYPES = new Set(["fuel", "repair", "annual", "other"]);
@@ -172,6 +172,10 @@ function requestHasTransitDeletePermission(req) {
   return ["管理员", "超级管理员", "老板"].some((keyword) => text.includes(keyword));
 }
 
+function requestCanManageOrderAudit(req) {
+  return ["管理员", "财务"].includes(normalizeAccountRole(req.account?.role));
+}
+
 app.disable("x-powered-by");
 
 app.use(cors({
@@ -231,10 +235,17 @@ function todayInputValue() {
   return local.toISOString().slice(0, 10);
 }
 
+function normalizeEffectiveDate(value = "", fallback = todayInputValue()) {
+  const text = String(value || "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : fallback;
+}
+
 function mapCustomer(row) {
+  const customerCategory = row.type === "客户" && row.customer_category === "报关客户" ? "报关客户" : row.type === "客户" ? "运输客户" : "";
   return {
     id: row.id,
     type: row.type,
+    customerCategory,
     name: row.name,
     province: row.province || "广东省",
     city: row.city,
@@ -267,10 +278,12 @@ function normalizeCustomerPayload(body, id = "") {
   const address = String(body.address || invoice.address || "").trim();
   const taxNo = String(body.taxNo || invoice.taxNo || "").trim();
   const type = body.type === "供应商" ? "供应商" : "客户";
+  const customerCategory = type === "客户" && (body.customerCategory || body.customer_category) === "报关客户" ? "报关客户" : type === "客户" ? "运输客户" : "";
   const settlementCurrency = String(body.settlementCurrency || "").trim();
   return {
     id,
     type,
+    customerCategory,
     name,
     province: String(body.province || "广东省").trim(),
     city: String(body.city || "深圳市").trim(),
@@ -295,6 +308,7 @@ function normalizeCustomerPayload(body, id = "") {
 }
 
 function mapOrder(row) {
+  const createdByName = row.created_by_display_name || row.created_by_username || "";
   return {
     no: row.no,
     dispatchNo: row.dispatch_no || "",
@@ -320,6 +334,9 @@ function mapOrder(row) {
     receivableHKD: row.receivable_hkd,
     receivableRMB: row.receivable_rmb,
     status: row.status,
+    createdByAccountId: row.created_by_account_id || null,
+    createdByUsername: row.created_by_username || "",
+    createdByName,
     remark: row.remark || "",
     tripNoEnabled: Boolean(row.trip_no_enabled),
     tripNo: row.trip_no || "",
@@ -329,9 +346,42 @@ function mapOrder(row) {
   };
 }
 
+function creatorFieldsFromAccount(account = {}) {
+  const username = String(account.username || "").trim();
+  const displayName = String(account.displayName || account.display_name || username).trim();
+  const accountId = Number(account.id);
+  return {
+    createdByAccountId: Number.isFinite(accountId) && accountId > 0 ? accountId : null,
+    createdByUsername: username,
+    createdByName: displayName || username
+  };
+}
+
+function creatorFieldsFromRecord(record = {}) {
+  const accountId = Number(record.createdByAccountId ?? record.created_by_account_id ?? 0);
+  const username = String(record.createdByUsername || record.created_by_username || "").trim();
+  const name = String(
+    record.createdByName ||
+    record.createdByDisplayName ||
+    record.created_by_display_name ||
+    username ||
+    ""
+  ).trim();
+  return {
+    createdByAccountId: Number.isFinite(accountId) && accountId > 0 ? accountId : null,
+    createdByUsername: username,
+    createdByName: name
+  };
+}
+
+function creatorFieldsHaveValue(fields = {}) {
+  return Boolean(fields.createdByAccountId || fields.createdByUsername || fields.createdByName);
+}
+
 const ORDER_EXPORT_COLUMNS = [
   ["排车单号", "dispatchNo", 82],
   ["订单号", "no", 82],
+  ["创建者", "createdByName", 56],
   ["客户", "customer", 118],
   ["业务", "businessType", 46],
   ["口岸", "port", 70],
@@ -1243,6 +1293,151 @@ function applyExcelTemplateLogo(workbook, worksheet, template, headerBlockRows, 
   }
 }
 
+function statementReceiptImageExtension(file = {}) {
+  const mime = normalizeMime(file.mime || "");
+  const filename = String(file.filename || "").toLowerCase();
+  if (mime === "image/png" || filename.endsWith(".png")) return "png";
+  if (mime === "image/jpeg" || mime === "image/pjpeg" || /\.(jpe?g)$/i.test(filename)) return "jpeg";
+  return "";
+}
+
+function statementReceiptDateLabel(value = "") {
+  const text = String(value || "").trim();
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return text || "未填写日期";
+  return `${Number(match[2])}月${Number(match[3])}号`;
+}
+
+async function loadOrderReceiptImageRows(orders = []) {
+  const orderNos = orders.map((order) => String(order.no || "").trim()).filter(Boolean);
+  if (!orderNos.length) return [];
+  const placeholders = orderNos.map(() => "?").join(",");
+  const orderMeta = new Map(orders.map((order) => [
+    String(order.no || "").trim(),
+    {
+      no: String(order.no || "").trim(),
+      date: String(order.date || "").trim(),
+      customer: String(order.customer || "").trim()
+    }
+  ]));
+  const rows = await db.prepare(`
+    SELECT *
+    FROM files
+    WHERE deleted_at IS NULL
+      AND entity_type = 'order'
+      AND entity_id IN (${placeholders})
+    ORDER BY entity_id ASC, created_at ASC, id ASC
+  `).all(...orderNos);
+  return rows
+    .map((row) => ({ ...row, extension: statementReceiptImageExtension(row), order: orderMeta.get(String(row.entity_id || "").trim()) || null }))
+    .filter((row) => row.extension && row.order);
+}
+
+async function fetchReceiptImageBuffer(file = {}) {
+  if (file.storage_provider !== "oss" || !file.object_key || !ossClient) return null;
+  const url = signedOssUrl(file, "inline");
+  if (!url) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) return null;
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    if (!buffer.length || buffer.length > MAX_UPLOAD_BYTES) return null;
+    return buffer;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function addStatementReceiptSheet(workbook, orders = []) {
+  const receiptRows = await loadOrderReceiptImageRows(orders);
+  const worksheet = workbook.addWorksheet("票据");
+  worksheet.properties.defaultRowHeight = 22;
+  worksheet.pageSetup = {
+    paperSize: 9,
+    orientation: "portrait",
+    fitToPage: true,
+    fitToWidth: 1,
+    fitToHeight: 0,
+    margins: { left: 0.35, right: 0.35, top: 0.35, bottom: 0.35, header: 0.1, footer: 0.1 }
+  };
+  worksheet.columns = [
+    { width: 18 },
+    { width: 24 },
+    { width: 24 },
+    { width: 24 },
+    { width: 24 }
+  ];
+  const border = { style: "thin", color: { argb: excelArgb("#d9e3f2") } };
+  const imageWidth = 160;
+  const imageHeight = 112;
+  const imagesPerRow = 3;
+  let cursorRow = 1;
+  if (!receiptRows.length) {
+    worksheet.mergeCells(cursorRow, 1, cursorRow, 5);
+    const emptyCell = worksheet.getCell(cursorRow, 1);
+    emptyCell.value = "未找到可导出的票据图片";
+    emptyCell.font = { name: "Microsoft YaHei", size: 12, bold: true, color: { argb: excelArgb("#b91c1c") } };
+    emptyCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: excelArgb("#fef2f2") } };
+    emptyCell.alignment = { vertical: "middle", horizontal: "center" };
+    emptyCell.border = { top: border, left: border, bottom: border, right: border };
+    worksheet.getRow(cursorRow).height = 24;
+    return;
+  }
+  const grouped = new Map();
+  receiptRows.forEach((file) => {
+    const date = file.order.date || "未填写日期";
+    if (!grouped.has(date)) grouped.set(date, []);
+    grouped.get(date).push(file);
+  });
+  const sortedGroups = Array.from(grouped.entries()).sort(([left], [right]) => left.localeCompare(right));
+  for (const [date, files] of sortedGroups) {
+    worksheet.mergeCells(cursorRow, 1, cursorRow, 5);
+    const dateCell = worksheet.getCell(cursorRow, 1);
+    dateCell.value = statementReceiptDateLabel(date);
+    dateCell.font = { name: "Microsoft YaHei", size: 13, bold: true, color: { argb: excelArgb("#17233c") } };
+    dateCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: excelArgb("#f1f5f9") } };
+    dateCell.alignment = { vertical: "middle", horizontal: "left" };
+    dateCell.border = { top: border, left: border, bottom: border, right: border };
+    worksheet.getRow(cursorRow).height = 24;
+    cursorRow += 1;
+
+    for (let index = 0; index < files.length; index += imagesPerRow) {
+      const batch = files.slice(index, index + imagesPerRow);
+      const imageRowNumber = cursorRow;
+      worksheet.getRow(imageRowNumber).height = 90;
+      for (let itemIndex = 0; itemIndex < batch.length; itemIndex += 1) {
+        const file = batch[itemIndex];
+        const startColumn = 1 + itemIndex * 2;
+        const imageBuffer = await fetchReceiptImageBuffer(file);
+        if (!imageBuffer) {
+          const imageCell = worksheet.getCell(imageRowNumber, startColumn);
+          imageCell.value = "图片读取失败";
+          imageCell.font = { name: "Microsoft YaHei", size: 10, color: { argb: excelArgb("#dc2626") } };
+          imageCell.alignment = { vertical: "middle", horizontal: "center" };
+          imageCell.border = { top: border, left: border, bottom: border, right: border };
+          continue;
+        }
+        const imageId = workbook.addImage({
+          buffer: imageBuffer,
+          extension: file.extension
+        });
+        worksheet.addImage(imageId, {
+          tl: { col: startColumn - 1 + 0.08, row: imageRowNumber - 1 + 0.12 },
+          ext: { width: imageWidth, height: imageHeight },
+          editAs: "oneCell"
+        });
+      }
+      cursorRow += 2;
+    }
+    cursorRow += 1;
+  }
+}
+
 function pdfTextHeight(doc, value, width, fontSize, options = {}) {
   doc.fontSize(Number(fontSize || 8));
   return doc.heightOfString(textValue(value), {
@@ -1277,7 +1472,7 @@ function pdfFooterItemY(item = {}, template = null) {
   return Math.max(0, Math.min(rawY, footerHeight - 4));
 }
 
-async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePayload = null, exchange = null) {
+async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePayload = null, exchange = null, options = {}) {
   const template = normalizeExportTemplate(templatePayload);
   const columns = exportColumnsForOrders(templatePayload, orders);
   const headers = columns.map(exportColumnHeaderText);
@@ -1470,6 +1665,10 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
     });
   });
 
+  const shouldIncludeReceiptSheet = Boolean(options.includeReceiptSheet) || String(title || "").startsWith("客户对账单");
+  if (shouldIncludeReceiptSheet) {
+    await addStatementReceiptSheet(workbook, orders);
+  }
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 
@@ -1609,6 +1808,8 @@ function normalizeExportOrderSnapshot(order = {}) {
   });
   snapshot.dispatchNo = String(snapshot.dispatchNo || order.dispatchNo || "");
   snapshot.no = String(snapshot.no || order.no || "");
+  snapshot.createdByName = String(snapshot.createdByName || order.createdByName || order.created_by_display_name || order.createdByUsername || order.created_by_username || "");
+  snapshot.createdByUsername = String(snapshot.createdByUsername || order.createdByUsername || order.created_by_username || "");
   snapshot.customer = String(snapshot.customer || order.customer || "");
   snapshot.businessType = String(snapshot.businessType || order.businessType || "");
   snapshot.port = String(snapshot.port || order.port || "");
@@ -1970,14 +2171,21 @@ function mapVehicle(row) {
 }
 
 function mapVehicleExpense(row) {
+  const year = row.expense_year || String(row.start_date || row.expense_date || "").slice(0, 4) || "";
+  const startDate = row.start_date || "";
+  const endDate = row.end_date || "";
   return {
     id: row.id,
     type: row.expense_type,
     name: row.name || "",
     fuelStation: row.fuel_station || "",
+    fuelLiters: Number(row.fuel_liters || 0),
+    odometerKm: Number(row.odometer_km || 0),
     plate: row.plate || "",
     date: row.expense_date || "",
-    year: row.expense_year || "",
+    year,
+    startDate,
+    endDate,
     currency: row.currency || "人民币",
     amount: Number(row.amount || 0),
     note: row.note || "",
@@ -1997,13 +2205,25 @@ function normalizeVehicleExpensePayload(body = {}, current = null) {
     ? String(body.type || body.expenseType || current?.expense_type || "fuel")
     : "fuel";
   const rawName = String(body.name ?? current?.name ?? "").trim();
-  const yearValue = Number(body.year ?? body.expenseYear ?? current?.expense_year ?? new Date().getFullYear());
-  const year = Number.isInteger(yearValue) && yearValue >= 2000 && yearValue <= 2100 ? yearValue : new Date().getFullYear();
+  const currentYear = Number(current?.expense_year || String(current?.expense_date || "").slice(0, 4) || new Date().getFullYear());
+  const yearValue = Number(body.year ?? body.expenseYear ?? current?.expense_year ?? currentYear);
+  const year = Number.isInteger(yearValue) && yearValue >= 2000 && yearValue <= 2100 ? yearValue : currentYear || new Date().getFullYear();
+  const rawDate = String(body.date || body.expenseDate || current?.expense_date || todayInputValue()).trim();
+  const explicitStartDate = String(body.startDate || body.start_date || "").trim();
+  const explicitEndDate = String(body.endDate || body.end_date || "").trim();
+  const startDate = type === "annual"
+    ? explicitStartDate || String(current?.start_date || "").trim() || `${year}-01-01`
+    : "";
+  const endDate = type === "annual"
+    ? explicitEndDate || String(current?.end_date || "").trim() || addInputYears(startDate, 1)
+    : "";
+  const startYear = Number(String(startDate || "").slice(0, 4));
+  const annualYear = type === "annual" && Number.isInteger(startYear) && startYear >= 2000 && startYear <= 2100 ? startYear : year;
   const date = type === "annual"
-    ? `${year}-01-01`
-    : String(body.date || body.expenseDate || current?.expense_date || todayInputValue()).trim();
+    ? startDate || `${year}-01-01`
+    : rawDate;
   const defaultNames = {
-    fuel: "加油费",
+    fuel: "加油记录",
     repair: "维修费",
     annual: "保险费",
     other: ""
@@ -2017,9 +2237,17 @@ function normalizeVehicleExpensePayload(body = {}, current = null) {
     fuelStation: type === "fuel"
       ? String(body.fuelStation ?? body.fuel_station ?? current?.fuel_station ?? "").trim()
       : "",
+    fuelLiters: type === "fuel"
+      ? Number(body.fuelLiters ?? body.fuel_liters ?? current?.fuel_liters ?? 0)
+      : 0,
+    odometerKm: type === "fuel"
+      ? Number(body.odometerKm ?? body.odometer_km ?? current?.odometer_km ?? 0)
+      : 0,
     plate: String(body.plate ?? current?.plate ?? "").trim(),
     date,
-    year: type === "annual" ? year : null,
+    year: type === "annual" ? annualYear : null,
+    startDate,
+    endDate,
     currency: normalizeVehicleExpenseCurrency(body.currency ?? current?.currency ?? "人民币"),
     amount: Number(body.amount ?? current?.amount ?? 0),
     note: String(body.note ?? current?.note ?? "").trim()
@@ -2044,12 +2272,18 @@ function mapDriver(row) {
   };
 }
 
-const FEE_ITEM_CATEGORY_OPTIONS = ["正常", "代垫", "公司自费"];
-const FEE_ITEM_COST_SOURCE_OPTIONS = ["供应商", "香港司机", "大陆骑师", "公司自费"];
+const FEE_ITEM_CATEGORY_OPTIONS = ["正常", "代垫"];
+const ORDER_FEE_CATEGORY_OPTIONS = ["正常", "代垫", "公司自费"];
+const FEE_ITEM_COST_SOURCE_OPTIONS = ["供应商", "香港司机", "大陆骑师", "公司自费", "其他支出"];
 
 function normalizeFeeItemCategory(value = "", fallback = "正常") {
   const category = String(value || "").trim();
   return FEE_ITEM_CATEGORY_OPTIONS.includes(category) ? category : fallback;
+}
+
+function normalizeOrderFeeCategory(value = "", fallback = "正常") {
+  const category = String(value || "").trim();
+  return ORDER_FEE_CATEGORY_OPTIONS.includes(category) ? category : fallback;
 }
 
 function normalizeFeeItemCostSourceToken(value = "") {
@@ -2084,29 +2318,19 @@ function feeItemCostSourceText(value = "供应商") {
   return normalizeFeeItemCostSources(value).join(",");
 }
 
-function feeItemIsCompanySelfPay(row = {}) {
-  return normalizeFeeItemCategory(row.category) === "公司自费"
-    || normalizeFeeItemCostSources(row.cost_source ?? row.costSource ?? row.costSources).includes("公司自费");
+function feeItemCategoryValue(category = "") {
+  return normalizeFeeItemCategory(category);
 }
 
-function feeItemCategoryValue(category = "", costSource = "供应商") {
-  const normalizedCategory = normalizeFeeItemCategory(category);
-  return feeItemIsCompanySelfPay({ category: normalizedCategory, cost_source: costSource })
-    ? "公司自费"
-    : normalizedCategory;
-}
-
-function feeItemCostSourceValue(category = "", value = "供应商") {
-  return normalizeFeeItemCategory(category) === "公司自费"
-    ? "公司自费"
-    : feeItemCostSourceText(value);
+function feeItemCostSourceValue(value = "供应商") {
+  return feeItemCostSourceText(value);
 }
 
 function mapFeeItem(row) {
   const costSources = normalizeFeeItemCostSources(row.cost_source);
   return {
     id: row.id,
-    category: feeItemCategoryValue(row.category, row.cost_source),
+    category: feeItemCategoryValue(row.category),
     name: row.name,
     currency: row.currency,
     defaultAmount: row.default_amount,
@@ -2130,7 +2354,9 @@ function mapFreightRate(row) {
     tonnage: row.tonnage,
     rmbAmount: row.rmb_amount,
     hkdAmount: row.hkd_amount,
-    sortOrder: row.sort_order
+    sortOrder: row.sort_order,
+    effectiveDate: row.effective_date || "1970-01-01",
+    updatedAt: row.updated_at || ""
   };
 }
 
@@ -2204,16 +2430,19 @@ function normalizeCostCenterValues(value = {}, fallbackCurrency = "港币") {
 }
 
 function mapCostCenterRate(row) {
+  const source = normalizeCostCenterSource(row.source);
   return {
     id: row.id,
-    source: normalizeCostCenterSource(row.source),
+    source,
     entityId: row.entity_id || "",
     entityName: row.entity_name || "",
     origin: row.origin || "",
     destination: row.destination || "",
+    tonnage: row.tonnage || (source === "供应商" ? "3T" : ""),
     currency: row.currency || "港币",
     costValues: normalizeCostCenterValues(row.cost_values, row.currency || "港币"),
     note: row.note || "",
+    effectiveDate: row.effective_date || "1970-01-01",
     updatedAt: row.updated_at || row.created_at || ""
   };
 }
@@ -2269,6 +2498,8 @@ function readCostCenterRatePayload(body = {}, current = null) {
   const origin = String(body.origin ?? current?.origin ?? "").trim();
   const destination = String(body.destination ?? current?.destination ?? "").trim();
   const source = normalizeCostCenterSource(body.source ?? current?.source ?? "");
+  const tonnage = String(body.tonnage ?? current?.tonnage ?? "").trim() || (source === "供应商" ? "3T" : "");
+  const fallbackEffectiveDate = current?.effective_date || todayInputValue();
   const entityName = String(body.entityName ?? body.entity_name ?? current?.entity_name ?? "").trim()
     || [origin, destination].filter(Boolean).join(" - ")
     || source;
@@ -2278,12 +2509,17 @@ function readCostCenterRatePayload(body = {}, current = null) {
     entityName,
     origin,
     destination,
+    tonnage,
     currency: normalizeCostCenterCurrency(body.currency ?? current?.currency ?? "港币"),
     costValues: JSON.stringify(normalizeCostCenterValues(
       body.costValues ?? body.cost_values ?? current?.cost_values,
       body.currency ?? current?.currency ?? "港币"
     )),
-    note: String(body.note ?? current?.note ?? "").trim()
+    note: String(body.note ?? current?.note ?? "").trim(),
+    effectiveDate: normalizeEffectiveDate(
+      body.effectiveDate ?? body.effective_date ?? body.modifiedDate ?? body.modified_date ?? current?.effective_date,
+      fallbackEffectiveDate
+    )
   };
 }
 
@@ -2348,6 +2584,8 @@ function mapStatementDownload(row) {
     start: row.start_date || "",
     end: row.end_date || "",
     status: normalizeStatementDownloadStatus(row.status || "已导出"),
+    paymentStatus: normalizeStatementPaymentStatus(row.payment_status || "未收款"),
+    paymentDate: row.payment_date || "",
     downloadedAt: row.downloaded_at || row.updated_at || row.created_at || "",
     createdAt: row.created_at || "",
     updatedAt: row.updated_at || ""
@@ -2370,6 +2608,7 @@ function mapCustomsBusiness(row) {
     inspectionFee: Number(row.inspection_fee || 0),
     checkFee: Number(row.check_fee || 0),
     otherFee: Number(row.other_fee || 0),
+    customFields: normalizeCustomsBusinessCustomFields(row.custom_fields),
     total: Number(row.total || 0),
     remark: row.remark || "",
     createdAt: row.created_at || "",
@@ -2414,6 +2653,12 @@ function parseInputDate(value) {
 function addInputDays(value, days) {
   const date = parseInputDate(value) || parseInputDate(todayInputValue()) || new Date();
   date.setDate(date.getDate() + Number(days || 0));
+  return dateInputFromDate(date);
+}
+
+function addInputYears(value, years) {
+  const date = parseInputDate(value) || parseInputDate(todayInputValue()) || new Date();
+  date.setFullYear(date.getFullYear() + Number(years || 0));
   return dateInputFromDate(date);
 }
 
@@ -2558,6 +2803,32 @@ function customsStatementExportContext(body = {}) {
   return { company, period, start, end, rangeLabel, title };
 }
 
+const CUSTOMS_STATEMENT_OUTER_BORDER = { style: "medium", color: { argb: "FF000000" } };
+const CUSTOMS_STATEMENT_INNER_BORDER = { style: "thin", color: { argb: "FFD1D5DB" } };
+const CUSTOMS_STATEMENT_HEADER_BORDER = { style: "thin", color: { argb: "FF9CA3AF" } };
+
+function customsStatementTableBorder(rowNumber, columnNumber, tableStartRow, tableEndRow, lastColumn, options = {}) {
+  const isHeader = rowNumber === tableStartRow;
+  const isTotal = Boolean(options.isTotal);
+  const isFirstColumn = columnNumber === 1;
+  const isLastColumn = columnNumber === lastColumn;
+  if (isHeader) {
+    return {
+      top: CUSTOMS_STATEMENT_OUTER_BORDER,
+      left: isFirstColumn ? CUSTOMS_STATEMENT_OUTER_BORDER : CUSTOMS_STATEMENT_HEADER_BORDER,
+      right: isLastColumn ? CUSTOMS_STATEMENT_OUTER_BORDER : CUSTOMS_STATEMENT_HEADER_BORDER,
+      bottom: CUSTOMS_STATEMENT_OUTER_BORDER
+    };
+  }
+  const border = {
+    bottom: isTotal || rowNumber === tableEndRow ? CUSTOMS_STATEMENT_OUTER_BORDER : CUSTOMS_STATEMENT_INNER_BORDER
+  };
+  if (isFirstColumn) border.left = CUSTOMS_STATEMENT_OUTER_BORDER;
+  if (isLastColumn) border.right = CUSTOMS_STATEMENT_OUTER_BORDER;
+  if (isTotal) border.top = CUSTOMS_STATEMENT_OUTER_BORDER;
+  return border;
+}
+
 async function renderCustomsStatementXlsxBuffer(rows = [], context = {}) {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "汉业管理系统";
@@ -2598,28 +2869,27 @@ async function renderCustomsStatementXlsxBuffer(rows = [], context = {}) {
   worksheet.getRow(2).height = 22;
 
   const tableStartRow = 4;
+  const bodyRows = [...customsStatementExportRows(rows), customsStatementTotalRow(rows)];
+  const tableEndRow = tableStartRow + bodyRows.length;
   const headerRow = worksheet.getRow(tableStartRow);
   headerRow.values = CUSTOMS_STATEMENT_EXPORT_COLUMNS.map((column) => column.label);
   headerRow.height = 34;
-  headerRow.eachCell((cell) => {
+  for (let columnNumber = 1; columnNumber <= mergeEndColumn; columnNumber += 1) {
+    const cell = headerRow.getCell(columnNumber);
     cell.font = { name: "Microsoft YaHei", size: 8, bold: true, color: { argb: "FF1F2A44" } };
     cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF1F5F9" } };
     cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
-    cell.border = {
-      top: { style: "thin", color: { argb: "FFD9E3F2" } },
-      left: { style: "thin", color: { argb: "FFD9E3F2" } },
-      bottom: { style: "thin", color: { argb: "FFD9E3F2" } },
-      right: { style: "thin", color: { argb: "FFD9E3F2" } }
-    };
-  });
+    cell.border = customsStatementTableBorder(tableStartRow, columnNumber, tableStartRow, tableEndRow, mergeEndColumn);
+  }
 
-  const bodyRows = [...customsStatementExportRows(rows), customsStatementTotalRow(rows)];
   bodyRows.forEach((values, rowIndex) => {
     const isTotalRow = rowIndex === bodyRows.length - 1;
-    const row = worksheet.getRow(tableStartRow + 1 + rowIndex);
+    const rowNumber = tableStartRow + 1 + rowIndex;
+    const row = worksheet.getRow(rowNumber);
     row.values = values.map(excelSingleLineValue);
     row.height = 22;
-    row.eachCell((cell, columnNumber) => {
+    for (let columnNumber = 1; columnNumber <= mergeEndColumn; columnNumber += 1) {
+      const cell = row.getCell(columnNumber);
       const column = CUSTOMS_STATEMENT_EXPORT_COLUMNS[columnNumber - 1] || {};
       if (column.amount && cell.value !== "") cell.numFmt = "#,##0.##";
       cell.font = { name: "Microsoft YaHei", size: 8, bold: isTotalRow, color: { argb: "FF17233C" } };
@@ -2631,13 +2901,8 @@ async function renderCustomsStatementXlsxBuffer(rows = [], context = {}) {
       if (isTotalRow) {
         cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF1F5F9" } };
       }
-      cell.border = {
-        top: { style: "thin", color: { argb: "FFD9E3F2" } },
-        left: { style: "thin", color: { argb: "FFD9E3F2" } },
-        bottom: { style: "thin", color: { argb: "FFD9E3F2" } },
-        right: { style: "thin", color: { argb: "FFD9E3F2" } }
-      };
-    });
+      cell.border = customsStatementTableBorder(rowNumber, columnNumber, tableStartRow, tableEndRow, mergeEndColumn, { isTotal: isTotalRow });
+    }
   });
   worksheet.views = [{ state: "frozen", ySplit: tableStartRow }];
   return workbook.xlsx.writeBuffer();
@@ -2773,6 +3038,25 @@ function numberField(value) {
   return Number.isFinite(number) ? number : 0;
 }
 
+function normalizeCustomsBusinessCustomFields(value = []) {
+  const source = Array.isArray(value) ? value : parseJsonArrayText(value);
+  const fieldsByName = new Map();
+  source.forEach((field) => {
+    const name = String(field?.name ?? field?.label ?? field?.key ?? "").trim();
+    if (!name) return;
+    const amount = numberField(field?.value ?? field?.amount ?? field?.fee);
+    fieldsByName.set(name, {
+      name,
+      value: numberField((fieldsByName.get(name)?.value || 0) + amount)
+    });
+  });
+  return Array.from(fieldsByName.values()).slice(0, 40);
+}
+
+function customsBusinessCustomFieldsTotal(fields = []) {
+  return normalizeCustomsBusinessCustomFields(fields).reduce((sum, field) => sum + numberField(field.value), 0);
+}
+
 function normalizeCustomsBusinessPayload(body = {}) {
   const customsFee = numberField(body.customsFee ?? body.customs_fee);
   const pageFee = numberField(body.pageFee ?? body.page_fee);
@@ -2780,8 +3064,9 @@ function normalizeCustomsBusinessPayload(body = {}) {
   const inspectionFee = numberField(body.inspectionFee ?? body.inspection_fee);
   const checkFee = numberField(body.checkFee ?? body.check_fee);
   const otherFee = numberField(body.otherFee ?? body.other_fee);
-  const totalInput = body.total ?? "";
-  const computedTotal = customsFee + pageFee + manifestFee + inspectionFee + checkFee + otherFee;
+  const customFields = normalizeCustomsBusinessCustomFields(body.customFields ?? body.custom_fields);
+  const computedTotal = customsFee + pageFee + manifestFee + inspectionFee + checkFee + otherFee
+    + customsBusinessCustomFieldsTotal(customFields);
   return {
     date: normalizeCustomsBusinessDate(body.date ?? body.businessDate ?? body.business_date),
     declarationNo: String(body.declarationNo ?? body.declaration_no ?? "").trim(),
@@ -2796,7 +3081,9 @@ function normalizeCustomsBusinessPayload(body = {}) {
     inspectionFee,
     checkFee,
     otherFee,
-    total: totalInput === "" || totalInput === null || totalInput === undefined ? computedTotal : numberField(totalInput),
+    customFields,
+    customFieldsJson: JSON.stringify(customFields),
+    total: computedTotal,
     remark: String(body.remark ?? "").trim()
   };
 }
@@ -2925,18 +3212,46 @@ async function nextCustomerId(type) {
   return `${prefix}${String(next).padStart(8, "0")}`;
 }
 
-async function nextOrderNo() {
-  const today = new Date();
-  const yymmdd = `${String(today.getFullYear()).slice(2)}${String(today.getMonth() + 1).padStart(2, "0")}${String(today.getDate()).padStart(2, "0")}`;
-  const prefix = `HY${yymmdd}`;
-  const row = await db.prepare(`
+function normalizeBusinessNoDate(value = todayInputValue()) {
+  const text = String(value || "").trim().slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : todayInputValue();
+}
+
+function businessNoPrefix(prefix, date = todayInputValue()) {
+  return `${prefix}${normalizeBusinessNoDate(date).replaceAll("-", "")}`;
+}
+
+function nextBusinessNoFromRows(prefix, rows = []) {
+  let max = 0;
+  rows.forEach((row) => {
+    const value = String(row?.no || row?.dispatch_no || row?.dispatchNo || "").trim();
+    if (!value.startsWith(prefix)) return;
+    const sequence = Number(value.slice(prefix.length));
+    if (Number.isFinite(sequence)) max = Math.max(max, sequence);
+  });
+  return `${prefix}${String(max + 1).padStart(3, "0")}`;
+}
+
+async function nextOrderNo(date = todayInputValue()) {
+  const prefix = businessNoPrefix("HY", date);
+  const rows = await db.prepare(`
     SELECT no FROM orders
     WHERE no LIKE ?
-    ORDER BY no DESC
-    LIMIT 1
-  `).get(`${prefix}%`);
-  const next = row ? Number(row.no.slice(prefix.length)) + 1 : 1;
-  return `${prefix}${String(next).padStart(4, "0")}`;
+  `).all(`${prefix}%`);
+  return nextBusinessNoFromRows(prefix, rows);
+}
+
+async function nextDispatchNo(date = todayInputValue()) {
+  const prefix = businessNoPrefix("PC", date);
+  const orderRows = await db.prepare(`
+    SELECT dispatch_no FROM orders
+    WHERE dispatch_no LIKE ?
+  `).all(`${prefix}%`);
+  const plan = await db.prepare("SELECT rows_json FROM dispatch_plans WHERE plan_date = ?").get(normalizeBusinessNoDate(date));
+  const planRows = parseDispatchPlanRowsJson(plan?.rows_json)
+    .map((row) => ({ dispatch_no: row.dispatchNo }))
+    .filter((row) => String(row.dispatch_no || "").startsWith(prefix));
+  return nextBusinessNoFromRows(prefix, [...orderRows, ...planRows]);
 }
 
 app.get("/api/health", async (_req, res) => {
@@ -3191,10 +3506,10 @@ app.post("/api/customs-businesses", async (req, res) => {
   const result = await db.prepare(`
     INSERT INTO customs_businesses
       (business_date, declaration_no, six_sheet_no, company, direction, item_count, page_count,
-       customs_fee, page_fee, manifest_fee, inspection_fee, check_fee, other_fee, total, remark)
+       customs_fee, page_fee, manifest_fee, inspection_fee, check_fee, other_fee, custom_fields, total, remark)
     VALUES
       (@date, @declarationNo, @sixSheetNo, @company, @direction, @itemCount, @pageCount,
-       @customsFee, @pageFee, @manifestFee, @inspectionFee, @checkFee, @otherFee, @total, @remark)
+       @customsFee, @pageFee, @manifestFee, @inspectionFee, @checkFee, @otherFee, @customFieldsJson, @total, @remark)
   `).run(item);
   await writeAudit("create", "customs_business", String(result.lastInsertId), `${item.date}/${item.company}/${item.declarationNo || item.sixSheetNo}`);
   const row = await db.prepare("SELECT * FROM customs_businesses WHERE id = ?").get(result.lastInsertId);
@@ -3394,6 +3709,7 @@ app.patch("/api/customers/:id", async (req, res) => {
   const result = await db.prepare(`
     UPDATE customers
     SET type = @type,
+        customer_category = @customerCategory,
         name = @name,
         province = @province,
         city = @city,
@@ -3432,11 +3748,11 @@ app.post("/api/customers", async (req, res) => {
 
   await db.prepare(`
     INSERT INTO customers
-      (id, type, name, province, city, address, term, settlement_currency, receivable_rmb, receivable_hkd, recent_order, created_at,
+      (id, type, customer_category, name, province, city, address, term, settlement_currency, receivable_rmb, receivable_hkd, recent_order, created_at,
        tax_no, contact, mobile, driver_wage_adjust_hkd, default_template_id,
        invoice_title, invoice_tax_no, invoice_bank, invoice_account, invoice_address_phone)
     VALUES
-      (@id, @type, @name, @province, @city, @address, @term, @settlementCurrency, @receivableRMB, @receivableHKD, @recentOrder, @createdAt,
+      (@id, @type, @customerCategory, @name, @province, @city, @address, @term, @settlementCurrency, @receivableRMB, @receivableHKD, @recentOrder, @createdAt,
        @taxNo, @contact, @mobile, @driverWageAdjustHKD, @defaultTemplateId,
        @invoiceTitle, @invoiceTaxNo, @invoiceBank, @invoiceAccount, @invoiceAddressPhone)
   `).run(item);
@@ -3549,6 +3865,148 @@ app.get("/api/orders", async (_req, res) => {
   res.json(await hydrateOrderFees(rows.map(mapOrder)));
 });
 
+function parseDispatchPlanRowsJson(rowsJson = "[]") {
+  try {
+    const parsed = JSON.parse(rowsJson || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function dispatchRowLookupKeys(row = {}) {
+  return [
+    row.id && `id:${row.id}`,
+    row.dispatchNo && `dispatch:${row.dispatchNo}`,
+    row.orderNo && `order:${row.orderNo}`
+  ].filter(Boolean);
+}
+
+function dispatchRowLookup(rows = []) {
+  const lookup = new Map();
+  rows.forEach((row) => {
+    dispatchRowLookupKeys(row).forEach((key) => {
+      if (!lookup.has(key)) lookup.set(key, row);
+    });
+  });
+  return lookup;
+}
+
+function findExistingDispatchRow(row = {}, lookup = new Map()) {
+  for (const key of dispatchRowLookupKeys(row)) {
+    const existing = lookup.get(key);
+    if (existing) return existing;
+  }
+  return null;
+}
+
+function dispatchRowText(row = {}, key = "") {
+  return String(row?.[key] ?? "").trim();
+}
+
+function dispatchRowOrderSyncKey(row = {}) {
+  return [
+    "dispatchNo",
+    "plate",
+    "vehicleSource",
+    "supplier",
+    "transportMode",
+    "driver",
+    "hkDriver",
+    "mainlandDriver"
+  ].map((key) => `${key}:${dispatchRowText(row, key)}`).join("|");
+}
+
+function dispatchRowNeedsOrderSync(row = {}, existingRow = null) {
+  if (!dispatchRowText(row, "orderNo") && !dispatchRowText(row, "dispatchNo")) return false;
+  if (!existingRow) return true;
+  return dispatchRowOrderSyncKey(row) !== dispatchRowOrderSyncKey(existingRow);
+}
+
+function dispatchRowCreatorFields(row = {}, existingRow = null, requestCreator = {}) {
+  if (existingRow) {
+    const existingCreator = creatorFieldsFromRecord(existingRow);
+    if (creatorFieldsHaveValue(existingCreator)) return existingCreator;
+    return creatorFieldsFromRecord(row);
+  }
+  const incomingCreator = creatorFieldsFromRecord(row);
+  return creatorFieldsHaveValue(incomingCreator) ? incomingCreator : requestCreator;
+}
+
+function mapDispatchPlanRecord(row = {}) {
+  return {
+    date: row.plan_date,
+    rows: parseDispatchPlanRowsJson(row.rows_json),
+    createdByAccountId: row.created_by_account_id || null,
+    createdByUsername: row.created_by_username || "",
+    createdByName: row.created_by_display_name || row.created_by_username || "",
+    updatedAt: row.updated_at || ""
+  };
+}
+
+async function syncDispatchPlanRowsToOrders(planDate, rows = []) {
+  const rowsToSync = rows.filter((row) => dispatchRowText(row, "orderNo") || dispatchRowText(row, "dispatchNo"));
+  if (!rowsToSync.length) return 0;
+
+  let synced = 0;
+  const findOrder = await db.prepare(`
+    SELECT * FROM orders
+    WHERE deleted_at IS NULL
+      AND (
+        (@orderNo <> '' AND no = @orderNo)
+        OR (@dispatchNo <> '' AND dispatch_no <> '' AND dispatch_no = @dispatchNo)
+      )
+    ORDER BY CASE WHEN no = @orderNo THEN 0 ELSE 1 END
+    LIMIT 1
+  `);
+  const updateOrder = await db.prepare(`
+    UPDATE orders
+    SET dispatch_no = @dispatchNo,
+        vehicle_source = @vehicleSource,
+        supplier = @supplier,
+        plate = @plate,
+        driver = @driver,
+        hk_driver = @hkDriver,
+        mainland_driver = @mainlandDriver,
+        transport_mode = @transportMode,
+        order_date = @orderDate
+    WHERE no = @no AND deleted_at IS NULL
+  `);
+
+  for (const row of rowsToSync) {
+    const orderNo = dispatchRowText(row, "orderNo");
+    const dispatchNo = dispatchRowText(row, "dispatchNo");
+    const order = await findOrder.get({ orderNo, dispatchNo });
+    if (!order) continue;
+    if (order.status === "已审核") continue;
+
+    const transportMode = normalizeTransportMode(row.transportMode || order.transport_mode || "") || order.transport_mode || "";
+    const isSingleDriver = transportMode === "单司机";
+    const rowDriver = dispatchRowText(row, "driver");
+    const rowHkDriver = dispatchRowText(row, "hkDriver");
+    const rowMainlandDriver = dispatchRowText(row, "mainlandDriver");
+    const driver = isSingleDriver
+      ? (rowDriver || rowHkDriver || order.driver || "")
+      : [rowHkDriver || rowDriver, rowMainlandDriver].filter(Boolean).join(" / ");
+
+    await updateOrder.run({
+      no: order.no,
+      dispatchNo: dispatchNo || order.dispatch_no || "",
+      vehicleSource: dispatchRowText(row, "vehicleSource") || order.vehicle_source || "",
+      supplier: dispatchRowText(row, "vehicleSource") === "外派车辆" ? dispatchRowText(row, "supplier") : "",
+      plate: dispatchRowText(row, "plate"),
+      driver,
+      hkDriver: isSingleDriver ? "" : (rowHkDriver || rowDriver),
+      mainlandDriver: isSingleDriver ? "" : rowMainlandDriver,
+      transportMode,
+      orderDate: /^\d{4}-\d{2}-\d{2}$/.test(planDate) ? planDate : order.order_date
+    });
+    synced += 1;
+  }
+
+  return synced;
+}
+
 app.get("/api/dispatch-plans", async (req, res) => {
   const { start, end } = dispatchPlanPeriodBounds(req.query);
   const dateWhere = start && end ? "WHERE plan_date >= ? AND plan_date < ?" : "";
@@ -3558,32 +4016,17 @@ app.get("/api/dispatch-plans", async (req, res) => {
     ${dateWhere}
     ORDER BY plan_date DESC
   `).all(...params);
-  const rows = records.map((row) => {
-    let planRows = [];
-    try {
-      const parsed = JSON.parse(row.rows_json || "[]");
-      planRows = Array.isArray(parsed) ? parsed : [];
-    } catch {
-      planRows = [];
-    }
-    return { date: row.plan_date, rows: planRows, updatedAt: row.updated_at || "" };
-  });
-  res.json(rows);
+  res.json(records.map(mapDispatchPlanRecord));
 });
 
 app.get("/api/dispatch-plans/:date", async (req, res) => {
   const date = String(req.params.date || "").trim();
   const row = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
-  let rows = [];
-  if (row) {
-    try {
-      const parsed = JSON.parse(row.rows_json || "[]");
-      rows = Array.isArray(parsed) ? parsed : [];
-    } catch {
-      rows = [];
-    }
+  if (!row) {
+    res.json({ date, rows: [], updatedAt: "" });
+    return;
   }
-  res.json({ date, rows, updatedAt: row?.updated_at || "" });
+  res.json(mapDispatchPlanRecord(row));
 });
 
 app.put("/api/dispatch-plans/:date", async (req, res) => {
@@ -3593,9 +4036,15 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
     return;
   }
   const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+  const existingPlan = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
+  const existingRowsLookup = dispatchRowLookup(parseDispatchPlanRowsJson(existingPlan?.rows_json));
+  const requestCreator = creatorFieldsFromAccount(req.account);
+  const rowsNeedingOrderSync = [];
   const cleanRows = rows.map((row) => {
     const item = row && typeof row === "object" ? row : {};
-    return {
+    const existingRow = findExistingDispatchRow(item, existingRowsLookup);
+    const creator = dispatchRowCreatorFields(item, existingRow, requestCreator);
+    const cleanRow = {
       id: String(item.id || ""),
       dispatchNo: String(item.dispatchNo || ""),
       orderNo: String(item.orderNo || ""),
@@ -3617,17 +4066,40 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
       mainlandDriver: String(item.mainlandDriver || ""),
       status: String(item.status || ""),
       previousStatus: String(item.previousStatus || ""),
+      createdByAccountId: creator.createdByAccountId,
+      createdByUsername: creator.createdByUsername,
+      createdByName: creator.createdByName,
       note: String(item.note || "")
     };
+    if (dispatchRowNeedsOrderSync(cleanRow, existingRow)) rowsNeedingOrderSync.push(cleanRow);
+    return cleanRow;
   });
   const rowsJson = JSON.stringify(cleanRows);
-  await db.prepare(`
-    INSERT INTO dispatch_plans (plan_date, rows_json, updated_at)
-    VALUES (?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(plan_date) DO UPDATE SET rows_json = excluded.rows_json, updated_at = CURRENT_TIMESTAMP
-  `).run(date, rowsJson);
+  const planCreator = existingPlan && creatorFieldsHaveValue(creatorFieldsFromRecord(existingPlan))
+    ? creatorFieldsFromRecord(existingPlan)
+    : requestCreator;
+  const transaction = db.transaction(async () => {
+    await db.prepare(`
+      INSERT INTO dispatch_plans
+        (plan_date, rows_json, created_by_account_id, created_by_username, created_by_display_name, updated_at)
+      VALUES
+        (@date, @rowsJson, @createdByAccountId, @createdByUsername, @createdByName, CURRENT_TIMESTAMP)
+      ON CONFLICT(plan_date) DO UPDATE SET
+        rows_json = excluded.rows_json,
+        updated_at = CURRENT_TIMESTAMP
+    `).run({
+      date,
+      rowsJson,
+      createdByAccountId: planCreator.createdByAccountId,
+      createdByUsername: planCreator.createdByUsername,
+      createdByName: planCreator.createdByName
+    });
+    await syncDispatchPlanRowsToOrders(date, rowsNeedingOrderSync);
+  });
+  await transaction();
   await writeAudit("update", "dispatch_plan", date, `保存 ${cleanRows.length} 条`);
-  res.json({ date, rows: cleanRows });
+  const saved = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
+  res.json(mapDispatchPlanRecord(saved));
 });
 
 app.get("/api/orders/recycle", async (_req, res) => {
@@ -3691,7 +4163,9 @@ app.post("/api/orders/export/excel", async (req, res) => {
     return;
   }
   try {
-    const body = await renderOrdersXlsxBuffer(orders, title, template, exchange);
+    const body = await renderOrdersXlsxBuffer(orders, title, template, exchange, {
+      includeReceiptSheet: Boolean(req.body.includeReceiptSheet)
+    });
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(orderExportFilename(orders, "xlsx"))}`);
     await writeAudit("export", "order", orderNos.join(",") || "snapshot", `Excel ${orders.length} 条`);
@@ -3717,6 +4191,10 @@ app.post("/api/orders/export/pdf", async (req, res) => {
 });
 
 app.post("/api/orders/audit", async (req, res) => {
+  if (!requestCanManageOrderAudit(req)) {
+    res.status(403).json({ message: "只有管理员和财务可以审核订单" });
+    return;
+  }
   const orderNos = Array.isArray(req.body.orderNos) ? [...new Set(req.body.orderNos.map(String).filter(Boolean))] : [];
   if (orderNos.length === 0) {
     res.status(400).json({ message: "请选择需要审核的订单" });
@@ -3763,9 +4241,11 @@ function pickBody(body, camelKey, snakeKey, fallback) {
 }
 
 async function readOrderPayload(body, existing = null) {
+  const date = pickBody(body, "date", "order_date", existing?.order_date || todayInputValue());
+  const dispatchNo = String(pickBody(body, "dispatchNo", "dispatch_no", existing?.dispatch_no || "") || "").trim();
   return {
-    no: existing?.no || body.no || (await nextOrderNo()),
-    dispatchNo: String(pickBody(body, "dispatchNo", "dispatch_no", existing?.dispatch_no || "") || "").trim(),
+    no: existing?.no || body.no || (await nextOrderNo(date)),
+    dispatchNo: dispatchNo || (existing ? "" : await nextDispatchNo(date)),
     customerId: pickBody(body, "customerId", "customer_id", existing?.customer_id || null),
     customer: String(pickBody(body, "customer", "customer_name", existing?.customer || "") || "").trim(),
     businessType: String(pickBody(body, "businessType", "business_type", existing?.business_type || "运输") || "运输").trim(),
@@ -3784,7 +4264,7 @@ async function readOrderPayload(body, existing = null) {
     transportMode: String(pickBody(body, "transportMode", "transport_mode", existing?.transport_mode || "") || "").trim(),
     loading: String(pickBody(body, "loading", "loading_place", existing?.loading || "") || "").trim(),
     unloading: String(pickBody(body, "unloading", "unloading_place", existing?.unloading || "") || "").trim(),
-    date: pickBody(body, "date", "order_date", existing?.order_date || todayInputValue()),
+    date,
     receivableHKD: Number(pickBody(body, "receivableHKD", "hkd_receivable", existing?.receivable_hkd || 0) || 0),
     receivableRMB: Number(pickBody(body, "receivableRMB", "rmb_receivable", existing?.receivable_rmb || 0) || 0),
     status: String(pickBody(body, "status", null, existing?.status || "待确认") || "待确认").trim(),
@@ -3821,6 +4301,7 @@ async function resolveOrderCustomer(item) {
 
 app.post("/api/orders", async (req, res) => {
   const item = await readOrderPayload(req.body);
+  Object.assign(item, creatorFieldsFromAccount(req.account));
   item.fees = item.fees || [];
   if (!(await resolveOrderCustomer(item))) {
     res.status(400).json({ message: "请选择有效客户" });
@@ -3836,11 +4317,12 @@ app.post("/api/orders", async (req, res) => {
       INSERT INTO orders
         (no, dispatch_no, customer_id, customer, business_type, port, direction, tonnage, currency, quantity,
          weight, vehicle_source, supplier, plate, driver, hk_driver, mainland_driver, transport_mode, loading, unloading, order_date, receivable_hkd,
-         receivable_rmb, status, remark, trip_no_enabled, trip_no, six_sheet_enabled, six_sheet_no)
+         receivable_rmb, status, created_by_account_id, created_by_username, created_by_display_name, remark,
+         trip_no_enabled, trip_no, six_sheet_enabled, six_sheet_no)
       VALUES
         (@no, @dispatchNo, @customerId, @customer, @businessType, @port, @direction, @tonnage, @currency,
          @quantity, @weight, @vehicleSource, @supplier, @plate, @driver, @hkDriver, @mainlandDriver, @transportMode, @loading, @unloading, @date,
-         @receivableHKD, @receivableRMB, @status, @remark, @tripNoEnabled, @tripNo,
+         @receivableHKD, @receivableRMB, @status, @createdByAccountId, @createdByUsername, @createdByName, @remark, @tripNoEnabled, @tripNo,
          @sixSheetEnabled, @sixSheetNo)
     `).run(item);
     await saveOrderFees(item.no, item.fees, item.currency);
@@ -3872,7 +4354,7 @@ function normalizeOrderFee(fee, fallbackCurrency) {
     : Number(rawCost);
   const cost = Number.isFinite(costNumber) && costNumber >= 0 ? costNumber : null;
   return {
-    category: normalizeFeeItemCategory(fee.category),
+    category: normalizeOrderFeeCategory(fee.category),
     name: String(fee.name || "").trim(),
     quantity,
     unitPrice,
@@ -3893,9 +4375,6 @@ function calculateOrderReceivables(fees, fallbackCurrency) {
     .map((fee) => normalizeOrderFee(fee, fallbackCurrency))
     .filter((fee) => fee.name)
     .reduce((totals, fee) => {
-      if (fee.category === "公司自费") {
-        return totals;
-      }
       if (fee.currency === "人民币" || fee.currency === "RMB") {
         totals.receivableRMB += fee.amount;
       } else {
@@ -3924,6 +4403,10 @@ app.patch("/api/orders/:no", async (req, res) => {
   const existing = await db.prepare("SELECT * FROM orders WHERE no = ? AND deleted_at IS NULL").get(no);
   if (!existing) {
     res.status(404).json({ message: "订单不存在或已删除" });
+    return;
+  }
+  if (existing.status === "已审核") {
+    res.status(409).json({ message: "已审核订单不可编辑，请先取消审核" });
     return;
   }
 
@@ -3978,8 +4461,16 @@ app.patch("/api/orders/:no/status", async (req, res) => {
     res.status(404).json({ message: "订单不存在或已删除" });
     return;
   }
+  if ((status === "已审核" || current.status === "已审核") && !requestCanManageOrderAudit(req)) {
+    res.status(403).json({ message: "只有管理员和财务可以审核或取消审核订单" });
+    return;
+  }
   if (status === "已审核" && current.status !== "已签收") {
     res.status(409).json({ message: "只有已签收订单才能审核" });
+    return;
+  }
+  if (current.status === "已审核" && status !== "已签收") {
+    res.status(409).json({ message: "已审核订单只能先取消审核" });
     return;
   }
 
@@ -4171,12 +4662,12 @@ app.get("/api/vehicle-expenses", async (req, res) => {
     ? await db.prepare(`
       SELECT * FROM vehicle_expenses
       WHERE deleted_at IS NULL AND expense_type = ?
-      ORDER BY expense_date DESC, id DESC
+      ORDER BY COALESCE(NULLIF(start_date, ''), expense_date) DESC, id DESC
     `).all(type)
     : await db.prepare(`
       SELECT * FROM vehicle_expenses
       WHERE deleted_at IS NULL
-      ORDER BY expense_date DESC, id DESC
+      ORDER BY COALESCE(NULLIF(start_date, ''), expense_date) DESC, id DESC
     `).all();
   res.json(rows.map(mapVehicleExpense));
 });
@@ -4204,9 +4695,19 @@ app.post("/api/vehicle-expenses", async (req, res) => {
     res.status(400).json({ message: "请填写正确的费用日期" });
     return;
   }
+  if (item.type === "annual") {
+    if (!parseInputDate(item.startDate) || !parseInputDate(item.endDate)) {
+      res.status(400).json({ message: "请填写正确的起止日期" });
+      return;
+    }
+    if (item.startDate > item.endDate) {
+      res.status(400).json({ message: "开始日期不能晚于到期日期" });
+      return;
+    }
+  }
   const result = await db.prepare(`
-    INSERT INTO vehicle_expenses (expense_type, name, fuel_station, plate, expense_date, expense_year, currency, amount, note)
-    VALUES (@type, @name, @fuelStation, @plate, @date, @year, @currency, @amount, @note)
+    INSERT INTO vehicle_expenses (expense_type, name, fuel_station, fuel_liters, odometer_km, plate, expense_date, start_date, end_date, expense_year, currency, amount, note)
+    VALUES (@type, @name, @fuelStation, @fuelLiters, @odometerKm, @plate, @date, @startDate, @endDate, @year, @currency, @amount, @note)
   `).run(item);
   await writeAudit("create", "vehicle_expense", String(result.lastInsertId), `${item.plate}/${item.name}/${item.amount}`);
   res.status(201).json(mapVehicleExpense(await db.prepare("SELECT * FROM vehicle_expenses WHERE id = ?").get(result.lastInsertId)));
@@ -4241,13 +4742,27 @@ app.patch("/api/vehicle-expenses/:id", async (req, res) => {
     res.status(400).json({ message: "请填写正确的费用日期" });
     return;
   }
+  if (item.type === "annual") {
+    if (!parseInputDate(item.startDate) || !parseInputDate(item.endDate)) {
+      res.status(400).json({ message: "请填写正确的起止日期" });
+      return;
+    }
+    if (item.startDate > item.endDate) {
+      res.status(400).json({ message: "开始日期不能晚于到期日期" });
+      return;
+    }
+  }
   await db.prepare(`
     UPDATE vehicle_expenses
     SET expense_type = @type,
         name = @name,
         fuel_station = @fuelStation,
+        fuel_liters = @fuelLiters,
+        odometer_km = @odometerKm,
         plate = @plate,
         expense_date = @date,
+        start_date = @startDate,
+        end_date = @endDate,
         expense_year = @year,
         currency = @currency,
         amount = @amount,
@@ -4506,12 +5021,12 @@ app.get("/api/cost-center-rates", async (req, res) => {
     ? await db.prepare(`
         SELECT * FROM cost_center_rates
         WHERE deleted_at IS NULL AND source = ?
-        ORDER BY origin ASC, destination ASC, entity_name ASC, id ASC
+        ORDER BY origin ASC, destination ASC, tonnage ASC, entity_name ASC, effective_date DESC, id ASC
       `).all(source)
     : await db.prepare(`
         SELECT * FROM cost_center_rates
         WHERE deleted_at IS NULL
-        ORDER BY source ASC, origin ASC, destination ASC, entity_name ASC, id ASC
+        ORDER BY source ASC, origin ASC, destination ASC, tonnage ASC, entity_name ASC, effective_date DESC, id ASC
       `).all();
   res.json(rows.map(mapCostCenterRate));
 });
@@ -4534,11 +5049,30 @@ app.post("/api/cost-center-rates", async (req, res) => {
     res.status(400).json({ message: "装货地和卸货地不能为空" });
     return;
   }
+  if (item.source === "供应商" && !item.tonnage) {
+    res.status(400).json({ message: "请填写吨位" });
+    return;
+  }
   const payload = {
     ...item,
     entityId: item.entityId || `cost-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   };
   if (id) {
+    if (payload.effectiveDate !== (current.effective_date || "1970-01-01")) {
+      const versionPayload = {
+        ...payload,
+        entityId: `cost-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      };
+      const result = await db.prepare(`
+        INSERT INTO cost_center_rates (source, entity_id, entity_name, origin, destination, tonnage, currency, cost_values, note, effective_date)
+        VALUES (@source, @entityId, @entityName, @origin, @destination, @tonnage, @currency, @costValues, @note, @effectiveDate)
+        RETURNING id
+      `).run(versionPayload);
+      const savedId = result.lastInsertId || result.rows?.[0]?.id;
+      await writeAudit("create", "cost_center_rate", String(savedId || versionPayload.entityId), `${versionPayload.source}/${versionPayload.origin}-${versionPayload.destination}/${versionPayload.tonnage || "全部"}/${versionPayload.effectiveDate}`);
+      res.json(mapCostCenterRate(await db.prepare("SELECT * FROM cost_center_rates WHERE id = ?").get(savedId)));
+      return;
+    }
     await db.prepare(`
       UPDATE cost_center_rates
       SET source = @source,
@@ -4546,25 +5080,27 @@ app.post("/api/cost-center-rates", async (req, res) => {
           entity_name = @entityName,
           origin = @origin,
           destination = @destination,
+          tonnage = @tonnage,
           currency = @currency,
           cost_values = @costValues,
           note = @note,
+          effective_date = @effectiveDate,
           updated_at = CURRENT_TIMESTAMP,
           deleted_at = NULL
       WHERE id = @id
         AND deleted_at IS NULL
     `).run({ ...payload, id });
-    await writeAudit("update", "cost_center_rate", String(id), `${payload.source}/${payload.origin}-${payload.destination}`);
+    await writeAudit("update", "cost_center_rate", String(id), `${payload.source}/${payload.origin}-${payload.destination}/${payload.tonnage || "全部"}/${payload.effectiveDate}`);
     res.json(mapCostCenterRate(await db.prepare("SELECT * FROM cost_center_rates WHERE id = ?").get(id)));
     return;
   }
   const result = await db.prepare(`
-    INSERT INTO cost_center_rates (source, entity_id, entity_name, origin, destination, currency, cost_values, note)
-    VALUES (@source, @entityId, @entityName, @origin, @destination, @currency, @costValues, @note)
+    INSERT INTO cost_center_rates (source, entity_id, entity_name, origin, destination, tonnage, currency, cost_values, note, effective_date)
+    VALUES (@source, @entityId, @entityName, @origin, @destination, @tonnage, @currency, @costValues, @note, @effectiveDate)
     RETURNING id
   `).run(payload);
   const savedId = result.lastInsertId || result.rows?.[0]?.id;
-  await writeAudit("create", "cost_center_rate", String(savedId || payload.entityId), `${payload.source}/${payload.origin}-${payload.destination}`);
+  await writeAudit("create", "cost_center_rate", String(savedId || payload.entityId), `${payload.source}/${payload.origin}-${payload.destination}/${payload.tonnage || "全部"}/${payload.effectiveDate}`);
   res.json(mapCostCenterRate(await db.prepare("SELECT * FROM cost_center_rates WHERE id = ?").get(savedId)));
 });
 
@@ -4910,16 +5446,26 @@ app.delete("/api/driver-route-adjust-rules/:id", async (req, res) => {
 });
 
 function normalizeStatementType(value = "") {
-  return ["customer", "driver", "supplier"].includes(String(value || "")) ? String(value || "") : "customer";
+  return ["customer", "driver", "supplier", "customs"].includes(String(value || "")) ? String(value || "") : "customer";
 }
 
 function normalizeStatementDownloadStatus(value = "已导出") {
   const text = String(value || "").trim();
-  return ["未导出", "已导出", "已发送", "已开票"].includes(text) ? text : "已导出";
+  return ["未导出", "已导出", "已发送", "已开票", "已收款"].includes(text) ? text : "已导出";
 }
 
 function isEditableStatementDownloadStatus(value = "") {
-  return ["已导出", "已发送", "已开票"].includes(String(value || "").trim());
+  return ["已导出", "已发送", "已开票", "已收款"].includes(String(value || "").trim());
+}
+
+function normalizeStatementPaymentStatus(value = "未收款") {
+  return String(value || "").trim() === "已收款" ? "已收款" : "未收款";
+}
+
+function normalizeStatementPaymentDate(value = "", status = "未收款") {
+  const text = String(value || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  return normalizeStatementPaymentStatus(status) === "已收款" ? todayInputValue() : "";
 }
 
 function statementDownloadKey(type, entityName, start, end) {
@@ -4934,13 +5480,17 @@ function readStatementDownloadPayload(body, current = null) {
   const downloadKey = String(
     body.key ?? body.downloadKey ?? body.download_key ?? current?.download_key ?? statementDownloadKey(type, entityName, start, end)
   ).trim() || statementDownloadKey(type, entityName, start, end);
+  const status = normalizeStatementDownloadStatus(body.status ?? body.statementStatus ?? body.statement_status ?? current?.status ?? "已导出");
+  const paymentStatus = status === "已收款" ? "已收款" : "未收款";
   return {
     downloadKey,
     statementType: type,
     entityName,
     start,
     end,
-    status: normalizeStatementDownloadStatus(body.status ?? body.statementStatus ?? body.statement_status ?? current?.status ?? "已导出"),
+    status,
+    paymentStatus,
+    paymentDate: normalizeStatementPaymentDate(body.paymentDate ?? body.payment_date ?? current?.payment_date ?? "", paymentStatus),
     downloadedAt: String(body.downloadedAt ?? body.downloaded_at ?? current?.downloaded_at ?? new Date().toISOString()).trim()
   };
 }
@@ -4948,9 +5498,9 @@ function readStatementDownloadPayload(body, current = null) {
 async function saveStatementDownload(item) {
   const result = await db.prepare(`
     INSERT INTO statement_downloads
-      (download_key, statement_type, entity_name, start_date, end_date, status, downloaded_at)
+      (download_key, statement_type, entity_name, start_date, end_date, status, payment_status, payment_date, downloaded_at)
     VALUES
-      (@downloadKey, @statementType, @entityName, @start, @end, @status, @downloadedAt)
+      (@downloadKey, @statementType, @entityName, @start, @end, @status, @paymentStatus, @paymentDate, @downloadedAt)
     ON CONFLICT (download_key)
     DO UPDATE SET
       statement_type = excluded.statement_type,
@@ -4958,6 +5508,8 @@ async function saveStatementDownload(item) {
       start_date = excluded.start_date,
       end_date = excluded.end_date,
       status = excluded.status,
+      payment_status = excluded.payment_status,
+      payment_date = excluded.payment_date,
       downloaded_at = excluded.downloaded_at,
       updated_at = CURRENT_TIMESTAMP,
       deleted_at = NULL
@@ -4976,10 +5528,27 @@ app.get("/api/statement-downloads", async (_req, res) => {
 });
 
 app.post("/api/statement-downloads", async (req, res) => {
-  const item = readStatementDownloadPayload(req.body);
+  const body = req.body || {};
+  const incoming = readStatementDownloadPayload(body);
+  const current = await db.prepare("SELECT * FROM statement_downloads WHERE download_key = ? AND deleted_at IS NULL").get(incoming.downloadKey);
+  const item = readStatementDownloadPayload(body, current);
   const row = await saveStatementDownload(item);
   await writeAudit("download", "statement", item.downloadKey, `${item.statementType}/${item.entityName}`);
   res.status(201).json(mapStatementDownload(row));
+});
+
+app.post("/api/statement-downloads/payment", async (req, res) => {
+  const body = req.body || {};
+  const incoming = readStatementDownloadPayload(body);
+  const current = await db.prepare("SELECT * FROM statement_downloads WHERE download_key = ? AND deleted_at IS NULL").get(incoming.downloadKey);
+  const item = readStatementDownloadPayload({
+    ...body,
+    status: body.status ?? current?.status ?? "未导出",
+    downloadedAt: body.downloadedAt ?? current?.downloaded_at ?? new Date().toISOString()
+  }, current);
+  const row = await saveStatementDownload(item);
+  await writeAudit("update", "statement", item.downloadKey, `收款状态${item.paymentStatus}${item.paymentDate ? `/${item.paymentDate}` : ""}`);
+  res.json(mapStatementDownload(row));
 });
 
 app.patch("/api/statement-downloads/:id/status", async (req, res) => {
@@ -4998,11 +5567,16 @@ app.patch("/api/statement-downloads/:id/status", async (req, res) => {
     res.status(404).json({ message: "对账单下载记录不存在" });
     return;
   }
+  const paymentStatus = status === "已收款" ? "已收款" : "未收款";
+  const paymentDate = status === "已收款" ? normalizeStatementPaymentDate(current.payment_date || "", paymentStatus) : "";
   await db.prepare(`
     UPDATE statement_downloads
-    SET status = ?, updated_at = CURRENT_TIMESTAMP
+    SET status = ?,
+        payment_status = ?,
+        payment_date = ?,
+        updated_at = CURRENT_TIMESTAMP
     WHERE id = ? AND deleted_at IS NULL
-  `).run(status, id);
+  `).run(status, paymentStatus, paymentDate, id);
   const row = await db.prepare("SELECT * FROM statement_downloads WHERE id = ?").get(id);
   await writeAudit("update", "statement", current.download_key || String(id), `状态改为${status}`);
   res.json(mapStatementDownload(row));
@@ -5056,10 +5630,7 @@ app.post("/api/fee-items", async (req, res) => {
     currency: String(req.body.currency || "港币").trim(),
     defaultAmount: Number(req.body.defaultAmount || 0),
     defaultDriverRole: normalizeDefaultDriverRole(req.body.defaultDriverRole || req.body.default_driver_role),
-    costSource: feeItemCostSourceValue(
-      normalizeFeeItemCategory(req.body.category),
-      requestFeeItemCostSource(req.body)
-    ),
+    costSource: feeItemCostSourceValue(requestFeeItemCostSource(req.body)),
     sortOrder: Number.isFinite(requestedSortOrder) && requestedSortOrder > 0 ? requestedSortOrder : nextSortOrder
   };
   if (!item.name) {
@@ -5122,7 +5693,7 @@ app.patch("/api/fee-items/:id", async (req, res) => {
   const item = {
     id,
     category: req.body.category === undefined
-      ? feeItemCategoryValue(current.category, current.cost_source)
+      ? feeItemCategoryValue(current.category)
       : normalizeFeeItemCategory(req.body.category),
     name: req.body.name === undefined ? current.name : String(req.body.name || "").trim(),
     currency: req.body.currency === undefined ? current.currency : String(req.body.currency || "港币").trim(),
@@ -5131,9 +5702,6 @@ app.patch("/api/fee-items/:id", async (req, res) => {
       ? (current.default_driver_role || "")
       : normalizeDefaultDriverRole(req.body.defaultDriverRole || req.body.default_driver_role),
     costSource: feeItemCostSourceValue(
-      req.body.category === undefined
-        ? feeItemCategoryValue(current.category, current.cost_source)
-        : normalizeFeeItemCategory(req.body.category),
       requestHasFeeItemCostSource(req.body)
         ? requestFeeItemCostSource(req.body, current.cost_source)
         : feeItemCostSourceText(current.cost_source)
@@ -5180,6 +5748,7 @@ function readFreightRatePayload(body, current = null) {
   const level3 = String(body.level3 ?? current?.level3 ?? "").trim();
   const cityValue = body.city ?? current?.city ?? "";
   const city = String(cityValue).trim() || level3 || level2 || level1;
+  const fallbackEffectiveDate = current?.effective_date || todayInputValue();
   return {
     customerId,
     customerName,
@@ -5191,12 +5760,16 @@ function readFreightRatePayload(body, current = null) {
     tonnage: String(body.tonnage ?? current?.tonnage ?? "").trim(),
     rmbAmount: Number(body.rmbAmount ?? current?.rmb_amount ?? 0) || 0,
     hkdAmount: Number(body.hkdAmount ?? current?.hkd_amount ?? 0) || 0,
-    sortOrder: Number(body.sortOrder ?? current?.sort_order ?? 0) || 0
+    sortOrder: Number(body.sortOrder ?? current?.sort_order ?? 0) || 0,
+    effectiveDate: normalizeEffectiveDate(
+      body.effectiveDate ?? body.effective_date ?? body.modifiedDate ?? body.modified_date ?? current?.effective_date,
+      fallbackEffectiveDate
+    )
   };
 }
 
 app.get("/api/freight-rates", async (_req, res) => {
-  const rows = await db.prepare("SELECT * FROM freight_rates WHERE deleted_at IS NULL ORDER BY sort_order ASC, id ASC").all();
+  const rows = await db.prepare("SELECT * FROM freight_rates WHERE deleted_at IS NULL ORDER BY sort_order ASC, effective_date DESC, id ASC").all();
   res.json(rows.map(mapFreightRate));
 });
 
@@ -5211,16 +5784,17 @@ app.post("/api/freight-rates", async (req, res) => {
     WHERE deleted_at IS NULL
       AND customer_id = ?
       AND direction = ? AND level1 = ? AND level2 = ? AND level3 = ? AND tonnage = ?
-  `).get(item.customerId, item.direction, item.level1, item.level2, item.level3, item.tonnage);
+      AND effective_date = ?
+  `).get(item.customerId, item.direction, item.level1, item.level2, item.level3, item.tonnage, item.effectiveDate);
   if (duplicate) {
-    res.status(409).json({ message: "同方向、目录、吨位的运费模板已存在" });
+    res.status(409).json({ message: "同方向、目录、吨位、修改日期的运费模板已存在" });
     return;
   }
   const result = await db.prepare(`
-    INSERT INTO freight_rates (customer_id, customer_name, direction, level1, level2, level3, city, tonnage, rmb_amount, hkd_amount, sort_order)
-    VALUES (@customerId, @customerName, @direction, @level1, @level2, @level3, @city, @tonnage, @rmbAmount, @hkdAmount, @sortOrder)
+    INSERT INTO freight_rates (customer_id, customer_name, direction, level1, level2, level3, city, tonnage, rmb_amount, hkd_amount, sort_order, effective_date)
+    VALUES (@customerId, @customerName, @direction, @level1, @level2, @level3, @city, @tonnage, @rmbAmount, @hkdAmount, @sortOrder, @effectiveDate)
   `).run(item);
-  await writeAudit("create", "freight_rate", String(result.lastInsertId), `${item.customerName || "公共模板"}/${item.direction}/${item.level1}/${item.level2}/${item.level3}/${item.tonnage}`);
+  await writeAudit("create", "freight_rate", String(result.lastInsertId), `${item.customerName || "公共模板"}/${item.direction}/${item.level1}/${item.level2}/${item.level3}/${item.tonnage}/${item.effectiveDate}`);
   res.status(201).json(mapFreightRate(await db.prepare("SELECT * FROM freight_rates WHERE id = ?").get(result.lastInsertId)));
 });
 
@@ -5241,9 +5815,19 @@ app.patch("/api/freight-rates/:id", async (req, res) => {
     WHERE deleted_at IS NULL AND id <> ?
       AND customer_id = ?
       AND direction = ? AND level1 = ? AND level2 = ? AND level3 = ? AND tonnage = ?
-  `).get(id, item.customerId, item.direction, item.level1, item.level2, item.level3, item.tonnage);
+      AND effective_date = ?
+  `).get(id, item.customerId, item.direction, item.level1, item.level2, item.level3, item.tonnage, item.effectiveDate);
   if (duplicate) {
-    res.status(409).json({ message: "同方向、目录、吨位的运费模板已存在" });
+    res.status(409).json({ message: "同方向、目录、吨位、修改日期的运费模板已存在" });
+    return;
+  }
+  if (item.effectiveDate !== (current.effective_date || "1970-01-01")) {
+    const result = await db.prepare(`
+      INSERT INTO freight_rates (customer_id, customer_name, direction, level1, level2, level3, city, tonnage, rmb_amount, hkd_amount, sort_order, effective_date)
+      VALUES (@customerId, @customerName, @direction, @level1, @level2, @level3, @city, @tonnage, @rmbAmount, @hkdAmount, @sortOrder, @effectiveDate)
+    `).run(item);
+    await writeAudit("create", "freight_rate", String(result.lastInsertId), `${item.customerName || "公共模板"}/${item.direction}/${item.level1}/${item.level2}/${item.level3}/${item.tonnage}/${item.effectiveDate}`);
+    res.json(mapFreightRate(await db.prepare("SELECT * FROM freight_rates WHERE id = ?").get(result.lastInsertId)));
     return;
   }
   await db.prepare(`
@@ -5251,10 +5835,11 @@ app.patch("/api/freight-rates/:id", async (req, res) => {
     SET customer_id = @customerId, customer_name = @customerName,
         direction = @direction, level1 = @level1, level2 = @level2, level3 = @level3,
         city = @city, tonnage = @tonnage,
-        rmb_amount = @rmbAmount, hkd_amount = @hkdAmount, sort_order = @sortOrder
+        rmb_amount = @rmbAmount, hkd_amount = @hkdAmount, sort_order = @sortOrder,
+        effective_date = @effectiveDate, updated_at = CURRENT_TIMESTAMP
     WHERE id = @id AND deleted_at IS NULL
   `).run(item);
-  await writeAudit("update", "freight_rate", String(id), `${item.customerName || "公共模板"}/${item.direction}/${item.level1}/${item.level2}/${item.level3}/${item.tonnage}`);
+  await writeAudit("update", "freight_rate", String(id), `${item.customerName || "公共模板"}/${item.direction}/${item.level1}/${item.level2}/${item.level3}/${item.tonnage}/${item.effectiveDate}`);
   res.json(mapFreightRate(await db.prepare("SELECT * FROM freight_rates WHERE id = ?").get(id)));
 });
 

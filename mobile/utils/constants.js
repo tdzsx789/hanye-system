@@ -28,7 +28,7 @@ const STATUS_ACTION_LABELS = {
 };
 
 const DIRECTION_OPTIONS = ["出口", "进口"];
-const TONNAGE_OPTIONS = ["3T", "5T", "8T", "10T", "12T", "20尺柜", "40尺柜"];
+const TONNAGE_OPTIONS = ["3T", "5T", "8T", "10T", "12T", "20尺柜", "40尺柜", "45尺柜"];
 const PORT_OPTIONS = ["深圳湾海关", "莲塘海关", "文锦渡海关", "大桥海关"];
 const VEHICLE_SOURCE_OPTIONS = ["本公司车辆", "外派车辆"];
 const TRANSPORT_MODE_OPTIONS = ["单司机", "双司机", "口岸转国内车"];

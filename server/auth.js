@@ -13,6 +13,7 @@ const BOSS_MODULES = [
   "bossDashboard",
   "bossCompanyProfit",
   "bossVehicleProfit",
+  "bossSupplierProfit",
   "bossCompanyExpenses"
 ];
 
@@ -77,6 +78,7 @@ const MODULE_LABELS = {
   bossDashboard: "老板看板",
   bossCompanyProfit: "公司利润",
   bossVehicleProfit: "车辆利润",
+  bossSupplierProfit: "供应商利润",
   bossCompanyExpenses: "公司级收支",
   freight: "运费模板",
   templates: "模板中心",

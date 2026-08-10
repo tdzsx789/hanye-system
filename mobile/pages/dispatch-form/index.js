@@ -70,6 +70,9 @@ Page({
       form.orderNo = "";
       form.dispatchNo = "";
       form.status = "预排";
+      form.createdByAccountId = null;
+      form.createdByUsername = "";
+      form.createdByName = "";
     }
     this.setData({
       form,
@@ -267,7 +270,10 @@ Page({
         : await api.updateOrder(form.orderNo, payload);
       const nextForm = Object.assign({}, form, {
         dispatchNo: order.dispatchNo || form.dispatchNo,
-        orderNo: order.no || form.orderNo
+        orderNo: order.no || form.orderNo,
+        createdByAccountId: order.createdByAccountId || form.createdByAccountId || null,
+        createdByUsername: order.createdByUsername || form.createdByUsername || "",
+        createdByName: order.createdByName || form.createdByName || order.createdByUsername || ""
       });
       const row = rowFromForm(nextForm, nextForm.orderNo);
       row.customer = order.customer || customer.name;

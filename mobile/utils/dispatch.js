@@ -135,6 +135,9 @@ function sanitizeDispatchRow(row) {
     hkDriver: valueText(item.hkDriver),
     mainlandDriver: valueText(item.mainlandDriver),
     status: normalizeDispatchPlanStatus(item.status),
+    createdByAccountId: Number(item.createdByAccountId || item.created_by_account_id || 0) || null,
+    createdByUsername: valueText(item.createdByUsername || item.created_by_username),
+    createdByName: valueText(item.createdByName || item.createdByDisplayName || item.created_by_display_name || item.createdByUsername || item.created_by_username),
     note: valueText(item.note)
   };
 }
@@ -291,6 +294,8 @@ function textMatchesRow(row, keyword) {
     row.loading,
     row.unloading,
     row.supplier,
+    row.createdByName,
+    row.createdByUsername,
     row.note,
     row.order && row.order.no,
     row.order && row.order.customer
@@ -329,6 +334,7 @@ function presentDispatchRows(rows, orders, date, options) {
       driverText: driverDisplayText(row),
       orderNoText: valueText(order.no || row.orderNo) || "-",
       orderStatusText: valueText(order.status),
+      creatorText: valueText(row.createdByName || row.createdByUsername),
       routeText: dispatchOrderRouteText(record),
       sourceText: dispatchVehicleSourceText(row),
       sourceClass: sourceClass(source),
@@ -542,6 +548,9 @@ function formFromDispatchRow(row, date) {
     mainlandDriver: source.mainlandDriver || order.mainlandDriver || "",
     status: dispatchStatusValueForRow(source),
     previousStatus: normalizeOptionalDispatchPlanStatus(source.previousStatus),
+    createdByAccountId: source.createdByAccountId || source.created_by_account_id || null,
+    createdByUsername: source.createdByUsername || source.created_by_username || "",
+    createdByName: source.createdByName || source.createdByDisplayName || source.created_by_display_name || source.createdByUsername || source.created_by_username || "",
     note: source.note || order.remark || "",
     tripNoEnabled: order.tripNoEnabled ? 1 : 0,
     tripNo: order.tripNo || "",
@@ -574,6 +583,9 @@ function rowFromForm(form, orderNo) {
     mainlandDriver: source.mainlandDriver,
     status: source.status || DISPATCH_PLAN_DEFAULT_STATUS,
     previousStatus: normalizeOptionalDispatchPlanStatus(source.previousStatus),
+    createdByAccountId: source.createdByAccountId || source.created_by_account_id || null,
+    createdByUsername: source.createdByUsername || source.created_by_username || "",
+    createdByName: source.createdByName || source.createdByDisplayName || source.created_by_display_name || source.createdByUsername || source.created_by_username || "",
     note: source.note
   });
 }

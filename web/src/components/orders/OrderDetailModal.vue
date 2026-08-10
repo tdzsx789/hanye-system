@@ -33,6 +33,14 @@ defineProps({
   orderDetailFeeRows: {
     type: Function,
     required: true
+  },
+  canEdit: {
+    type: Boolean,
+    default: true
+  },
+  editDisabledTitle: {
+    type: String,
+    default: "当前订单不可编辑"
   }
 });
 
@@ -48,7 +56,7 @@ const emit = defineEmits(["close", "edit"]);
           <p class="modal-subtitle">{{ order.customer || '-' }} · {{ order.date || '-' }} · {{ order.status || '-' }}</p>
         </div>
         <div class="modal-detail-actions">
-          <button class="ghost-btn small" type="button" @click="emit('edit', order)"><IconSvg name="edit" />编辑</button>
+          <button class="ghost-btn small" type="button" :title="canEdit ? '编辑' : editDisabledTitle" @click="emit('edit', order)"><IconSvg :name="canEdit ? 'edit' : 'eye'" />{{ canEdit ? '编辑' : '查看' }}</button>
           <button type="button" class="icon-btn" @click="emit('close')"><IconSvg name="close" />关闭</button>
         </div>
       </div>

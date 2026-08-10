@@ -71,6 +71,7 @@
         <view class="tag-row">
           <text class="source-tag {{item.sourceClass}}">{{item.sourceText}}</text>
           <text class="driver-tag">司机 {{item.driverText}}</text>
+          <text wx:if="{{item.creatorText}}" class="creator-tag">创建者 {{item.creatorText}}</text>
           <text wx:if="{{item.orderStatusText}}" class="order-status-tag">订单 {{item.orderStatusText}}</text>
         </view>
         <view wx:if="{{item.expanded}}" class="expanded-area">

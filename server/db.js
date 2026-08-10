@@ -270,6 +270,7 @@ async function initializeSchema() {
     CREATE TABLE IF NOT EXISTS customers (
       id TEXT PRIMARY KEY,
       type TEXT NOT NULL CHECK (type IN ('客户', '供应商')),
+      customer_category TEXT NOT NULL DEFAULT '运输客户',
       name TEXT NOT NULL,
       province TEXT NOT NULL DEFAULT '',
       city TEXT NOT NULL DEFAULT '',
@@ -318,6 +319,9 @@ async function initializeSchema() {
       receivable_hkd DOUBLE PRECISION NOT NULL DEFAULT 0,
       receivable_rmb DOUBLE PRECISION NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT '待确认',
+      created_by_account_id BIGINT,
+      created_by_username TEXT NOT NULL DEFAULT '',
+      created_by_display_name TEXT NOT NULL DEFAULT '',
       remark TEXT NOT NULL DEFAULT '',
       trip_no_enabled INTEGER NOT NULL DEFAULT 0,
       trip_no TEXT NOT NULL DEFAULT '',
@@ -357,6 +361,9 @@ async function initializeSchema() {
     CREATE TABLE IF NOT EXISTS dispatch_plans (
       plan_date TEXT PRIMARY KEY,
       rows_json TEXT NOT NULL DEFAULT '[]',
+      created_by_account_id BIGINT,
+      created_by_username TEXT NOT NULL DEFAULT '',
+      created_by_display_name TEXT NOT NULL DEFAULT '',
       updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)
     );
 
@@ -384,8 +391,12 @@ async function initializeSchema() {
       expense_type TEXT NOT NULL CHECK (expense_type IN ('fuel', 'repair', 'annual', 'other')),
       name TEXT NOT NULL DEFAULT '',
       fuel_station TEXT NOT NULL DEFAULT '',
+      fuel_liters DOUBLE PRECISION NOT NULL DEFAULT 0,
+      odometer_km DOUBLE PRECISION NOT NULL DEFAULT 0,
       plate TEXT NOT NULL REFERENCES vehicles(plate) ON UPDATE CASCADE,
       expense_date TEXT NOT NULL DEFAULT (CURRENT_DATE::text),
+      start_date TEXT NOT NULL DEFAULT '',
+      end_date TEXT NOT NULL DEFAULT '',
       expense_year INTEGER,
       currency TEXT NOT NULL DEFAULT '人民币',
       amount DOUBLE PRECISION NOT NULL DEFAULT 0,
@@ -414,7 +425,7 @@ async function initializeSchema() {
 
     CREATE TABLE IF NOT EXISTS fee_items (
       id BIGSERIAL PRIMARY KEY,
-      category TEXT NOT NULL DEFAULT '正常' CHECK (category IN ('正常', '代垫', '公司自费')),
+      category TEXT NOT NULL DEFAULT '正常' CHECK (category IN ('正常', '代垫')),
       name TEXT NOT NULL UNIQUE,
       currency TEXT NOT NULL DEFAULT '港币',
       default_amount DOUBLE PRECISION NOT NULL DEFAULT 0,
@@ -437,6 +448,8 @@ async function initializeSchema() {
       rmb_amount DOUBLE PRECISION NOT NULL DEFAULT 0,
       hkd_amount DOUBLE PRECISION NOT NULL DEFAULT 0,
       sort_order INTEGER NOT NULL DEFAULT 0,
+      effective_date TEXT NOT NULL DEFAULT '1970-01-01',
+      updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
       deleted_at TEXT
     );
 
@@ -521,6 +534,7 @@ async function initializeSchema() {
       inspection_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
       check_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
       other_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
+      custom_fields TEXT NOT NULL DEFAULT '[]',
       total DOUBLE PRECISION NOT NULL DEFAULT 0,
       remark TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
@@ -554,9 +568,11 @@ async function initializeSchema() {
       entity_name TEXT NOT NULL DEFAULT '',
       origin TEXT NOT NULL DEFAULT '',
       destination TEXT NOT NULL DEFAULT '',
+      tonnage TEXT NOT NULL DEFAULT '',
       currency TEXT NOT NULL DEFAULT '港币',
       cost_values TEXT NOT NULL DEFAULT '{}',
       note TEXT NOT NULL DEFAULT '',
+      effective_date TEXT NOT NULL DEFAULT '1970-01-01',
       created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
       updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
       deleted_at TEXT,
@@ -656,6 +672,8 @@ async function initializeSchema() {
       start_date TEXT NOT NULL DEFAULT '',
       end_date TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT '已导出',
+      payment_status TEXT NOT NULL DEFAULT '未收款',
+      payment_date TEXT NOT NULL DEFAULT '',
       downloaded_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
       created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
       updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
@@ -696,7 +714,15 @@ async function initializeSchema() {
       "trip_no_enabled INTEGER NOT NULL DEFAULT 0",
       "trip_no TEXT NOT NULL DEFAULT ''",
       "six_sheet_enabled INTEGER NOT NULL DEFAULT 0",
-      "six_sheet_no TEXT NOT NULL DEFAULT ''"
+      "six_sheet_no TEXT NOT NULL DEFAULT ''",
+      "created_by_account_id BIGINT",
+      "created_by_username TEXT NOT NULL DEFAULT ''",
+      "created_by_display_name TEXT NOT NULL DEFAULT ''"
+    ],
+    dispatch_plans: [
+      "created_by_account_id BIGINT",
+      "created_by_username TEXT NOT NULL DEFAULT ''",
+      "created_by_display_name TEXT NOT NULL DEFAULT ''"
     ],
     driver_wage_rules: [
       "transport_mode TEXT NOT NULL DEFAULT '单司机'",
@@ -705,10 +731,14 @@ async function initializeSchema() {
     cost_center_rates: [
       "origin TEXT NOT NULL DEFAULT ''",
       "destination TEXT NOT NULL DEFAULT ''",
-      "currency TEXT NOT NULL DEFAULT '港币'"
+      "tonnage TEXT NOT NULL DEFAULT ''",
+      "currency TEXT NOT NULL DEFAULT '港币'",
+      "effective_date TEXT NOT NULL DEFAULT '1970-01-01'"
     ],
     statement_downloads: [
-      "status TEXT NOT NULL DEFAULT '已导出'"
+      "status TEXT NOT NULL DEFAULT '已导出'",
+      "payment_status TEXT NOT NULL DEFAULT '未收款'",
+      "payment_date TEXT NOT NULL DEFAULT ''"
     ],
     drivers: [
       "type TEXT NOT NULL DEFAULT '香港司机'",
@@ -752,9 +782,12 @@ async function initializeSchema() {
       "customer_name TEXT NOT NULL DEFAULT ''",
       "level1 TEXT NOT NULL DEFAULT ''",
       "level2 TEXT NOT NULL DEFAULT ''",
-      "level3 TEXT NOT NULL DEFAULT ''"
+      "level3 TEXT NOT NULL DEFAULT ''",
+      "effective_date TEXT NOT NULL DEFAULT '1970-01-01'",
+      "updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)"
     ],
     customers: [
+      "customer_category TEXT NOT NULL DEFAULT '运输客户'",
       "province TEXT NOT NULL DEFAULT ''",
       "address TEXT NOT NULL DEFAULT ''",
       "settlement_currency TEXT NOT NULL DEFAULT ''",
@@ -775,8 +808,15 @@ async function initializeSchema() {
       "object_key TEXT NOT NULL DEFAULT ''",
       "etag TEXT NOT NULL DEFAULT ''"
     ],
+    customs_businesses: [
+      "custom_fields TEXT NOT NULL DEFAULT '[]'"
+    ],
     vehicle_expenses: [
-      "fuel_station TEXT NOT NULL DEFAULT ''"
+      "fuel_station TEXT NOT NULL DEFAULT ''",
+      "fuel_liters DOUBLE PRECISION NOT NULL DEFAULT 0",
+      "odometer_km DOUBLE PRECISION NOT NULL DEFAULT 0",
+      "start_date TEXT NOT NULL DEFAULT ''",
+      "end_date TEXT NOT NULL DEFAULT ''"
     ],
     company_expenses: [
       "entry_type TEXT NOT NULL DEFAULT 'expense'"
@@ -799,9 +839,19 @@ async function initializeSchema() {
       ADD CONSTRAINT order_fees_category_check
       CHECK (category IN ('正常', '代垫', '公司自费'));
     ALTER TABLE fee_items DROP CONSTRAINT IF EXISTS fee_items_category_check;
+    UPDATE fee_items
+    SET cost_source = CASE
+      WHEN COALESCE(TRIM(cost_source), '') = '' THEN '公司自费'
+      WHEN COALESCE(cost_source, '') LIKE '%公司自费%' THEN cost_source
+      ELSE CONCAT(cost_source, ',公司自费')
+    END
+    WHERE category = '公司自费';
+    UPDATE fee_items
+    SET category = '正常'
+    WHERE category IS NULL OR category NOT IN ('正常', '代垫');
     ALTER TABLE fee_items
       ADD CONSTRAINT fee_items_category_check
-      CHECK (category IN ('正常', '代垫', '公司自费'));
+      CHECK (category IN ('正常', '代垫'));
     ALTER TABLE files ALTER COLUMN storage_provider SET DEFAULT 'oss';
     CREATE INDEX IF NOT EXISTS idx_files_object_key ON files(storage_provider, object_key);
     CREATE INDEX IF NOT EXISTS idx_freight_rates_customer_scope
@@ -818,6 +868,25 @@ async function initializeSchema() {
     WHERE type = '客户'
       AND COALESCE(settlement_currency, '') = ''
   `).run();
+
+  await db.exec(`
+    ALTER TABLE customers ALTER COLUMN customer_category SET DEFAULT '运输客户';
+    UPDATE customers
+    SET customer_category = CASE
+      WHEN type = '客户' AND customer_category = '报关客户' THEN '报关客户'
+      WHEN type = '客户' THEN '运输客户'
+      ELSE ''
+    END
+    WHERE customer_category IS NULL
+       OR customer_category NOT IN ('运输客户', '报关客户', '')
+       OR (type = '客户' AND customer_category = '')
+       OR (type = '供应商' AND customer_category <> '');
+    ALTER TABLE customers ALTER COLUMN customer_category SET NOT NULL;
+    ALTER TABLE customers DROP CONSTRAINT IF EXISTS customers_customer_category_check;
+    ALTER TABLE customers
+      ADD CONSTRAINT customers_customer_category_check
+      CHECK (customer_category IN ('运输客户', '报关客户', ''));
+  `);
 
   await dropColumnIfExists("app_accounts", "department");
   await dropColumnIfExists("app_accounts", "position");
@@ -912,6 +981,30 @@ async function initializeSchema() {
   `).run();
 
   await db.prepare(`
+    UPDATE cost_center_rates
+    SET tonnage = '3T',
+        updated_at = CURRENT_TIMESTAMP
+    WHERE source = '供应商'
+      AND (tonnage IS NULL OR TRIM(tonnage) = '')
+  `).run();
+
+  await db.prepare(`
+    UPDATE vehicle_expenses
+    SET start_date = COALESCE(NULLIF(start_date, ''), CASE
+          WHEN expense_type = 'annual' AND expense_year IS NOT NULL THEN expense_year::text || '-01-01'
+          WHEN expense_type = 'annual' AND expense_date ~ '^[0-9]{4}-' THEN LEFT(expense_date, 4) || '-01-01'
+          ELSE ''
+        END),
+        end_date = COALESCE(NULLIF(end_date, ''), CASE
+          WHEN expense_type = 'annual' AND expense_year IS NOT NULL THEN expense_year::text || '-12-31'
+          WHEN expense_type = 'annual' AND expense_date ~ '^[0-9]{4}-' THEN LEFT(expense_date, 4) || '-12-31'
+          ELSE ''
+        END)
+    WHERE expense_type = 'annual'
+      AND (COALESCE(start_date, '') = '' OR COALESCE(end_date, '') = '')
+  `).run();
+
+  await db.prepare(`
     UPDATE fee_items
     SET cost_source = regexp_replace(
       regexp_replace(cost_source, '(^|[,，、])其他平台([,，、]|$)', '\\1大陆骑师\\2', 'g'),
@@ -924,20 +1017,11 @@ async function initializeSchema() {
   `).run();
 
   await db.exec(`
-    UPDATE fee_items
-    SET category = '公司自费',
-        cost_source = '公司自费'
-    WHERE COALESCE(cost_source, '') LIKE '%公司自费%';
-
-    UPDATE fee_items
-    SET cost_source = '公司自费'
-    WHERE category = '公司自费';
-
     UPDATE order_fees AS order_fee
     SET category = '公司自费'
     FROM fee_items AS fee_item
     WHERE order_fee.name = fee_item.name
-      AND fee_item.category = '公司自费'
+      AND COALESCE(fee_item.cost_source, '') LIKE '%公司自费%'
       AND order_fee.category <> '公司自费';
 
     UPDATE orders AS order_row
@@ -950,7 +1034,6 @@ async function initializeSchema() {
           )
           FROM order_fees AS order_fee
           WHERE order_fee.order_no = order_row.no
-            AND order_fee.category <> '公司自费'
         ), 0),
         receivable_rmb = COALESCE((
           SELECT SUM(
@@ -961,7 +1044,6 @@ async function initializeSchema() {
           )
           FROM order_fees AS order_fee
           WHERE order_fee.order_no = order_row.no
-            AND order_fee.category <> '公司自费'
         ), 0)
     WHERE EXISTS (
       SELECT 1
@@ -1002,6 +1084,7 @@ async function initializeSchema() {
     WHERE deleted_at IS NULL AND COALESCE(province, '') = ''
   `).run();
 
+  await ensureTonnageMasterData();
   await ensureOrderStatusMasterData();
   await reconcileLegacyPendingReviewOrders();
 
@@ -1471,14 +1554,23 @@ const DEMO_RULE_ITEMS = [
   { ruleType: "车辆司机规则", name: "司机工资规则", content: "司机工资按司机、方向、城市、运输模式匹配；无专属规则时使用通用规则。", enabled: 1 }
 ];
 
+const STANDARD_TONNAGE_MASTER_DATA = [
+  { type: "吨位", name: "3T", value: "3T", sortOrder: 1 },
+  { type: "吨位", name: "5T", value: "5T", sortOrder: 2 },
+  { type: "吨位", name: "8T", value: "8T", sortOrder: 3 },
+  { type: "吨位", name: "10T", value: "10T", sortOrder: 4 },
+  { type: "吨位", name: "12T", value: "12T", sortOrder: 5 },
+  { type: "吨位", name: "20尺柜", value: "20尺柜", sortOrder: 6 },
+  { type: "吨位", name: "40尺柜", value: "40尺柜", sortOrder: 7 },
+  { type: "吨位", name: "45尺柜", value: "45尺柜", sortOrder: 8 }
+];
+
 const DEMO_MASTER_DATA = [
   { type: "口岸", name: "深圳湾海关", value: "深圳湾海关", sortOrder: 1 },
   { type: "口岸", name: "莲塘海关", value: "莲塘海关", sortOrder: 2 },
   { type: "口岸", name: "文锦渡海关", value: "文锦渡海关", sortOrder: 3 },
   { type: "口岸", name: "大桥海关", value: "大桥海关", sortOrder: 4 },
-  { type: "吨位", name: "3T", value: "3T", sortOrder: 1 },
-  { type: "吨位", name: "5T", value: "5T", sortOrder: 2 },
-  { type: "吨位", name: "12T", value: "12T", sortOrder: 3 },
+  ...STANDARD_TONNAGE_MASTER_DATA,
   { type: "账期", name: "现结", value: "现结", sortOrder: 1 },
   { type: "账期", name: "月结15天", value: "月结15天", sortOrder: 2 },
   { type: "账期", name: "月结30天", value: "月结30天", sortOrder: 3 },
@@ -1820,6 +1912,17 @@ async function ensureOrderStatusMasterData() {
     WHERE type = '订单状态' AND name = '待审核' AND deleted_at IS NULL
   `).run();
   for (const item of statuses) {
+    await seedMasterData(item);
+    await db.prepare(`
+      UPDATE master_data
+      SET value = @value, sort_order = @sortOrder, deleted_at = NULL
+      WHERE type = @type AND name = @name
+    `).run(item);
+  }
+}
+
+async function ensureTonnageMasterData() {
+  for (const item of STANDARD_TONNAGE_MASTER_DATA) {
     await seedMasterData(item);
     await db.prepare(`
       UPDATE master_data
