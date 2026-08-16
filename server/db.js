@@ -120,7 +120,8 @@ const idReturningTables = new Set([
   "vehicle_expenses",
   "cost_center_rates",
   "vehicle_profit_exchange_rates",
-  "company_expenses"
+  "company_expenses",
+  "reminder_acknowledgements"
 ]);
 
 function withReturningId(sql) {
@@ -502,6 +503,15 @@ async function initializeSchema() {
       deleted_at TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS reminder_acknowledgements (
+      id BIGSERIAL PRIMARY KEY,
+      account_id BIGINT NOT NULL REFERENCES app_accounts(id) ON DELETE CASCADE,
+      reminder_key TEXT NOT NULL,
+      first_seen_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      acknowledged_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      UNIQUE(account_id, reminder_key)
+    );
+
     CREATE TABLE IF NOT EXISTS files (
       id BIGSERIAL PRIMARY KEY,
       entity_type TEXT NOT NULL,
@@ -700,6 +710,7 @@ async function initializeSchema() {
     CREATE INDEX IF NOT EXISTS idx_cost_center_rates_source ON cost_center_rates(source, deleted_at, entity_name);
     CREATE INDEX IF NOT EXISTS idx_vehicle_profit_exchange_rates_month ON vehicle_profit_exchange_rates(period_month);
     CREATE INDEX IF NOT EXISTS idx_company_expenses_period ON company_expenses(deleted_at, period_month);
+    CREATE INDEX IF NOT EXISTS idx_reminder_ack_account_key ON reminder_acknowledgements(account_id, reminder_key);
   `);
 
   const migrations = {

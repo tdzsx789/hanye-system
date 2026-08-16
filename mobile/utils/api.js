@@ -12,6 +12,30 @@ function listCustomers() {
   return requestList("/customers");
 }
 
+function listCustomerContacts(customerId) {
+  const path = customerId
+    ? `/customer-contacts?customerId=${encodeURIComponent(customerId)}`
+    : "/customer-contacts";
+  return requestList(path);
+}
+
+function createCustomerContact(payload) {
+  return request("/customer-contacts", { method: "POST", data: payload });
+}
+
+function updateCustomerContact(contactId, payload) {
+  return request(`/customer-contacts/${encodeURIComponent(contactId)}`, {
+    method: "PATCH",
+    data: payload
+  });
+}
+
+function deleteCustomerContact(contactId) {
+  return request(`/customer-contacts/${encodeURIComponent(contactId)}`, {
+    method: "DELETE"
+  });
+}
+
 function listOrders() {
   return requestList("/orders");
 }
@@ -64,15 +88,19 @@ function listDispatchPlans(options) {
 
 module.exports = {
   createOrder,
+  createCustomerContact,
   getCurrentAccount,
   getDispatchPlan,
   listCustomers,
+  listCustomerContacts,
   listDispatchPlans,
   listDrivers,
   listOrders,
   listVehicles,
   login,
+  deleteCustomerContact,
   saveDispatchPlan,
   updateOrder,
+  updateCustomerContact,
   updateOrderStatus
 };

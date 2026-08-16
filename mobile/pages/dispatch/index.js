@@ -55,6 +55,10 @@ Page({
     loading: false,
     orders: [],
     rawRows: [],
+    selectedDispatchCount: 0,
+    selectedDispatchIds: [],
+    allVisibleDispatchRowsSelected: false,
+    dispatchInfoBusy: false,
     saving: false,
     searchKeyword: "",
     showWarningsPanel: false,
@@ -65,14 +69,35 @@ Page({
   },
 
   onLoad() {
-    const storedDate = wx.getStorageSync(DISPATCH_DATE_KEY) || todayInputValue();
+    const today = todayInputValue();
+    this.dispatchToday = today;
+    const storedDate = wx.getStorageSync(DISPATCH_DATE_KEY);
+    const initialDate = storedDate === today ? storedDate : today;
+    if (storedDate !== initialDate) wx.setStorageSync(DISPATCH_DATE_KEY, initialDate);
     this.setData({
-      dispatchDate: storedDate,
-      dateLabel: formatDateLabel(storedDate)
+      dispatchDate: initialDate,
+      dateLabel: formatDateLabel(initialDate)
+    });
+  },
+
+  syncDispatchDateForToday() {
+    const today = todayInputValue();
+    if (this.dispatchToday === today) return;
+    this.dispatchToday = today;
+    if (this.data.dispatchDate === today) return;
+    wx.setStorageSync(DISPATCH_DATE_KEY, today);
+    this.setData({
+      activeStatus: "all",
+      dispatchDate: today,
+      dateLabel: formatDateLabel(today),
+      expandedIds: [],
+      selectedDispatchIds: [],
+      showWarningsPanel: false
     });
   },
 
   async onShow() {
+    this.syncDispatchDateForToday();
     const account = await getApp().ensureLogin();
     if (!account) {
       wx.reLaunch({ url: "/pages/login/index" });
@@ -112,6 +137,7 @@ Page({
         loading: false,
         orders,
         rawRows: rows,
+        selectedDispatchIds: [],
         vehicles
       });
       this.refreshDerivedData();
@@ -126,6 +152,7 @@ Page({
   refreshDerivedData() {
     const date = this.data.dispatchDate;
     const rawRows = this.data.rawRows || [];
+    const selectedIds = new Set(this.data.selectedDispatchIds || []);
     const summaryCards = dispatchSummaryCards(rawRows).map((card) => Object.assign({}, card, {
       active: this.data.activeStatus === card.key
     }));
@@ -134,13 +161,18 @@ Page({
       expandedIds: this.data.expandedIds,
       keyword: this.data.searchKeyword,
       status: activeStatus
+    })).map((row) => Object.assign({}, row, {
+      selected: selectedIds.has(row.id)
     }));
+    const selectedDisplayRows = displayRows.filter((row) => row.selected);
     const warnings = buildDispatchWarnings(rawRows, this.data.orders, this.data.vehicles, this.data.drivers, date);
     const emptyText = emptyTextForStatus(activeStatus);
     this.setData({
       dateLabel: formatDateLabel(date),
       displayRows,
       emptyText,
+      selectedDispatchCount: selectedDisplayRows.length,
+      allVisibleDispatchRowsSelected: displayRows.length > 0 && selectedDisplayRows.length === displayRows.length,
       showWarningsPanel: warnings.length ? this.data.showWarningsPanel : false,
       summaryCards,
       warnings
@@ -167,24 +199,67 @@ Page({
       activeStatus: "all",
       dispatchDate: date,
       expandedIds: [],
+      selectedDispatchIds: [],
       showWarningsPanel: false
     });
     await this.loadBoard();
   },
 
   onSearchInput(event) {
-    this.setData({ searchKeyword: event.detail.value });
+    this.setData({
+      searchKeyword: event.detail.value,
+      selectedDispatchIds: []
+    });
     this.refreshDerivedData();
   },
 
   clearSearch() {
-    this.setData({ searchKeyword: "" });
+    this.setData({
+      searchKeyword: "",
+      selectedDispatchIds: []
+    });
     this.refreshDerivedData();
   },
 
   setStatusFilter(event) {
     const activeStatus = event.currentTarget.dataset.status || "all";
-    this.setData({ activeStatus });
+    this.setData({
+      activeStatus,
+      selectedDispatchIds: []
+    });
+    this.refreshDerivedData();
+  },
+
+  selectedDispatchRows() {
+    const selectedIds = new Set(this.data.selectedDispatchIds || []);
+    return (this.data.displayRows || []).filter((row) => selectedIds.has(row.id));
+  },
+
+  toggleDispatchSelection(event) {
+    if (this.data.loading || this.data.saving) return;
+    const id = event.currentTarget.dataset.id;
+    if (!id) return;
+    const selectedIds = new Set(this.data.selectedDispatchIds || []);
+    if (selectedIds.has(id)) {
+      selectedIds.delete(id);
+    } else {
+      selectedIds.add(id);
+    }
+    this.setData({ selectedDispatchIds: Array.from(selectedIds) });
+    this.refreshDerivedData();
+  },
+
+  toggleAllVisibleDispatchSelection() {
+    if (this.data.loading || this.data.saving) return;
+    const visibleRows = this.data.displayRows || [];
+    if (!visibleRows.length) return;
+    const selectedIds = new Set(this.data.selectedDispatchIds || []);
+    if (this.data.allVisibleDispatchRowsSelected) {
+      visibleRows.forEach((row) => selectedIds.delete(row.id));
+    } else {
+      visibleRows.forEach((row) => selectedIds.add(row.id));
+    }
+    this.setData({ selectedDispatchIds: Array.from(selectedIds) });
     this.refreshDerivedData();
   },
 
@@ -231,12 +306,44 @@ Page({
   openCopyDispatch(event) {
     const row = this.rowById(event.currentTarget.dataset.id);
     if (!row) return;
+    this.openCopyDispatchByRow(row);
+  },
+
+  openCopyDispatchByRow(row) {
+    if (!row) return;
     setDispatchFormContext({
       mode: "copy",
       date: this.data.dispatchDate,
       row
     });
     wx.navigateTo({ url: "/pages/dispatch-form/index" });
+  },
+
+  async copyDispatchTextToClipboard(text, successTitle) {
+    if (this.data.dispatchInfoBusy) return;
+    this.setData({ dispatchInfoBusy: true });
+    wx.showLoading({ title: "生成中...", mask: true });
+    const startedAt = Date.now();
+    try {
+      await new Promise((resolve, reject) => {
+        wx.setClipboardData({
+          data: text,
+          success: resolve,
+          fail: reject
+        });
+      });
+      const elapsed = Date.now() - startedAt;
+      if (elapsed < 250) {
+        await new Promise((resolve) => setTimeout(resolve, 250 - elapsed));
+      }
+      wx.hideLoading();
+      wx.showToast({ title: successTitle, icon: "none" });
+    } catch (error) {
+      wx.hideLoading();
+      wx.showToast({ title: error.message || "生成派车信息失败", icon: "none" });
+    } finally {
+      this.setData({ dispatchInfoBusy: false });
+    }
   },
 
   async saveRows(rows, options) {
@@ -251,7 +358,10 @@ Page({
       const savedRows = savedPlan && Array.isArray(savedPlan.rows)
         ? sortDispatchRows(savedPlan.rows, this.data.orders, date)
         : nextRows;
-      this.setData({ rawRows: savedRows });
+      this.setData({
+        rawRows: savedRows,
+        selectedDispatchIds: []
+      });
       this.refreshDerivedData();
       if (source.toast) wx.showToast({ title: source.toast, icon: "none" });
       return true;
@@ -331,6 +441,7 @@ Page({
         : rows.map((item) => sanitizeDispatchRow(item));
       this.setData({
         rawRows: savedRows,
+        selectedDispatchIds: [],
         ...(source.switchToStatus ? { activeStatus: nextStatus } : {})
       });
       this.refreshDerivedData();
@@ -402,7 +513,7 @@ Page({
     const rows = this.data.rawRows || [];
     const index = rows.findIndex((row) => row.id === id);
     const actions = [
-      { key: "copy-text", label: "复制派车信息" },
+      { key: "copy-text", label: "生成派车信息" },
       { key: "copy", label: "复制排车单" }
     ];
     if (index > 0) actions.push({ key: "up", label: "上移" });
@@ -413,7 +524,7 @@ Page({
       success: (result) => {
         const action = actions[result.tapIndex];
         if (!action) return;
-        if (action.key === "copy-text") this.copySingleDispatchText(id);
+        if (action.key === "copy-text") this.generateDispatchInfoForRow(id);
         if (action.key === "copy") this.openCopyDispatch({ currentTarget: { dataset: { id } } });
         if (action.key === "up") this.moveRow({ currentTarget: { dataset: { id, offset: -1 } } });
         if (action.key === "down") this.moveRow({ currentTarget: { dataset: { id, offset: 1 } } });
@@ -422,21 +533,38 @@ Page({
     });
   },
 
-  copySingleDispatchText(id) {
+  generateDispatchInfoForRow(id) {
     const row = this.rowById(id);
     if (!row) return;
     const text = dispatchMessageText([row], this.data.orders, this.data.dispatchDate);
-    wx.setClipboardData({ data: text });
+    this.copyDispatchTextToClipboard(text, "已生成并复制 1 单派车信息");
   },
 
-  copyVisibleDispatchText() {
-    const rows = this.data.displayRows || [];
+  copySingleDispatchText(id) {
+    this.generateDispatchInfoForRow(id);
+  },
+
+  generateSelectedDispatchInfo() {
+    const rows = this.selectedDispatchRows();
     if (!rows.length) {
-      wx.showToast({ title: "当前列表暂无排车内容", icon: "none" });
+      wx.showToast({ title: "请先勾选要生成派车信息的排车单", icon: "none" });
       return;
     }
     const text = dispatchMessageText(rows, this.data.orders, this.data.dispatchDate);
-    wx.setClipboardData({ data: text });
+    this.copyDispatchTextToClipboard(text, `已生成并复制 ${rows.length} 单派车信息`);
+  },
+
+  copySelectedDispatchRow() {
+    const rows = this.selectedDispatchRows();
+    if (!rows.length) {
+      wx.showToast({ title: "请先勾选要复制的排车单", icon: "none" });
+      return;
+    }
+    if (rows.length > 1) {
+      wx.showToast({ title: "一次只能复制一张排车单，请只勾选一张", icon: "none" });
+      return;
+    }
+    this.openCopyDispatchByRow(rows[0]);
   },
 
   openWarningsPanel() {

@@ -18,7 +18,7 @@
           <view class="picker-box">{{form.date || '请选择日期'}}</view>
         </picker>
       </view>
-      <view class="field-row">
+      <view class="field-row customer-field">
         <text class="field-label">经营单位</text>
         <input placeholder="搜索并选择客户" placeholder-class="placeholder" value="{{form.customer}}" data-field="customer" bindfocus="onCustomerFocus" bindinput="onFieldInput" />
         <view wx:if="{{customerPickerOpen}}" class="suggestion-box">
@@ -30,20 +30,24 @@
           <button class="quiet-btn suggestion-close" bindtap="closeCustomerPicker">收起</button>
         </view>
       </view>
-      <view class="field-row">
-        <text class="field-label">业务类型</text>
-        <picker range="{{businessTypeOptions}}" data-field="businessType" data-options-key="businessTypeOptions" bindchange="onPickerChange">
-          <view class="picker-box">{{form.businessType || '运输'}}</view>
-        </picker>
-      </view>
-      <view wx:if="{{form.orderNo}}" class="readonly-line">
-        <text>关联订单</text>
-        <text>{{form.orderNo}}</text>
+      <view class="two-col">
+        <view class="field-row">
+          <text class="field-label">业务类型</text>
+          <picker range="{{businessTypeOptions}}" data-field="businessType" data-options-key="businessTypeOptions" bindchange="onPickerChange">
+            <view class="picker-box">{{form.businessType || '运输'}}</view>
+          </picker>
+        </view>
+        <view class="field-row">
+          <text class="field-label">币种</text>
+          <picker range="{{currencyOptions}}" data-field="currency" data-options-key="currencyOptions" bindchange="onPickerChange">
+            <view class="picker-box">{{form.currency || '港币'}}</view>
+          </picker>
+        </view>
       </view>
     </view>
 
     <view class="panel form-panel">
-      <view class="section-title">车辆与口岸</view>
+      <view class="section-title">车辆与路线</view>
       <view class="field-row">
         <text class="field-label">车辆来源</text>
         <picker range="{{vehicleSourceOptions}}" data-field="vehicleSource" data-options-key="vehicleSourceOptions" bindchange="onPickerChange">
@@ -86,33 +90,21 @@
           </picker>
         </view>
         <view class="field-row">
-          <text class="field-label">装车时间</text>
-          <picker range="{{timeOptions}}" data-field="loadTime" data-options-key="timeOptions" bindchange="onPickerChange">
-            <view class="picker-box">{{form.loadTime || '未定'}}</view>
-          </picker>
-        </view>
-      </view>
-    </view>
-
-    <view class="panel form-panel">
-      <view class="section-title">货物与路线</view>
-      <view class="two-col">
-        <view class="field-row">
           <text class="field-label">件数/板数</text>
           <input placeholder="例如：20件 / 4板" placeholder-class="placeholder" value="{{form.quantity}}" data-field="quantity" bindinput="onFieldInput" />
         </view>
+      </view>
+      <view class="two-col">
         <view class="field-row">
           <text class="field-label">重量</text>
           <input placeholder="例如：1200kg" placeholder-class="placeholder" value="{{form.weight}}" data-field="weight" bindinput="onFieldInput" />
         </view>
-      </view>
-      <view class="field-row">
-        <text class="field-label">装货地</text>
-        <textarea placeholder="可填写多个装货地址，每行一个" placeholder-class="placeholder" value="{{form.loading}}" data-field="loading" bindinput="onFieldInput" />
-      </view>
-      <view class="field-row">
-        <text class="field-label">卸货地</text>
-        <textarea placeholder="可填写多个卸货地址，每行一个" placeholder-class="placeholder" value="{{form.unloading}}" data-field="unloading" bindinput="onFieldInput" />
+        <view class="field-row">
+          <text class="field-label">装车时间</text>
+          <picker mode="multiSelector" range="{{loadTimePickerRange}}" value="{{loadTimePickerValue}}" bindchange="onLoadTimePickerChange">
+            <view class="picker-box">{{form.loadTime || '未定'}}</view>
+          </picker>
+        </view>
       </view>
       <view class="field-row">
         <text class="field-label">备注</text>
@@ -120,45 +112,165 @@
       </view>
     </view>
 
-    <view class="panel form-panel">
-      <view class="section-row" bindtap="toggleAdvanced">
-        <text class="section-title inline">高级字段</text>
-        <text class="section-arrow">{{advancedOpen ? '收起' : '展开'}}</text>
+    <view wx:if="{{form.vehicleSource === '本公司车辆'}}" class="panel form-panel">
+      <view class="section-title">运输模式</view>
+      <view class="field-row">
+        <text class="field-label">运输模式</text>
+        <picker range="{{transportModeOptions}}" data-field="transportMode" data-options-key="transportModeOptions" bindchange="onPickerChange">
+          <view class="picker-box">{{form.transportMode || '请选择运输模式'}}</view>
+        </picker>
       </view>
-      <view wx:if="{{advancedOpen}}">
+      <view wx:if="{{!form.transportMode || form.transportMode === '单司机'}}" class="field-row">
+        <text class="field-label">香港司机</text>
+        <picker wx:if="{{hkDriverOptions.length}}" range="{{hkDriverOptions}}" data-field="driver" data-options-key="hkDriverOptions" bindchange="onPickerChange">
+          <view class="picker-box">{{form.driver || '请选择香港司机'}}</view>
+        </picker>
+        <input wx:else placeholder="香港司机" placeholder-class="placeholder" value="{{form.driver}}" data-field="driver" bindinput="onFieldInput" />
+      </view>
+      <view wx:elif="{{form.transportMode === '双司机'}}" class="two-col">
         <view class="field-row">
-          <text class="field-label">排车状态</text>
-          <picker range="{{statusOptions}}" disabled="{{statusPickerDisabled}}" data-field="status" data-options-key="statusOptions" bindchange="onPickerChange">
-            <view class="picker-box {{statusPickerDisabled ? 'disabled' : ''}}">{{form.status || '预排'}}</view>
+          <text class="field-label">香港司机</text>
+          <picker wx:if="{{hkDriverOptions.length}}" range="{{hkDriverOptions}}" data-field="hkDriver" data-options-key="hkDriverOptions" bindchange="onPickerChange">
+            <view class="picker-box">{{form.hkDriver || '请选择香港司机'}}</view>
           </picker>
+          <input wx:else placeholder="香港司机" placeholder-class="placeholder" value="{{form.hkDriver}}" data-field="hkDriver" bindinput="onFieldInput" />
         </view>
         <view class="field-row">
-          <text class="field-label">运输模式</text>
-          <picker range="{{transportModeOptions}}" data-field="transportMode" data-options-key="transportModeOptions" bindchange="onPickerChange">
-            <view class="picker-box">{{form.transportMode || '未指定'}}</view>
+          <text class="field-label">大陆骑师</text>
+          <picker wx:if="{{mainlandDriverOptions.length}}" range="{{mainlandDriverOptions}}" data-field="mainlandDriver" data-options-key="mainlandDriverOptions" bindchange="onPickerChange">
+            <view class="picker-box">{{form.mainlandDriver || '请选择大陆骑师'}}</view>
           </picker>
+          <input wx:else placeholder="大陆骑师" placeholder-class="placeholder" value="{{form.mainlandDriver}}" data-field="mainlandDriver" bindinput="onFieldInput" />
+        </view>
+      </view>
+      <view wx:elif="{{form.transportMode === '口岸转国内车'}}" class="two-col">
+        <view class="field-row">
+          <text class="field-label">香港司机</text>
+          <picker wx:if="{{hkDriverOptions.length}}" range="{{hkDriverOptions}}" data-field="hkDriver" data-options-key="hkDriverOptions" bindchange="onPickerChange">
+            <view class="picker-box">{{form.hkDriver || '请选择香港司机'}}</view>
+          </picker>
+          <input wx:else placeholder="香港司机" placeholder-class="placeholder" value="{{form.hkDriver}}" data-field="hkDriver" bindinput="onFieldInput" />
         </view>
         <view class="field-row">
-          <text class="field-label">司机</text>
-          <input placeholder="单司机模式可填写司机" placeholder-class="placeholder" value="{{form.driver}}" data-field="driver" bindinput="onFieldInput" />
-        </view>
-        <view class="two-col">
-          <view class="field-row">
-            <text class="field-label">香港司机</text>
-            <input placeholder="香港司机" placeholder-class="placeholder" value="{{form.hkDriver}}" data-field="hkDriver" bindinput="onFieldInput" />
-          </view>
-          <view class="field-row">
-            <text class="field-label">大陆骑师</text>
-            <input placeholder="大陆骑师" placeholder-class="placeholder" value="{{form.mainlandDriver}}" data-field="mainlandDriver" bindinput="onFieldInput" />
-          </view>
-        </view>
-        <view class="field-row">
-          <text class="field-label">币种</text>
-          <input placeholder="港币 / 人民币" placeholder-class="placeholder" value="{{form.currency}}" data-field="currency" bindinput="onFieldInput" />
+          <text class="field-label">国内车牌号</text>
+          <input placeholder="例如：粤B12345" placeholder-class="placeholder" value="{{form.mainlandDriver}}" data-field="mainlandDriver" bindinput="onFieldInput" />
         </view>
       </view>
     </view>
+
+    <view class="panel form-panel location-panel">
+      <view class="location-head">
+        <view>
+          <text class="section-title">装货地</text>
+          <text class="location-hint">点击选择联系人地址，支持多个地址。</text>
+        </view>
+        <text class="location-count {{loadingEntryCount ? '' : 'empty'}}">{{loadingEntryCount ? '共 ' + loadingEntryCount + ' 个地址' : '未选择地址'}}</text>
+      </view>
+      <view wx:if="{{loadingEntryCount}}" class="location-list">
+        <view wx:for="{{loadingEntries}}" wx:key="id" class="location-item">
+          <text class="location-index">{{index + 1}}</text>
+          <text class="location-text">{{item.value}}</text>
+        </view>
+      </view>
+      <view wx:else class="location-empty-inline">未选择地址</view>
+      <button class="ghost-btn location-button" data-target="loading" bindtap="openLocationPicker">选择装货地</button>
+    </view>
+
+    <view class="panel form-panel location-panel">
+      <view class="location-head">
+        <view>
+          <text class="section-title">卸货地</text>
+          <text class="location-hint">点击选择联系人地址，支持多个地址。</text>
+        </view>
+        <text class="location-count {{unloadingEntryCount ? '' : 'empty'}}">{{unloadingEntryCount ? '共 ' + unloadingEntryCount + ' 个地址' : '未选择地址'}}</text>
+      </view>
+      <view wx:if="{{unloadingEntryCount}}" class="location-list">
+        <view wx:for="{{unloadingEntries}}" wx:key="id" class="location-item">
+          <text class="location-index">{{index + 1}}</text>
+          <text class="location-text">{{item.value}}</text>
+        </view>
+      </view>
+      <view wx:else class="location-empty-inline">未选择地址</view>
+      <button class="ghost-btn location-button" data-target="unloading" bindtap="openLocationPicker">选择卸货地</button>
+    </view>
   </block>
+
+  <view wx:if="{{locationPickerOpen}}" class="sheet-mask location-picker-mask" bindtap="closeLocationPicker">
+    <view class="location-sheet" catchtap="noop">
+      <view class="sheet-head">
+        <view class="sheet-head-copy">
+          <text class="sheet-title">{{locationPickerTitle}}</text>
+          <text class="sheet-subtitle">{{form.customer || '未选择客户'}}</text>
+        </view>
+        <button class="quiet-btn sheet-close" bindtap="closeLocationPicker">关闭</button>
+      </view>
+
+      <view wx:if="{{!addressBookCustomerReady}}" class="address-picker-note">先选经营单位，再读取和保存联系人地址。</view>
+
+      <view class="location-toolbar">
+        <input class="location-search" placeholder="联系人 / 电话 / 地址 / 备注" placeholder-class="placeholder" value="{{addressBookKeyword}}" bindinput="onAddressBookKeywordInput" />
+        <button class="primary-btn small location-new-btn" bindtap="toggleAddressBookForm">{{addressBookFormOpen ? '收起新建' : '新建地址'}}</button>
+      </view>
+
+      <view wx:if="{{addressBookFormOpen}}" class="address-form">
+        <view class="two-col">
+          <view class="field-row">
+            <text class="field-label">片区</text>
+            <input placeholder="省 / 市 / 区 / 片区" placeholder-class="placeholder" value="{{addressBookForm.area}}" data-field="area" bindinput="onAddressBookFormInput" />
+          </view>
+          <view class="field-row">
+            <text class="field-label">联系人</text>
+            <input placeholder="联系人" placeholder-class="placeholder" value="{{addressBookForm.contact}}" data-field="contact" bindinput="onAddressBookFormInput" />
+          </view>
+        </view>
+        <view class="two-col">
+          <view class="field-row">
+            <text class="field-label">电话</text>
+            <input placeholder="电话 / 手机" placeholder-class="placeholder" value="{{addressBookForm.phone}}" data-field="phone" bindinput="onAddressBookFormInput" />
+          </view>
+          <view class="field-row">
+            <text class="field-label">详细地址</text>
+            <input placeholder="详细地址" placeholder-class="placeholder" value="{{addressBookForm.address}}" data-field="address" bindinput="onAddressBookFormInput" />
+          </view>
+        </view>
+        <view class="field-row">
+          <text class="field-label">备注</text>
+          <input placeholder="楼栋、门牌、仓库名" placeholder-class="placeholder" value="{{addressBookForm.note}}" data-field="note" bindinput="onAddressBookFormInput" />
+        </view>
+        <button class="primary-btn address-save-btn" loading="{{addressBookSaving}}" disabled="{{addressBookSaving}}" bindtap="saveAddressBookEntry">保存到联系人</button>
+      </view>
+
+      <view class="address-list-head">
+        <text>{{addressBookVisibleRows.length ? '左侧勾选地址后点确定' : (addressBookCustomerReady ? '暂无地址，请先新建地址' : '请先选择经营单位，再查看或新建联系人地址')}}</text>
+        <text>{{addressBookSelectedIds.length}} 项</text>
+      </view>
+
+      <view wx:if="{{addressBookLoading}}" class="address-empty">正在读取联系人地址...</view>
+      <view wx:elif="{{addressBookKeyword && !addressBookVisibleRows.length}}" class="address-empty">没有匹配地址，请清空搜索或新建地址。</view>
+      <view wx:elif="{{!addressBookVisibleRows.length && addressBookCustomerReady}}" class="address-empty">暂无地址，请先新建地址。</view>
+      <view wx:elif="{{!addressBookVisibleRows.length}}" class="address-empty">请先选择经营单位后再查看或新建联系人地址。</view>
+      <scroll-view wx:else scroll-y class="address-list">
+        <view wx:for="{{addressBookVisibleRows}}" wx:key="id" class="address-card" data-id="{{item.id}}" bindtap="toggleAddressBookSelection">
+          <view class="address-card-check">
+            <checkbox value="{{item.id}}" checked="{{addressBookSelectedIds.indexOf(item.id) >= 0}}" />
+          </view>
+          <view class="address-card-body">
+            <view class="address-card-title">
+              <text>{{item.contact || '未填联系人'}}</text>
+              <text wx:if="{{item.phone}}" class="address-card-phone">{{item.phone}}</text>
+            </view>
+            <text class="address-card-main">{{item.area ? item.area + ' / ' : ''}}{{item.address || item.value || '未填写地址'}}</text>
+            <text wx:if="{{item.note}}" class="address-card-note">{{item.note}}</text>
+          </view>
+        </view>
+      </scroll-view>
+
+      <view class="address-actions">
+        <button class="ghost-btn" bindtap="closeLocationPicker">取消</button>
+        <button class="primary-btn" type="button" bindtap="applySelectedAddressBookEntries" disabled="{{!addressBookSelectedIds.length}}">确定</button>
+      </view>
+    </view>
+  </view>
 
   <view class="bottom-actions">
     <button class="ghost-btn bottom-btn" bindtap="cancelForm" disabled="{{saving}}">取消</button>

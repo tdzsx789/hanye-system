@@ -35,25 +35,10 @@
 }
 
 .section-title {
+  display: block;
   margin-bottom: 20rpx;
   color: #172033;
   font-size: 28rpx;
-  font-weight: 800;
-}
-
-.section-title.inline {
-  margin-bottom: 0;
-}
-
-.section-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.section-arrow {
-  color: #1769e0;
-  font-size: 24rpx;
   font-weight: 800;
 }
 
@@ -82,6 +67,10 @@
   padding: 18rpx 24rpx;
   color: #172033;
   font-size: 28rpx;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .picker-box.disabled {
@@ -91,8 +80,12 @@
 
 .two-col {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   column-gap: 16rpx;
+}
+
+.customer-field {
+  z-index: 2;
 }
 
 .suggestion-box {
@@ -140,15 +133,306 @@
   border-radius: 0;
 }
 
-.readonly-line {
+.location-panel {
+  display: block;
+}
+
+.location-head {
   display: flex;
+  align-items: flex-start;
   justify-content: space-between;
-  margin-top: 8rpx;
-  padding: 16rpx;
+  column-gap: 16rpx;
+  margin-bottom: 14rpx;
+}
+
+.location-hint {
+  display: block;
+  margin-top: 4rpx;
+  color: #7a889d;
+  font-size: 22rpx;
+  line-height: 1.4;
+}
+
+.location-count {
+  flex: 0 0 auto;
+  border-radius: 999rpx;
+  background: #e8f1ff;
+  padding: 6rpx 14rpx;
+  color: #1d4ed8;
+  font-size: 22rpx;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.location-count.empty {
+  background: #edf2f7;
+  color: #7a889d;
+}
+
+.location-list {
+  margin-bottom: 16rpx;
+}
+
+.location-empty-inline {
+  margin-bottom: 16rpx;
+  border: 1rpx dashed #cbd7e7;
   border-radius: 8rpx;
-  background: #f4f7fb;
-  color: #52627a;
+  background: #f8fbff;
+  padding: 22rpx 20rpx;
+  color: #7a889d;
   font-size: 24rpx;
+  text-align: center;
+}
+
+.location-item {
+  display: grid;
+  grid-template-columns: 44rpx minmax(0, 1fr);
+  align-items: flex-start;
+  column-gap: 12rpx;
+  margin-bottom: 12rpx;
+  border: 1rpx solid #dce5ef;
+  border-radius: 8rpx;
+  background: #f8fbff;
+  padding: 14rpx 16rpx;
+}
+
+.location-item:last-child {
+  margin-bottom: 0;
+}
+
+.location-index {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44rpx;
+  height: 44rpx;
+  border-radius: 999rpx;
+  background: #e8f1ff;
+  color: #1d4ed8;
+  font-size: 22rpx;
+  font-weight: 800;
+}
+
+.location-text {
+  display: block;
+  min-width: 0;
+  color: #172033;
+  font-size: 26rpx;
+  line-height: 1.45;
+  word-break: break-all;
+}
+
+.location-text.empty {
+  color: #7a889d;
+}
+
+.location-button {
+  width: 100%;
+  min-height: 64rpx;
+  border: 1rpx dashed #b8c8dc;
+  background: #f8fbff;
+  color: #1769e0;
+  font-size: 24rpx;
+}
+
+.small {
+  min-height: 64rpx;
+  padding: 0 20rpx;
+  font-size: 24rpx;
+}
+
+.sheet-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(13, 21, 37, 0.5);
+}
+
+.location-picker-mask {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 24rpx 24rpx calc(24rpx + env(safe-area-inset-bottom));
+}
+
+.location-sheet {
+  width: 100%;
+  max-height: 88vh;
+  border-radius: 8rpx;
+  background: #ffffff;
+  padding: 22rpx;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 28rpx 60rpx rgba(9, 18, 34, 0.22);
+}
+
+.sheet-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  column-gap: 16rpx;
+}
+
+.sheet-head-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.sheet-title {
+  display: block;
+  color: #172033;
+  font-size: 30rpx;
+  font-weight: 800;
+}
+
+.sheet-subtitle {
+  display: block;
+  margin-top: 6rpx;
+  color: #607089;
+  font-size: 22rpx;
+  line-height: 1.4;
+}
+
+.sheet-close {
+  flex: 0 0 auto;
+  min-width: 104rpx;
+  min-height: 54rpx;
+  padding: 0 16rpx;
+}
+
+.location-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 12rpx;
+  margin-top: 18rpx;
+}
+
+.address-picker-note {
+  margin-top: 14rpx;
+  border-radius: 8rpx;
+  background: #eef5ff;
+  padding: 14rpx 16rpx;
+  color: #1d4ed8;
+  font-size: 22rpx;
+  line-height: 1.5;
+}
+
+.location-search {
+  min-height: 72rpx;
+}
+
+.location-new-btn {
+  min-width: 154rpx;
+  padding: 0 18rpx;
+}
+
+.address-form {
+  margin-top: 18rpx;
+  padding: 18rpx;
+  border: 1rpx solid #dbe4f0;
+  border-radius: 8rpx;
+  background: #f8fbff;
+}
+
+.address-save-btn {
+  width: 100%;
+  margin-top: 4rpx;
+}
+
+.address-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 18rpx;
+  margin-bottom: 12rpx;
+  color: #607089;
+  font-size: 22rpx;
+}
+
+.address-empty {
+  padding: 34rpx 20rpx;
+  border: 1rpx dashed #cbd7e7;
+  border-radius: 8rpx;
+  background: #f8fbff;
+  color: #607089;
+  text-align: center;
+  font-size: 24rpx;
+}
+
+.address-list {
+  height: 44vh;
+}
+
+.address-card {
+  display: grid;
+  grid-template-columns: 46rpx minmax(0, 1fr);
+  column-gap: 12rpx;
+  margin-bottom: 12rpx;
+  padding: 16rpx 14rpx;
+  border: 1rpx solid #dce5ef;
+  border-radius: 8rpx;
+  background: #ffffff;
+}
+
+.address-card:last-child {
+  margin-bottom: 0;
+}
+
+.address-card-check {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 4rpx;
+}
+
+.address-card-body {
+  min-width: 0;
+}
+
+.address-card-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  column-gap: 12rpx;
+  color: #172033;
+  font-size: 26rpx;
+  font-weight: 800;
+}
+
+.address-card-phone {
+  flex: 0 0 auto;
+  color: #52627a;
+  font-size: 22rpx;
+  font-weight: 700;
+}
+
+.address-card-main {
+  display: block;
+  margin-top: 6rpx;
+  color: #2c3d56;
+  font-size: 24rpx;
+  line-height: 1.45;
+  word-break: break-all;
+}
+
+.address-card-note {
+  display: block;
+  margin-top: 6rpx;
+  color: #7a889d;
+  font-size: 22rpx;
+  line-height: 1.45;
+}
+
+.address-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 12rpx;
+  margin-top: 18rpx;
+}
+
+.address-actions button {
+  width: 100%;
 }
 
 .bottom-actions {

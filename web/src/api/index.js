@@ -8,6 +8,7 @@ export * as customsBusinessApi from "./customsBusiness.js";
 export * as dispatchApi from "./dispatch.js";
 export * as financeApi from "./finance.js";
 export * as masterDataApi from "./masterData.js";
+export * as remindersApi from "./reminders.js";
 export * as securityApi from "./security.js";
 export * as templatesApi from "./templates.js";
 export * as vehiclesApi from "./vehicles.js";

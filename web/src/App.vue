@@ -14,6 +14,7 @@ import {
   financeApi,
   masterDataApi,
   ordersApi,
+  remindersApi,
   securityApi,
   templatesApi,
   vehiclesApi
@@ -1023,6 +1024,31 @@ const vehicleExpenseReceiptUploading = ref(false);
 const vehicleExpenseReceiptUploadStatus = ref("");
 const vehicleExpenseReceiptUploadTone = ref("busy");
 const driverFileRows = ref([]);
+const expiryReminderRows = ref([]);
+const expiryReminderSummary = ref({
+  total: 0,
+  unacknowledged: 0,
+  overdue: 0,
+  dueToday: 0,
+  dueIn7: 0,
+  dueIn30: 0,
+  drivers: 0,
+  vehicles: 0
+});
+const expiryReminderLoading = ref(false);
+const expiryReminderAcking = ref(false);
+const expiryReminderModalOpen = ref(false);
+const expiryReminderCenterFilter = ref("all");
+const expiryReminderCenterEl = ref(null);
+const expiryReminderPopupMutedSignature = ref("");
+const EXPIRY_REMINDER_FILTERS = [
+  { value: "all", label: "全部" },
+  { value: "unacknowledged", label: "新提醒" },
+  { value: "overdue", label: "已过期" },
+  { value: "7days", label: "7天内" },
+  { value: "driver", label: "司机" },
+  { value: "vehicle", label: "车辆" }
+];
 
 const selectedCustomerId = ref(customerRows.value[0]?.id || "");
 const selectedVehiclePlate = ref(vehicleRows.value[0]?.plate || "");
@@ -1068,7 +1094,7 @@ const addressBookFormOpen = ref(false);
 const tableSortState = reactive({});
 
 const loading = ref(false);
-const apiStatus = ref("本地数据库连接中");
+const apiStatus = ref("");
 const notice = ref("");
 let noticeTimer;
 let orderAttachmentUploadStatusTimer;
@@ -1801,6 +1827,141 @@ function canAccessMonthlyExchangeRates() {
 
 function canAccessCompanyExpenses() {
   return ["bossDashboard", "bossCompanyProfit", "bossCompanyExpenses"].some((moduleId) => canAccessModule(moduleId));
+}
+
+const expiryReminderUnacknowledgedRows = computed(() =>
+  expiryReminderRows.value.filter((row) => !row.acknowledged)
+);
+
+const filteredExpiryReminderRows = computed(() => {
+  const filter = expiryReminderCenterFilter.value;
+  if (filter === "unacknowledged") return expiryReminderRows.value.filter((row) => !row.acknowledged);
+  if (filter === "overdue") return expiryReminderRows.value.filter((row) => Number(row.days) < 0);
+  if (filter === "7days") return expiryReminderRows.value.filter((row) => Number(row.days) >= 0 && Number(row.days) <= 7);
+  if (filter === "driver") return expiryReminderRows.value.filter((row) => row.entityType === "driver");
+  if (filter === "vehicle") return expiryReminderRows.value.filter((row) => row.entityType === "vehicle");
+  return expiryReminderRows.value;
+});
+
+function expiryReminderFilterCount(filter) {
+  if (filter.value === "unacknowledged") return expiryReminderUnacknowledgedRows.value.length;
+  if (filter.value === "overdue") return expiryReminderRows.value.filter((row) => Number(row.days) < 0).length;
+  if (filter.value === "7days") return expiryReminderRows.value.filter((row) => Number(row.days) >= 0 && Number(row.days) <= 7).length;
+  if (filter.value === "driver") return expiryReminderRows.value.filter((row) => row.entityType === "driver").length;
+  if (filter.value === "vehicle") return expiryReminderRows.value.filter((row) => row.entityType === "vehicle").length;
+  return expiryReminderRows.value.length;
+}
+
+function expiryReminderDefaultSummary() {
+  return {
+    total: 0,
+    unacknowledged: 0,
+    overdue: 0,
+    dueToday: 0,
+    dueIn7: 0,
+    dueIn30: 0,
+    drivers: 0,
+    vehicles: 0
+  };
+}
+
+function expiryReminderStatusLabel(row = {}) {
+  if (Number(row.days) < 0) return `已过期 ${Math.abs(Number(row.days))} 天`;
+  if (Number(row.days) === 0) return "今天到期";
+  return `${Number(row.days)} 天后到期`;
+}
+
+function expiryReminderToneClass(row = {}) {
+  return Number(row.days) <= 7 ? "danger" : "warning";
+}
+
+function expiryReminderPopupSignature(rows = expiryReminderUnacknowledgedRows.value) {
+  return rows.map((row) => row.key).filter(Boolean).sort().join("|");
+}
+
+function maybeOpenExpiryReminderPopup(rows = expiryReminderUnacknowledgedRows.value) {
+  if (!loggedIn.value || activeModule.value !== "home" || rows.length === 0) return;
+  const signature = expiryReminderPopupSignature(rows);
+  if (!signature || signature === expiryReminderPopupMutedSignature.value) return;
+  expiryReminderModalOpen.value = true;
+}
+
+async function loadExpiryReminders(options = {}) {
+  if (!loggedIn.value || !canAccessModule("vehicleDriver")) {
+    expiryReminderRows.value = [];
+    expiryReminderSummary.value = expiryReminderDefaultSummary();
+    expiryReminderModalOpen.value = false;
+    return;
+  }
+  try {
+    expiryReminderLoading.value = true;
+    const result = await remindersApi.listExpiryReminders();
+    expiryReminderRows.value = Array.isArray(result?.rows) ? result.rows : [];
+    expiryReminderSummary.value = {
+      ...expiryReminderDefaultSummary(),
+      ...(result?.summary || {})
+    };
+    if (options.showPopup) maybeOpenExpiryReminderPopup(result?.unacknowledgedRows || expiryReminderUnacknowledgedRows.value);
+  } catch (error) {
+    if (!options.silent) notify(error.message || "提醒中心加载失败");
+  } finally {
+    expiryReminderLoading.value = false;
+  }
+}
+
+function scrollToExpiryReminderCenter() {
+  expiryReminderModalOpen.value = false;
+  nextTick(() => {
+    expiryReminderCenterEl.value?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  });
+}
+
+function deferExpiryReminderPopup() {
+  expiryReminderPopupMutedSignature.value = expiryReminderPopupSignature();
+  scrollToExpiryReminderCenter();
+}
+
+async function acknowledgeExpiryReminders(keys = expiryReminderUnacknowledgedRows.value.map((row) => row.key)) {
+  const normalizedKeys = Array.from(new Set((keys || []).map((key) => String(key || "").trim()).filter(Boolean)));
+  if (normalizedKeys.length === 0) {
+    expiryReminderModalOpen.value = false;
+    return;
+  }
+  try {
+    expiryReminderAcking.value = true;
+    const result = await remindersApi.acknowledgeExpiryReminders(normalizedKeys);
+    expiryReminderRows.value = Array.isArray(result?.rows) ? result.rows : expiryReminderRows.value.map((row) =>
+      normalizedKeys.includes(row.key) ? { ...row, acknowledged: true } : row
+    );
+    expiryReminderSummary.value = {
+      ...expiryReminderDefaultSummary(),
+      ...(result?.summary || {})
+    };
+    expiryReminderPopupMutedSignature.value = "";
+    expiryReminderModalOpen.value = false;
+    notify("提醒已确认");
+  } catch (error) {
+    notify(error.message || "提醒确认失败");
+  } finally {
+    expiryReminderAcking.value = false;
+  }
+}
+
+function goExpiryReminderTarget(row = {}) {
+  expiryReminderModalOpen.value = false;
+  if (row.entityType === "vehicle") {
+    selectedVehiclePlate.value = row.entityId || selectedVehiclePlate.value;
+    activeVehicleTab.value = "车辆管理";
+    activeVehicleDetailTab.value = "证件提醒";
+    openModule("vehicleManage");
+    return;
+  }
+  if (row.entityType === "driver") {
+    selectedDriverId.value = Number(row.entityId) || selectedDriverId.value;
+    activeVehicleTab.value = "司机管理";
+    activeDriverDetailTab.value = "司机资料";
+    openModule("driverManage");
+  }
 }
 
 function navItemActive(item) {
@@ -12291,6 +12452,11 @@ watch([feeItemRows, () => templateModalOpen.value], () => {
 
 watch(activeModule, (moduleId) => {
   resetPeriodFiltersForModuleNavigation();
+  if (loggedIn.value && moduleId === "home") {
+    loadExpiryReminders({ silent: true, showPopup: true }).catch((error) => {
+      notify(error.message || "提醒中心加载失败");
+    });
+  }
   if (loggedIn.value && moduleId === "templates") {
     ensureTemplateRowsLoaded({ silent: true }).catch((error) => {
       notify(error.message || "模板中心加载失败");
@@ -14053,7 +14219,7 @@ async function loadDatabaseData(options = {}) {
     editRule(null);
     editMaster(masterData.find((item) => item.id === selectedMasterId.value) || masterData[0] || null);
     editAccount(accountData.find((item) => item.id === selectedAccountId.value) || accountData[0] || null);
-    apiStatus.value = "已连接本地数据库";
+    apiStatus.value = "";
   } catch (error) {
     apiStatus.value = `接口未连接，请先启动后端：${error.message}`;
   } finally {
@@ -14149,7 +14315,8 @@ async function login() {
       activeModule.value = firstAccessibleModule.value;
       location.hash = activeModule.value === "vehicleDriver" ? "vehicleManage" : activeModule.value;
     }
-    loadDatabaseData();
+    await loadDatabaseData();
+    await loadExpiryReminders({ silent: true, showPopup: activeModule.value === "home" });
     if (canAccessModule("dispatchBoard")) loadDispatchPlansForCurrentFilter();
     if (activeModule.value === "templates") {
       ensureTemplateRowsLoaded({ silent: true }).catch((error) => notify(error.message || "模板中心加载失败"));
@@ -14165,6 +14332,9 @@ function logout(options = {}) {
   currentSessionAccount.value = null;
   currentUsername.value = "";
   closeTransientUi();
+  expiryReminderRows.value = [];
+  expiryReminderSummary.value = expiryReminderDefaultSummary();
+  expiryReminderPopupMutedSignature.value = "";
   loggedIn.value = false;
   if (!options.silent) notify("已退出登录");
 }
@@ -14181,6 +14351,7 @@ function closeTransientUi() {
   customerOrderColumnMenuOpen.value = false;
   orderColumnMenuOpen.value = false;
   dispatchColumnMenuOpen.value = false;
+  expiryReminderModalOpen.value = false;
   accountPasswordModalOpen.value = false;
   accountProfileModalOpen.value = false;
   accountCreateModalOpen.value = false;
@@ -14200,9 +14371,11 @@ function scheduleDatabaseRefresh() {
   if (!loggedIn.value) return;
   window.clearTimeout(databaseRefreshTimer);
   databaseRefreshTimer = window.setTimeout(() => {
-    loadDatabaseData({ preserveSelection: true }).catch((error) => {
-      apiStatus.value = `接口未连接，请先启动后端：${error.message}`;
-    });
+    loadDatabaseData({ preserveSelection: true })
+      .then(() => loadExpiryReminders({ silent: true, showPopup: activeModule.value === "home" }))
+      .catch((error) => {
+        apiStatus.value = `接口未连接，请先启动后端：${error.message}`;
+      });
   }, 100);
 }
 
@@ -15964,6 +16137,7 @@ async function saveVehicle() {
       : [item, ...vehicleRows.value];
     selectedVehiclePlate.value = item.plate;
     vehicleModalOpen.value = false;
+    await loadExpiryReminders({ silent: true, showPopup: activeModule.value === "home" });
     notify(`已保存车辆：${item.plate}`);
   } catch (error) {
     notify(error.message);
@@ -16109,6 +16283,7 @@ async function saveDriver() {
       : [item, ...driverRows.value];
     selectedDriverId.value = item.id;
     driverModalOpen.value = false;
+    await loadExpiryReminders({ silent: true, showPopup: activeModule.value === "home" });
     notify(`已保存司机：${item.name}`);
   } catch (error) {
     notify(error.message);
@@ -20109,7 +20284,8 @@ onMounted(async () => {
   if (loggedIn.value) {
     await refreshCurrentAccount({ silent: true });
     if (loggedIn.value) {
-      loadDatabaseData();
+      await loadDatabaseData();
+      await loadExpiryReminders({ silent: true, showPopup: activeModule.value === "home" });
       if (canAccessModule("dispatchBoard")) loadDispatchPlansForCurrentFilter();
     }
   }
@@ -20338,7 +20514,7 @@ function orderDetailFeeRows(order = {}) {
         </section>
       </nav>
       <div class="sidebar-footer">
-        <p class="db-status">{{ apiStatus }}</p>
+        <p v-if="apiStatus" class="db-status">{{ apiStatus }}</p>
         <section class="account-status-card" aria-label="账户登录状态">
           <div class="account-status-head">
             <span class="account-avatar"><IconSvg name="user" /></span>
@@ -20393,7 +20569,57 @@ function orderDetailFeeRows(order = {}) {
             <strong>{{ homeDispatchOwnVehicleCount }} / {{ homeDispatchOutsourceCount }}</strong>
             <small>本公司 / 外派</small>
           </button>
+          <button v-if="canAccessModule('vehicleDriver')" class="home-kpi-card home-kpi-reminder-card" type="button" @click="scrollToExpiryReminderCenter">
+            <span>证件提醒</span>
+            <strong>{{ expiryReminderSummary.total }}</strong>
+            <small>已过期 {{ expiryReminderSummary.overdue }} · 新提醒 {{ expiryReminderSummary.unacknowledged }}</small>
+          </button>
         </div>
+
+        <section v-if="canAccessModule('vehicleDriver')" ref="expiryReminderCenterEl" class="table-card home-reminder-panel">
+          <div class="home-board-head home-reminder-head">
+            <div>
+              <strong>提醒中心</strong>
+              <span>司机证件、车辆保险和年审 30 天内到期提醒</span>
+            </div>
+            <span class="status-badge warning">{{ expiryReminderLoading ? '同步中' : '30天窗口' }}</span>
+          </div>
+          <div class="home-reminder-summary-row">
+            <span class="home-reminder-stat danger"><strong>{{ expiryReminderSummary.overdue }}</strong>已过期</span>
+            <span class="home-reminder-stat danger"><strong>{{ expiryReminderSummary.dueIn7 }}</strong>7天内</span>
+            <span class="home-reminder-stat warning"><strong>{{ expiryReminderSummary.dueIn30 }}</strong>30天内</span>
+            <span class="home-reminder-stat neutral"><strong>{{ expiryReminderSummary.unacknowledged }}</strong>新提醒</span>
+          </div>
+          <div class="home-reminder-filters">
+            <button
+              v-for="filter in EXPIRY_REMINDER_FILTERS"
+              :key="filter.value"
+              type="button"
+              :class="{ active: expiryReminderCenterFilter === filter.value }"
+              @click="expiryReminderCenterFilter = filter.value"
+            >
+              {{ filter.label }} <span>{{ expiryReminderFilterCount(filter) }}</span>
+            </button>
+          </div>
+          <div class="home-reminder-list">
+            <button
+              v-for="row in filteredExpiryReminderRows"
+              :key="row.key"
+              type="button"
+              :class="['home-reminder-row', expiryReminderToneClass(row), { fresh: !row.acknowledged }]"
+              @click="goExpiryReminderTarget(row)"
+            >
+              <span class="home-reminder-row-main">
+                <strong>{{ row.entityName }}</strong>
+                <span>{{ row.entityLabel }} · {{ row.itemLabel }}</span>
+              </span>
+              <span class="home-reminder-date">{{ inputDateLabel(row.expireDate) }}</span>
+              <span :class="['status-badge', expiryReminderToneClass(row)]">{{ expiryReminderStatusLabel(row) }}</span>
+              <span v-if="!row.acknowledged" class="home-reminder-new">新</span>
+            </button>
+            <p v-if="filteredExpiryReminderRows.length === 0" class="empty-state compact">当前分类暂无到期提醒。</p>
+          </div>
+        </section>
 
         <div class="home-board-grid">
           <section class="table-card home-board-card">
@@ -26912,6 +27138,43 @@ function orderDetailFeeRows(order = {}) {
                 </tbody>
               </table>
             </div>
+          </div>
+        </section>
+      </div>
+
+      <div v-if="expiryReminderModalOpen" class="modal-backdrop">
+        <section class="modal-card compact-modal expiry-reminder-modal">
+          <div class="modal-head">
+            <div>
+              <p class="eyebrow">提醒中心</p>
+              <h2>证件到期提醒</h2>
+            </div>
+            <button type="button" class="icon-btn" @click="deferExpiryReminderPopup"><IconSvg name="close" />关闭</button>
+          </div>
+          <div class="modal-body">
+            <p class="expiry-reminder-modal-copy">以下项目首次进入 30 天倒计时或已过期，确认后本账号不再弹出这些提醒。</p>
+            <div class="expiry-reminder-modal-list">
+              <button
+                v-for="row in expiryReminderUnacknowledgedRows"
+                :key="row.key"
+                type="button"
+                :class="['expiry-reminder-modal-row', expiryReminderToneClass(row)]"
+                @click="goExpiryReminderTarget(row)"
+              >
+                <span>
+                  <strong>{{ row.entityName }}</strong>
+                  <small>{{ row.entityLabel }} · {{ row.itemLabel }}</small>
+                </span>
+                <span>{{ inputDateLabel(row.expireDate) }}</span>
+                <b>{{ expiryReminderStatusLabel(row) }}</b>
+              </button>
+            </div>
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="ghost-btn" @click="deferExpiryReminderPopup">查看提醒中心</button>
+            <button type="button" class="primary-btn" :disabled="expiryReminderAcking" @click="acknowledgeExpiryReminders()">
+              <IconSvg name="check" />{{ expiryReminderAcking ? '确认中' : '确认，不再弹出' }}
+            </button>
           </div>
         </section>
       </div>

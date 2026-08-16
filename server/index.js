@@ -2662,6 +2662,176 @@ function addInputYears(value, years) {
   return dateInputFromDate(date);
 }
 
+const EXPIRY_REMINDER_WINDOW_DAYS = 30;
+const VEHICLE_EXPIRY_REMINDER_FIELDS = [
+  { field: "mainland_review_date", camelField: "mainlandReviewDate", label: "大陆年审", type: "mainlandReview" },
+  { field: "hk_review_date", camelField: "hkReviewDate", label: "香港年审", type: "hkReview" },
+  { field: "mainland_insurance_date", camelField: "mainlandInsuranceDate", label: "大陆保险", type: "mainlandInsurance" },
+  { field: "hk_insurance_date", camelField: "hkInsuranceDate", label: "香港保险", type: "hkInsurance" }
+];
+
+function inputDateDaysUntil(value, referenceValue = todayInputValue()) {
+  const target = parseInputDate(value);
+  const reference = parseInputDate(referenceValue);
+  if (!target || !reference) return null;
+  const targetUtc = Date.UTC(target.getFullYear(), target.getMonth(), target.getDate());
+  const referenceUtc = Date.UTC(reference.getFullYear(), reference.getMonth(), reference.getDate());
+  return Math.ceil((targetUtc - referenceUtc) / 86400000);
+}
+
+function expiryReminderStatus(days) {
+  if (days < 0) return "overdue";
+  if (days === 0) return "today";
+  return "upcoming";
+}
+
+function expiryReminderSeverity(days) {
+  if (days <= 0 || days <= 7) return "danger";
+  return "warning";
+}
+
+function expiryReminderStatusText(days) {
+  if (days < 0) return "已过期";
+  if (days === 0) return "今天到期";
+  if (days <= 7) return "7天内到期";
+  return "30天内到期";
+}
+
+function expiryReminderMessage(owner, itemLabel, days) {
+  if (days < 0) return `${owner}${itemLabel}已过期${Math.abs(days)}天`;
+  if (days === 0) return `${owner}${itemLabel}今天到期`;
+  return `${owner}${itemLabel}到期还剩${days}天`;
+}
+
+function expiryReminderSortRank(days) {
+  if (days < 0) return 0;
+  if (days === 0) return 1;
+  if (days <= 7) return 2;
+  return 3;
+}
+
+function buildExpiryReminderRow(source = {}, options = {}) {
+  const expireDate = String(options.expireDate || "").trim();
+  const days = inputDateDaysUntil(expireDate, options.referenceDate);
+  if (days === null || days > EXPIRY_REMINDER_WINDOW_DAYS) return null;
+  const entityName = String(options.entityName || "").trim();
+  const itemLabel = String(options.itemLabel || "").trim();
+  const key = [
+    options.entityType,
+    options.entityId,
+    options.field,
+    expireDate
+  ].map((part) => String(part || "").trim()).join(":");
+  if (!entityName || !itemLabel || !key || key.includes("::")) return null;
+  return {
+    key,
+    entityType: options.entityType,
+    entityId: String(options.entityId || "").trim(),
+    entityName,
+    entityLabel: options.entityLabel || entityName,
+    itemType: options.itemType || options.field,
+    itemLabel,
+    field: options.camelField || options.field,
+    expireDate,
+    days,
+    status: expiryReminderStatus(days),
+    statusText: expiryReminderStatusText(days),
+    severity: expiryReminderSeverity(days),
+    message: expiryReminderMessage(entityName, itemLabel, days),
+    sourceStatus: source.status || "",
+    sortRank: expiryReminderSortRank(days)
+  };
+}
+
+function summarizeExpiryReminderRows(rows = []) {
+  return rows.reduce((summary, row) => {
+    summary.total += 1;
+    if (!row.acknowledged) summary.unacknowledged += 1;
+    if (row.entityType === "driver") summary.drivers += 1;
+    if (row.entityType === "vehicle") summary.vehicles += 1;
+    if (row.days < 0) summary.overdue += 1;
+    if (row.days === 0) summary.dueToday += 1;
+    if (row.days >= 0 && row.days <= 7) summary.dueIn7 += 1;
+    if (row.days >= 0 && row.days <= EXPIRY_REMINDER_WINDOW_DAYS) summary.dueIn30 += 1;
+    return summary;
+  }, {
+    total: 0,
+    unacknowledged: 0,
+    overdue: 0,
+    dueToday: 0,
+    dueIn7: 0,
+    dueIn30: 0,
+    drivers: 0,
+    vehicles: 0
+  });
+}
+
+async function loadExpiryReminderRowsForAccount(accountId) {
+  const referenceDate = todayInputValue();
+  const [vehicleRows, driverRows, ackRows] = await Promise.all([
+    db.prepare("SELECT * FROM vehicles WHERE deleted_at IS NULL ORDER BY plate ASC").all(),
+    db.prepare("SELECT * FROM drivers WHERE deleted_at IS NULL ORDER BY id ASC").all(),
+    accountId
+      ? db.prepare("SELECT reminder_key, acknowledged_at FROM reminder_acknowledgements WHERE account_id = ?").all(accountId)
+      : Promise.resolve([])
+  ]);
+  const acknowledgementMap = new Map(
+    ackRows.map((row) => [row.reminder_key, row.acknowledged_at || ""])
+  );
+  const rows = [];
+  for (const vehicle of vehicleRows) {
+    for (const config of VEHICLE_EXPIRY_REMINDER_FIELDS) {
+      const row = buildExpiryReminderRow(vehicle, {
+        referenceDate,
+        entityType: "vehicle",
+        entityId: vehicle.plate,
+        entityName: vehicle.plate,
+        entityLabel: "车辆",
+        field: config.field,
+        camelField: config.camelField,
+        itemType: config.type,
+        itemLabel: config.label,
+        expireDate: vehicle[config.field]
+      });
+      if (row) rows.push(row);
+    }
+  }
+  for (const driver of driverRows) {
+    const row = buildExpiryReminderRow(driver, {
+      referenceDate,
+      entityType: "driver",
+      entityId: driver.id,
+      entityName: driver.name,
+      entityLabel: driver.type || "司机",
+      field: "expire_at",
+      camelField: "expireAt",
+      itemType: "driverCertificate",
+      itemLabel: `${driver.type || "司机"}证件`,
+      expireDate: driver.expire_at
+    });
+    if (row) rows.push(row);
+  }
+  rows.forEach((row) => {
+    row.acknowledged = acknowledgementMap.has(row.key);
+    row.acknowledgedAt = acknowledgementMap.get(row.key) || "";
+  });
+  rows.sort((left, right) =>
+    left.sortRank - right.sortRank
+    || left.days - right.days
+    || left.entityType.localeCompare(right.entityType)
+    || left.entityName.localeCompare(right.entityName, "zh-Hans-CN", { numeric: true, sensitivity: "base" })
+    || left.itemLabel.localeCompare(right.itemLabel, "zh-Hans-CN", { numeric: true, sensitivity: "base" })
+  );
+  const summary = summarizeExpiryReminderRows(rows);
+  return {
+    rows,
+    unacknowledgedRows: rows.filter((row) => !row.acknowledged),
+    summary,
+    today: referenceDate,
+    windowDays: EXPIRY_REMINDER_WINDOW_DAYS
+  };
+}
+
 function normalizeDispatchPlanDate(value, fallback = todayInputValue()) {
   const text = String(value || "").trim();
   return parseInputDate(text) ? text : fallback;
@@ -3336,6 +3506,7 @@ function requiredModuleForRequest(req) {
   if (path.startsWith("/orders")) return "orders";
   if (path.startsWith("/customs-businesses")) return "customsBusiness";
   if (path.startsWith("/dispatch-plans")) return "dispatchBoard";
+  if (path.startsWith("/reminders")) return "vehicleDriver";
   if (path.startsWith("/vehicle-expenses")) return "vehicleDriver";
   if (path.startsWith("/vehicles")) return "vehicleDriver";
   if (path.startsWith("/drivers")) return "vehicleDriver";
@@ -3386,6 +3557,42 @@ app.use("/api", authenticateApiRequest, authorizeApiRequest);
 
 app.get("/api/auth/me", async (req, res) => {
   res.json({ account: req.account, roles: ACCOUNT_ROLES });
+});
+
+app.get("/api/reminders/expiry", async (req, res) => {
+  res.json(await loadExpiryReminderRowsForAccount(req.account?.id));
+});
+
+app.post("/api/reminders/expiry/ack", async (req, res) => {
+  const rawKeys = Array.isArray(req.body?.keys)
+    ? req.body.keys
+    : [req.body?.key].filter(Boolean);
+  const keys = Array.from(new Set(
+    rawKeys
+      .map((key) => String(key || "").trim())
+      .filter(Boolean)
+  )).slice(0, 500);
+  if (keys.length === 0) {
+    res.status(400).json({ message: "请选择要确认的提醒" });
+    return;
+  }
+  const accountId = Number(req.account?.id || 0);
+  if (!accountId) {
+    res.status(401).json({ message: "请先登录" });
+    return;
+  }
+  const transaction = db.transaction(async () => {
+    for (const key of keys) {
+      await db.prepare(`
+        INSERT INTO reminder_acknowledgements (account_id, reminder_key, acknowledged_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP::text)
+        ON CONFLICT (account_id, reminder_key)
+        DO UPDATE SET acknowledged_at = EXCLUDED.acknowledged_at
+      `).run(accountId, key);
+    }
+  });
+  await transaction();
+  res.json(await loadExpiryReminderRowsForAccount(accountId));
 });
 
 app.patch("/api/auth/password", async (req, res) => {

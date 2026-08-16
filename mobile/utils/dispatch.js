@@ -155,19 +155,7 @@ function normalizeDispatchRows(rows, date) {
 }
 
 function generateDispatchNo(date, rows, extraRows) {
-  const year = String(date || todayInputValue()).slice(0, 4) || String(new Date().getFullYear());
-  const prefix = `PC${year}`;
-  let max = 0;
-  const candidates = []
-    .concat(Array.isArray(rows) ? rows : [])
-    .concat(Array.isArray(extraRows) ? extraRows : []);
-  candidates.forEach((row) => {
-    const no = valueText(row && row.dispatchNo);
-    if (no.indexOf(prefix) === 0) {
-      max = Math.max(max, Number(no.slice(prefix.length)) || 0);
-    }
-  });
-  return `${prefix}${String(max + 1).padStart(4, "0")}`;
+  return generateBusinessNo("PC", date, rows, extraRows);
 }
 
 function getRowOrder(row, orders) {
@@ -242,6 +230,26 @@ function sortDispatchRows(rows, orders, date) {
     .map((row) => sanitizeDispatchRow(row));
 }
 
+function businessNoDateKey(date) {
+  const text = valueText(date || todayInputValue()).slice(0, 10);
+  const normalized = /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : todayInputValue();
+  return normalized.replace(/-/g, "");
+}
+
+function generateBusinessNo(prefix, date, rows, extraRows) {
+  const fullPrefix = `${prefix}${businessNoDateKey(date)}`;
+  let max = 0;
+  const candidates = []
+    .concat(Array.isArray(rows) ? rows : [])
+    .concat(Array.isArray(extraRows) ? extraRows : []);
+  candidates.forEach((row) => {
+    const no = valueText((row && row.no) || (row && row.dispatchNo) || (row && row.dispatch_no));
+    if (no.indexOf(fullPrefix) !== 0) return;
+    max = Math.max(max, Number(no.slice(fullPrefix.length)) || 0);
+  });
+  return `${fullPrefix}${String(max + 1).padStart(3, "0")}`;
+}
+
 function isTransportOrder(order) {
   return !order || order.businessType !== "报关";
 }
@@ -259,6 +267,14 @@ function dispatchOrderRouteText(record) {
   const loading = dispatchShortLocation(record && record.loading);
   const unloading = dispatchShortLocation(record && record.unloading);
   return [loading, unloading].filter(Boolean).join(" -> ") || "-";
+}
+
+function splitDispatchLocationEntries(value) {
+  return valueText(value)
+    .replace(/\r/g, "\n")
+    .split(/[\n；;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function dispatchVehicleSourceText(row) {
@@ -467,8 +483,13 @@ function buildDispatchWarnings(rows, orders, vehicles, drivers, date) {
 }
 
 function dispatchLocationBlock(label, record, field) {
-  const location = valueText(record && record[field]) || "-";
-  return `${label}：${location}`;
+  const entries = splitDispatchLocationEntries(record && record[field]);
+  if (entries.length <= 1) {
+    return `${label}：${entries[0] || "-"}`;
+  }
+  return entries
+    .map((location, index) => `${label}${index + 1}：${location || "-"}`)
+    .join("\n");
 }
 
 function dispatchMessageText(rows, orders, date) {

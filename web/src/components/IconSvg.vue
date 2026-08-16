@@ -7,6 +7,7 @@ const ICON_PATHS = {
   alignCenter: "M7 6h10M4 10h16M7 14h10M4 18h16",
   alignLeft: "M4 6h16M4 10h10M4 14h16M4 18h10",
   alignRight: "M4 6h16M10 10h10M4 14h16M10 18h10",
+  bell: "M18 8a6 6 0 1 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4",
   car: "M5 17h14M6 17l1-7h10l1 7M8 17a2 2 0 1 0 0 4 2 2 0 0 0 0-4M16 17a2 2 0 1 0 0 4 2 2 0 0 0 0-4M8 10l2-4h4l2 4",
   check: "M20 6 9 17l-5-5",
   checklist: "M9 6h11M9 12h11M9 18h11M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2",

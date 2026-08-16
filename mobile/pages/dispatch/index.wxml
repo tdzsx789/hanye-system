@@ -22,9 +22,12 @@
   </view>
 
   <view class="toolbar">
-    <button class="primary-btn toolbar-btn" bindtap="openNewDispatch" disabled="{{loading || saving}}">新建排车</button>
-    <button class="ghost-btn toolbar-btn" bindtap="copyVisibleDispatchText" disabled="{{loading || saving}}">复制文本</button>
+    <button class="primary-btn toolbar-btn" bindtap="openNewDispatch" disabled="{{loading || saving || dispatchInfoBusy}}">新建排车</button>
+    <button class="ghost-btn toolbar-btn" bindtap="generateSelectedDispatchInfo" loading="{{dispatchInfoBusy}}" disabled="{{loading || saving || dispatchInfoBusy || !selectedDispatchCount}}">{{dispatchInfoBusy ? '生成中...' : '生成派车信息'}}</button>
+    <button class="ghost-btn toolbar-btn" bindtap="copySelectedDispatchRow" disabled="{{loading || saving || dispatchInfoBusy || !selectedDispatchCount}}">复制排车单</button>
+    <button class="quiet-btn toolbar-btn" bindtap="toggleAllVisibleDispatchSelection" disabled="{{loading || saving || dispatchInfoBusy || !displayRows.length}}">{{allVisibleDispatchRowsSelected ? '取消全选' : '全选'}}</button>
   </view>
+  <view wx:if="{{selectedDispatchCount}}" class="selection-summary">已选 {{selectedDispatchCount}} 单</view>
 
   <view wx:if="{{warnings.length}}" class="warning-entry" bindtap="openWarningsPanel">
     <view class="warning-entry-copy">
@@ -51,11 +54,16 @@
   <block wx:else>
     <view class="list-area">
       <view wx:if="{{!displayRows.length}}" class="empty-box">{{emptyText}}</view>
-      <view wx:for="{{displayRows}}" wx:key="id" class="dispatch-card">
+      <view wx:for="{{displayRows}}" wx:key="id" class="dispatch-card {{item.selected ? 'selected' : ''}}">
         <view class="card-head" data-id="{{item.id}}" bindtap="toggleExpand">
-          <view class="card-title-wrap">
-            <text class="dispatch-no">{{item.dispatchNo || '未编号'}}</text>
-            <text class="order-no">订单 {{item.orderNoText}}</text>
+          <view class="card-head-main">
+            <view class="card-select {{item.selected ? 'checked' : ''}}" catchtap="toggleDispatchSelection" data-id="{{item.id}}">
+              <view class="card-select-mark"></view>
+            </view>
+            <view class="card-title-wrap">
+              <text class="dispatch-no">{{item.dispatchNo || '未编号'}}</text>
+              <text class="order-no">订单 {{item.orderNoText}}</text>
+            </view>
           </view>
           <text class="status-chip {{item.statusClass}}">{{item.status}}</text>
         </view>
@@ -75,8 +83,8 @@
           <text wx:if="{{item.orderStatusText}}" class="order-status-tag">订单 {{item.orderStatusText}}</text>
         </view>
         <view wx:if="{{item.expanded}}" class="expanded-area">
-          <view class="detail-line"><text>装货地</text><text>{{item.loading || '-'}}</text></view>
-          <view class="detail-line"><text>卸货地</text><text>{{item.unloading || '-'}}</text></view>
+          <view class="detail-line"><text>装货地</text><text class="detail-value multiline">{{item.loading || '-'}}</text></view>
+          <view class="detail-line"><text>卸货地</text><text class="detail-value multiline">{{item.unloading || '-'}}</text></view>
           <view class="detail-line"><text>外派供应商</text><text>{{item.supplier || '-'}}</text></view>
           <view class="detail-line"><text>备注</text><text>{{item.noteText || '-'}}</text></view>
         </view>
@@ -93,7 +101,7 @@
   <view wx:if="{{showWarningsPanel}}" class="sheet-mask" bindtap="closeWarningsPanel">
     <view class="warning-sheet" catchtap="noop">
       <view class="sheet-head">
-        <view>
+        <view class="sheet-head-copy">
           <text class="sheet-title">证件到期提醒</text>
           <text class="sheet-subtitle">30天内到期 / 已过期</text>
         </view>
