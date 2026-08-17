@@ -1,4 +1,5 @@
 const api = require("../../utils/api");
+const { DEFAULT_API_BASE_URL, setApiBaseUrl } = require("../../utils/config");
 const { getSession, isSessionExpired, setSession } = require("../../utils/session");
 const { hasDispatchAccess } = require("../../utils/dispatch");
 
@@ -11,6 +12,7 @@ Page({
   },
 
   onLoad() {
+    setApiBaseUrl(DEFAULT_API_BASE_URL);
     this.tryResumeSession();
   },
 
@@ -40,6 +42,7 @@ Page({
       wx.showToast({ title: "请输入账号和密码", icon: "none" });
       return;
     }
+    setApiBaseUrl(DEFAULT_API_BASE_URL);
     this.setData({ loading: true });
     try {
       const result = await api.login({ username, password });

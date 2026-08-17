@@ -1,5 +1,5 @@
 const API_BASE_STORAGE_KEY = "hanye_mobile_api_base_url";
-const DEFAULT_API_BASE_URL = "http://localhost:8080/api";
+const DEFAULT_API_BASE_URL = "http://127.0.0.1:8080/api";
 
 function normalizeApiBaseUrl(value) {
   const text = String(value || "").trim().replace(/\/+$/, "");
