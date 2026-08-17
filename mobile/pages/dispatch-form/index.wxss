@@ -25,9 +25,34 @@
 }
 
 .loading-panel {
-  padding: 36rpx 20rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  column-gap: 16rpx;
+  padding: 40rpx 20rpx;
   color: #607089;
+  font-size: 26rpx;
+  font-weight: 700;
   text-align: center;
+}
+
+.loading-spinner {
+  width: 34rpx;
+  height: 34rpx;
+  border: 4rpx solid #d9e6f8;
+  border-top-color: #1769e0;
+  border-radius: 50%;
+  animation: form-loading-spin 0.8s linear infinite;
+}
+
+@keyframes form-loading-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .form-panel {

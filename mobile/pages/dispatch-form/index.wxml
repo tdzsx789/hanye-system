@@ -7,7 +7,10 @@
     <text class="status-chip {{form.status === '已签收' ? 'status-signed' : form.status === '通关中' ? 'status-crossing' : form.status === '异常滞留' ? 'status-exception' : form.status === '已派车' ? 'status-dispatched' : 'status-planned'}}">{{form.status || '预排'}}</text>
   </view>
 
-  <view wx:if="{{loadingRefs}}" class="panel loading-panel">正在读取客户、车辆和司机资料...</view>
+  <view wx:if="{{loadingRefs}}" class="panel loading-panel">
+    <view class="loading-spinner"></view>
+    <text>正在读取客户、车辆和司机资料...</text>
+  </view>
 
   <block wx:else>
     <view class="panel form-panel">

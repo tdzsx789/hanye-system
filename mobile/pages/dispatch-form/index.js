@@ -426,6 +426,8 @@ Page({
     } catch (error) {
       this.setData({ loadingRefs: false });
       wx.showToast({ title: error.message || "读取基础资料失败", icon: "none" });
+    } finally {
+      wx.hideLoading();
     }
   },
 
