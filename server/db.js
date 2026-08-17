@@ -922,6 +922,20 @@ async function initializeSchema() {
     });
   }
 
+  await db.prepare(`
+    UPDATE app_accounts
+    SET username = 'Zhongyuanni',
+        updated_at = CURRENT_TIMESTAMP
+    WHERE username = 'gendanyuan1'
+      AND display_name LIKE '%钟苑妮%'
+      AND deleted_at IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM app_accounts
+        WHERE lower(username) = lower('Zhongyuanni')
+          AND deleted_at IS NULL
+      )
+  `).run();
+
   const adminRole = "管理员";
   const adminPermissions = JSON.stringify(accountPermissionsForRole(adminRole));
   const adminPasswordHash = hashPassword("admin");

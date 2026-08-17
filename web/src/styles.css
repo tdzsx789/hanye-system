@@ -3255,6 +3255,21 @@ select {
   background: #f4f7fb;
 }
 
+.audit-locked-btn,
+.audit-locked-btn:disabled {
+  color: #64748b !important;
+  border-color: #cbd5e1 !important;
+  background: #eef2f7 !important;
+  opacity: 1 !important;
+  box-shadow: none !important;
+  cursor: not-allowed !important;
+}
+
+.audit-locked-btn .ui-icon {
+  color: currentColor;
+  opacity: 0.72;
+}
+
 .icon-btn.danger {
   color: var(--danger);
   border-color: #ffccc7;
@@ -10257,6 +10272,10 @@ tr.selected {
 
 .dispatch-table td small {
   color: var(--muted);
+}
+
+.dispatch-table .dispatch-missing-order-label {
+  color: #b45309;
 }
 
 .dispatch-table select,

@@ -157,23 +157,11 @@ function booleanFlag(value, fallback = false) {
 }
 
 function requestHasTransitDeletePermission(req) {
-  if (roleLevelFor(req.account?.role) >= roleLevelFor("管理员")) return true;
-  const decodeHeaderValue = (value) => {
-    try {
-      return decodeURIComponent(String(value || ""));
-    } catch {
-      return String(value || "");
-    }
-  };
-  const text = [
-    req.headers["x-hanye-role"],
-    req.headers["x-hanye-display-name"]
-  ].map(decodeHeaderValue).join(" ");
-  return ["管理员", "超级管理员", "老板"].some((keyword) => text.includes(keyword));
+  return normalizeAccountRole(req.account?.role) === "管理员";
 }
 
 function requestCanManageOrderAudit(req) {
-  return ["管理员", "财务"].includes(normalizeAccountRole(req.account?.role));
+  return normalizeAccountRole(req.account?.role) === "财务";
 }
 
 app.disable("x-powered-by");
@@ -3435,7 +3423,7 @@ app.post("/api/auth/login", async (req, res) => {
     res.status(400).json({ message: "请输入账号和密码" });
     return;
   }
-  const row = await db.prepare("SELECT * FROM app_accounts WHERE username = ? AND deleted_at IS NULL").get(username);
+  const row = await db.prepare("SELECT * FROM app_accounts WHERE lower(username) = lower(?) AND deleted_at IS NULL ORDER BY id ASC LIMIT 1").get(username);
   if (!row) {
     res.status(404).json({ message: "账号不存在" });
     return;
@@ -3484,7 +3472,7 @@ async function authenticateApiRequest(req, res, next) {
     res.status(401).json({ message: "请先登录" });
     return;
   }
-  const row = await db.prepare("SELECT * FROM app_accounts WHERE id = ? AND username = ? AND deleted_at IS NULL").get(Number(payload.sub), payload.username);
+  const row = await db.prepare("SELECT * FROM app_accounts WHERE id = ? AND lower(username) = lower(?) AND deleted_at IS NULL").get(Number(payload.sub), payload.username);
   if (!row || row.status !== "启用") {
     res.status(401).json({ message: "登录状态已失效，请重新登录" });
     return;
@@ -4113,6 +4101,7 @@ function dispatchRowText(row = {}, key = "") {
 
 function dispatchRowOrderSyncKey(row = {}) {
   return [
+    "orderNo",
     "dispatchNo",
     "plate",
     "vehicleSource",
@@ -4212,6 +4201,31 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = []) {
   }
 
   return synced;
+}
+
+async function removeDispatchPlanRowsLinkedToOrder(orderRow = {}) {
+  const orderNo = String(orderRow.no || "").trim();
+  const dispatchNo = String(orderRow.dispatch_no || orderRow.dispatchNo || "").trim();
+  if (!orderNo && !dispatchNo) return 0;
+
+  const plans = await db.prepare("SELECT plan_date, rows_json FROM dispatch_plans").all();
+  let removed = 0;
+  for (const plan of plans) {
+    const rows = parseDispatchPlanRowsJson(plan.rows_json);
+    const nextRows = rows.filter((row) => {
+      const rowOrderNo = dispatchRowText(row, "orderNo");
+      const rowDispatchNo = dispatchRowText(row, "dispatchNo");
+      return !(orderNo && rowOrderNo === orderNo) && !(dispatchNo && rowDispatchNo === dispatchNo);
+    });
+    if (nextRows.length === rows.length) continue;
+    removed += rows.length - nextRows.length;
+    await db.prepare(`
+      UPDATE dispatch_plans
+      SET rows_json = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE plan_date = ?
+    `).run(JSON.stringify(nextRows), plan.plan_date);
+  }
+  return removed;
 }
 
 app.get("/api/dispatch-plans", async (req, res) => {
@@ -4399,7 +4413,7 @@ app.post("/api/orders/export/pdf", async (req, res) => {
 
 app.post("/api/orders/audit", async (req, res) => {
   if (!requestCanManageOrderAudit(req)) {
-    res.status(403).json({ message: "只有管理员和财务可以审核订单" });
+    res.status(403).json({ message: "只有财务可以审核订单" });
     return;
   }
   const orderNos = Array.isArray(req.body.orderNos) ? [...new Set(req.body.orderNos.map(String).filter(Boolean))] : [];
@@ -4669,7 +4683,7 @@ app.patch("/api/orders/:no/status", async (req, res) => {
     return;
   }
   if ((status === "已审核" || current.status === "已审核") && !requestCanManageOrderAudit(req)) {
-    res.status(403).json({ message: "只有管理员和财务可以审核或取消审核订单" });
+    res.status(403).json({ message: "只有财务可以审核或取消审核订单" });
     return;
   }
   if (status === "已审核" && current.status !== "已签收") {
@@ -4694,7 +4708,7 @@ app.patch("/api/orders/:no/status", async (req, res) => {
 
 app.delete("/api/orders/:no", async (req, res) => {
   const no = String(req.params.no || "").trim();
-  const row = await db.prepare("SELECT status FROM orders WHERE no = ? AND deleted_at IS NULL").get(no);
+  const row = await db.prepare("SELECT no, dispatch_no, status FROM orders WHERE no = ? AND deleted_at IS NULL").get(no);
   if (!row) {
     res.status(404).json({ message: "订单不存在或已删除" });
     return;
@@ -4708,7 +4722,11 @@ app.delete("/api/orders/:no", async (req, res) => {
     return;
   }
 
-  await db.prepare("UPDATE orders SET deleted_at = CURRENT_TIMESTAMP WHERE no = ?").run(no);
+  const transaction = db.transaction(async () => {
+    await db.prepare("UPDATE orders SET deleted_at = CURRENT_TIMESTAMP WHERE no = ?").run(no);
+    await removeDispatchPlanRowsLinkedToOrder(row);
+  });
+  await transaction();
   await writeAudit("delete", "order", no, "移入回收站");
   res.json({ ok: true });
 });

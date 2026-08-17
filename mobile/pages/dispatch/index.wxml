@@ -89,10 +89,10 @@
           <view class="detail-line"><text>备注</text><text>{{item.noteText || '-'}}</text></view>
         </view>
         <view class="card-actions">
-          <view class="card-action-btn secondary {{saving || item.statusActionDisabled ? 'disabled' : ''}}" data-id="{{item.id}}" bindtap="openStatusActions">状态</view>
-          <view class="card-action-btn secondary {{saving ? 'disabled' : ''}}" data-id="{{item.id}}" bindtap="openEditDispatch">编辑</view>
-          <view class="card-action-btn quiet {{saving ? 'disabled' : ''}}" data-id="{{item.id}}" bindtap="openMoreActions">更多</view>
-          <view class="card-action-btn return {{saving || !item.returnStatus ? 'disabled' : ''}}" data-id="{{item.id}}" bindtap="returnRowStatus">返回</view>
+          <view class="card-action-btn secondary {{saving || item.statusActionDisabled ? 'disabled' : ''}}" data-id="{{item.id}}" catchtap="openStatusActions">更改状态</view>
+          <view class="card-action-btn secondary {{saving ? 'disabled' : ''}}" data-id="{{item.id}}" catchtap="openEditDispatch">编辑</view>
+          <view class="card-action-btn quiet {{saving ? 'disabled' : ''}}" data-id="{{item.id}}" catchtap="openMoreActions">更多</view>
+          <view class="card-action-btn return {{saving || !item.returnStatus ? 'disabled' : ''}}" data-id="{{item.id}}" catchtap="returnRowStatus">返回</view>
         </view>
       </view>
     </view>

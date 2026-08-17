@@ -17,10 +17,6 @@
       <text class="field-label">密码</text>
       <input password placeholder="请输入密码" placeholder-class="placeholder" data-field="password" value="{{password}}" bindinput="onFieldInput" confirm-type="done" bindconfirm="submitLogin" />
     </view>
-    <view class="form-line server-line">
-      <text class="field-label">服务器地址</text>
-      <input placeholder="例如：https://www.example.com/api" placeholder-class="placeholder" data-field="apiBaseUrl" value="{{apiBaseUrl}}" bindinput="onFieldInput" />
-    </view>
-    <button class="primary-btn login-btn" loading="{{loading}}" disabled="{{loading}}" bindtap="submitLogin">登录排车端</button>
+    <button class="primary-btn login-btn" loading="{{loading}}" disabled="{{loading}}" bindtap="submitLogin">登录</button>
   </view>
 </view>

@@ -39,10 +39,6 @@
   margin-bottom: 24rpx;
 }
 
-.server-line {
-  margin-top: 8rpx;
-}
-
 .field-label {
   display: block;
   margin-bottom: 12rpx;
@@ -52,6 +48,7 @@
 }
 
 .login-btn {
-  width: 100%;
-  margin-top: 12rpx;
+  display: flex;
+  width: 220rpx;
+  margin: 12rpx auto 0;
 }

@@ -1,11 +1,9 @@
 const api = require("../../utils/api");
-const { DEFAULT_API_BASE_URL, getApiBaseUrl, setApiBaseUrl } = require("../../utils/config");
 const { getSession, isSessionExpired, setSession } = require("../../utils/session");
 const { hasDispatchAccess } = require("../../utils/dispatch");
 
 Page({
   data: {
-    apiBaseUrl: DEFAULT_API_BASE_URL,
     checking: true,
     loading: false,
     password: "",
@@ -13,7 +11,6 @@ Page({
   },
 
   onLoad() {
-    this.setData({ apiBaseUrl: getApiBaseUrl() });
     this.tryResumeSession();
   },
 
@@ -39,14 +36,12 @@ Page({
   async submitLogin() {
     const username = String(this.data.username || "").trim();
     const password = String(this.data.password || "");
-    const apiBaseUrl = String(this.data.apiBaseUrl || "").trim();
     if (!username || !password) {
       wx.showToast({ title: "请输入账号和密码", icon: "none" });
       return;
     }
     this.setData({ loading: true });
     try {
-      setApiBaseUrl(apiBaseUrl);
       const result = await api.login({ username, password });
       const account = result && result.account ? result.account : null;
       if (!hasDispatchAccess(account)) {

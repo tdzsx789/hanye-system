@@ -1,5 +1,5 @@
 .form-page {
-  padding-bottom: calc(132rpx + env(safe-area-inset-bottom));
+  padding-bottom: calc(176rpx + env(safe-area-inset-bottom));
 }
 
 .form-head {
@@ -76,6 +76,37 @@
 .picker-box.disabled {
   background: #f3f6fa;
   color: #7a889d;
+}
+
+.address-area-picker {
+  display: block;
+}
+
+.picker-box-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  column-gap: 12rpx;
+}
+
+.picker-box-trigger.empty {
+  color: #8a97aa;
+}
+
+.picker-box-value {
+  display: block;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.picker-box-arrow {
+  flex: 0 0 auto;
+  color: #7a889d;
+  font-size: 28rpx;
+  line-height: 1;
 }
 
 .two-col {
@@ -281,9 +312,14 @@
 
 .sheet-title {
   display: block;
+  max-width: 100%;
   color: #172033;
-  font-size: 30rpx;
+  font-size: 26rpx;
   font-weight: 800;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sheet-subtitle {
@@ -373,10 +409,17 @@
   border: 1rpx solid #dce5ef;
   border-radius: 8rpx;
   background: #ffffff;
+  transition: background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
 }
 
 .address-card:last-child {
   margin-bottom: 0;
+}
+
+.address-card.selected {
+  border-color: #1769e0;
+  background: #eef5ff;
+  box-shadow: inset 6rpx 0 0 #1769e0, 0 10rpx 24rpx rgba(23, 105, 224, 0.12);
 }
 
 .address-card-check {
@@ -384,6 +427,10 @@
   align-items: flex-start;
   justify-content: center;
   padding-top: 4rpx;
+}
+
+.address-card.selected .address-card-check {
+  color: #1769e0;
 }
 
 .address-card-body {
@@ -398,6 +445,10 @@
   color: #172033;
   font-size: 26rpx;
   font-weight: 800;
+}
+
+.address-card.selected .address-card-title {
+  color: #0f4fb5;
 }
 
 .address-card-phone {
@@ -440,12 +491,14 @@
   left: 0;
   right: 0;
   bottom: 0;
+  z-index: 90;
   display: grid;
   grid-template-columns: 1fr 1.3fr;
   column-gap: 16rpx;
   padding: 18rpx 24rpx calc(18rpx + env(safe-area-inset-bottom));
   border-top: 1rpx solid #e2e8f0;
-  background: rgba(255, 255, 255, 0.96);
+  background: #ffffff;
+  box-shadow: 0 -12rpx 30rpx rgba(15, 23, 42, 0.08);
 }
 
 .bottom-btn {

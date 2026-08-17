@@ -228,6 +228,13 @@ function filterAddressBookRows(rows, keyword) {
   return rows.filter((row) => row.searchText.indexOf(normalizedKeyword) >= 0);
 }
 
+function rowsWithAddressBookSelection(rows = [], selectedIds = []) {
+  const selected = new Set((Array.isArray(selectedIds) ? selectedIds : []).map((item) => String(item)));
+  return (Array.isArray(rows) ? rows : []).map((row) => Object.assign({}, row, {
+    selected: selected.has(String(row.id))
+  }));
+}
+
 function selectedAddressBookIdsForValue(value, rows) {
   const values = splitLocationEntries(value).map((entry) => locationEntryValue(entry)).filter(Boolean);
   if (!values.length) return [];
@@ -251,6 +258,49 @@ function selectedAddressBookIdsForValue(value, rows) {
   return selectedIds;
 }
 
+function uniqueSortedTextList(values) {
+  return uniqueTextList(values).sort((left, right) => left.localeCompare(right, "zh-Hans-CN"));
+}
+
+function splitAreaPickerPath(value) {
+  return String(value || "")
+    .replace(/\r/g, "\n")
+    .replace(/[／｜|]+/g, "/")
+    .replace(/\s*\/\s*/g, "/")
+    .split("/")
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+}
+
+function formatAreaPickerPath(level1 = "", level2 = "") {
+  return [level1, level2].map((item) => String(item || "").trim()).filter(Boolean).join(" / ");
+}
+
+function buildAddressBookAreaCatalog(rows = []) {
+  const level2OptionsByLevel1 = {};
+  const seen = new Set();
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const level1 = String(row && (row.level1 || row.city) || "").trim();
+    const level2 = String(row && row.level2 || "").trim();
+    if (!level1) return;
+    const key = `${level1}||${level2}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    if (!level2OptionsByLevel1[level1]) level2OptionsByLevel1[level1] = [];
+    if (level2 && level2OptionsByLevel1[level1].indexOf(level2) < 0) {
+      level2OptionsByLevel1[level1].push(level2);
+    }
+  });
+  const level1Options = uniqueSortedTextList(Object.keys(level2OptionsByLevel1));
+  level1Options.forEach((level1) => {
+    level2OptionsByLevel1[level1] = uniqueSortedTextList(level2OptionsByLevel1[level1] || []);
+  });
+  return {
+    level1Options,
+    level2OptionsByLevel1
+  };
+}
+
 Page({
   data: {
     addressBookForm: createBlankAddressBookForm(),
@@ -262,6 +312,10 @@ Page({
     addressBookSelectedIds: [],
     addressBookVisibleRows: [],
     addressBookCustomerReady: false,
+    addressBookAreaLevel1Options: [],
+    addressBookAreaLevel2Options: [],
+    addressBookAreaPickerRange: [[], []],
+    addressBookAreaPickerValue: [0, 0],
     businessTypeOptions: BUSINESS_TYPE_OPTIONS,
     customerPickerOpen: false,
     customerSuggestions: [],
@@ -297,6 +351,7 @@ Page({
   },
 
   onLoad() {
+    this.addressBookAreaCatalog = buildAddressBookAreaCatalog();
     const context = getDispatchFormContext();
     const mode = context.mode || "new";
     const date = context.date || todayInputValue();
@@ -338,11 +393,15 @@ Page({
   async loadReferences() {
     this.setData({ loadingRefs: true });
     try {
-      const [customers, vehicles, drivers] = await Promise.all([
+      const [customers, vehicles, drivers, freightRates] = await Promise.all([
         api.listCustomers(),
         api.listVehicles(),
-        api.listDrivers()
+        api.listDrivers(),
+        api.listFreightRates().catch(() => [])
       ]);
+      this.addressBookAreaCatalog = buildAddressBookAreaCatalog(
+        (Array.isArray(freightRates) ? freightRates : []).filter((item) => !String(item.customerId || item.customer_id || "").trim() && !String(item.customerName || item.customer_name || "").trim())
+      );
       const form = normalizeDispatchFormForDisplay(Object.assign({}, this.data.form));
       const locationPatch = locationEntriesPatchFromForm(form);
       this.setData({
@@ -362,6 +421,7 @@ Page({
         unloadingEntryCount: locationPatch.unloadingEntryCount,
         vehicles
       });
+      this.syncAddressBookAreaPicker();
       this.refreshCustomerSuggestions();
     } catch (error) {
       this.setData({ loadingRefs: false });
@@ -545,7 +605,7 @@ Page({
       addressBookLoading: false,
       addressBookRows: rows,
       addressBookSelectedIds,
-      addressBookVisibleRows: filterAddressBookRows(rows, keyword)
+      addressBookVisibleRows: rowsWithAddressBookSelection(filterAddressBookRows(rows, keyword), addressBookSelectedIds)
     });
   },
 
@@ -562,11 +622,68 @@ Page({
     });
   },
 
+  syncAddressBookAreaPicker(value) {
+    const catalog = this.addressBookAreaCatalog || buildAddressBookAreaCatalog();
+    const level1Options = Array.isArray(catalog.level1Options) ? catalog.level1Options : [];
+    const parsed = splitAreaPickerPath(value === undefined ? this.data.addressBookForm.area : value);
+    const selectedLevel1 = parsed[0] && level1Options.indexOf(parsed[0]) >= 0 ? parsed[0] : (level1Options[0] || "");
+    const rawLevel2Options = selectedLevel1
+      ? (catalog.level2OptionsByLevel1[selectedLevel1] || [])
+      : [];
+    const level2Options = rawLevel2Options.length ? rawLevel2Options : [""];
+    const selectedLevel2 = parsed[1] && level2Options.indexOf(parsed[1]) >= 0 ? parsed[1] : (level2Options[0] || "");
+    const level1Index = selectedLevel1 ? level1Options.indexOf(selectedLevel1) : 0;
+    const level2Index = selectedLevel2 ? level2Options.indexOf(selectedLevel2) : 0;
+    this.setData({
+      addressBookAreaLevel1Options: level1Options,
+      addressBookAreaLevel2Options: level2Options,
+      addressBookAreaPickerRange: [level1Options, level2Options],
+      addressBookAreaPickerValue: [Math.max(level1Index, 0), Math.max(level2Index, 0)]
+    });
+  },
+
+  onAddressBookAreaPickerColumnChange(event) {
+    const column = Number(event.detail.column || 0);
+    const value = Number(event.detail.value || 0);
+    const catalog = this.addressBookAreaCatalog || buildAddressBookAreaCatalog();
+    const nextValue = Array.isArray(this.data.addressBookAreaPickerValue)
+      ? this.data.addressBookAreaPickerValue.slice()
+      : [0, 0];
+    if (column === 0) {
+      const level1 = (this.data.addressBookAreaLevel1Options || [])[value] || "";
+      const rawLevel2Options = level1 ? (catalog.level2OptionsByLevel1[level1] || []) : [];
+      const level2Options = rawLevel2Options.length ? rawLevel2Options : [""];
+      nextValue[0] = value;
+      nextValue[1] = 0;
+      this.setData({
+        addressBookAreaLevel2Options: level2Options,
+        addressBookAreaPickerRange: [this.data.addressBookAreaLevel1Options || [], level2Options],
+        addressBookAreaPickerValue: nextValue
+      });
+      return;
+    }
+    nextValue[column] = value;
+    this.setData({ addressBookAreaPickerValue: nextValue });
+  },
+
+  onAddressBookAreaPickerChange(event) {
+    const pickerValue = Array.isArray(event.detail.value) ? event.detail.value : this.data.addressBookAreaPickerValue;
+    const level1 = (this.data.addressBookAreaLevel1Options || [])[Number(pickerValue[0] || 0)] || "";
+    const level2 = (this.data.addressBookAreaLevel2Options || [])[Number(pickerValue[1] || 0)] || "";
+    this.setData({
+      "addressBookForm.area": formatAreaPickerPath(level1, level2),
+      addressBookAreaPickerValue: [Number(pickerValue[0] || 0), Number(pickerValue[1] || 0)]
+    });
+  },
+
   onAddressBookKeywordInput(event) {
     const addressBookKeyword = event.detail.value;
     this.setData({
       addressBookKeyword,
-      addressBookVisibleRows: filterAddressBookRows(this.data.addressBookRows || [], addressBookKeyword)
+      addressBookVisibleRows: rowsWithAddressBookSelection(
+        filterAddressBookRows(this.data.addressBookRows || [], addressBookKeyword),
+        this.data.addressBookSelectedIds || []
+      )
     });
   },
 
@@ -582,6 +699,7 @@ Page({
       addressBookForm: createBlankAddressBookForm(),
       addressBookFormOpen: true
     });
+    this.syncAddressBookAreaPicker("");
   },
 
   onAddressBookFormInput(event) {
@@ -589,16 +707,34 @@ Page({
     this.setData({ [`addressBookForm.${field}`]: event.detail.value });
   },
 
+  setAddressBookSelection(id, checked) {
+    const normalizedId = String(id || "").trim();
+    if (!normalizedId) return;
+    const selected = new Set((this.data.addressBookSelectedIds || []).map((item) => String(item)));
+    if (checked) {
+      selected.add(normalizedId);
+    } else {
+      selected.delete(normalizedId);
+    }
+    const addressBookSelectedIds = Array.from(selected);
+    this.setData({
+      addressBookSelectedIds,
+      addressBookVisibleRows: rowsWithAddressBookSelection(this.data.addressBookVisibleRows || [], addressBookSelectedIds)
+    });
+  },
+
   toggleAddressBookSelection(event) {
     const id = String(event.currentTarget.dataset.id || "").trim();
     if (!id) return;
     const selected = new Set((this.data.addressBookSelectedIds || []).map((item) => String(item)));
-    if (selected.has(id)) {
-      selected.delete(id);
-    } else {
-      selected.add(id);
-    }
-    this.setData({ addressBookSelectedIds: Array.from(selected) });
+    this.setAddressBookSelection(id, !selected.has(id));
+  },
+
+  onAddressBookCheckboxChange(event) {
+    const id = String(event.currentTarget.dataset.id || "").trim();
+    if (!id) return;
+    const values = Array.isArray(event.detail.value) ? event.detail.value.map((item) => String(item)) : [];
+    this.setAddressBookSelection(id, values.indexOf(id) >= 0);
   },
 
   async saveAddressBookEntry() {
@@ -608,6 +744,7 @@ Page({
       wx.showToast({ title: "请选择客户资料中的有效客户", icon: "none" });
       return;
     }
+    const area = String(this.data.addressBookForm.area || "").trim();
     const address = String(this.data.addressBookForm.address || "").trim();
     const contact = String(this.data.addressBookForm.contact || "").trim();
     if (!contact) {
@@ -623,7 +760,7 @@ Page({
       name: contact,
       mobile: String(this.data.addressBookForm.phone || "").trim(),
       phone: String(this.data.addressBookForm.phone || "").trim(),
-      area: String(this.data.addressBookForm.area || "").trim(),
+      area,
       address,
       remark: String(this.data.addressBookForm.note || "").trim()
     };
@@ -638,7 +775,7 @@ Page({
         addressBookLoading: false,
         addressBookRows: nextRows,
         addressBookSelectedIds: nextSelectedIds,
-        addressBookVisibleRows: filterAddressBookRows(nextRows, this.data.addressBookKeyword || ""),
+        addressBookVisibleRows: rowsWithAddressBookSelection(filterAddressBookRows(nextRows, this.data.addressBookKeyword || ""), nextSelectedIds),
         addressBookSaving: false
       });
       wx.showToast({ title: "地址已保存到联系人", icon: "none" });

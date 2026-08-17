@@ -216,7 +216,23 @@
         <view class="two-col">
           <view class="field-row">
             <text class="field-label">片区</text>
-            <input placeholder="省 / 市 / 区 / 片区" placeholder-class="placeholder" value="{{addressBookForm.area}}" data-field="area" bindinput="onAddressBookFormInput" />
+            <picker
+              wx:if="{{addressBookAreaLevel1Options.length}}"
+              class="address-area-picker"
+              mode="multiSelector"
+              range="{{addressBookAreaPickerRange}}"
+              value="{{addressBookAreaPickerValue}}"
+              bindcolumnchange="onAddressBookAreaPickerColumnChange"
+              bindchange="onAddressBookAreaPickerChange"
+            >
+              <view class="picker-box picker-box-trigger {{addressBookForm.area ? '' : 'empty'}}">
+                <text class="picker-box-value">{{addressBookForm.area || '请选择市 / 区'}}</text>
+                <text class="picker-box-arrow">⌄</text>
+              </view>
+            </picker>
+            <view wx:else class="picker-box picker-box-trigger disabled">
+              <text class="picker-box-value">暂无可选片区</text>
+            </view>
           </view>
           <view class="field-row">
             <text class="field-label">联系人</text>
@@ -250,9 +266,11 @@
       <view wx:elif="{{!addressBookVisibleRows.length && addressBookCustomerReady}}" class="address-empty">暂无地址，请先新建地址。</view>
       <view wx:elif="{{!addressBookVisibleRows.length}}" class="address-empty">请先选择经营单位后再查看或新建联系人地址。</view>
       <scroll-view wx:else scroll-y class="address-list">
-        <view wx:for="{{addressBookVisibleRows}}" wx:key="id" class="address-card" data-id="{{item.id}}" bindtap="toggleAddressBookSelection">
+        <view wx:for="{{addressBookVisibleRows}}" wx:key="id" class="address-card {{item.selected ? 'selected' : ''}}" data-id="{{item.id}}" bindtap="toggleAddressBookSelection">
           <view class="address-card-check">
-            <checkbox value="{{item.id}}" checked="{{addressBookSelectedIds.indexOf(item.id) >= 0}}" />
+            <checkbox-group data-id="{{item.id}}" catchtap="noop" bindchange="onAddressBookCheckboxChange">
+              <checkbox color="#1769e0" value="{{item.id}}" checked="{{addressBookSelectedIds.indexOf(item.id) >= 0}}" />
+            </checkbox-group>
           </view>
           <view class="address-card-body">
             <view class="address-card-title">

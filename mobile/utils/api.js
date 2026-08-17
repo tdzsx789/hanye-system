@@ -58,12 +58,22 @@ function updateOrderStatus(orderNo, status) {
   });
 }
 
+function deleteOrder(orderNo) {
+  return request(`/orders/${encodeURIComponent(orderNo)}`, {
+    method: "DELETE"
+  });
+}
+
 function listVehicles() {
   return requestList("/vehicles");
 }
 
 function listDrivers() {
   return requestList("/drivers");
+}
+
+function listFreightRates() {
+  return requestList("/freight-rates");
 }
 
 function getDispatchPlan(date) {
@@ -89,9 +99,11 @@ function listDispatchPlans(options) {
 module.exports = {
   createOrder,
   createCustomerContact,
+  deleteOrder,
   getCurrentAccount,
   getDispatchPlan,
   listCustomers,
+  listFreightRates,
   listCustomerContacts,
   listDispatchPlans,
   listDrivers,

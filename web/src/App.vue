@@ -51,6 +51,7 @@ import {
   FEE_DRIVER_ROLE_OPTIONS,
   FEE_ITEM_CATEGORY_OPTIONS,
   FEE_ITEM_COST_SOURCE_OPTIONS,
+  FINANCE_CENTER_MODULES,
   FILE_UPLOAD_ACCEPT,
   FREIGHT_QUOTE_CUSTOMERS_VIEW,
   FREIGHT_QUOTE_MATRIX_VIEW,
@@ -1805,6 +1806,9 @@ const currentAllowedModuleIds = computed(() => {
   const accountModules = currentAccount.value?.allowedModules;
   if (!Array.isArray(accountModules) || !accountModules.length) return roleModules;
   const moduleSet = new Set(accountModules);
+  roleModules
+    .filter((moduleId) => FINANCE_CENTER_MODULES.includes(moduleId))
+    .forEach((moduleId) => moduleSet.add(moduleId));
   if (moduleSet.has("financeCosts")) moduleSet.add("financeSupplierStatements");
   if (moduleSet.has("financeCosts") || moduleSet.has("financeSupplierStatements")) moduleSet.add("financeCustomsStatements");
   if (moduleSet.has("bossVehicleProfit")) moduleSet.add("bossSupplierProfit");
@@ -2859,8 +2863,24 @@ const dispatchWorkDateOrders = computed(() =>
   )
 );
 
+function dispatchRowLiveOrder(row = {}) {
+  const orderNo = String(row?.orderNo || "").trim();
+  const dispatchNo = String(row?.dispatchNo || "").trim();
+  return orderRows.value.find((order) =>
+    !order.deletedAt &&
+    (
+      (orderNo && order.no === orderNo) ||
+      (dispatchNo && String(order.dispatchNo || "").trim() === dispatchNo)
+    )
+  ) || null;
+}
+
+function dispatchRowHasMissingOrder(row = {}) {
+  return Boolean(String(row?.orderNo || "").trim() && !dispatchRowLiveOrder(row));
+}
+
 const dispatchPlannedOrderNos = computed(() =>
-  new Set(dispatchPlanRows.value.map((row) => row.orderNo).filter(Boolean))
+  new Set(dispatchPlanRows.value.map((row) => dispatchRowLiveOrder(row)?.no).filter(Boolean))
 );
 
 const dispatchUnplannedOrders = computed(() =>
@@ -2870,13 +2890,14 @@ const dispatchUnplannedOrders = computed(() =>
 const dispatchPlanDisplayRows = computed(() =>
   dispatchPlanRows.value
     .map((row, index) => {
-      const order = orderRows.value.find((item) => item.no === row.orderNo) || null;
+      const order = dispatchRowLiveOrder(row);
       return {
         ...row,
         createdByName: row.createdByName || row.createdByUsername || "",
         index,
+        orderMissing: Boolean(row.orderNo && !order),
         order: order || {
-          no: row.orderNo || "",
+          no: "",
           customer: row.customer || "",
           businessType: row.businessType || "",
           date: row.date || dispatchDate.value,
@@ -2968,7 +2989,7 @@ const dispatchPlanWarnings = computed(() => {
     if (count > 1) warnings.push(`司机 ${name} 在当天安排了 ${count} 次`);
   });
   dispatchPlanDisplayRows.value.forEach((row) => {
-    if (row.orderNo && !orderRows.value.some((order) => order.no === row.orderNo)) {
+    if (dispatchRowHasMissingOrder(row)) {
       warnings.push(`${row.dispatchNo || "未编号排车单"} 关联订单 ${row.orderNo} 不存在或已删除`);
     }
     if (row.vehicle && row.vehicle.status !== "正常") warnings.push(`${row.plate} 车辆状态：${row.vehicle.status}`);
@@ -3122,7 +3143,7 @@ async function loadDispatchPlansForCurrentFilter() {
 }
 
 function dispatchPlanRowOrder(row = {}) {
-  return row.order || orderRows.value.find((item) => item.no === row.orderNo) || {};
+  return dispatchRowLiveOrder(row) || row.order || {};
 }
 
 function dispatchPlanVehicleSource(row = {}) {
@@ -3219,7 +3240,7 @@ function sortDispatchPlanRowsForDisplay() {
 }
 
 function dispatchPlanDate(row = {}) {
-  return row.date || row.order?.date || orderRows.value.find((item) => item.no === row.orderNo)?.date || dispatchDate.value;
+  return row.date || dispatchRowLiveOrder(row)?.date || row.order?.date || dispatchDate.value;
 }
 
 async function saveDispatchPlan({ silent = false, throwOnError = false } = {}) {
@@ -3314,25 +3335,24 @@ function dispatchStatusClass(status) {
 }
 
 async function syncDispatchRowOrderStatus(row, status) {
-  const orderNo = row?.orderNo || row?.order?.no || "";
   const orderStatus = DISPATCH_STATUS_TO_ORDER_STATUS[status];
-  if (!orderNo || !orderStatus) return;
-  const currentOrder = orderRows.value.find((order) => order.no === orderNo);
+  if (!orderStatus) return;
+  const currentOrder = dispatchRowLiveOrder(row);
   if (!currentOrder) {
-    throw new Error(`排车单关联订单 ${orderNo} 不存在或已删除，请移除该排车单或重新生成订单`);
+    if (dispatchRowHasMissingOrder(row)) return;
+    return;
   }
   if (currentOrder?.status === orderStatus) return;
-  const item = await ordersApi.updateOrderStatus(orderNo, orderStatus);
+  const item = await ordersApi.updateOrderStatus(currentOrder.no, orderStatus);
   orderRows.value = orderRows.value.map((order) => order.no === item.no ? item : order);
 }
 
 async function syncDispatchNoToOrder(row = {}) {
-  const orderNo = row.orderNo || row.order?.no || "";
   const dispatchNo = String(row.dispatchNo || "").trim();
-  if (!orderNo || !dispatchNo) return;
-  const currentOrder = orderRows.value.find((order) => order.no === orderNo);
+  if (!dispatchNo) return;
+  const currentOrder = dispatchRowLiveOrder(row);
   if (!currentOrder || String(currentOrder.dispatchNo || "").trim() === dispatchNo) return;
-  const item = await ordersApi.updateOrder(orderNo, { dispatchNo });
+  const item = await ordersApi.updateOrder(currentOrder.no, { dispatchNo });
   orderRows.value = orderRows.value.map((order) => order.no === item.no ? item : order);
   if (row.order) row.order.dispatchNo = item.dispatchNo || dispatchNo;
 }
@@ -3340,7 +3360,7 @@ async function syncDispatchNoToOrder(row = {}) {
 async function syncDispatchNosToOrders(rows = dispatchPlanRows.value) {
   const seenOrderNos = new Set();
   for (const row of rows) {
-    const orderNo = row?.orderNo || row?.order?.no || "";
+    const orderNo = dispatchRowLiveOrder(row)?.no || "";
     if (!orderNo || seenOrderNos.has(orderNo)) continue;
     seenOrderNos.add(orderNo);
     await syncDispatchNoToOrder(row);
@@ -3348,13 +3368,13 @@ async function syncDispatchNosToOrders(rows = dispatchPlanRows.value) {
 }
 
 async function syncDispatchDriverToOrder(row, driverName) {
-  const orderNo = row?.orderNo || row?.order?.no || "";
-  if (!orderNo || !driverName) return;
-  const currentOrder = orderRows.value.find((order) => order.no === orderNo);
+  if (!driverName) return;
+  const currentOrder = dispatchRowLiveOrder(row);
   if (!currentOrder) {
-    throw new Error(`排车单关联订单 ${orderNo} 不存在或已删除，请移除该排车单或重新生成订单`);
+    if (dispatchRowHasMissingOrder(row)) return;
+    return;
   }
-  const item = await ordersApi.updateOrder(orderNo, {
+  const item = await ordersApi.updateOrder(currentOrder.no, {
     transportMode: "单司机",
     vehicleSource: currentOrder.vehicleSource || row.vehicleSource || "本公司车辆",
     driver: driverName,
@@ -3636,9 +3656,9 @@ async function saveEditedDispatchPlanRow() {
   try {
     loading.value = true;
     if (updatedRow.orderNo) {
-      const currentOrder = orderRows.value.find((order) => order.no === updatedRow.orderNo);
+      const currentOrder = dispatchRowLiveOrder(updatedRow);
       if (currentOrder) {
-        const item = await ordersApi.updateOrder(updatedRow.orderNo, {
+        const item = await ordersApi.updateOrder(currentOrder.no, {
           ...currentOrder,
           customerId: matchedCustomer.id,
           customer: matchedCustomer.name,
@@ -3923,7 +3943,7 @@ function bindableDispatchRowsForCustomer(customerName = "") {
   const normalizedName = String(customerName || "").trim();
   if (!normalizedName) return [];
   return dispatchPlanRows.value.filter(
-    (row) => !row.orderNo && String(row.customer || "").trim() === normalizedName
+    (row) => (!row.orderNo || dispatchRowHasMissingOrder(row)) && String(row.customer || "").trim() === normalizedName
   );
 }
 
@@ -3944,6 +3964,7 @@ function applyDispatchRowToOrderForm(row) {
     loading: row.loading || "",
     unloading: row.unloading || "",
     date: dispatchDate.value || orderForm.date,
+    status: DISPATCH_STATUS_TO_ORDER_STATUS[row.status] || orderForm.status,
     remark: [orderForm.remark, row.note ? `排车备注：${row.note}` : ""].filter(Boolean).join("\n")
   });
   ensureOrderFreightCurrency();
@@ -3956,12 +3977,34 @@ function applyDispatchRowToOrderForm(row) {
   pendingDispatchBindId.value = row.id;
 }
 
-function removeDispatchPlanRow(index) {
+async function removeDispatchPlanRow(index) {
+  const row = dispatchPlanRows.value[index];
+  if (!row) return;
+  const linkedOrder = linkedOrderForDispatchRow(row);
+  if (linkedOrder) {
+    try {
+      await ordersApi.deleteOrder(linkedOrder.no);
+      orderRows.value = orderRows.value.filter((item) => item.no !== linkedOrder.no);
+      removeDispatchRowsByOrderRefs([linkedOrder]);
+      notify(`排车单 ${row.dispatchNo || ""} 及关联订单 ${linkedOrder.no} 已删除`);
+      return;
+    } catch (error) {
+      const message = String(error?.message || "");
+      if (message.includes("不存在或已删除")) {
+        orderRows.value = orderRows.value.filter((item) => item.no !== linkedOrder.no);
+        removeDispatchRowsByOrderRefs([linkedOrder]);
+        await saveDispatchPlan({ silent: true });
+        return;
+      }
+      notify(error.message);
+      return;
+    }
+  }
   dispatchPlanRows.value.splice(index, 1);
   selectedDispatchPlanIds.value = selectedDispatchPlanIds.value.filter((id) =>
     dispatchPlanRows.value.some((row) => row.id === id)
   );
-  saveDispatchPlan({ silent: true });
+  await saveDispatchPlan({ silent: true });
 }
 
 function moveDispatchPlanRow(index, offset) {
@@ -3983,6 +4026,33 @@ function toggleAllDispatchPlanSelection(checked) {
   selectedDispatchPlanIds.value = checked
     ? searchedDispatchPlanRows.value.map((row) => row.id)
     : [];
+}
+
+function linkedOrderForDispatchRow(row = {}) {
+  return dispatchRowLiveOrder(row);
+}
+
+function removeDispatchRowsByOrderRefs(orderRefs = []) {
+  const orderNos = new Set();
+  const dispatchNos = new Set();
+  orderRefs.forEach((order) => {
+    const orderNo = String(order?.no || order?.orderNo || "").trim();
+    const dispatchNo = String(order?.dispatchNo || "").trim();
+    if (orderNo) orderNos.add(orderNo);
+    if (dispatchNo) dispatchNos.add(dispatchNo);
+  });
+  if (!orderNos.size && !dispatchNos.size) return;
+  dispatchPlanRows.value = dispatchPlanRows.value.filter((row) => {
+    const rowOrderNo = String(row?.orderNo || "").trim();
+    const rowDispatchNo = String(row?.dispatchNo || "").trim();
+    return !orderNos.has(rowOrderNo) && !dispatchNos.has(rowDispatchNo);
+  });
+  selectedDispatchPlanIds.value = selectedDispatchPlanIds.value.filter((id) =>
+    dispatchPlanRows.value.some((row) => row.id === id)
+  );
+  if (dispatchPlanRows.value.length === 0) {
+    selectedDispatchPlanIds.value = [];
+  }
 }
 
 function dispatchShortLocation(value = "") {
@@ -4105,7 +4175,7 @@ async function applyDispatchPlanToOrders() {
   try {
     loading.value = true;
     for (const row of dispatchPlanRows.value) {
-      const order = orderRows.value.find((item) => item.no === row.orderNo);
+      const order = dispatchRowLiveOrder(row);
       if (!order) continue;
       const normalizedMode = normalizeTransportMode(row.transportMode || order.transportMode || "单司机") || "单司机";
       const nextVehicleSource = order.vehicleSource || (row.plate ? "本公司车辆" : "");
@@ -8876,10 +8946,7 @@ function orderBelongsToPartner(order, partner) {
 }
 
 function orderDispatchPlanRow(order = {}) {
-  return dispatchPlanRows.value.find((row) =>
-    (order.no && row.orderNo === order.no) ||
-    (order.dispatchNo && row.dispatchNo === order.dispatchNo)
-  );
+  return dispatchPlanRows.value.find((row) => dispatchRowLiveOrder(row)?.no === order.no);
 }
 
 function isOrderVisibleInOrderManagement(order = {}) {
@@ -12266,7 +12333,7 @@ const currentAccountCanDeleteInTransitOrder = computed(() =>
 );
 
 const currentAccountCanManageOrderAudit = computed(() =>
-  ["管理员", "财务"].includes(normalizeAccountRole(currentAccount.value.role))
+  normalizeAccountRole(currentAccount.value.role) === "财务"
 );
 
 watch(() => accountForm.role, (role) => {
@@ -15234,7 +15301,7 @@ function canManageOrderAudit() {
 }
 
 function orderAuditPermissionMessage() {
-  return "只有管理员和财务可以审核或取消审核订单";
+  return "只有财务可以审核或取消审核订单";
 }
 
 function orderStatusValue(order = {}) {
@@ -15415,6 +15482,7 @@ async function deleteSelectedOrders() {
     }
     const deletedNos = new Set(targets.map((item) => item.no));
     orderRows.value = orderRows.value.filter((item) => !deletedNos.has(item.no));
+    removeDispatchRowsByOrderRefs(targets);
     selectedOrderNos.value = [];
     notify(`已删除 ${targets.length} 条订单`);
   } catch (error) {
@@ -15436,6 +15504,7 @@ async function deleteOrder(order) {
   try {
     await ordersApi.deleteOrder(order.no);
     orderRows.value = orderRows.value.filter((item) => item.no !== order.no);
+    removeDispatchRowsByOrderRefs([order]);
     notify(`订单 ${order.no} 已移入回收站`);
   } catch (error) {
     notify(error.message);
@@ -15530,6 +15599,7 @@ async function deleteSelectedCustomerOrders() {
     }
     const deletedNos = new Set(targets.map((item) => item.no));
     orderRows.value = orderRows.value.filter((item) => !deletedNos.has(item.no));
+    removeDispatchRowsByOrderRefs(targets);
     selectedOrderNos.value = selectedOrderNos.value.filter((no) => !deletedNos.has(no));
     notify(`已删除 ${targets.length} 条订单`);
   } catch (error) {
@@ -21016,8 +21086,8 @@ function orderDetailFeeRows(order = {}) {
             <div v-else-if="activeCustomerDetailTab === '订单管理'" class="customer-order-panel" @click="customerOrderExportMenuOpen = false">
               <div class="customer-order-toolbar">
                 <span class="customer-order-count">已选 {{ selectedCustomerOrderCount }} 项 / 共 {{ selectedCustomerOrders.length }} 单</span>
-                <button class="ghost-btn small" type="button" :title="currentAccountCanManageOrderAudit ? '批量审核' : orderAuditPermissionMessage()" :disabled="!currentAccountCanManageOrderAudit" @click="auditSelectedCustomerOrders"><IconSvg name="check" />批量审核</button>
-                <button class="ghost-btn small" type="button" :title="currentAccountCanManageOrderAudit ? '取消审核' : orderAuditPermissionMessage()" :disabled="!currentAccountCanManageOrderAudit" @click="cancelSelectedCustomerAudits"><IconSvg name="refresh" />取消审核</button>
+                <button :class="['ghost-btn', 'small', { 'audit-locked-btn': !currentAccountCanManageOrderAudit }]" type="button" :title="currentAccountCanManageOrderAudit ? '批量审核' : orderAuditPermissionMessage()" :disabled="!currentAccountCanManageOrderAudit" @click="auditSelectedCustomerOrders"><IconSvg name="check" />批量审核</button>
+                <button :class="['ghost-btn', 'small', { 'audit-locked-btn': !currentAccountCanManageOrderAudit }]" type="button" :title="currentAccountCanManageOrderAudit ? '取消审核' : orderAuditPermissionMessage()" :disabled="!currentAccountCanManageOrderAudit" @click="cancelSelectedCustomerAudits"><IconSvg name="refresh" />取消审核</button>
                 <button class="ghost-btn small" type="button" @click="resetCustomerOrderColumnOrder"><IconSvg name="list" />恢复列序</button>
                 <button class="ghost-btn small" type="button" @click="resetCustomerOrderColumnWidths"><IconSvg name="refresh" />恢复列宽</button>
                 <button class="ghost-btn small" type="button" :title="selectedCustomerOrderCount ? `查看已选 ${selectedCustomerOrderCount} 单` : `查看当前${activePartnerType}订单`" @click="openOrderListDetail('customer')"><IconSvg name="eye" />查看</button>
@@ -21101,22 +21171,26 @@ function orderDetailFeeRows(order = {}) {
                       :class="{ 'row-actions': column.key === 'actions', 'sticky-managed-column': isCustomerOrderColumnFrozen(column) }"
                       :style="customerOrderFrozenColumnStyle(column, index)"
                       :title="orderTableCellTitle(order, column.key)"
+                      @click="column.key === 'actions' && $event.stopPropagation()"
+                      @dblclick="column.key === 'actions' && $event.stopPropagation()"
                     >
                       <input v-if="column.key === 'select'" type="checkbox" :checked="selectedOrderNos.includes(order.no)" @change="toggleCustomerOrderSelection(order.no, $event.target.checked)" />
                       <span v-else-if="column.key === 'status'" class="status-badge" :class="orderStatusClass(order.status)">{{ order.status }}</span>
                       <template v-else-if="column.key === 'actions'">
+                      <span class="order-row-actions" @click.stop @dblclick.stop>
                       <button
                         v-if="order.status !== '已审核'"
-                        :class="['icon-btn', 'icon-only', { success: canAuditOrder(order) }]"
+                        :class="['icon-btn', 'icon-only', { success: canAuditOrder(order), 'audit-locked-btn': !canAuditOrder(order) }]"
                         type="button"
                         :title="orderAuditButtonTitle(order)"
                         aria-label="待审核"
                         :disabled="!canAuditOrder(order)"
                         @click="auditOrder(order)"
                       ><IconSvg name="check" /></button>
-                      <button v-else class="icon-btn icon-only" type="button" :title="orderCancelAuditButtonTitle(order)" aria-label="取消审核" :disabled="!canCancelAuditOrder(order)" @click="cancelAuditOrder(order)"><IconSvg name="refresh" /></button>
+                      <button v-else :class="['icon-btn', 'icon-only', { 'audit-locked-btn': !canCancelAuditOrder(order) }]" type="button" :title="orderCancelAuditButtonTitle(order)" aria-label="取消审核" :disabled="!canCancelAuditOrder(order)" @click="cancelAuditOrder(order)"><IconSvg name="refresh" /></button>
                       <button class="icon-btn icon-only" type="button" :title="orderEditButtonTitle(order)" :aria-label="orderEditButtonTitle(order)" @click="openOrderModal(selectedCustomer, order)"><IconSvg :name="orderEditButtonIcon(order)" /></button>
                       <button v-if="canDeleteOrder(order)" class="icon-btn icon-only danger" type="button" title="删除订单" aria-label="删除订单" @click="deleteOrder(order)"><IconSvg name="trash" /></button>
+                      </span>
                       </template>
                       <template v-else>{{ customerOrderCellText(order, column.key) }}</template>
                     </td>
@@ -21471,8 +21545,8 @@ function orderDetailFeeRows(order = {}) {
 	          </div>
 	          <div class="order-action-group">
 	            <button class="primary-btn" :disabled="loading" @click="openOrderModal()"><IconSvg name="plus" />新建订单</button>
-	            <button class="ghost-btn small" :title="currentAccountCanManageOrderAudit ? '批量审核' : orderAuditPermissionMessage()" :disabled="!currentAccountCanManageOrderAudit" @click="auditPendingOrders"><IconSvg name="check" />批量审核</button>
-	            <button class="ghost-btn small" :title="currentAccountCanManageOrderAudit ? '取消审核' : orderAuditPermissionMessage()" :disabled="!currentAccountCanManageOrderAudit" @click="cancelSelectedAudits"><IconSvg name="refresh" />取消审核</button>
+	            <button :class="['ghost-btn', 'small', { 'audit-locked-btn': !currentAccountCanManageOrderAudit }]" :title="currentAccountCanManageOrderAudit ? '批量审核' : orderAuditPermissionMessage()" :disabled="!currentAccountCanManageOrderAudit" @click="auditPendingOrders"><IconSvg name="check" />批量审核</button>
+	            <button :class="['ghost-btn', 'small', { 'audit-locked-btn': !currentAccountCanManageOrderAudit }]" :title="currentAccountCanManageOrderAudit ? '取消审核' : orderAuditPermissionMessage()" :disabled="!currentAccountCanManageOrderAudit" @click="cancelSelectedAudits"><IconSvg name="refresh" />取消审核</button>
 	            <button class="ghost-btn small" type="button" @click="resetOrderColumnOrder"><IconSvg name="list" />恢复列序</button>
 	            <button class="ghost-btn small" type="button" @click="resetOrderColumnWidths"><IconSvg name="refresh" />恢复列宽</button>
 	            <span class="order-export-wrap" @click.stop>
@@ -21582,21 +21656,23 @@ function orderDetailFeeRows(order = {}) {
                     :class="{ 'row-actions': column.key === 'actions', 'sticky-managed-column': isOrderColumnFrozen(column), 'sticky-order-right-column': isOrderRightStickyColumn(column), 'order-full-cell': isOrderFullDisplayColumn(column), 'order-driver-cell': column.key === 'driver' }"
                     :style="orderStickyColumnStyle(column, index)"
                     :title="orderTableCellTitle(order, column.key)"
+                    @click="column.key === 'actions' && $event.stopPropagation()"
+                    @dblclick="column.key === 'actions' && $event.stopPropagation()"
                   >
                     <input v-if="column.key === 'select'" v-model="selectedOrderNos" type="checkbox" :value="order.no" @click.stop @dblclick.stop />
                     <span v-else-if="column.key === 'status'" class="status-badge" :class="orderStatusClass(order.status)">{{ order.status }}</span>
                     <template v-else-if="column.key === 'actions'">
-                      <span class="order-row-actions">
+                      <span class="order-row-actions" @click.stop @dblclick.stop>
                         <button
                           v-if="order.status !== '已审核'"
-                          :class="['icon-btn', { success: canAuditOrder(order) }]"
+                          :class="['icon-btn', { success: canAuditOrder(order), 'audit-locked-btn': !canAuditOrder(order) }]"
                           type="button"
                           :title="orderAuditButtonTitle(order)"
                           :disabled="!canAuditOrder(order)"
                           @click.stop="auditOrder(order)"
                           @dblclick.stop
                         ><IconSvg name="check" />待审核</button>
-                        <button v-else class="icon-btn" type="button" :title="orderCancelAuditButtonTitle(order)" :disabled="!canCancelAuditOrder(order)" @click.stop="cancelAuditOrder(order)" @dblclick.stop><IconSvg name="refresh" />取消审核</button>
+                        <button v-else :class="['icon-btn', { 'audit-locked-btn': !canCancelAuditOrder(order) }]" type="button" :title="orderCancelAuditButtonTitle(order)" :disabled="!canCancelAuditOrder(order)" @click.stop="cancelAuditOrder(order)" @dblclick.stop><IconSvg name="refresh" />取消审核</button>
                         <button class="icon-btn" type="button" :title="orderEditButtonTitle(order)" @click.stop="openOrderModal(null, order)" @dblclick.stop><IconSvg :name="orderEditButtonIcon(order)" />{{ orderEditButtonLabel(order) }}</button>
                         <button v-if="canDeleteOrder(order)" class="icon-btn icon-only danger" type="button" title="删除订单" aria-label="删除订单" @click.stop="deleteOrder(order)" @dblclick.stop><IconSvg name="trash" /></button>
                       </span>
@@ -21863,6 +21939,7 @@ function orderDetailFeeRows(order = {}) {
 	                      <template v-else-if="column.key === 'dispatchNo'">
 	                        <strong>{{ row.dispatchNo }}</strong>
 	                        <small v-if="row.order.no">{{ row.order.no }}</small>
+	                        <small v-else-if="row.orderMissing" class="dispatch-missing-order-label">原订单已删除，可重新生成</small>
 	                        <small v-else>未绑定订单</small>
 	                      </template>
 	                      <template v-else-if="column.key === 'createdByName'">{{ row.createdByName || row.createdByUsername || "-" }}</template>
@@ -25207,11 +25284,15 @@ function orderDetailFeeRows(order = {}) {
                       :class="{ 'row-actions': column.key === 'actions', 'sticky-managed-column': isOrderColumnFrozen(column), 'sticky-order-right-column': isOrderRightStickyColumn(column), 'order-full-cell': isOrderFullDisplayColumn(column), 'order-driver-cell': column.key === 'driver' }"
                       :style="orderStickyColumnStyle(column, index)"
                       :title="orderTableCellTitle(order, column.key)"
+                      @click="column.key === 'actions' && $event.stopPropagation()"
+                      @dblclick="column.key === 'actions' && $event.stopPropagation()"
                     >
                       <span v-if="column.key === 'status'" class="status-badge" :class="orderStatusClass(order.status)">{{ order.status }}</span>
                       <template v-else-if="column.key === 'actions'">
+                        <span class="order-row-actions" @click.stop @dblclick.stop>
                         <button class="icon-btn" type="button" @click.stop="openOrderDetail(order)"><IconSvg name="eye" />查看</button>
                         <button class="icon-btn" type="button" :title="orderEditButtonTitle(order)" @click.stop="openOrderModal(null, order)"><IconSvg :name="orderEditButtonIcon(order)" />{{ orderEditButtonLabel(order) }}</button>
+                        </span>
                       </template>
                       <button v-else-if="column.key === 'no'" class="table-link-btn" type="button" @click.stop="openOrderDetail(order)">{{ orderCellText(order, column.key) }}</button>
                       <template v-else>{{ orderCellText(order, column.key) || '-' }}</template>

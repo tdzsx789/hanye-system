@@ -59,15 +59,15 @@ export const ROLE_ALLOWED_MODULES = {
     ...BOSS_CENTER_MODULES,
     ...SYSTEM_CONFIG_MODULES
   ],
-  财务: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_CENTER_MODULES, ...SYSTEM_CONFIG_MODULES],
-  跟单员: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...SYSTEM_CONFIG_MODULES],
-  司机: VEHICLE_DRIVER_MODULES
+  财务: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_CENTER_MODULES],
+  跟单员: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_CENTER_MODULES],
+  司机: [...VEHICLE_DRIVER_MODULES, ...FINANCE_CENTER_MODULES]
 };
 export const ROLE_PERMISSION_LABELS = {
   管理员: "全部权限",
-  财务: "业务、车辆司机、财务中心、系统配置",
-  跟单员: "业务、车辆司机、系统配置",
-  司机: "车辆司机"
+  财务: "业务、车辆司机、财务中心",
+  跟单员: "业务、车辆司机、财务中心",
+  司机: "车辆司机、财务中心"
 };
 
 export const MODULES = [

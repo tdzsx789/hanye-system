@@ -43,6 +43,39 @@ function emptyTextForStatus(status) {
   return `当前条件下暂无${status}排车单`;
 }
 
+function compactOrderForDispatchForm(order) {
+  if (!order) return null;
+  return {
+    no: order.no || "",
+    dispatchNo: order.dispatchNo || "",
+    customerId: order.customerId || "",
+    customer: order.customer || "",
+    businessType: order.businessType || "",
+    port: order.port || "",
+    direction: order.direction || "",
+    tonnage: order.tonnage || "",
+    currency: order.currency || "",
+    quantity: order.quantity || "",
+    weight: order.weight || "",
+    vehicleSource: order.vehicleSource || "",
+    supplier: order.supplier || "",
+    plate: order.plate || "",
+    driver: order.driver || "",
+    hkDriver: order.hkDriver || "",
+    mainlandDriver: order.mainlandDriver || "",
+    transportMode: order.transportMode || "",
+    loading: order.loading || "",
+    unloading: order.unloading || "",
+    date: order.date || "",
+    status: order.status || "",
+    remark: order.remark || "",
+    tripNoEnabled: order.tripNoEnabled ? 1 : 0,
+    tripNo: order.tripNo || "",
+    sixSheetEnabled: order.sixSheetEnabled ? 1 : 0,
+    sixSheetNo: order.sixSheetNo || ""
+  };
+}
+
 Page({
   data: {
     accountLabel: "",
@@ -283,24 +316,63 @@ Page({
     return rawRow || null;
   },
 
+  linkedOrderForRow(row) {
+    if (!row) return null;
+    const orderNo = String(row.orderNo || "").trim();
+    const dispatchNo = String(row.dispatchNo || "").trim();
+    return (this.data.orders || []).find((order) => order.no === orderNo)
+      || (dispatchNo ? (this.data.orders || []).find((order) => String(order.dispatchNo || "").trim() === dispatchNo) : null)
+      || null;
+  },
+
+  dispatchFormRowForContext(row) {
+    const order = this.linkedOrderForRow(row) || row.order || null;
+    return Object.assign({}, sanitizeDispatchRow(row), {
+      order: compactOrderForDispatchForm(order)
+    });
+  },
+
+  openDispatchForm(context) {
+    wx.showLoading({
+      title: "正在打开排车单...",
+      mask: true
+    });
+    try {
+      setDispatchFormContext(context);
+    } catch (error) {
+      wx.hideLoading();
+      wx.showToast({ title: "打开排车单失败，请重试", icon: "none" });
+      return;
+    }
+    wx.navigateTo({
+      url: "/pages/dispatch-form/index",
+      fail: () => {
+        wx.hideLoading();
+        wx.showToast({ title: "打开排车单失败，请重试", icon: "none" });
+      }
+    });
+  },
+
   openNewDispatch() {
-    setDispatchFormContext({
+    this.openDispatchForm({
       mode: "new",
       date: this.data.dispatchDate
     });
-    wx.navigateTo({ url: "/pages/dispatch-form/index" });
   },
 
   openEditDispatch(event) {
     if (this.data.saving) return;
-    const row = this.rowById(event.currentTarget.dataset.id);
-    if (!row) return;
-    setDispatchFormContext({
+    const dataset = (event.currentTarget && event.currentTarget.dataset) || (event.target && event.target.dataset) || {};
+    const row = this.rowById(dataset.id);
+    if (!row) {
+      wx.showToast({ title: "未找到这张排车单，请刷新后重试", icon: "none" });
+      return;
+    }
+    this.openDispatchForm({
       mode: "edit",
       date: this.data.dispatchDate,
-      row
+      row: this.dispatchFormRowForContext(row)
     });
-    wx.navigateTo({ url: "/pages/dispatch-form/index" });
   },
 
   openCopyDispatch(event) {
@@ -311,12 +383,11 @@ Page({
 
   openCopyDispatchByRow(row) {
     if (!row) return;
-    setDispatchFormContext({
+    this.openDispatchForm({
       mode: "copy",
       date: this.data.dispatchDate,
-      row
+      row: this.dispatchFormRowForContext(row)
     });
-    wx.navigateTo({ url: "/pages/dispatch-form/index" });
   },
 
   async copyDispatchTextToClipboard(text, successTitle) {
@@ -494,15 +565,54 @@ Page({
     const id = event.currentTarget.dataset.id;
     const row = this.rowById(id);
     if (!row) return;
+    const linkedOrder = this.linkedOrderForRow(row);
     wx.showModal({
       title: "删除排车单",
-      content: `确认从当天排车表移除 ${row.dispatchNo || "这张排车单"}？关联订单不会自动删除。`,
+      content: linkedOrder
+        ? `确认删除 ${row.dispatchNo || "这张排车单"} 及其关联订单 ${linkedOrder.no}？`
+        : `确认从当天排车表移除 ${row.dispatchNo || "这张排车单"}？`,
       confirmText: "删除",
       confirmColor: "#b42318",
       success: async (result) => {
         if (!result.confirm) return;
-        const rows = this.data.rawRows.filter((item) => item.id !== id);
-        await this.saveRows(rows, { sort: false, toast: "排车单已移除" });
+        try {
+          if (linkedOrder) {
+            let fallbackSave = false;
+            try {
+              await api.deleteOrder(linkedOrder.no);
+            } catch (error) {
+              const message = String(error.message || "");
+              if (message.indexOf("不存在或已删除") < 0) {
+                throw error;
+              }
+              fallbackSave = true;
+            }
+            const deletedOrderNo = linkedOrder.no;
+            const deletedDispatchNo = String(linkedOrder.dispatchNo || row.dispatchNo || "").trim();
+            const nextOrders = (this.data.orders || []).filter((order) => order.no !== deletedOrderNo);
+            const nextRows = (this.data.rawRows || []).filter((item) =>
+              item.id !== id
+              && item.orderNo !== deletedOrderNo
+              && (!deletedDispatchNo || String(item.dispatchNo || "").trim() !== deletedDispatchNo)
+            );
+            if (fallbackSave) {
+              const saved = await this.saveRows(nextRows, { sort: false, toast: "排车单已移除" });
+              if (saved) {
+                this.setData({ orders: nextOrders });
+                this.refreshDerivedData();
+              }
+              return;
+            }
+            this.setData({ orders: nextOrders, rawRows: nextRows });
+            this.refreshDerivedData();
+            wx.showToast({ title: "排车单及关联订单已删除", icon: "none" });
+            return;
+          }
+          const rows = this.data.rawRows.filter((item) => item.id !== id);
+          await this.saveRows(rows, { sort: false, toast: "排车单已移除" });
+        } catch (error) {
+          wx.showToast({ title: error.message || "删除失败", icon: "none" });
+        }
       }
     });
   },
