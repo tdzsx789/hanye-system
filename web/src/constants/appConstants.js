@@ -48,26 +48,28 @@ export const BOSS_CENTER_MODULES = [
   "bossSupplierProfit",
   "bossCompanyExpenses"
 ];
-export const FINANCE_CENTER_MODULES = ["financeWages", "financeCosts", "financeSupplierStatements", "financeCustomsStatements", "financeCostCenter", "financeDaily"];
+export const FINANCE_WAGE_MODULES = ["financeWages"];
+export const FINANCE_CENTER_MODULES = ["financeCosts", "financeSupplierStatements", "financeCustomsStatements", "financeCostCenter", "financeDaily"];
 export const BUSINESS_MODULES = ["home", "customers", "dispatchBoard", "orders", "customsBusiness"];
 export const SYSTEM_CONFIG_MODULES = ["freight", "templates", "master", "security", "accounts"];
 export const ROLE_ALLOWED_MODULES = {
   管理员: [
     ...BUSINESS_MODULES,
     ...VEHICLE_DRIVER_MODULES,
+    ...FINANCE_WAGE_MODULES,
     ...FINANCE_CENTER_MODULES,
     ...BOSS_CENTER_MODULES,
     ...SYSTEM_CONFIG_MODULES
   ],
-  财务: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_CENTER_MODULES],
+  财务: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_WAGE_MODULES, ...FINANCE_CENTER_MODULES],
   跟单员: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_CENTER_MODULES],
   司机: [...VEHICLE_DRIVER_MODULES, ...FINANCE_CENTER_MODULES]
 };
 export const ROLE_PERMISSION_LABELS = {
   管理员: "全部权限",
-  财务: "业务、车辆司机、财务中心",
-  跟单员: "业务、车辆司机、财务中心",
-  司机: "车辆司机、财务中心"
+  财务: "业务、车辆司机、司机工资统计、财务中心",
+  跟单员: "业务、车辆司机、财务中心（不含司机工资统计）",
+  司机: "车辆司机、财务中心（不含司机工资统计）"
 };
 
 export const MODULES = [
@@ -83,7 +85,7 @@ export const MODULES = [
   { id: "vehicleRepairExpenses", label: "维修费管理", group: "车辆司机" },
   { id: "vehicleAnnualExpenses", label: "保险年审牌头费", group: "车辆司机" },
   { id: "vehicleOtherExpenses", label: "其他支出", group: "车辆司机" },
-  { id: "financeWages", label: "工资统计", group: "财务中心" },
+  { id: "financeWages", label: "司机工资统计", group: "财务中心" },
   { id: "financeCosts", label: "客户对账单", group: "财务中心" },
   { id: "financeSupplierStatements", label: "供应商对账单", group: "财务中心" },
   { id: "financeCustomsStatements", label: "报关对账单", group: "财务中心" },

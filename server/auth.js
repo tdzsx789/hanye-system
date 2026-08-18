@@ -48,12 +48,13 @@ const ALL_MODULES = [
 
 const BUSINESS_MODULES = ["home", "customers", "dispatchBoard", "orders", "customsBusiness"];
 const VEHICLE_DRIVER_MODULES = ["vehicleDriver", ...VEHICLE_EXPENSE_MODULES];
-const FINANCE_MODULES = ["financeWages", "financeCosts", "financeSupplierStatements", "financeCustomsStatements", "financeCostCenter", "financeDaily"];
+const FINANCE_WAGE_MODULES = ["financeWages"];
+const FINANCE_MODULES = ["financeCosts", "financeSupplierStatements", "financeCustomsStatements", "financeCostCenter", "financeDaily"];
 const SYSTEM_MODULES = ["freight", "templates", "master", "security", "accounts"];
 
 export const ROLE_ALLOWED_MODULES = {
   管理员: ALL_MODULES,
-  财务: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_MODULES],
+  财务: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_WAGE_MODULES, ...FINANCE_MODULES],
   跟单员: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_MODULES],
   司机: [...VEHICLE_DRIVER_MODULES, ...FINANCE_MODULES]
 };
@@ -69,7 +70,7 @@ const MODULE_LABELS = {
   vehicleAnnualExpenses: "保险年审牌头费",
   vehicleOtherExpenses: "其他支出",
   dispatchBoard: "排车表",
-  financeWages: "工资统计",
+  financeWages: "司机工资统计",
   financeCosts: "客户对账单",
   financeSupplierStatements: "供应商对账单",
   financeCustomsStatements: "报关对账单",

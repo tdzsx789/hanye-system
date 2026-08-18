@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import {
   API_BASE,
   apiDownloadErrorMessage,
@@ -53,6 +53,7 @@ import {
   FEE_ITEM_CATEGORY_OPTIONS,
   FEE_ITEM_COST_SOURCE_OPTIONS,
   FINANCE_CENTER_MODULES,
+  FINANCE_WAGE_MODULES,
   FILE_UPLOAD_ACCEPT,
   FREIGHT_QUOTE_CUSTOMERS_VIEW,
   FREIGHT_QUOTE_MATRIX_VIEW,
@@ -279,6 +280,7 @@ pinColumnAfter(orderColumns, "dispatchNo", "no", ORDER_COLUMN_ORDER_KEY);
 pinColumnAfter(orderColumns, "createdByName", "dispatchNo", ORDER_COLUMN_ORDER_KEY);
 pinColumnAfter(orderColumns, "plate", "customer", ORDER_COLUMN_ORDER_KEY);
 pinColumnAfter(orderColumns, "driver", "plate", ORDER_COLUMN_ORDER_KEY);
+pinColumnAfter(orderColumns, "supplier", "driver", ORDER_COLUMN_ORDER_KEY);
 
 function dataTableStorageKey(tableId, feature) {
   return `hanye_data_table_${tableId}_${feature}`;
@@ -450,6 +452,24 @@ function loadOrderColumnWidths() {
     saved = JSON.parse(localStorage.getItem(ORDER_COLUMN_STORAGE_KEY) || "{}") || {};
   } catch {
     saved = {};
+  }
+  const migrationKey = "hanye_order_column_widths_driver_supplier_v1";
+  if (localStorage.getItem(migrationKey) !== "done") {
+    const next = { ...saved };
+    let changed = false;
+    if (next.driver === undefined || Number(next.driver) === 180) {
+      next.driver = 132;
+      changed = true;
+    }
+    if (next.supplier === undefined || Number(next.supplier) === 92) {
+      next.supplier = 144;
+      changed = true;
+    }
+    if (changed) {
+      localStorage.setItem(ORDER_COLUMN_STORAGE_KEY, JSON.stringify(next));
+      saved = next;
+    }
+    localStorage.setItem(migrationKey, "done");
   }
   return orderColumns.reduce((widths, column) => {
     const savedWidth = Number(saved[column.key]);
@@ -1047,6 +1067,8 @@ const dispatchSearchKeyword = ref("");
 const dispatchCustomerFilter = ref("");
 const dispatchPlateFilter = ref("");
 const dispatchDriverFilter = ref("");
+const dispatchDriverPickerRowId = ref("");
+const dispatchDriverSearchKeyword = ref("");
 const dispatchBusinessTypeFilter = ref("");
 const orderStatusFilter = ref("");
 const orderSearchKeyword = ref("");
@@ -1234,6 +1256,8 @@ const vehicleExpenseSaving = ref(false);
 const orderExportExchangeMode = ref("");
 const orderExportExchangeRate = ref("");
 const orderCustomerKeyword = ref("");
+const orderSupplierPickerOpen = ref(false);
+const orderSupplierKeyword = ref("");
 const previewFile = ref(null);
 
 const editingCustomerId = ref("");
@@ -1401,6 +1425,9 @@ const dispatchForm = reactive({
   note: ""
 });
 
+const DISPATCH_LOAD_HOUR_OPTIONS = Array.from({ length: 24 }, (_, index) => String(index).padStart(2, "0"));
+const DISPATCH_LOAD_MINUTE_OPTIONS = ["00", "15", "30", "45"];
+
 const chinaProvinceCities = {
   "北京市": ["北京市"],
   "天津市": ["天津市"],
@@ -1564,6 +1591,15 @@ const orderColumnVisibility = reactive(loadColumnVisibility(orderColumns, ORDER_
 const customerOrderLockedColumns = ref(loadStoredJson(CUSTOMER_ORDER_COLUMN_LOCKED_KEY, []));
 const orderLockedColumns = ref(loadStoredJson(ORDER_COLUMN_LOCKED_KEY, []));
 const dataTableDensity = ref(localStorage.getItem("hanye_data_table_density") || "compact");
+
+function ensureOrderSupplierColumnVisible() {
+  if (orderColumnVisibility.supplier === false) {
+    orderColumnVisibility.supplier = true;
+    localStorage.setItem(ORDER_COLUMN_VISIBILITY_KEY, JSON.stringify({ ...orderColumnVisibility }));
+  }
+}
+
+ensureOrderSupplierColumnVisible();
 
 const addressBookForm = reactive({
   area: "",
@@ -1896,7 +1932,7 @@ const currentAllowedModuleIds = computed(() => {
   if (!Array.isArray(accountModules) || !accountModules.length) return roleModules;
   const moduleSet = new Set(accountModules);
   roleModules
-    .filter((moduleId) => FINANCE_CENTER_MODULES.includes(moduleId))
+    .filter((moduleId) => FINANCE_CENTER_MODULES.includes(moduleId) || FINANCE_WAGE_MODULES.includes(moduleId))
     .forEach((moduleId) => moduleSet.add(moduleId));
   if (moduleSet.has("financeCosts")) moduleSet.add("financeSupplierStatements");
   if (moduleSet.has("financeCosts") || moduleSet.has("financeSupplierStatements")) moduleSet.add("financeCustomsStatements");
@@ -3157,6 +3193,7 @@ function normalizeDispatchPlanRows(rows = [], date = dispatchDate.value) {
 
 function applyDispatchPlanRows(rows = [], date = dispatchDate.value, loadedDates = [date]) {
   const normalizedRows = normalizeDispatchPlanRows(rows, date);
+  closeDispatchDriverPicker();
   dispatchPlanRows.value = normalizedRows;
   dispatchLoadedDates.value = loadedDates.length ? loadedDates : [date];
   selectedDispatchPlanIds.value = selectedDispatchPlanIds.value.filter((id) =>
@@ -3298,6 +3335,28 @@ function normalizeDispatchLoadTime(value) {
   const nextHour = Math.floor(total / 60);
   const nextMinute = total % 60;
   return `${String(nextHour).padStart(2, "0")}:${String(nextMinute).padStart(2, "0")}`;
+}
+
+function dispatchLoadTimePart(value = "", part = "hour") {
+  const normalized = normalizeDispatchLoadTime(value);
+  if (!normalized) return "";
+  const [hour, minute] = normalized.split(":");
+  return part === "minute" ? minute : hour;
+}
+
+function setDispatchFormLoadTimePart(part = "hour", value = "") {
+  const currentHour = dispatchLoadTimePart(dispatchForm.loadTime, "hour");
+  const currentMinute = dispatchLoadTimePart(dispatchForm.loadTime, "minute") || "00";
+  if (part === "hour") {
+    dispatchForm.loadTime = value ? normalizeDispatchLoadTime(`${value}:${currentMinute}`) : "";
+    return;
+  }
+  if (!currentHour) return;
+  dispatchForm.loadTime = normalizeDispatchLoadTime(`${currentHour}:${value || "00"}`);
+}
+
+function clearDispatchFormLoadTime() {
+  dispatchForm.loadTime = "";
 }
 
 function handleDispatchRowLoadTimeChange(row) {
@@ -3504,7 +3563,7 @@ async function syncDispatchDriverToOrder(row, driverName) {
   orderRows.value = orderRows.value.map((order) => order.no === item.no ? item : order);
 }
 
-async function handleDispatchDriverChange(row) {
+async function handleDispatchDriverChange(row, driverName) {
   const target = dispatchPlanRows.value[row.index];
   if (!target) return;
   const previous = {
@@ -3513,20 +3572,24 @@ async function handleDispatchDriverChange(row) {
     mainlandDriver: row.mainlandDriver || "",
     transportMode: row.transportMode || ""
   };
-  const driverName = String(target.driver || "").trim();
-  target.driver = driverName;
-  if (driverName) {
+  const nextDriverName = driverName === undefined
+    ? String(target.driver || "").trim()
+    : String(driverName || "").trim();
+  closeDispatchDriverPicker();
+  if (nextDriverName === String(target.driver || "").trim()) return;
+  target.driver = nextDriverName;
+  if (nextDriverName) {
     target.transportMode = "单司机";
-    target.hkDriver = driverName;
+    target.hkDriver = nextDriverName;
     target.mainlandDriver = "";
   } else {
     target.hkDriver = "";
     target.mainlandDriver = "";
   }
   try {
-    await syncDispatchDriverToOrder(target, driverName);
+    await syncDispatchDriverToOrder(target, nextDriverName);
     await saveDispatchPlan({ silent: true, throwOnError: true });
-    if (driverName && target.orderNo) notify("已同步订单运输模式和香港司机");
+    if (nextDriverName && target.orderNo) notify("已同步订单运输模式和香港司机");
   } catch (error) {
     Object.assign(target, previous);
     await saveDispatchPlan({ silent: true });
@@ -3535,6 +3598,7 @@ async function handleDispatchDriverChange(row) {
 }
 
 async function handleDispatchStatusChange(row) {
+  closeDispatchDriverPicker();
   const target = dispatchPlanRows.value[row.index];
   if (!target) return;
   const previousStatus = dispatchStatusValueForRow(row);
@@ -3571,6 +3635,7 @@ async function handleDispatchStatusChange(row) {
 }
 
 async function returnDispatchRowStatus(row) {
+  closeDispatchDriverPicker();
   const target = dispatchPlanRows.value[row.index];
   if (!target) return;
   const currentStatus = dispatchStatusValueForRow(target);
@@ -3596,6 +3661,7 @@ async function returnDispatchRowStatus(row) {
 
 function closeDispatchModal(options = {}) {
   if (loading.value && !options.force) return;
+  closeDispatchDriverPicker();
   dispatchModalOpen.value = false;
   editingDispatchRowId.value = "";
   copyingDispatchRowId.value = "";
@@ -4202,6 +4268,53 @@ function dispatchOrderRouteText(order) {
   return [loading, unloading].filter(Boolean).join(" → ") || "-";
 }
 
+function spreadsheetHardWrapLine(value = "", maxWidth = 34) {
+  const text = String(value || "");
+  if (spreadsheetTextWidth(text) <= maxWidth) return text;
+  const lines = [];
+  let current = "";
+  Array.from(text).forEach((char) => {
+    const next = `${current}${char}`;
+    if (current && spreadsheetTextWidth(next) > maxWidth) {
+      lines.push(current);
+      current = char;
+    } else {
+      current = next;
+    }
+  });
+  if (current) lines.push(current);
+  return lines.join("\n");
+}
+
+function spreadsheetHardWrapText(value = "", maxWidth = 34) {
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((line) => spreadsheetHardWrapLine(line, maxWidth))
+    .join("\n");
+}
+
+function dispatchExportRouteText(row = {}) {
+  const order = row.order || {};
+  const record = {
+    ...order,
+    loading: order.loading || row.loading || "",
+    loadingContact: order.loadingContact || row.loadingContact || "",
+    loadingPhone: order.loadingPhone || row.loadingPhone || "",
+    unloading: order.unloading || row.unloading || "",
+    unloadingContact: order.unloadingContact || row.unloadingContact || "",
+    unloadingPhone: order.unloadingPhone || row.unloadingPhone || ""
+  };
+  return [
+    dispatchLocationBlock("装货地", record, "loading"),
+    dispatchLocationBlock("卸货地", record, "unloading")
+  ].filter(Boolean).map((block) => spreadsheetHardWrapText(block, 38)).join("\n");
+}
+
+function spreadsheetWrappedRowHeight(value = "", base = 20, perLine = 18, max = 180) {
+  const lines = String(value || "").split(/\r?\n/).length;
+  return Math.min(max, Math.max(base, lines * perLine));
+}
+
 function dispatchVehicleSourceText(row) {
   const order = row?.order || {};
   if (order.vehicleSource === "外派车辆") return order.supplier || "外派供应商";
@@ -4256,7 +4369,7 @@ async function copyDispatchPlanText() {
   );
 }
 
-function exportDispatchPlanRows() {
+async function exportDispatchPlanRows() {
   const selectedRows = selectedDispatchPlanRows.value;
   const rows = selectedRows.length ? selectedRows : searchedDispatchPlanRows.value;
   if (!rows.length) {
@@ -4266,9 +4379,6 @@ function exportDispatchPlanRows() {
   const headers = [
     "序号",
     "装车时间",
-    "排车单号",
-    "订单号",
-    "创建者",
     "经营单位",
     "业务类型",
     "车牌",
@@ -4277,7 +4387,6 @@ function exportDispatchPlanRows() {
     "进出口",
     "吨位",
     "件数/板数",
-    "重量",
     "装卸",
     "车辆来源",
     "排车状态",
@@ -4288,9 +4397,6 @@ function exportDispatchPlanRows() {
     return [
       index + 1,
       row.loadTime || "",
-      row.dispatchNo || "",
-      order.no || row.orderNo || "",
-      row.createdByName || row.createdByUsername || "",
       order.customer || row.customer || "",
       order.businessType || row.businessType || "",
       row.plate || "",
@@ -4299,14 +4405,25 @@ function exportDispatchPlanRows() {
       order.direction || row.direction || "",
       order.tonnage || row.tonnage || "",
       order.quantity || row.quantity || "",
-      order.weight || row.weight || "",
-      dispatchOrderRouteText(order),
+      dispatchExportRouteText(row),
       dispatchVehicleSourceText(row),
       row.status || DISPATCH_PLAN_DEFAULT_STATUS,
       row.note || ""
     ];
   });
-  exportCsv(`排车表_${dispatchDate.value}_${selectedRows.length ? "已选" : "全部"}${rows.length}单.csv`, headers, exportRows);
+  const routeColumnIndex = headers.indexOf("装卸");
+  await exportXlsx(
+    `排车表_${dispatchDate.value}_${selectedRows.length ? "已选" : "全部"}${rows.length}单.xlsx`,
+    headers,
+    exportRows,
+    "排车表",
+    {
+      columnWidths: {
+        [routeColumnIndex]: { wch: 54 }
+      },
+      rowHeights: exportRows.map((row) => ({ hpt: spreadsheetWrappedRowHeight(row[routeColumnIndex]) }))
+    }
+  );
   notify(selectedRows.length ? `已导出已选 ${rows.length} 单` : `已导出当前列表 ${rows.length} 单`);
 }
 
@@ -5562,6 +5679,10 @@ function dropCustomsBusinessColumn(column) {
     columns.splice(nextTargetIndex, 0, moved);
     saveCustomsBusinessColumnOrder(columns);
   }
+  draggedCustomsBusinessColumnKey = "";
+}
+
+function endCustomsBusinessColumnDrag() {
   draggedCustomsBusinessColumnKey = "";
 }
 
@@ -9579,6 +9700,17 @@ const orderCustomerOptions = computed(() => {
     .slice(0, 80);
 });
 
+const orderSupplierOptions = computed(() => {
+  const keyword = normalizeLocationText(orderSupplierKeyword.value);
+  return customerRows.value
+    .filter((item) => item.type === "供应商")
+    .filter((item) => {
+      if (!keyword) return true;
+      return normalizeLocationText([item.id, item.name, item.taxNo, item.mobile, item.contact].join(" ")).includes(keyword);
+    })
+    .slice(0, 80);
+});
+
 const dispatchCustomerOptions = computed(() => {
   const keyword = normalizeLocationText(dispatchCustomerKeyword.value);
   return customerRows.value
@@ -9873,6 +10005,16 @@ const dispatchDriverOptions = computed(() =>
       String(left.name || "").localeCompare(String(right.name || ""), "zh-Hans-CN", { numeric: true, sensitivity: "base" })
     )
 );
+
+const dispatchDriverPickerOptions = computed(() => {
+  const keyword = normalizeLocationText(dispatchDriverSearchKeyword.value);
+  return dispatchDriverOptions.value
+    .filter((driver) => {
+      if (!keyword) return true;
+      return normalizeLocationText(dispatchDriverSearchValues(driver).join(" ")).includes(keyword);
+    })
+    .slice(0, 120);
+});
 
 const CUSTOMS_CUSTOMER_DETAIL_KEYS = new Set([
   "customsHomeItemCount",
@@ -13781,6 +13923,58 @@ function dispatchDriverLabel(driver = {}) {
   return name ? (type ? `${name} · ${type}` : name) : "";
 }
 
+function dispatchDriverSearchValues(driver = {}) {
+  return [
+    driver.id,
+    driver.name,
+    driver.phone,
+    driver.license,
+    driver.idNo,
+    driver.boundPlate,
+    driver.status,
+    driver.type,
+    driver.note
+  ];
+}
+
+function isDispatchDriverPickerOpen(row = {}) {
+  return dispatchDriverPickerRowId.value === row?.id;
+}
+
+function closeDispatchDriverPicker() {
+  dispatchDriverPickerRowId.value = "";
+  dispatchDriverSearchKeyword.value = "";
+}
+
+function openDispatchDriverPicker(row = {}) {
+  if (!row?.id || row.status !== "已派车") return;
+  if (dispatchDriverPickerRowId.value === row.id) return;
+  dispatchDriverPickerRowId.value = row.id;
+  dispatchDriverSearchKeyword.value = String(row.driver || "").trim();
+}
+
+function toggleDispatchDriverPicker(row = {}) {
+  if (isDispatchDriverPickerOpen(row)) {
+    closeDispatchDriverPicker();
+    return;
+  }
+  openDispatchDriverPicker(row);
+}
+
+function handleDispatchDriverPickerInput(row = {}, event) {
+  if (!isDispatchDriverPickerOpen(row)) openDispatchDriverPicker(row);
+  dispatchDriverSearchKeyword.value = String(event?.target?.value || "");
+}
+
+function clearDispatchDriverSelection(row = {}) {
+  selectDispatchDriver(row, "");
+}
+
+async function selectDispatchDriver(row = {}, driver = "") {
+  const driverName = typeof driver === "string" ? driver : String(driver?.name || "").trim();
+  return handleDispatchDriverChange(row, driverName);
+}
+
 function dispatchDriverText(row = {}) {
   return String(row.driver || "").trim() || "-";
 }
@@ -15625,19 +15819,42 @@ function handleOrderBusinessTypeChange() {
 function handleOrderVehicleSourceChange() {
   if (orderUsesOwnVehicle.value) {
     orderForm.supplier = "";
+    orderSupplierKeyword.value = "";
+    orderSupplierPickerOpen.value = false;
   } else if (orderUsesOutsourcedVehicle.value) {
     orderForm.driver = "";
     orderForm.hkDriver = "";
     orderForm.mainlandDriver = "";
     orderForm.transportMode = "";
+    orderSupplierKeyword.value = orderForm.supplier || orderSupplierKeyword.value || "";
   } else {
     orderForm.supplier = "";
+    orderSupplierKeyword.value = "";
+    orderSupplierPickerOpen.value = false;
     orderForm.plate = "";
     orderForm.driver = "";
     orderForm.hkDriver = "";
     orderForm.mainlandDriver = "";
     orderForm.transportMode = "";
   }
+}
+
+function openOrderSupplierPicker() {
+  orderSupplierKeyword.value = orderForm.supplier || "";
+  orderSupplierPickerOpen.value = true;
+}
+
+function handleOrderSupplierInput() {
+  orderForm.supplier = orderSupplierKeyword.value;
+  orderSupplierPickerOpen.value = true;
+  scheduleOrderFeeCostSync();
+}
+
+function selectOrderSupplier(supplier) {
+  orderForm.supplier = supplier?.name || "";
+  orderSupplierKeyword.value = supplier?.name || "";
+  orderSupplierPickerOpen.value = false;
+  scheduleOrderFeeCostSync();
 }
 
 function normalizeTransportMode(value = "") {
@@ -15808,6 +16025,8 @@ async function openOrderModal(customer = null, order = null, options = {}) {
   }
   orderCustomerKeyword.value = orderForm.customer || "";
   orderCustomerPickerOpen.value = false;
+  orderSupplierKeyword.value = orderForm.supplier || "";
+  orderSupplierPickerOpen.value = false;
   orderModalOpen.value = true;
   scheduleAutoFreightSync();
   scheduleOrderFeeCostSync();
@@ -15818,6 +16037,7 @@ function closeOrderModal() {
   orderAuditMode.value = false;
   orderViewMode.value = false;
   closeOrderFeeNamePicker();
+  orderSupplierPickerOpen.value = false;
 }
 
 async function submitOrderModal() {
@@ -18079,10 +18299,23 @@ function worksheetAutoColumns(headers, rows) {
   });
 }
 
-async function exportXlsx(filename, headers, rows, sheetName = "导出数据") {
+async function exportXlsx(filename, headers, rows, sheetName = "导出数据", options = {}) {
   const XLSX = await import("xlsx");
   const worksheet = XLSX.utils.aoa_to_sheet([headers, ...rows]);
-  worksheet["!cols"] = worksheetAutoColumns(headers, rows);
+  const columnWidths = worksheetAutoColumns(headers, rows);
+  Object.entries(options.columnWidths || {}).forEach(([index, width]) => {
+    const columnIndex = Number(index);
+    if (Number.isInteger(columnIndex) && columnIndex >= 0) {
+      columnWidths[columnIndex] = { ...columnWidths[columnIndex], ...width };
+    }
+  });
+  worksheet["!cols"] = columnWidths;
+  if (Array.isArray(options.rowHeights) && options.rowHeights.length) {
+    worksheet["!rows"] = [
+      { hpt: 24 },
+      ...options.rowHeights
+    ];
+  }
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, sheetName.slice(0, 31));
   XLSX.writeFile(workbook, filename);
@@ -18215,12 +18448,12 @@ watch([financeWageRows, visibleFinanceWageTableColumns], () => {
 async function exportFinanceWages(rows = financeWageRows.value) {
   const columns = visibleFinanceWageTableColumns.value.filter((column) => column.exportable !== false);
   await exportXlsx(
-    `工资统计-${financeDateRangeLabel()}-${todayInputValue()}.xlsx`,
+    `司机工资统计-${financeDateRangeLabel()}-${todayInputValue()}.xlsx`,
     columns.map((column) => column.label),
     rows.map((row) => columns.map((column) => financeWageExportValue(row, column.key))),
-    "工资统计"
+    "司机工资统计"
   );
-  notify("已导出工资统计");
+  notify("已导出司机工资统计");
 }
 
 const FINANCE_WAGE_AUDIT_FEE_COLUMN_LABELS = ["香港停车费", "香港登记费", "加点费", "大陆停车费", "装货等候费"];
@@ -21330,8 +21563,31 @@ watch(dispatchRangePeriodFilter, () => {
   }
 });
 
+watch(activeDispatchStatusPool, () => {
+  closeDispatchDriverPicker();
+});
+
+function isDispatchDriverPickerEventTarget(event) {
+  const target = event?.target;
+  return target instanceof Element && Boolean(target.closest(".dispatch-driver-select"));
+}
+
+function handleDispatchDriverPickerDocumentClick(event) {
+  if (!dispatchDriverPickerRowId.value) return;
+  if (isDispatchDriverPickerEventTarget(event)) return;
+  closeDispatchDriverPicker();
+}
+
+function handleDispatchDriverPickerFocusIn(event) {
+  if (!dispatchDriverPickerRowId.value) return;
+  if (isDispatchDriverPickerEventTarget(event)) return;
+  closeDispatchDriverPicker();
+}
+
 onMounted(async () => {
   syncRouteFromHash();
+  document.addEventListener("click", handleDispatchDriverPickerDocumentClick, true);
+  document.addEventListener("focusin", handleDispatchDriverPickerFocusIn, true);
   if (loggedIn.value && canAccessModule("dispatchBoard")) loadDispatchPlansForCurrentFilter();
   window.setInterval(syncRouteFromHash, 1000);
   if (loggedIn.value) {
@@ -21342,6 +21598,11 @@ onMounted(async () => {
       if (canAccessModule("dispatchBoard")) loadDispatchPlansForCurrentFilter();
     }
   }
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener("click", handleDispatchDriverPickerDocumentClick, true);
+  document.removeEventListener("focusin", handleDispatchDriverPickerFocusIn, true);
 });
 
 function normalizedDispatchFilterText(value = "") {
@@ -21493,6 +21754,7 @@ function closeOrderDetail() {
 
 function openDispatchDetail(row) {
   if (!row?.id) return;
+  closeDispatchDriverPicker();
   dispatchDetailId.value = row.id;
 }
 
@@ -22511,47 +22773,44 @@ function orderDetailFeeRows(order = {}) {
 	            <button class="primary-btn" :disabled="loading" @click="openOrderModal()"><IconSvg name="plus" />新建订单</button>
 	            <button :class="['ghost-btn', 'small', { 'audit-locked-btn': !currentAccountCanManageOrderAudit }]" :title="currentAccountCanManageOrderAudit ? '批量审核' : orderAuditPermissionMessage()" :disabled="!currentAccountCanManageOrderAudit" @click="auditPendingOrders"><IconSvg name="check" />批量审核</button>
 	            <button :class="['ghost-btn', 'small', { 'audit-locked-btn': !currentAccountCanManageOrderAudit }]" :title="currentAccountCanManageOrderAudit ? '取消审核' : orderAuditPermissionMessage()" :disabled="!currentAccountCanManageOrderAudit" @click="cancelSelectedAudits"><IconSvg name="refresh" />取消审核</button>
-	            <button class="ghost-btn small" type="button" @click="resetOrderColumnOrder"><IconSvg name="list" />恢复列序</button>
-	            <button class="ghost-btn small" type="button" @click="resetOrderColumnWidths"><IconSvg name="refresh" />恢复列宽</button>
-	            <span class="order-export-wrap" @click.stop>
-	              <button class="ghost-btn small order-export-trigger" type="button" title="导出" @click="toggleOrderExportMenu">
-	                <IconSvg name="download" />导出<IconSvg name="chevronDown" />
-	              </button>
-              <div v-if="orderExportMenuOpen" class="order-export-menu">
-                <div class="order-export-menu-title">选择导出模板</div>
-                <div class="order-export-exchange">
-                  <select v-model="orderExportExchangeMode" title="合计换算方向">
-                    <option value="">合计不换算</option>
-                    <option value="hkd-to-rmb">HKD合计转RMB</option>
-                    <option value="rmb-to-hkd">RMB合计转HKD</option>
+		            <button class="ghost-btn small" type="button" @click="resetOrderColumnOrder"><IconSvg name="list" />恢复列序</button>
+		            <button class="ghost-btn small" type="button" @click="resetOrderColumnWidths"><IconSvg name="refresh" />恢复列宽</button>
+                <label class="data-table-density-select order-density-select">行密度
+                  <select :value="dataTableDensity" @change="setDataTableDensity($event.target.value)">
+                    <option v-for="item in dataTableDensityOptions" :key="item.key" :value="item.key">{{ item.label }}</option>
                   </select>
-                  <input
-                    v-model="orderExportExchangeRate"
-                    type="number"
-                    min="0"
-                    step="0.0001"
-                    inputmode="decimal"
-                    placeholder="1HKD=?RMB"
-                    title="汇率：1 港币等于多少人民币"
-                  />
-                </div>
-                <div v-for="template in orderExportTemplateOptions()" :key="template.id" class="order-export-template-row">
-                  <span :title="template.name">{{ template.name }}</span>
-                  <button type="button" title="导出 Excel" aria-label="导出 Excel" @click="exportOrdersByFormat('excel', template)">Excel</button>
-                  <button type="button" title="导出 PDF" aria-label="导出 PDF" @click="exportOrdersByFormat('pdf', template)">PDF</button>
-                </div>
-              </div>
-            </span>
-            <button class="ghost-btn order-icon-btn" type="button" :title="selectedOrderNos.length ? `查看已选 ${selectedOrderNos.length} 条` : '查看当前筛选列表'" aria-label="查看订单列表" @click="openOrderListDetail">
-              <IconSvg name="eye" /><span class="sr-only">查看</span>
-            </button>
+                </label>
+                <details class="data-table-column-menu order-column-menu">
+                  <summary class="ghost-btn small">
+                    <IconSvg name="columns" />列
+                    <span>{{ visibleOrderColumns.length }}/{{ orderColumns.length }}</span>
+                  </summary>
+                  <div class="data-table-column-popover">
+                    <label
+                      v-for="column in orderColumns.filter((item) => !isOrderRightStickyColumn(item))"
+                      :key="column.key"
+                      :class="{ disabled: column.locked || isOrderLeftStickyColumn(column) }"
+                    >
+                      <input
+                        type="checkbox"
+                        :checked="isOrderColumnVisible(column.key)"
+                        :disabled="column.locked || isOrderLeftStickyColumn(column)"
+                        @change="setOrderColumnVisible(column, $event.target.checked)"
+                      />
+                      {{ column.label }}
+                    </label>
+                  </div>
+                </details>
+	            <button class="ghost-btn order-icon-btn" type="button" :title="selectedOrderNos.length ? `查看已选 ${selectedOrderNos.length} 条` : '查看当前筛选列表'" aria-label="查看订单列表" @click="openOrderListDetail">
+	              <IconSvg name="eye" /><span class="sr-only">查看</span>
+	            </button>
             <button class="danger-btn order-icon-btn" title="批量删除" aria-label="批量删除" @click="deleteSelectedOrders"><IconSvg name="trash" /><span class="sr-only">批量删除</span></button>
             <button class="ghost-btn order-icon-btn" title="回收站" aria-label="回收站" @click="openRecycleBin('orders')"><IconSvg name="archive" /><span class="sr-only">回收站</span></button>
           </div>
         </div>
         <div class="table-card full-height order-table-card">
           <div class="order-table-scroll">
-            <table class="data-table compact order-table" :style="orderTableStyle()">
+	            <table :class="['data-table compact order-table', dataTableDensityClass()]" :style="orderTableStyle()">
               <colgroup>
                 <col v-for="column in visibleOrderColumns" :key="column.key" :style="orderColumnStyle(column.key)" />
               </colgroup>
@@ -22569,32 +22828,34 @@ function orderDetailFeeRows(order = {}) {
                       <button class="table-op icon-only column-manager-trigger" type="button" title="管理列表" aria-label="管理列表" @click="orderColumnMenuOpen = !orderColumnMenuOpen"><IconSvg name="list" /></button>
                       <div v-if="orderColumnMenuOpen" class="column-manager-menu" @click.stop>
                         <div
-                          v-for="menuColumn in orderColumns.filter((item) => !item.locked && !isOrderLeftStickyColumn(item) && !isOrderRightStickyColumn(item))"
+                          v-for="menuColumn in orderColumns.filter((item) => !item.locked && !isOrderRightStickyColumn(item))"
                           :key="menuColumn.key"
-                          class="column-manager-row"
-                          draggable="true"
-                          @dragstart="startOrderColumnDrag(menuColumn, $event)"
+                          :class="['column-manager-row', { disabled: isOrderLeftStickyColumn(menuColumn) }]"
+                          :draggable="!isOrderLeftStickyColumn(menuColumn)"
+                          @dragstart="isOrderLeftStickyColumn(menuColumn) ? $event.preventDefault() : startOrderColumnDrag(menuColumn, $event)"
                           @dragover.prevent
-                          @dragenter.prevent="dropOrderColumn(menuColumn)"
-                          @drop.prevent="dropOrderColumn(menuColumn)"
+                          @dragenter.prevent="!isOrderLeftStickyColumn(menuColumn) && dropOrderColumn(menuColumn)"
+                          @drop.prevent="!isOrderLeftStickyColumn(menuColumn) && dropOrderColumn(menuColumn)"
                         >
                           <span class="column-manager-drag"><IconSvg name="list" /></span>
                           <button
                             class="column-manager-check"
                             :class="{ checked: isOrderColumnVisible(menuColumn.key) }"
                             type="button"
-                            title="显示/隐藏"
+                            :title="isOrderLeftStickyColumn(menuColumn) ? '固定列' : '显示/隐藏'"
+                            :disabled="isOrderLeftStickyColumn(menuColumn)"
                             @click.stop.prevent="toggleOrderColumnVisible(menuColumn)"
                           ><IconSvg v-if="isOrderColumnVisible(menuColumn.key)" name="check" /></button>
                           <span>{{ menuColumn.label }}</span>
                           <button
                             :class="['icon-btn', 'icon-only', { active: isOrderColumnLocked(menuColumn) }]"
                             type="button"
-                            :title="isOrderColumnLocked(menuColumn) ? '取消冻结' : '冻结列'"
+                            :title="isOrderLeftStickyColumn(menuColumn) ? '固定列' : isOrderColumnLocked(menuColumn) ? '取消冻结' : '冻结列'"
+                            :disabled="isOrderLeftStickyColumn(menuColumn)"
                             @click.stop.prevent="toggleOrderColumnLock(menuColumn)"
                           ><IconSvg name="lock" /></button>
-                          <button class="icon-btn icon-only" type="button" title="上移" @click.stop.prevent="moveOrderColumn(menuColumn, -1)"><IconSvg name="chevronUp" /></button>
-                          <button class="icon-btn icon-only" type="button" title="下移" @click.stop.prevent="moveOrderColumn(menuColumn, 1)"><IconSvg name="chevronDown" /></button>
+                          <button class="icon-btn icon-only" type="button" title="上移" :disabled="isOrderLeftStickyColumn(menuColumn)" @click.stop.prevent="moveOrderColumn(menuColumn, -1)"><IconSvg name="chevronUp" /></button>
+                          <button class="icon-btn icon-only" type="button" title="下移" :disabled="isOrderLeftStickyColumn(menuColumn)" @click.stop.prevent="moveOrderColumn(menuColumn, 1)"><IconSvg name="chevronDown" /></button>
                         </div>
                       </div>
                     </span>
@@ -22913,17 +23174,50 @@ function orderDetailFeeRows(order = {}) {
                         <input v-model.trim="dispatchPlanRows[row.index].plate" class="dispatch-plate-input" list="dispatchVehiclePlates" placeholder="车牌" @click.stop @input="handleDispatchPlateInput(row)" />
                       </template>
                       <template v-else-if="column.key === 'driver'">
-                        <select
-                          v-if="row.status === '已派车'"
-                          v-model="dispatchPlanRows[row.index].driver"
-	                          class="dispatch-driver-select"
-	                          title="指派司机"
-	                          @click.stop
-	                          @change="handleDispatchDriverChange(row)"
-	                        >
-                          <option value="">未指派</option>
-                          <option v-for="driver in dispatchDriverOptions" :key="driver.id" :value="driver.name">{{ dispatchDriverLabel(driver) }}</option>
-                        </select>
+                        <span v-if="row.status === '已派车'" class="searchable-select dispatch-driver-select" :class="{ 'is-open': isDispatchDriverPickerOpen(row) }" @click.stop>
+                          <input
+                            :value="isDispatchDriverPickerOpen(row) ? dispatchDriverSearchKeyword : (row.driver || '')"
+                            class="dispatch-driver-search-input"
+                            type="text"
+                            autocomplete="off"
+                            placeholder="搜索司机 / 电话 / 证件"
+                            :aria-expanded="isDispatchDriverPickerOpen(row)"
+                            aria-haspopup="listbox"
+                            @focus="openDispatchDriverPicker(row)"
+                            @input="handleDispatchDriverPickerInput(row, $event)"
+                            @keydown.esc.prevent="closeDispatchDriverPicker"
+                          />
+                          <button
+                            type="button"
+                            class="dispatch-driver-toggle icon-only"
+                            :title="isDispatchDriverPickerOpen(row) ? '收起司机列表' : '展开司机列表'"
+                            :aria-label="isDispatchDriverPickerOpen(row) ? '收起司机列表' : '展开司机列表'"
+                            @click.stop="toggleDispatchDriverPicker(row)"
+                          >
+                            <IconSvg :name="isDispatchDriverPickerOpen(row) ? 'chevronUp' : 'chevronDown'" />
+                          </button>
+                          <div v-if="isDispatchDriverPickerOpen(row)" class="searchable-select-dropdown dispatch-driver-dropdown" role="listbox">
+                            <button
+                              type="button"
+                              :class="{ active: !row.driver }"
+                              @click="clearDispatchDriverSelection(row)"
+                            >
+                              <strong>未指派</strong>
+                              <span>清空司机</span>
+                            </button>
+                            <button
+                              v-for="driver in dispatchDriverPickerOptions"
+                              :key="driver.id"
+                              type="button"
+                              :class="{ active: driver.name === row.driver }"
+                              @click="selectDispatchDriver(row, driver)"
+                            >
+                              <strong>{{ driver.name }}</strong>
+                              <span>{{ dispatchDriverLabel(driver) }}</span>
+                            </button>
+                            <p v-if="dispatchDriverPickerOptions.length === 0">没有匹配司机</p>
+                          </div>
+                        </span>
                         <template v-else>{{ dispatchDriverText(row) }}</template>
                       </template>
                       <template v-else-if="column.key === 'port'">{{ row.order.port || "-" }}</template>
@@ -23441,7 +23735,7 @@ function orderDetailFeeRows(order = {}) {
         <div class="section-head">
           <div>
             <p class="eyebrow">财务中心</p>
-            <h2>工资统计</h2>
+            <h2>司机工资统计</h2>
           </div>
         </div>
         <div class="finance-filter-bar">
@@ -23566,7 +23860,7 @@ function orderDetailFeeRows(order = {}) {
 	                  </td>
 	                </tr>
 	              </template>
-              <tr v-if="financeWageRows.length === 0"><td :colspan="visibleFinanceWageTableColumns.length">暂无工资统计数据</td></tr>
+              <tr v-if="financeWageRows.length === 0"><td :colspan="visibleFinanceWageTableColumns.length">暂无司机工资统计数据</td></tr>
             </tbody>
           </table>
           </div>
@@ -25143,28 +25437,6 @@ function orderDetailFeeRows(order = {}) {
             </label>
           </div>
           <div class="customs-business-top-actions">
-            <span class="column-manager-wrap customs-business-column-manager" @click.stop>
-              <button class="ghost-btn small" type="button" title="调整列表列顺序" aria-label="调整列表列顺序" @click="customsBusinessColumnMenuOpen = !customsBusinessColumnMenuOpen"><IconSvg name="list" />列顺序</button>
-              <div v-if="customsBusinessColumnMenuOpen" class="column-manager-menu customs-business-column-menu" @click.stop>
-                <div
-                  v-for="column in orderedCustomsBusinessColumns.filter((item) => item.key !== 'actions')"
-                  :key="column.key"
-                  class="column-manager-row customs-business-column-row"
-                  draggable="true"
-                  @dragstart="startCustomsBusinessColumnDrag(column, $event)"
-                  @dragover.prevent
-                  @dragenter.prevent="dropCustomsBusinessColumn(column)"
-                  @drop.prevent="dropCustomsBusinessColumn(column)"
-                >
-                  <span class="column-manager-drag"><IconSvg name="list" /></span>
-                  <span class="column-manager-check checked"><IconSvg name="check" /></span>
-                  <span>{{ column.label }}</span>
-                  <button class="icon-btn icon-only" type="button" title="上移" @click.stop.prevent="moveCustomsBusinessColumn(column, -1)"><IconSvg name="chevronUp" /></button>
-                  <button class="icon-btn icon-only" type="button" title="下移" @click.stop.prevent="moveCustomsBusinessColumn(column, 1)"><IconSvg name="chevronDown" /></button>
-                  <button class="icon-btn icon-only" type="button" title="恢复默认列序" @click.stop.prevent="resetCustomsBusinessColumnOrder"><IconSvg name="refresh" /></button>
-                </div>
-              </div>
-            </span>
             <button class="primary-btn" type="button" @click="openCustomsBusinessModal"><IconSvg name="plus" />新增报关业务</button>
           </div>
         </div>
@@ -25194,9 +25466,34 @@ function orderDetailFeeRows(order = {}) {
             <option value="">全部进出口</option>
             <option v-for="direction in customsBusinessDirectionFilterOptions" :key="direction" :value="direction">{{ direction }}</option>
           </select>
+        </div>
+        <div class="customs-business-filter-actions">
           <button class="ghost-btn small" type="button" :disabled="!customsBusinessFiltersActive" @click="clearCustomsBusinessFilters">
             <IconSvg name="refresh" />清空筛选
           </button>
+          <span class="column-manager-wrap customs-business-column-manager" @click.stop>
+            <button class="ghost-btn small" type="button" title="调整列表列顺序" aria-label="调整列表列顺序" @click="customsBusinessColumnMenuOpen = !customsBusinessColumnMenuOpen"><IconSvg name="list" />列顺序</button>
+            <div v-if="customsBusinessColumnMenuOpen" class="column-manager-menu customs-business-column-menu" @click.stop>
+              <div
+                v-for="column in orderedCustomsBusinessColumns.filter((item) => item.key !== 'actions')"
+                :key="column.key"
+                class="column-manager-row customs-business-column-row"
+                draggable="true"
+                @dragstart="startCustomsBusinessColumnDrag(column, $event)"
+                @dragend="endCustomsBusinessColumnDrag"
+                @dragover.prevent
+                @dragenter.prevent="dropCustomsBusinessColumn(column)"
+                @drop.prevent="dropCustomsBusinessColumn(column)"
+              >
+                <span class="column-manager-drag"><IconSvg name="list" /></span>
+                <span class="column-manager-check checked"><IconSvg name="check" /></span>
+                <span>{{ column.label }}</span>
+                <button class="icon-btn icon-only" type="button" title="向左移动一列" @click.stop.prevent="moveCustomsBusinessColumn(column, -1)"><IconSvg name="chevronLeft" /></button>
+                <button class="icon-btn icon-only" type="button" title="向右移动一列" @click.stop.prevent="moveCustomsBusinessColumn(column, 1)"><IconSvg name="chevronRight" /></button>
+                <button class="icon-btn icon-only" type="button" title="恢复默认列序" @click.stop.prevent="resetCustomsBusinessColumnOrder"><IconSvg name="refresh" /></button>
+              </div>
+            </div>
+          </span>
         </div>
         <div class="finance-summary-grid">
           <div class="finance-summary-card"><span>筛选记录</span><strong>{{ customsBusinessSummary.count }}</strong></div>
@@ -25215,6 +25512,13 @@ function orderDetailFeeRows(order = {}) {
                   v-for="column in orderedCustomsBusinessColumns"
                   :key="column.key"
                   :class="{ 'customs-business-actions-col': column.key === 'actions', 'customs-business-amount-col': column.amount }"
+                  :draggable="column.key !== 'actions'"
+                  :title="column.key !== 'actions' ? '拖动左右调整列顺序' : ''"
+                  @dragstart="startCustomsBusinessColumnDrag(column, $event)"
+                  @dragend="endCustomsBusinessColumnDrag"
+                  @dragover.prevent
+                  @dragenter.prevent="dropCustomsBusinessColumn(column)"
+                  @drop.prevent="dropCustomsBusinessColumn(column)"
                 >{{ column.label }}</th>
               </tr>
             </thead>
@@ -27257,11 +27561,26 @@ function orderDetailFeeRows(order = {}) {
               <label>吨位<select v-model="dispatchForm.tonnage"><option value=""></option><option v-for="item in TONNAGE_OPTIONS" :key="item">{{ item }}</option></select></label>
               <label>件数/板数<input v-model.trim="dispatchForm.quantity" placeholder="例如：20件 / 4板" /></label>
               <label>重量<input v-model.trim="dispatchForm.weight" placeholder="例如：1200kg" /></label>
-              <label>装车时间
-                <select v-model="dispatchForm.loadTime" @change="handleDispatchFormLoadTimeChange">
-                  <option value="">未定</option>
-                  <option v-for="time in DISPATCH_LOAD_TIME_OPTIONS" :key="time" :value="time">{{ time }}</option>
-                </select>
+              <label class="dispatch-load-time-picker-field">装车时间
+                <span class="dispatch-load-time-picker">
+                  <select
+                    :value="dispatchLoadTimePart(dispatchForm.loadTime, 'hour')"
+                    title="装车小时"
+                    @change="setDispatchFormLoadTimePart('hour', $event.target.value)"
+                  >
+                    <option value="">未定</option>
+                    <option v-for="hour in DISPATCH_LOAD_HOUR_OPTIONS" :key="hour" :value="hour">{{ hour }}时</option>
+                  </select>
+                  <select
+                    :value="dispatchLoadTimePart(dispatchForm.loadTime, 'minute')"
+                    :disabled="!dispatchLoadTimePart(dispatchForm.loadTime, 'hour')"
+                    title="装车分钟"
+                    @change="setDispatchFormLoadTimePart('minute', $event.target.value)"
+                  >
+                    <option v-for="minute in DISPATCH_LOAD_MINUTE_OPTIONS" :key="minute" :value="minute">{{ minute }}分</option>
+                  </select>
+                  <button class="ghost-btn small dispatch-load-time-clear" type="button" :disabled="!dispatchForm.loadTime" @click="clearDispatchFormLoadTime">未定</button>
+                </span>
               </label>
               <label class="span-2">备注<input v-model.trim="dispatchForm.note" placeholder="备注" /></label>
               <label v-if="dispatchForm.vehicleSource === '外派车辆'">外派供应商<select v-model="dispatchForm.supplier"><option value=""></option><option v-for="customer in customerRows.filter((item) => item.type === '供应商')" :key="customer.id" :value="customer.name">{{ customer.name }}</option></select></label>
@@ -27548,7 +27867,7 @@ function orderDetailFeeRows(order = {}) {
         :show-submit="!orderViewMode"
         @close="closeOrderModal"
         @submit="submitOrderModal"
-	        @panel-click="dispatchMessageOpen = false; loadFeeTemplateMenuOpen = false; closeRouteTreeDropdown(); orderCustomerPickerOpen = false; closeOrderFeeNamePicker()"
+	        @panel-click="dispatchMessageOpen = false; loadFeeTemplateMenuOpen = false; closeRouteTreeDropdown(); orderCustomerPickerOpen = false; orderSupplierPickerOpen = false; closeOrderFeeNamePicker()"
       >
           <div class="modal-body order-modal-review-body" :class="{ 'is-readonly': orderReadOnlyMode }">
             <fieldset class="order-modal-readonly-fieldset" :disabled="orderReadOnlyMode">
@@ -27619,10 +27938,27 @@ function orderDetailFeeRows(order = {}) {
               <div v-if="orderHasTransportFields && orderUsesOutsourcedVehicle" class="order-outsourced-field">
                 <label class="order-compact-field">
                   外派供应商
-                  <select v-model="orderForm.supplier">
-                    <option value=""></option>
-                    <option v-for="customer in customerRows.filter((item) => item.type === '供应商')" :key="customer.id" :value="customer.name">{{ customer.name }}</option>
-                  </select>
+                  <span class="searchable-select order-supplier-search" @click.stop>
+                    <input
+                      v-model.trim="orderSupplierKeyword"
+                      placeholder="输入供应商名称 / 编号搜索"
+                      @focus="openOrderSupplierPicker"
+                      @input="handleOrderSupplierInput"
+                    />
+                    <div v-if="orderSupplierPickerOpen" class="searchable-select-dropdown order-supplier-dropdown">
+                      <button
+                        v-for="supplier in orderSupplierOptions"
+                        :key="supplier.id"
+                        type="button"
+                        :class="{ active: supplier.name === orderForm.supplier }"
+                        @click="selectOrderSupplier(supplier)"
+                      >
+                        <strong>{{ supplier.name }}</strong>
+                        <span>{{ supplier.id }}</span>
+                      </button>
+                      <p v-if="orderSupplierOptions.length === 0">没有匹配外派供应商</p>
+                    </div>
+                  </span>
                 </label>
                 <label class="order-compact-field">
                   车牌
