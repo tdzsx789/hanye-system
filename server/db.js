@@ -7,9 +7,9 @@ types.setTypeParser(1700, (value) => Number(value));
 
 const pgHost = process.env.PGHOST || "127.0.0.1";
 const pgPort = process.env.PGPORT || "5432";
-const pgDatabase = process.env.PGDATABASE || "hanye";
-const pgUser = process.env.PGUSER || "hanye";
-const pgPassword = process.env.PGPASSWORD || "hanye";
+const pgDatabase = process.env.PGDATABASE || process.env.POSTGRES_DB || "hanye";
+const pgUser = process.env.PGUSER || process.env.POSTGRES_USER || "hanye";
+const pgPassword = process.env.PGPASSWORD || process.env.POSTGRES_PASSWORD || "hanye";
 const connectionString = process.env.DATABASE_URL || `postgres://${encodeURIComponent(pgUser)}:${encodeURIComponent(pgPassword)}@${pgHost}:${pgPort}/${pgDatabase}`;
 const seedDemoDataEnabled = ["1", "true", "yes", "on"].includes(String(process.env.SEED_DEMO_DATA || "").toLowerCase());
 
@@ -291,6 +291,12 @@ async function initializeSchema() {
       invoice_bank TEXT NOT NULL DEFAULT '',
       invoice_account TEXT NOT NULL DEFAULT '',
       invoice_address_phone TEXT NOT NULL DEFAULT '',
+      customs_home_item_count INTEGER NOT NULL DEFAULT 6,
+      customs_page_item_count INTEGER NOT NULL DEFAULT 14,
+      customs_import_home_fee DOUBLE PRECISION NOT NULL DEFAULT 100,
+      customs_export_home_fee DOUBLE PRECISION NOT NULL DEFAULT 150,
+      customs_import_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30,
+      customs_export_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30,
       created_at TEXT NOT NULL DEFAULT (CURRENT_DATE::text),
       deleted_at TEXT
     );
@@ -543,6 +549,7 @@ async function initializeSchema() {
       manifest_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
       inspection_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
       check_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
+      verification_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
       other_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
       custom_fields TEXT NOT NULL DEFAULT '[]',
       total DOUBLE PRECISION NOT NULL DEFAULT 0,
@@ -811,7 +818,13 @@ async function initializeSchema() {
       "invoice_tax_no TEXT NOT NULL DEFAULT ''",
       "invoice_bank TEXT NOT NULL DEFAULT ''",
       "invoice_account TEXT NOT NULL DEFAULT ''",
-      "invoice_address_phone TEXT NOT NULL DEFAULT ''"
+      "invoice_address_phone TEXT NOT NULL DEFAULT ''",
+      "customs_home_item_count INTEGER NOT NULL DEFAULT 6",
+      "customs_page_item_count INTEGER NOT NULL DEFAULT 14",
+      "customs_import_home_fee DOUBLE PRECISION NOT NULL DEFAULT 100",
+      "customs_export_home_fee DOUBLE PRECISION NOT NULL DEFAULT 150",
+      "customs_import_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30",
+      "customs_export_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30"
     ],
     files: [
       "storage_provider TEXT NOT NULL DEFAULT 'oss'",
@@ -820,7 +833,9 @@ async function initializeSchema() {
       "etag TEXT NOT NULL DEFAULT ''"
     ],
     customs_businesses: [
-      "custom_fields TEXT NOT NULL DEFAULT '[]'"
+      "custom_fields TEXT NOT NULL DEFAULT '[]'",
+      "verification_fee DOUBLE PRECISION NOT NULL DEFAULT 0",
+      "deleted_at TEXT"
     ],
     vehicle_expenses: [
       "fuel_station TEXT NOT NULL DEFAULT ''",
@@ -839,6 +854,8 @@ async function initializeSchema() {
       await addColumn(table, definition);
     }
   }
+
+  await addColumn("audit_logs", "actor TEXT NOT NULL DEFAULT 'admin'");
 
   await ensureTextColumn("orders", "quantity");
 
@@ -952,6 +969,15 @@ async function initializeSchema() {
           updated_at = CURRENT_TIMESTAMP,
           deleted_at = NULL
       WHERE id = @id
+        AND (
+          COALESCE(display_name, '') = ''
+          OR COALESCE(role, '') <> @role
+          OR COALESCE(role_level, 0) <> @roleLevel
+          OR COALESCE(status, '') <> '启用'
+          OR COALESCE(password_hash, '') = ''
+          OR COALESCE(permissions, '') <> @permissions
+          OR deleted_at IS NOT NULL
+        )
     `).run({
       id: adminAccount.id,
       role: adminRole,
@@ -2041,11 +2067,11 @@ async function seedDemoData() {
   await seedHiddenHistoryAddress("历史地址样例：深圳 / 南山 / 科技园临时仓");
 }
 
-export async function writeAudit(action, entityType, entityId, detail = "") {
+export async function writeAudit(action, entityType, entityId, detail = "", actor = "admin") {
   await db.prepare(`
-    INSERT INTO audit_logs (action, entity_type, entity_id, detail)
-    VALUES (?, ?, ?, ?)
-  `).run(action, entityType, entityId, detail);
+    INSERT INTO audit_logs (actor, action, entity_type, entity_id, detail)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(actor || "admin", action, entityType, entityId, detail);
 }
 
 await waitForDatabase();

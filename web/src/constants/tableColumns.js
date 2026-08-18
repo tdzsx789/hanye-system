@@ -145,6 +145,12 @@ export function createCustomerListDetailColumns() {
     { key: "receivableRMB", label: "应收人民币", width: 116, min: 92 },
     { key: "receivableHKD", label: "应收港币", width: 116, min: 92 },
     { key: "recentOrderDate", label: "最近订单日期", width: 120, min: 96 },
+    { key: "customsHomeItemCount", label: "主页品名项", width: 104, min: 86 },
+    { key: "customsPageItemCount", label: "续页品名项", width: 104, min: 86 },
+    { key: "customsImportHomeFee", label: "进口主页费用", width: 116, min: 96 },
+    { key: "customsExportHomeFee", label: "出口主页费用", width: 116, min: 96 },
+    { key: "customsImportPageFee", label: "进口续页费用", width: 116, min: 96 },
+    { key: "customsExportPageFee", label: "出口续页费用", width: 116, min: 96 },
     { key: "createdAt", label: "创建日期", width: 110, min: 86 },
     { key: "actions", label: "操作", width: 138, min: 100, locked: true }
   ]);

@@ -25,11 +25,20 @@ PGHOST=127.0.0.1 PGPORT=5432 PGDATABASE=hanye PGUSER=hanye PGPASSWORD=hanye_dev_
 ```
 
 2. 用微信开发者工具打开 `/Users/tree/Desktop/code/hanye-system/mobile`。
-3. 登录页不展示服务器地址，默认连接 `http://127.0.0.1:8080/api`，对应 Docker Web 代理后的后端 API。
+3. 登录页不展示服务器地址，开发版默认连接 `http://127.0.0.1:8080/api`，体验版和正式版默认连接 `https://oa.hanyeltd.com/api`。
 
 ## 上线配置
 
-- 把 `mobile/project.config.json` 里的 `appid` 改成正式小程序 AppID。
-- 生产环境服务器地址必须使用 HTTPS，例如 `https://www.524458.cn/api`。
-- 在微信公众平台配置 request 合法域名，域名需要指向同一套后端 API。
+- `mobile/project.config.json` 已配置正式小程序 AppID：`wx82dcadc96976af5f`。
+- 生产环境服务器地址必须使用 HTTPS，当前使用 `https://oa.hanyeltd.com/api`。
+- 在微信公众平台配置 request 合法域名：`https://oa.hanyeltd.com`，域名需要指向同一套后端 API。
+- 上传图片/附件如走 OSS 直传或访问 OSS 文件，还需要在微信公众平台同步配置对应的 uploadFile/downloadFile 合法域名。
+- 接口地址会按小程序运行环境自动切换，开发版走本地，体验版和正式版走线上，不需要发布前手动改代码。
 - 小程序端不维护复杂模板和财务规则，相关配置仍在 PC 端完成。
+
+## 真机预览排查
+
+- 当前已关闭 source map 上传，并排除了 README、私有配置和系统隐藏文件，减少预览上传时的网络中断。
+- 如果预览提示 `read ECONNRESET`，优先在微信开发者工具右上角退出后重新扫码登录，再关闭旧项目，只打开 `/Users/tree/Desktop/code/hanye-system/mobile`。
+- 如果仍然失败，执行“工具 -> 清缓存 -> 清除登录状态”和“工具 -> 清缓存 -> 清除项目缓存”，重启微信开发者工具后再预览。
+- 微信开发者工具日志出现 `access_token missing`、`getNewTicket empty ticket/userInfo` 时，说明是工具登录票据失效，不是小程序代码编译错误。

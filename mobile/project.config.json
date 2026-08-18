@@ -1,5 +1,5 @@
 {
-  "appid": "wx3cffa2a80fc1b081",
+  "appid": "wx82dcadc96976af5f",
   "projectname": "hanye-system-mobile",
   "miniprogramRoot": "./",
   "compileType": "miniprogram",
@@ -12,7 +12,7 @@
     "packNpmManually": false,
     "compileWorklet": false,
     "uglifyFileName": false,
-    "uploadWithSourceMap": true,
+    "uploadWithSourceMap": false,
     "packNpmRelationList": [],
     "minifyWXSS": true,
     "minifyWXML": true,
@@ -20,6 +20,7 @@
     "disableUseStrict": false,
     "useCompilerPlugins": false,
     "condition": false,
+    "ignoreUploadUnusedFiles": false,
     "babelSetting": {
       "ignore": [],
       "disablePlugins": [],

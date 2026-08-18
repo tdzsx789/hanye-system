@@ -21,6 +21,7 @@ import {
 } from "./api/index.js";
 import IconSvg from "./components/IconSvg.vue";
 import FilePreviewModal from "./components/FilePreviewModal.vue";
+import UploadDropzoneModal from "./components/UploadDropzoneModal.vue";
 import OrderAttachmentPanel from "./components/orders/OrderAttachmentPanel.vue";
 import OrderDetailModal from "./components/orders/OrderDetailModal.vue";
 import OrderModal from "./components/orders/OrderModal.vue";
@@ -207,6 +208,14 @@ const COMPANY_ENTRY_TYPE_OPTIONS = [
 ];
 const COMPANY_EXPENSE_CUSTOM_CATEGORY_VALUE = "__custom_company_expense_category__";
 const CUSTOMER_CATEGORY_OPTIONS = ["运输客户", "报关客户"];
+const DEFAULT_CUSTOMS_CUSTOMER_CONFIG = {
+  customsHomeItemCount: 6,
+  customsPageItemCount: 14,
+  customsImportHomeFee: 100,
+  customsExportHomeFee: 150,
+  customsImportPageFee: 30,
+  customsExportPageFee: 30
+};
 const bossCompanyExpenseRows = ref([]);
 const customerOrderColumns = reactive(createCustomerOrderColumns());
 const orderColumns = reactive(createOrderColumns());
@@ -218,6 +227,49 @@ const customerListDetailColumns = reactive(createCustomerListDetailColumns());
 const vehicleListDetailColumns = reactive(createVehicleListDetailColumns());
 const driverListDetailColumns = reactive(createDriverListDetailColumns());
 const dataTableDensityOptions = DATA_TABLE_DENSITY_OPTIONS;
+const CUSTOMS_BUSINESS_TABLE_ID = "customs_business";
+const CUSTOMS_BUSINESS_COLUMN_ORDER_KEY = dataTableStorageKey(CUSTOMS_BUSINESS_TABLE_ID, "order");
+const CUSTOMS_BUSINESS_PREFIX_COLUMNS = [
+  { key: "date", label: "日期", width: 96 },
+  { key: "declarationNo", label: "报关单号", width: 136 },
+  { key: "sixSheetNo", label: "六联单号", width: 128 },
+  { key: "company", label: "公司", width: 220 },
+  { key: "direction", label: "进出口", width: 92 },
+  { key: "itemCount", label: "品名项数", width: 86 },
+  { key: "pageCount", label: "续页", width: 72 },
+  { key: "pageFee", label: "续页费", width: 92, amount: true },
+  { key: "customsFee", label: "报关费", width: 92, amount: true },
+  { key: "manifestFee", label: "舱单费", width: 92, amount: true },
+  { key: "inspectionFee", label: "报检费", width: 92, amount: true },
+  { key: "checkFee", label: "查验费", width: 92, amount: true },
+  { key: "verificationFee", label: "核注费", width: 92, amount: true },
+  { key: "otherFee", label: "其他费用", width: 96, amount: true }
+];
+const CUSTOMS_BUSINESS_SUFFIX_COLUMNS = [
+  { key: "total", label: "合计", width: 96, amount: true },
+  { key: "remark", label: "备注", width: 180 },
+  { key: "actions", label: "操作", width: 120, exportable: false }
+];
+
+function migrateCustomsBusinessColumnOrder(saved = []) {
+  if (!Array.isArray(saved) || !saved.length) return [];
+  const migrationKey = dataTableStorageKey(CUSTOMS_BUSINESS_TABLE_ID, "page_fee_after_page_count_v1");
+  if (localStorage.getItem(migrationKey) === "done") return saved;
+  const pageCountIndex = saved.indexOf("pageCount");
+  const pageFeeIndex = saved.indexOf("pageFee");
+  if (pageCountIndex < 0 || pageFeeIndex < 0 || pageFeeIndex === pageCountIndex + 1) {
+    localStorage.setItem(migrationKey, "done");
+    return saved;
+  }
+  const next = saved.filter((key) => key !== "pageFee");
+  const nextPageCountIndex = next.indexOf("pageCount");
+  next.splice(nextPageCountIndex + 1, 0, "pageFee");
+  localStorage.setItem(CUSTOMS_BUSINESS_COLUMN_ORDER_KEY, JSON.stringify(next));
+  localStorage.setItem(migrationKey, "done");
+  return next;
+}
+
+const customsBusinessColumnOrder = ref(migrateCustomsBusinessColumnOrder(loadStoredJson(CUSTOMS_BUSINESS_COLUMN_ORDER_KEY, [])));
 applySavedColumnOrder(customerOrderColumns, CUSTOMER_ORDER_COLUMN_ORDER_KEY);
 applySavedColumnOrder(orderColumns, ORDER_COLUMN_ORDER_KEY);
 pinColumnAfter(customerOrderColumns, "date", "select", CUSTOMER_ORDER_COLUMN_ORDER_KEY);
@@ -533,7 +585,13 @@ function normalizeCustomerRecord(customer = {}) {
   const row = customer || {};
   return {
     ...row,
-    customerCategory: row.type === "客户" ? customerCategoryValue(row) : ""
+    customerCategory: row.type === "客户" ? customerCategoryValue(row) : "",
+    customsHomeItemCount: Number(row.customsHomeItemCount ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsHomeItemCount),
+    customsPageItemCount: Number(row.customsPageItemCount ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsPageItemCount),
+    customsImportHomeFee: Number(row.customsImportHomeFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportHomeFee),
+    customsExportHomeFee: Number(row.customsExportHomeFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportHomeFee),
+    customsImportPageFee: Number(row.customsImportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee),
+    customsExportPageFee: Number(row.customsExportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee)
   };
 }
 
@@ -902,6 +960,7 @@ const bossCompanyExpenseEditForm = reactive({
 });
 const customsBusinessPeriodFilter = ref(currentPeriodMonthKey());
 const customsStatementPeriodFilter = ref(normalizePeriodFilter(localStorage.getItem("hanye_customs_statement_period_filter") || currentPeriodMonthKey()));
+const customsStatementCompanySearch = ref("");
 const vehicleExpensePeriodFilter = ref(normalizePeriodFilter(localStorage.getItem("hanye_vehicle_expense_period_filter") || currentPeriodMonthKey()));
 const financeWageDetailDriverId = ref(null);
 const selectedFinanceWageDetailOrderNo = ref("");
@@ -921,6 +980,11 @@ const statementCustomerExchangeRates = reactive(loadStoredJson(STATEMENT_CUSTOME
 const statementCustomerUnreceivedAmounts = reactive(loadStoredJson(STATEMENT_CUSTOMER_UNRECEIVED_AMOUNTS_KEY, {}));
 const customsBusinessRows = ref([]);
 const customsBusinessAllRows = ref([]);
+const customsBusinessRecycleRows = ref([]);
+const editingCustomsBusinessId = ref("");
+const copyingCustomsBusinessId = ref("");
+const customsBusinessCompanySearch = ref("");
+const customsBusinessCompanyPickerOpen = ref(false);
 const customsBusinessSearchKeyword = ref("");
 const customsBusinessCompanyFilter = ref("");
 const customsBusinessDirectionFilter = ref("");
@@ -1005,6 +1069,8 @@ const costCenterRateRows = ref([]);
 const bossVehicleExchangeRateRows = ref([]);
 const driverAdjustmentRows = ref([]);
 const recycleRows = ref([]);
+const recycleScope = ref("orders");
+const activeRecycleTab = ref("orders");
 const feeItemRows = ref([]);
 const freightRateRows = ref([]);
 const templateRows = ref([]);
@@ -1093,6 +1159,16 @@ const selectedAddressBookIds = ref([]);
 const editingAddressBookId = ref("");
 const addressBookFormOpen = ref(false);
 const tableSortState = reactive({});
+const uploadPanel = reactive({
+  open: false,
+  title: "上传附件",
+  description: "",
+  accept: FILE_UPLOAD_ACCEPT,
+  multiple: true,
+  uploading: false,
+  submitLabel: "开始上传",
+  handler: null
+});
 
 const loading = ref(false);
 const apiStatus = ref("");
@@ -1111,6 +1187,7 @@ let dataTableResizeState = null;
 let draggedCustomerOrderColumnKey = "";
 let draggedOrderColumnKey = "";
 let draggedDispatchTableColumnKey = "";
+let draggedCustomsBusinessColumnKey = "";
 
 const customerModalOpen = ref(false);
 const contactModalOpen = ref(false);
@@ -1142,6 +1219,7 @@ const statementExportMenuKey = ref("");
 const customerOrderColumnMenuOpen = ref(false);
 const orderColumnMenuOpen = ref(false);
 const dispatchColumnMenuOpen = ref(false);
+const customsBusinessColumnMenuOpen = ref(false);
 const accountPasswordModalOpen = ref(false);
 const accountProfileModalOpen = ref(false);
 const accountCreateModalOpen = ref(false);
@@ -1220,6 +1298,7 @@ function blankCustomsBusinessForm() {
     manifestFee: 0,
     inspectionFee: 0,
     checkFee: 0,
+    verificationFee: 0,
     otherFee: 0,
     customFields: [],
     remark: ""
@@ -1246,6 +1325,12 @@ const customerForm = reactive({
   invoiceBank: "",
   invoiceAccount: "",
   invoiceAddressPhone: "",
+  customsHomeItemCount: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsHomeItemCount,
+  customsPageItemCount: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsPageItemCount,
+  customsImportHomeFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportHomeFee,
+  customsExportHomeFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportHomeFee,
+  customsImportPageFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee,
+  customsExportPageFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee,
   invoicePasteText: ""
 });
 
@@ -1303,6 +1388,7 @@ const dispatchForm = reactive({
   customer: "",
   plate: "",
   port: "",
+  needsWeighing: false,
   direction: "",
   tonnage: "",
   quantity: "",
@@ -1360,6 +1446,7 @@ const orderForm = reactive({
   customer: "",
   businessType: "",
   port: "",
+  needsWeighing: false,
   direction: "",
   tonnage: "",
   currency: "",
@@ -1393,6 +1480,8 @@ const orderForm = reactive({
   customsPageCount: ""
 });
 const orderFees = ref([]);
+const orderFeeNamePickerOpenIndex = ref(null);
+const orderFeeNameSearchKeyword = ref("");
 const selectedFeeItemId = ref(null);
 const feeItemManagerTargetIndex = ref(null);
 const draggedFeeItemId = ref(null);
@@ -2820,6 +2909,36 @@ async function handleVehicleExpenseReceiptFiles(event) {
   }
 }
 
+function openVehicleExpenseReceiptUploadPanel(event) {
+  if (vehicleExpenseSaving.value || vehicleExpenseReceiptUploading.value) {
+    notify("票据正在上传，请稍候");
+    return;
+  }
+  if (vehicleRows.value.length === 0) {
+    notify("请先新增车辆，再上传票据");
+    return;
+  }
+  const form = event?.currentTarget?.form || null;
+  openUploadPanel({
+    title: "上传车辆支出票据",
+    description: "可一次上传多张票据，支持拖拽、选择文件和粘贴微信复制的图片。",
+    accept: FILE_UPLOAD_ACCEPT,
+    multiple: true,
+    handler: async (files) => {
+      try {
+        const expenseId = await ensureVehicleExpenseForReceiptUpload(form);
+        if (!expenseId) return false;
+        const result = await uploadVehicleExpenseReceiptFiles(expenseId, files);
+        return result.failed === 0;
+      } catch (error) {
+        setVehicleExpenseReceiptUploadStatus(`票据上传失败：${error.message}`, "error");
+        notify(error.message);
+        return false;
+      }
+    }
+  });
+}
+
 function closeVehicleExpenseModal() {
   if (vehicleExpenseSaving.value || vehicleExpenseReceiptUploading.value) {
     notify("费用或票据正在保存，请稍候");
@@ -2903,6 +3022,7 @@ const dispatchPlanDisplayRows = computed(() =>
           date: row.date || dispatchDate.value,
           port: row.port || "",
           direction: row.direction || "",
+          needsWeighing: booleanFlag(row.needsWeighing, false),
           tonnage: row.tonnage || "",
           quantity: row.quantity || "",
           weight: row.weight || "",
@@ -3488,6 +3608,7 @@ function resetDispatchForm() {
     customer: "",
     plate: "",
     port: "",
+    needsWeighing: false,
     direction: "",
     tonnage: "",
     quantity: "",
@@ -3521,6 +3642,7 @@ function fillDispatchFormFromPlanRow(row, fallbackDate = dispatchDate.value || o
     customer: customerName,
     plate: row.plate || order.plate || "",
     port: order.port || row.port || "",
+    needsWeighing: booleanFlag(row.needsWeighing, false),
     direction: order.direction || row.direction || "",
     tonnage: order.tonnage || row.tonnage || "",
     quantity: order.quantity || row.quantity || "",
@@ -3595,6 +3717,7 @@ function createManualDispatchPlanRow() {
     customer: dispatchForm.customer,
     plate: dispatchForm.plate,
     port: dispatchForm.port,
+    needsWeighing: booleanFlag(dispatchForm.needsWeighing, false),
     direction: dispatchForm.direction,
     tonnage: dispatchForm.tonnage,
     quantity: dispatchForm.quantity,
@@ -3641,6 +3764,7 @@ async function saveEditedDispatchPlanRow() {
     customer: matchedCustomer.name,
     plate: dispatchForm.plate,
     port: dispatchForm.port,
+    needsWeighing: booleanFlag(dispatchForm.needsWeighing, false),
     direction: dispatchForm.direction,
     tonnage: dispatchForm.tonnage,
     quantity: dispatchForm.quantity,
@@ -3663,6 +3787,7 @@ async function saveEditedDispatchPlanRow() {
           customerId: matchedCustomer.id,
           customer: matchedCustomer.name,
           port: updatedRow.port,
+          needsWeighing: updatedRow.needsWeighing,
           direction: updatedRow.direction,
           tonnage: updatedRow.tonnage,
           quantity: updatedRow.quantity,
@@ -3728,6 +3853,7 @@ async function saveManualDispatchPlanRow() {
       customer: matchedCustomer.name,
       businessType: "运输",
       port: row.port,
+      needsWeighing: row.needsWeighing,
       direction: row.direction,
       tonnage: row.tonnage,
       currency: "港币",
@@ -3776,6 +3902,7 @@ function createDispatchPlanRow(order) {
     customer: order.customer || "",
     plate: order.plate || "",
     port: order.port || "",
+    needsWeighing: booleanFlag(order.needsWeighing, false),
     direction: order.direction || "",
     tonnage: order.tonnage || "",
     quantity: order.quantity || "",
@@ -3817,6 +3944,7 @@ function createDispatchDuplicateDraftRow(sourceRow, index) {
     plate: sourceRow.plate || sourceOrder.plate || "",
     loadTime: sourceRow.loadTime || "",
     port: sourceOrder.port || sourceRow.port || "",
+    needsWeighing: booleanFlag(sourceRow.needsWeighing ?? sourceOrder.needsWeighing, false),
     direction: sourceOrder.direction || sourceRow.direction || "",
     tonnage: sourceOrder.tonnage || sourceRow.tonnage || "",
     quantity: sourceOrder.quantity || sourceRow.quantity || "",
@@ -3883,6 +4011,7 @@ async function saveDuplicateDispatchRows() {
         customer: matchedCustomer.name,
         businessType: sourceOrder.businessType || "运输",
         port: draft.port || sourceOrder.port || sourceRow.port || "",
+        needsWeighing: booleanFlag(draft.needsWeighing ?? sourceRow.needsWeighing, false),
         direction: draft.direction || sourceOrder.direction || sourceRow.direction || "",
         tonnage: draft.tonnage || sourceOrder.tonnage || sourceRow.tonnage || "",
         currency: sourceOrder.currency || "港币",
@@ -3911,6 +4040,7 @@ async function saveDuplicateDispatchRows() {
         orderNo: item.no,
         customer: item.customer || matchedCustomer.name,
         plate: draft.plate || sourceRow.plate || "",
+        needsWeighing: booleanFlag(draft.needsWeighing ?? sourceRow.needsWeighing, false),
         loadTime: draft.loadTime || sourceRow.loadTime || "",
         status: DISPATCH_PLAN_DEFAULT_STATUS,
         previousStatus: "",
@@ -3954,6 +4084,7 @@ function applyDispatchRowToOrderForm(row) {
     customer: row.customer || orderForm.customer,
     businessType: orderForm.businessType || "运输",
     port: row.port || "",
+    needsWeighing: booleanFlag(row.needsWeighing, false),
     direction: row.direction || "",
     tonnage: row.tonnage || "",
     quantity: row.quantity || "",
@@ -4078,6 +4209,17 @@ function dispatchVehicleSourceText(row) {
   return order.vehicleSource || "-";
 }
 
+function dispatchWeighingText(value) {
+  return booleanFlag(value, false) ? "过磅" : "不用过磅";
+}
+
+function dispatchDirectionText(value = "") {
+  const text = String(value || "").trim();
+  if (text === "进口") return "进口";
+  if (text === "出口") return "出口";
+  return text || "-";
+}
+
 function dispatchMessageText(rows = dispatchPlanDisplayRows.value) {
   if (!rows.length) return "";
   return rows.map((row) => {
@@ -4085,8 +4227,9 @@ function dispatchMessageText(rows = dispatchPlanDisplayRows.value) {
     const record = { ...order, loading: order.loading || row.loading, unloading: order.unloading || row.unloading };
     const date = order.date || row.date || dispatchDate.value || "-";
     const time = row.loadTime || order.loadingTime || "-";
+    const direction = order.direction || row.direction || "";
     return [
-      `装货时间：${date}   ${time}  口岸：${order.port || row.port || "-"}`,
+      `装货时间：${date}   ${time}  ${dispatchWeighingText(row.needsWeighing)} ${dispatchDirectionText(direction)} 口岸：${order.port || row.port || "-"}`,
       `车牌：${row.plate || order.plate || "-"} 吨位：${order.tonnage || row.tonnage || "-"}    板数：${order.quantity || row.quantity || "-"}`,
       "",
       dispatchLocationBlock("装货地", record, "loading"),
@@ -5051,14 +5194,13 @@ function removeCustomsBusinessCustomField(index) {
 }
 
 const customsBusinessFormTotal = computed(() =>
-  [
-    customsBusinessForm.customsFee,
-    customsBusinessForm.pageFee,
-    customsBusinessForm.manifestFee,
-    customsBusinessForm.inspectionFee,
-    customsBusinessForm.checkFee,
-    customsBusinessForm.otherFee
-  ].reduce((sum, value) => sum + Number(value || 0), 0)
+  Number(customsBusinessHomeFee.value || 0)
+  + Number(customsBusinessForm.pageFee || 0)
+  + Number(customsBusinessForm.customsFee || 0)
+  + Number(customsBusinessForm.manifestFee || 0)
+  + Number(customsBusinessForm.inspectionFee || 0)
+  + Number(customsBusinessForm.checkFee || 0)
+  + Number(customsBusinessForm.verificationFee || 0)
   + normalizeCustomsBusinessCustomFields(customsBusinessForm.customFields)
     .reduce((sum, field) => sum + customsBusinessCustomFieldAmount(field), 0)
 );
@@ -5079,12 +5221,159 @@ const customsBusinessCustomerOptions = computed(() =>
     )
 );
 
-function customsBusinessCompanySelectedFromCustomers(company = customsBusinessForm.company) {
+const customsBusinessFilteredCustomerOptions = computed(() => {
+  const keyword = normalizedCustomsBusinessSearchText(customsBusinessCompanySearch.value);
+  const selectedCompany = String(customsBusinessForm.company || "").trim();
+  const filtered = customsBusinessCustomerOptions.value.filter((customer) => {
+    const name = String(customer.name || "").trim();
+    if (!keyword) return true;
+    return normalizedCustomsBusinessSearchText(name).includes(keyword);
+  });
+  if (selectedCompany && !filtered.some((customer) => String(customer.name || "").trim() === selectedCompany)) {
+    const selected = customsBusinessCustomerOptions.value.find((customer) => String(customer.name || "").trim() === selectedCompany);
+    if (selected) filtered.unshift(selected);
+  }
+  return filtered;
+});
+
+function findCustomsBusinessCustomerByName(company = customsBusinessForm.company) {
   const target = String(company || "").trim();
-  return Boolean(target) && customsBusinessCustomerOptions.value.some((customer) =>
+  if (!target) return null;
+  return customsBusinessCustomerOptions.value.find((customer) =>
     String(customer.name || "").trim() === target
-  );
+  ) || null;
 }
+
+function customsBusinessCompanySelectedFromCustomers(company = customsBusinessForm.company) {
+  return Boolean(findCustomsBusinessCustomerByName(company));
+}
+
+function openCustomsBusinessCompanyPicker() {
+  customsBusinessCompanyPickerOpen.value = true;
+}
+
+function closeCustomsBusinessCompanyPicker() {
+  customsBusinessCompanyPickerOpen.value = false;
+  const selectedCompany = String(customsBusinessForm.company || "").trim();
+  if (selectedCompany && customsBusinessCompanySearch.value !== selectedCompany) {
+    customsBusinessCompanySearch.value = selectedCompany;
+  }
+}
+
+function handleCustomsBusinessCompanyInput(event) {
+  const value = String(event?.target?.value || "").trim();
+  customsBusinessCompanySearch.value = value;
+  customsBusinessCompanyPickerOpen.value = true;
+  const exactCustomer = findCustomsBusinessCustomerByName(value);
+  customsBusinessForm.company = exactCustomer ? exactCustomer.name : "";
+}
+
+function selectCustomsBusinessCompany(customer) {
+  const company = String(customer?.name || "").trim();
+  customsBusinessForm.company = company;
+  customsBusinessCompanySearch.value = company;
+  customsBusinessCompanyPickerOpen.value = false;
+}
+
+function clearCustomsBusinessCompany() {
+  customsBusinessForm.company = "";
+  customsBusinessCompanySearch.value = "";
+  customsBusinessCompanyPickerOpen.value = true;
+}
+
+function confirmFirstCustomsBusinessCompanyOption() {
+  const [firstCustomer] = customsBusinessFilteredCustomerOptions.value;
+  if (firstCustomer) selectCustomsBusinessCompany(firstCustomer);
+}
+
+const customsBusinessSelectedCustomer = computed(() =>
+  findCustomsBusinessCustomerByName(customsBusinessForm.company)
+);
+
+function customsBusinessDirectionFeeType(direction = customsBusinessForm.direction) {
+  const text = String(direction || "").trim();
+  if (text.includes("进口")) return "import";
+  if (text.includes("出口")) return "export";
+  return "";
+}
+
+function nonNegativeCustomsConfigNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : fallback;
+}
+
+function positiveCustomsConfigNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+const customsBusinessHomeFee = computed(() => {
+  const customer = customsBusinessSelectedCustomer.value;
+  const feeType = customsBusinessDirectionFeeType();
+  if (!customer || !feeType) return 0;
+  const key = feeType === "import" ? "customsImportHomeFee" : "customsExportHomeFee";
+  return Number(customer[key] ?? 0) || 0;
+});
+
+const customsBusinessPageUnitFee = computed(() => {
+  const customer = customsBusinessSelectedCustomer.value;
+  const feeType = customsBusinessDirectionFeeType();
+  if (!customer || !feeType) return 0;
+  const key = feeType === "import" ? "customsImportPageFee" : "customsExportPageFee";
+  return Number(customer[key] ?? 0) || 0;
+});
+
+const calculatedCustomsBusinessPageCount = computed(() => {
+  const customer = customsBusinessSelectedCustomer.value;
+  if (!customer) return 0;
+  const itemCount = Math.max(0, Number(customsBusinessForm.itemCount || 0));
+  const homeItemCount = nonNegativeCustomsConfigNumber(customer.customsHomeItemCount, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsHomeItemCount);
+  const pageItemCount = positiveCustomsConfigNumber(customer.customsPageItemCount, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsPageItemCount);
+  if (itemCount <= homeItemCount || pageItemCount <= 0) return 0;
+  return Math.ceil((itemCount - homeItemCount) / pageItemCount);
+});
+
+const calculatedCustomsBusinessPageFee = computed(() =>
+  calculatedCustomsBusinessPageCount.value * customsBusinessPageUnitFee.value
+);
+
+const customsBusinessHomeFeeDisplay = computed(() => {
+  if (!customsBusinessSelectedCustomer.value || !customsBusinessDirectionFeeType()) return "";
+  return money(customsBusinessHomeFee.value);
+});
+
+function syncCalculatedCustomsBusinessCharges() {
+  const feeType = customsBusinessDirectionFeeType();
+  if (!feeType) {
+    if (!String(customsBusinessForm.direction || "").trim()) {
+      customsBusinessForm.pageCount = 0;
+      customsBusinessForm.pageFee = 0;
+    }
+    return;
+  }
+  const nextPageCount = calculatedCustomsBusinessPageCount.value;
+  const nextPageFee = Number(calculatedCustomsBusinessPageFee.value.toFixed(2));
+  if (Number(customsBusinessForm.pageCount || 0) !== nextPageCount) {
+    customsBusinessForm.pageCount = nextPageCount;
+  }
+  if (Number(customsBusinessForm.pageFee || 0) !== nextPageFee) {
+    customsBusinessForm.pageFee = nextPageFee;
+  }
+}
+
+watch(
+  [
+    () => customsBusinessForm.company,
+    () => customsBusinessForm.direction,
+    () => customsBusinessForm.itemCount,
+    () => customsBusinessSelectedCustomer.value?.customsHomeItemCount,
+    () => customsBusinessSelectedCustomer.value?.customsPageItemCount,
+    () => customsBusinessSelectedCustomer.value?.customsImportPageFee,
+    () => customsBusinessSelectedCustomer.value?.customsExportPageFee
+  ],
+  syncCalculatedCustomsBusinessCharges,
+  { immediate: true }
+);
 
 function normalizedCustomsBusinessSearchText(value = "") {
   return String(value || "").trim().toLowerCase();
@@ -5131,7 +5420,7 @@ const filteredCustomsBusinessRows = computed(() =>
 const customsBusinessCustomColumns = computed(() => {
   const names = [];
   const seen = new Set();
-  filteredCustomsBusinessRows.value.forEach((row) => {
+  customsBusinessRows.value.forEach((row) => {
     normalizeCustomsBusinessCustomFields(row.customFields).forEach((field) => {
       if (seen.has(field.name)) return;
       seen.add(field.name);
@@ -5141,8 +5430,59 @@ const customsBusinessCustomColumns = computed(() => {
   return names;
 });
 
+function customsBusinessCustomColumnKey(name = "") {
+  return `custom:${String(name || "").trim()}`;
+}
+
+function customsBusinessCustomColumnName(key = "") {
+  return String(key || "").startsWith("custom:") ? String(key).slice(7) : "";
+}
+
+const customsBusinessBaseColumns = computed(() => {
+  const customColumns = customsBusinessCustomColumns.value.map((name) => ({
+    key: customsBusinessCustomColumnKey(name),
+    label: name,
+    width: 112,
+    amount: true,
+    custom: true
+  }));
+  return [
+    ...CUSTOMS_BUSINESS_PREFIX_COLUMNS,
+    ...customColumns,
+    ...CUSTOMS_BUSINESS_SUFFIX_COLUMNS
+  ].map((column, index) => ({ ...column, defaultIndex: index }));
+});
+
+const orderedCustomsBusinessColumns = computed(() => {
+  const columns = customsBusinessBaseColumns.value;
+  const byKey = new Map(columns.map((column) => [column.key, column]));
+  const savedKeys = Array.isArray(customsBusinessColumnOrder.value)
+    ? customsBusinessColumnOrder.value.filter((key) => byKey.has(key) && key !== "actions")
+    : [];
+  const used = new Set(savedKeys);
+  const ordered = savedKeys.map((key) => byKey.get(key));
+  columns
+    .filter((column) => column.key !== "actions" && !used.has(column.key))
+    .forEach((column) => {
+      const insertIndex = ordered.findIndex((item) => (item.defaultIndex ?? 999) > (column.defaultIndex ?? 999));
+      if (insertIndex >= 0) ordered.splice(insertIndex, 0, column);
+      else ordered.push(column);
+    });
+  const actionsColumn = byKey.get("actions");
+  return actionsColumn ? [...ordered, actionsColumn] : ordered;
+});
+
+const customsBusinessExportColumns = computed(() =>
+  orderedCustomsBusinessColumns.value
+    .filter((column) => column.exportable !== false)
+    .map((column) => ({
+      key: column.key,
+      label: column.label
+    }))
+);
+
 const customsBusinessTableMinWidth = computed(() =>
-  `${1380 + customsBusinessCustomColumns.value.length * 112}px`
+  `${orderedCustomsBusinessColumns.value.reduce((sum, column) => sum + Number(column.width || 96), 0)}px`
 );
 
 function customsBusinessCustomFieldEntry(row = {}, columnName = "") {
@@ -5155,6 +5495,80 @@ function customsBusinessCustomFieldEntry(row = {}, columnName = "") {
 function customsBusinessCustomFieldDisplay(row = {}, columnName = "") {
   const field = customsBusinessCustomFieldEntry(row, columnName);
   return field ? money(field.value) : "";
+}
+
+function customsBusinessColumnStyle(column = {}) {
+  const width = Number(column.width || 96);
+  return { width: `${width}px`, minWidth: `${width}px` };
+}
+
+function customsBusinessCellText(row = {}, column = {}) {
+  if (column.custom) return customsBusinessCustomFieldDisplay(row, customsBusinessCustomColumnName(column.key));
+  const values = {
+    date: row.date || "",
+    declarationNo: row.declarationNo || "",
+    sixSheetNo: row.sixSheetNo || "",
+    company: row.company || "",
+    direction: row.direction || "",
+    itemCount: row.itemCount || "",
+    pageCount: row.pageCount || "",
+    customsFee: money(row.customsFee),
+    pageFee: money(row.pageFee),
+    manifestFee: money(row.manifestFee),
+    inspectionFee: money(row.inspectionFee),
+    checkFee: money(row.checkFee),
+    verificationFee: money(row.verificationFee),
+    otherFee: money(row.otherFee),
+    total: money(row.total),
+    remark: row.remark || ""
+  };
+  return values[column.key] ?? "";
+}
+
+function saveCustomsBusinessColumnOrder(columns = orderedCustomsBusinessColumns.value) {
+  const keys = columns
+    .filter((column) => column.key !== "actions")
+    .map((column) => column.key);
+  customsBusinessColumnOrder.value = keys;
+  saveStoredJson(CUSTOMS_BUSINESS_COLUMN_ORDER_KEY, keys);
+}
+
+function moveCustomsBusinessColumn(column = {}, offset = 0) {
+  if (!column?.key || column.key === "actions") return;
+  const columns = orderedCustomsBusinessColumns.value.filter((item) => item.key !== "actions");
+  const fromIndex = columns.findIndex((item) => item.key === column.key);
+  const toIndex = fromIndex + offset;
+  if (fromIndex < 0 || toIndex < 0 || toIndex >= columns.length) return;
+  const [moved] = columns.splice(fromIndex, 1);
+  columns.splice(toIndex, 0, moved);
+  saveCustomsBusinessColumnOrder(columns);
+}
+
+function startCustomsBusinessColumnDrag(column, event) {
+  if (!column?.key || column.key === "actions") return;
+  draggedCustomsBusinessColumnKey = column.key;
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", column.key);
+}
+
+function dropCustomsBusinessColumn(column) {
+  if (!draggedCustomsBusinessColumnKey || !column?.key || column.key === "actions") return;
+  const columns = orderedCustomsBusinessColumns.value.filter((item) => item.key !== "actions");
+  const fromIndex = columns.findIndex((item) => item.key === draggedCustomsBusinessColumnKey);
+  const toIndex = columns.findIndex((item) => item.key === column.key);
+  if (fromIndex >= 0 && toIndex >= 0 && fromIndex !== toIndex) {
+    const [moved] = columns.splice(fromIndex, 1);
+    const nextTargetIndex = columns.findIndex((item) => item.key === column.key);
+    columns.splice(nextTargetIndex, 0, moved);
+    saveCustomsBusinessColumnOrder(columns);
+  }
+  draggedCustomsBusinessColumnKey = "";
+}
+
+function resetCustomsBusinessColumnOrder() {
+  localStorage.removeItem(CUSTOMS_BUSINESS_COLUMN_ORDER_KEY);
+  customsBusinessColumnOrder.value = [];
+  notify("已恢复报关业务默认列顺序");
 }
 
 const customsBusinessCompanyFilterOptions = computed(() =>
@@ -5211,6 +5625,16 @@ function currentPeriodMonthKey() {
 }
 
 const STATEMENT_PERIOD_MODES = PERIOD_FILTER_MODES;
+const CUSTOMS_STATEMENT_PERIOD_MODES = [
+  ...PERIOD_FILTER_MODES,
+  { key: "range", label: "自定义范围" }
+];
+const CUSTOMS_BUSINESS_PERIOD_FILTER_MODES = [
+  { key: "month", label: "按月查看" },
+  { key: "day", label: "按天查看" },
+  { key: "year", label: "按年查看" },
+  { key: "all", label: "全部" }
+];
 const statementMonthOptions = PERIOD_MONTH_OPTIONS;
 
 function previousMonthKey(monthKey = currentPeriodMonthKey()) {
@@ -5229,11 +5653,29 @@ function normalizePeriodMonth(month, fallbackMonth = currentPeriodMonthKey().sli
   return String(Math.min(12, Math.max(1, number || Number(fallbackMonth)))).padStart(2, "0");
 }
 
+function normalizePeriodRangeDate(value, fallback = todayInputValue()) {
+  const text = String(value || "").trim().slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) && parseInputDate(text) ? text : fallback;
+}
+
+function normalizePeriodRange(startValue, endValue) {
+  const start = normalizePeriodRangeDate(startValue);
+  const end = normalizePeriodRangeDate(endValue, start);
+  return start <= end ? { start, end } : { start: end, end: start };
+}
+
 function normalizePeriodFilter(value, fallbackMonthKey = currentPeriodMonthKey()) {
   const fallback = /^\d{4}-\d{2}$/.test(fallbackMonthKey) ? fallbackMonthKey : currentPeriodMonthKey();
   const [fallbackYear, fallbackMonth] = fallback.split("-");
   const text = String(value || "").trim();
   if (text === "all") return "all";
+  const dayMatched = text.match(/^day:(\d{4}-\d{2}-\d{2})$/);
+  if (dayMatched) return `day:${normalizePeriodRangeDate(dayMatched[1], `${fallback}-01`)}`;
+  const rangeMatched = text.match(/^range:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$/);
+  if (rangeMatched) {
+    const { start, end } = normalizePeriodRange(rangeMatched[1], rangeMatched[2]);
+    return `range:${start}:${end}`;
+  }
   const yearMatched = text.match(/^year:(\d{4})$/);
   if (yearMatched) return `year:${normalizePeriodYear(yearMatched[1], fallbackYear)}`;
   const monthMatched = text.match(/^(\d{4})-(\d{2})$/);
@@ -5248,7 +5690,7 @@ function normalizeLegacyPeriodFilter(value) {
   if (text === "all") return "all";
   if (text === "year") return `year:${currentPeriodMonthKey().slice(0, 4)}`;
   if (text === "lastMonth") return previousMonthKey();
-  if (/^year:\d{4}$/.test(text) || /^\d{4}-\d{2}$/.test(text)) return normalizePeriodFilter(text);
+  if (/^day:\d{4}-\d{2}-\d{2}$/.test(text) || /^year:\d{4}$/.test(text) || /^\d{4}-\d{2}$/.test(text)) return normalizePeriodFilter(text);
   return currentPeriodMonthKey();
 }
 
@@ -5353,6 +5795,27 @@ function periodFilterParts(filterKey = currentPeriodMonthKey()) {
   const [currentYear, currentMonth] = currentMonthKey.split("-");
   const normalized = normalizePeriodFilter(filterKey, currentMonthKey);
   if (normalized === "all") return { mode: "all", year: currentYear, month: currentMonth };
+  const dayMatched = normalized.match(/^day:(\d{4})-(\d{2})-(\d{2})$/);
+  if (dayMatched) {
+    return {
+      mode: "day",
+      year: dayMatched[1],
+      month: dayMatched[2],
+      day: `${dayMatched[1]}-${dayMatched[2]}-${dayMatched[3]}`
+    };
+  }
+  const rangeMatched = normalized.match(/^range:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$/);
+  if (rangeMatched) {
+    const { start, end } = normalizePeriodRange(rangeMatched[1], rangeMatched[2]);
+    const rangeMonth = inputMonthKey(start);
+    return {
+      mode: "range",
+      year: rangeMonth.slice(0, 4) || currentYear,
+      month: rangeMonth.slice(5, 7) || currentMonth,
+      start,
+      end
+    };
+  }
   const yearMatched = normalized.match(/^year:(\d{4})$/);
   if (yearMatched) return { mode: "year", year: yearMatched[1], month: currentMonth };
   const [year, month] = normalized.split("-");
@@ -5375,10 +5838,18 @@ function periodFilterMonth(scope) {
   return periodFilterParts(periodFilterValue(scope)).month;
 }
 
+function periodFilterDay(scope) {
+  return periodFilterParts(periodFilterValue(scope)).day || todayInputValue();
+}
+
 function periodFilterLabel(filterKey) {
-  const { mode, year, month } = periodFilterParts(filterKey);
+  const { mode, year, month, day, start, end } = periodFilterParts(filterKey);
   if (mode === "all") return "全部";
   if (mode === "year") return `${year}年`;
+  if (mode === "day") return `${year}年${Number(month)}月${Number(day.slice(8, 10))}日`;
+  if (mode === "range") return start === end
+    ? `自定义：${inputDateLabel(start)}`
+    : `自定义：${inputDateLabel(start)} 至 ${inputDateLabel(end)}`;
   return `${year}年${Number(month)}月`;
 }
 
@@ -5387,23 +5858,34 @@ function periodFilterLabelByScope(scope) {
 }
 
 function periodFilterBounds(filterKey = currentPeriodMonthKey()) {
-  const { mode, year, month } = periodFilterParts(filterKey);
+  const { mode, year, month, day, start, end } = periodFilterParts(filterKey);
   if (mode === "all") return { start: "", end: "" };
   if (mode === "year") return { start: `${year}-01-01`, end: `${year}-12-31` };
+  if (mode === "day") return { start: day, end: day };
+  if (mode === "range") return { start, end };
   const first = new Date(Number(year), Number(month) - 1, 1);
   const last = new Date(Number(year), Number(month), 0);
   return { start: dateInputFromDate(first), end: dateInputFromDate(last) };
 }
 
 function dateMatchesPeriodFilter(dateValue, filterKey) {
-  const { mode, year, month } = periodFilterParts(filterKey);
+  const { mode, year, month, day, start, end } = periodFilterParts(filterKey);
   if (mode === "all") return true;
+  if (mode === "day") return String(dateValue || "").slice(0, 10) === day;
+  if (mode === "range") {
+    const date = parseInputDate(dateValue);
+    const startDate = parseInputDate(start);
+    const endDate = parseInputDate(end);
+    if (!date || !startDate || !endDate) return false;
+    return date >= startDate && date <= endDate;
+  }
   const monthKey = inputMonthKey(dateValue);
   return mode === "year" ? monthKey.startsWith(`${year}-`) : monthKey === `${year}-${month}`;
 }
 
 function periodFilterDateValue(filterKey) {
-  const { mode, year, month } = periodFilterParts(filterKey);
+  const { mode, year, month, day, start } = periodFilterParts(filterKey);
+  if (mode === "day") return day;
   if (mode === "month") {
     const monthKey = `${year}-${month}`;
     return monthKey === currentPeriodMonthKey() ? todayInputValue() : `${monthKey}-01`;
@@ -5411,6 +5893,7 @@ function periodFilterDateValue(filterKey) {
   if (mode === "year") {
     return year === currentPeriodMonthKey().slice(0, 4) ? todayInputValue() : `${year}-01-01`;
   }
+  if (mode === "range") return start || todayInputValue();
   return todayInputValue();
 }
 
@@ -5486,9 +5969,38 @@ function setPeriodFilterMode(scope, mode) {
     setPeriodFilterValue(scope, "all");
   } else if (mode === "year") {
     setPeriodFilterValue(scope, `year:${year}`);
+  } else if (mode === "day") {
+    setPeriodFilterValue(scope, `day:${periodFilterDateValue(periodFilterValue(scope))}`);
+  } else if (mode === "range") {
+    const { start, end } = periodFilterBounds(periodFilterValue(scope));
+    setPeriodFilterValue(scope, `range:${start || `${year}-${month}-01`}:${end || todayInputValue()}`);
   } else {
     setPeriodFilterValue(scope, `${year}-${month}`);
   }
+}
+
+function periodFilterRangeStart(scope) {
+  const parts = periodFilterParts(periodFilterValue(scope));
+  if (parts.mode === "range") return parts.start;
+  return periodFilterBounds(periodFilterValue(scope)).start || todayInputValue();
+}
+
+function periodFilterRangeEnd(scope) {
+  const parts = periodFilterParts(periodFilterValue(scope));
+  if (parts.mode === "range") return parts.end;
+  return periodFilterBounds(periodFilterValue(scope)).end || periodFilterRangeStart(scope);
+}
+
+function setPeriodFilterRangeStart(scope, value) {
+  const start = normalizePeriodRangeDate(value, periodFilterRangeStart(scope));
+  const end = periodFilterRangeEnd(scope) || start;
+  setPeriodFilterValue(scope, `range:${start}:${end}`);
+}
+
+function setPeriodFilterRangeEnd(scope, value) {
+  const end = normalizePeriodRangeDate(value, periodFilterRangeEnd(scope));
+  const start = periodFilterRangeStart(scope) || end;
+  setPeriodFilterValue(scope, `range:${start}:${end}`);
 }
 
 function setPeriodFilterYear(scope, year) {
@@ -5500,6 +6012,10 @@ function setPeriodFilterYear(scope, year) {
 function setPeriodFilterMonth(scope, month) {
   const { year } = periodFilterParts(periodFilterValue(scope));
   setPeriodFilterValue(scope, `${year}-${normalizePeriodMonth(month)}`);
+}
+
+function setPeriodFilterDay(scope, day) {
+  setPeriodFilterValue(scope, `day:${normalizePeriodRangeDate(day)}`);
 }
 
 const orderPeriodMode = computed(() => periodFilterMode("orders"));
@@ -7964,6 +8480,7 @@ const bossDashboardCustomsRevenueRows = computed(() =>
       direction: row.direction || "-",
       customsFee: moneyRmbDisplay(row.customsFee || 0),
       pageFee: moneyRmbDisplay(row.pageFee || 0),
+      verificationFee: moneyRmbDisplay(row.verificationFee || 0),
       otherFee: moneyRmbDisplay(Number(row.manifestFee || 0) + Number(row.inspectionFee || 0) + Number(row.checkFee || 0) + Number(row.otherFee || 0)),
       total: moneyRmbDisplay(row.total || 0),
       totalValue: Number(row.total || 0)
@@ -8232,6 +8749,7 @@ function buildCustomsStatementRows(sourceRows = []) {
       manifestFee: 0,
       inspectionFee: 0,
       checkFee: 0,
+      verificationFee: 0,
       otherFee: 0,
       total: 0
     };
@@ -8242,6 +8760,7 @@ function buildCustomsStatementRows(sourceRows = []) {
     row.manifestFee += Number(item.manifestFee || 0);
     row.inspectionFee += Number(item.inspectionFee || 0);
     row.checkFee += Number(item.checkFee || 0);
+    row.verificationFee += Number(item.verificationFee || 0);
     row.otherFee += Number(item.otherFee || 0);
     row.total += Number(item.total || 0);
     groups.set(company, row);
@@ -8252,11 +8771,18 @@ function buildCustomsStatementRows(sourceRows = []) {
 }
 
 const customsStatementRows = computed(() => buildCustomsStatementRows(customsBusinessRows.value));
+const filteredCustomsStatementRows = computed(() => {
+  const keyword = normalizedCustomsBusinessSearchText(customsStatementCompanySearch.value);
+  if (!keyword) return customsStatementRows.value;
+  return customsStatementRows.value.filter((row) =>
+    normalizedCustomsBusinessSearchText(row.company).includes(keyword)
+  );
+});
 const customsStatementSummary = computed(() => ({
-  companyCount: customsStatementRows.value.length,
-  recordCount: customsStatementRows.value.reduce((sum, row) => sum + Number(row.count || 0), 0),
-  declarationCount: customsStatementRows.value.reduce((sum, row) => sum + Number(row.declarationCount || 0), 0),
-  total: customsStatementRows.value.reduce((sum, row) => sum + Number(row.total || 0), 0)
+  companyCount: filteredCustomsStatementRows.value.length,
+  recordCount: filteredCustomsStatementRows.value.reduce((sum, row) => sum + Number(row.count || 0), 0),
+  declarationCount: filteredCustomsStatementRows.value.reduce((sum, row) => sum + Number(row.declarationCount || 0), 0),
+  total: filteredCustomsStatementRows.value.reduce((sum, row) => sum + Number(row.total || 0), 0)
 }));
 
 function customsStatementRangeLabel() {
@@ -8989,6 +9515,35 @@ const customerListDetailRows = computed(() =>
     : visibleCustomers.value
 );
 
+const customerPageColumns = computed(() => {
+  const baseColumns = [
+    { key: "id", label: `${activeCustomerListLabel.value}编号` },
+    { key: "name", label: `${activeCustomerListLabel.value}名称` },
+    { key: "city", label: "城市" },
+    { key: "term", label: "账期" },
+    { key: "settlementCurrency", label: "结算币种" }
+  ];
+  if (activePartnerType.value === "客户" && normalizeCustomerCategory(activeCustomerCategory.value) === "报关客户") {
+    return [
+      ...baseColumns,
+      { key: "customsHomeItemCount", label: "主页品名项" },
+      { key: "customsPageItemCount", label: "续页品名项" },
+      { key: "customsImportHomeFee", label: "进口主页费用" },
+      { key: "customsExportHomeFee", label: "出口主页费用" },
+      { key: "customsImportPageFee", label: "进口续页费用" },
+      { key: "customsExportPageFee", label: "出口续页费用" },
+      { key: "createdAt", label: "创建日期" }
+    ];
+  }
+  return [
+    ...baseColumns,
+    { key: "receivableRMB", label: "应收人民币" },
+    { key: "receivableHKD", label: "应收港币" },
+    { key: "recentOrderDate", label: "最近订单日期" },
+    { key: "createdAt", label: "创建日期" }
+  ];
+});
+
 const selectedCustomerContacts = computed(() => {
   if (!selectedCustomer.value) return [];
   return customerContactRows.value.filter((item) => item.customerId === selectedCustomer.value.id);
@@ -9319,9 +9874,24 @@ const dispatchDriverOptions = computed(() =>
     )
 );
 
-const visibleCustomerListDetailColumns = computed(() =>
-  customerListDetailColumns.filter((column) => customerListDetailColumnVisibility[column.key] !== false)
-);
+const CUSTOMS_CUSTOMER_DETAIL_KEYS = new Set([
+  "customsHomeItemCount",
+  "customsPageItemCount",
+  "customsImportHomeFee",
+  "customsExportHomeFee",
+  "customsImportPageFee",
+  "customsExportPageFee"
+]);
+const CUSTOMS_CUSTOMER_HIDDEN_FINANCE_KEYS = new Set(["receivableRMB", "receivableHKD", "recentOrderDate"]);
+
+const visibleCustomerListDetailColumns = computed(() => {
+  const showingCustomsCustomers = activePartnerType.value === "客户" && normalizeCustomerCategory(activeCustomerCategory.value) === "报关客户";
+  return customerListDetailColumns.filter((column) => {
+    if (showingCustomsCustomers && CUSTOMS_CUSTOMER_HIDDEN_FINANCE_KEYS.has(column.key)) return false;
+    if (!showingCustomsCustomers && CUSTOMS_CUSTOMER_DETAIL_KEYS.has(column.key)) return false;
+    return customerListDetailColumnVisibility[column.key] !== false;
+  });
+});
 
 const visibleVehicleListDetailColumns = computed(() =>
   vehicleListDetailColumns.filter((column) => vehicleListDetailColumnVisibility[column.key] !== false)
@@ -9457,8 +10027,8 @@ function booleanFlag(value, fallback = false) {
   if (typeof value === "boolean") return value;
   if (typeof value === "number") return value !== 0;
   const text = String(value).trim().toLowerCase();
-  if (["1", "true", "yes", "on"].includes(text)) return true;
-  if (["0", "false", "no", "off"].includes(text)) return false;
+  if (["1", "true", "yes", "on", "过磅"].includes(text)) return true;
+  if (["0", "false", "no", "off", "不用过磅"].includes(text)) return false;
   return fallback;
 }
 
@@ -10016,6 +10586,16 @@ function feeItemCostSourceText(item = {}) {
 }
 
 const sortedFeeItemRows = computed(() => sortFeeItems(feeItemRows.value));
+const orderFeeNameOptions = computed(() => {
+  const keyword = String(orderFeeNameSearchKeyword.value || "").trim().toLowerCase();
+  if (!keyword) return sortedFeeItemRows.value;
+  return sortedFeeItemRows.value.filter((item) => [
+    item.name,
+    feeItemCategoryLabel(item.category),
+    feeItemCostSourceText(item),
+    currencyCodeDisplay(item.currency)
+  ].some((value) => String(value || "").toLowerCase().includes(keyword)));
+});
 const feeItemSearchActive = computed(() => Boolean(feeItemSearchKeyword.value.trim()));
 const visibleFeeItemRows = computed(() => {
   const keyword = feeItemSearchKeyword.value.trim().toLowerCase();
@@ -12328,7 +12908,9 @@ function sortRowsByTable(rows = [], tableId, fallbackIndexKey = "__sortIndex") {
     .map((item) => item.row);
 }
 
-const currentAccountCanDeleteInTransitOrder = computed(() =>
+const ADMIN_ONLY_DELETE_ORDER_STATUSES = ["待确认", "通关中"];
+
+const currentAccountCanDeleteAdminOnlyOrder = computed(() =>
   normalizeAccountRole(currentAccount.value.role) === "管理员"
 );
 
@@ -12346,7 +12928,7 @@ watch(() => accountCreateForm.role, (role) => {
 
 function canDeleteOrder(order = {}) {
   if (order.status === "已审核") return false;
-  if (order.status === "通关中") return currentAccountCanDeleteInTransitOrder.value;
+  if (ADMIN_ONLY_DELETE_ORDER_STATUSES.includes(order.status)) return currentAccountCanDeleteAdminOnlyOrder.value;
   return true;
 }
 
@@ -12412,12 +12994,8 @@ function dispatchLocationBlock(label, record = {}, target) {
 }
 
 const dispatchMessage = computed(() => [
-  `日期：${orderForm.date || "-"}`,
-  `装货时间：${orderForm.loadingTime || "-"}`,
-  `车牌：${orderForm.plate || "-"}`,
-  `口岸：${orderForm.port || "-"}`,
-  `吨位：${orderForm.tonnage || "-"}`,
-  `板数：${orderForm.quantity || "-"}`,
+  `装货时间：${orderForm.date || "-"}   ${orderForm.loadingTime || "-"}  ${dispatchWeighingText(orderForm.needsWeighing)} ${dispatchDirectionText(orderForm.direction)} 口岸：${orderForm.port || "-"}`,
+  `车牌：${orderForm.plate || "-"} 吨位：${orderForm.tonnage || "-"}    板数：${orderForm.quantity || "-"}`,
   dispatchLocationBlock("装货地", orderForm, "loading"),
   "",
   dispatchLocationBlock("卸货地", orderForm, "unloading"),
@@ -13186,6 +13764,12 @@ function customerListDetailCellText(item = {}, key = "") {
     receivableRMB: `人民币 ${Number(item.receivableRMB || 0).toLocaleString()}`,
     receivableHKD: `港币 ${Number(item.receivableHKD || 0).toLocaleString()}`,
     recentOrderDate: partnerRecentOrderDate(item) || "-",
+    customsHomeItemCount: `${Number(item.customsHomeItemCount ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsHomeItemCount)} 个`,
+    customsPageItemCount: `${Number(item.customsPageItemCount ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsPageItemCount)} 个`,
+    customsImportHomeFee: `人民币 ${Number(item.customsImportHomeFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportHomeFee).toLocaleString()}`,
+    customsExportHomeFee: `人民币 ${Number(item.customsExportHomeFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportHomeFee).toLocaleString()}`,
+    customsImportPageFee: `人民币 ${Number(item.customsImportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee).toLocaleString()}`,
+    customsExportPageFee: `人民币 ${Number(item.customsExportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee).toLocaleString()}`,
     createdAt: item.createdAt || "-"
   };
   return values[key] ?? item[key] ?? "-";
@@ -13774,6 +14358,48 @@ async function loadAllCustomsBusinesses(options = {}) {
 
 function resetCustomsBusinessForm() {
   Object.assign(customsBusinessForm, blankCustomsBusinessForm());
+  editingCustomsBusinessId.value = "";
+  copyingCustomsBusinessId.value = "";
+  customsBusinessCompanySearch.value = "";
+  customsBusinessCompanyPickerOpen.value = false;
+}
+
+function assignCustomsBusinessForm(row = {}) {
+  Object.assign(customsBusinessForm, {
+    date: row.date || todayInputValue(),
+    declarationNo: row.declarationNo || "",
+    sixSheetNo: row.sixSheetNo || "",
+    company: row.company || "",
+    direction: row.direction || "",
+    itemCount: Number(row.itemCount || 0),
+    pageCount: Number(row.pageCount || 0),
+    customsFee: Number(row.customsFee || 0),
+    pageFee: Number(row.pageFee || 0),
+    manifestFee: Number(row.manifestFee || 0),
+    inspectionFee: Number(row.inspectionFee || 0),
+    checkFee: Number(row.checkFee || 0),
+    verificationFee: Number(row.verificationFee || 0),
+    otherFee: Number(row.otherFee || 0),
+    customFields: normalizeCustomsBusinessCustomFields(row.customFields)
+      .map((field) => ({ name: field.name, value: Number(field.value || 0) })),
+    remark: row.remark || ""
+  });
+  customsBusinessCompanySearch.value = String(row.company || "");
+  customsBusinessCompanyPickerOpen.value = false;
+}
+
+function upsertCustomsBusinessRows(item, options = {}) {
+  const append = options.position === "append";
+  const mergeRows = (rows) => {
+    const withoutCurrent = rows.filter((row) => row.id !== item.id);
+    return append ? [...withoutCurrent, item] : [item, ...withoutCurrent];
+  };
+  customsBusinessAllRows.value = mergeRows(customsBusinessAllRows.value);
+  if (dateMatchesPeriodFilter(item.date, customsBusinessPeriodFilter.value)) {
+    customsBusinessRows.value = mergeRows(customsBusinessRows.value);
+  } else {
+    customsBusinessRows.value = customsBusinessRows.value.filter((row) => row.id !== item.id);
+  }
 }
 
 async function loadCustomsBusinesses(options = {}) {
@@ -13790,7 +14416,32 @@ async function loadCustomsBusinesses(options = {}) {
 function openCustomsBusinessModal() {
   resetCustomsBusinessForm();
   customsBusinessForm.date = periodFilterDateValue(customsBusinessPeriodFilter.value);
+  customsBusinessCompanySearch.value = "";
+  customsBusinessCompanyPickerOpen.value = false;
   customsBusinessModalOpen.value = true;
+}
+
+function openEditCustomsBusinessModal(row) {
+  editingCustomsBusinessId.value = String(row?.id || "");
+  copyingCustomsBusinessId.value = "";
+  assignCustomsBusinessForm(row);
+  customsBusinessModalOpen.value = true;
+}
+
+function openCopyCustomsBusinessModal(row) {
+  if (!row) return;
+  editingCustomsBusinessId.value = "";
+  copyingCustomsBusinessId.value = String(row?.id || "");
+  assignCustomsBusinessForm(row);
+  customsBusinessModalOpen.value = true;
+}
+
+function closeCustomsBusinessModal() {
+  customsBusinessModalOpen.value = false;
+  editingCustomsBusinessId.value = "";
+  copyingCustomsBusinessId.value = "";
+  customsBusinessCompanySearch.value = "";
+  customsBusinessCompanyPickerOpen.value = false;
 }
 
 async function saveCustomsBusiness() {
@@ -13811,27 +14462,55 @@ async function saveCustomsBusiness() {
     notify("请填写自定义类目名称，或删除空白类目");
     return;
   }
+  syncCalculatedCustomsBusinessCharges();
   const customFields = normalizeCustomsBusinessCustomFields(customsBusinessForm.customFields);
   try {
     customsBusinessSaving.value = true;
-    const item = await customsBusinessApi.createCustomsBusiness({
+    const isCopying = Boolean(copyingCustomsBusinessId.value);
+    const isEditing = Boolean(editingCustomsBusinessId.value) && !isCopying;
+    const payload = {
       ...customsBusinessForm,
       company,
+      homeFee: customsBusinessHomeFee.value,
       customFields,
       total: customsBusinessFormTotal.value
-    });
-    customsBusinessAllRows.value = [item, ...customsBusinessAllRows.value.filter((row) => row.id !== item.id)];
-    if (dateMatchesPeriodFilter(item.date, customsBusinessPeriodFilter.value)) {
-      customsBusinessRows.value = [item, ...customsBusinessRows.value.filter((row) => row.id !== item.id)];
-    } else {
-      await loadCustomsBusinesses({ silent: true });
-    }
-    customsBusinessModalOpen.value = false;
-    notify("已新增报关业务");
+    };
+    const item = isEditing
+      ? await customsBusinessApi.updateCustomsBusiness(editingCustomsBusinessId.value, payload)
+      : await customsBusinessApi.createCustomsBusiness(payload);
+    upsertCustomsBusinessRows(item, { position: isCopying ? "append" : "prepend" });
+    closeCustomsBusinessModal();
+    notify(isEditing ? "已更新报关业务" : (isCopying ? "已新增报关单" : "已新增报关业务"));
   } catch (error) {
     notify(error.message);
   } finally {
     customsBusinessSaving.value = false;
+  }
+}
+
+async function deleteCustomsBusiness(row) {
+  if (!row?.id) return;
+  const label = [row.date, row.company, row.declarationNo || row.sixSheetNo].filter(Boolean).join(" / ");
+  if (!window.confirm(`确定删除报关业务 ${label || row.id}？删除后会进入回收站。`)) return;
+  try {
+    await customsBusinessApi.deleteCustomsBusiness(row.id);
+    customsBusinessRows.value = customsBusinessRows.value.filter((item) => item.id !== row.id);
+    customsBusinessAllRows.value = customsBusinessAllRows.value.filter((item) => item.id !== row.id);
+    notify("报关业务已移入回收站");
+  } catch (error) {
+    notify(error.message || "删除报关业务失败");
+  }
+}
+
+async function restoreCustomsBusiness(row) {
+  if (!row?.id) return;
+  try {
+    const restored = await customsBusinessApi.restoreCustomsBusiness(row.id);
+    upsertCustomsBusinessRows(restored);
+    customsBusinessRecycleRows.value = customsBusinessRecycleRows.value.filter((item) => item.id !== restored.id);
+    notify(`已恢复报关业务：${restored.company || restored.declarationNo || restored.sixSheetNo || restored.id}`);
+  } catch (error) {
+    notify(error.message || "恢复报关业务失败");
   }
 }
 
@@ -13925,6 +14604,50 @@ function openStoredFile(file, action = "preview") {
 function closeFilePreview() {
   filePreviewOpen.value = false;
   previewFile.value = null;
+}
+
+function openUploadPanel(options = {}) {
+  Object.assign(uploadPanel, {
+    open: true,
+    title: options.title || "上传附件",
+    description: options.description || "",
+    accept: options.accept || FILE_UPLOAD_ACCEPT,
+    multiple: options.multiple !== false,
+    uploading: false,
+    submitLabel: options.submitLabel || "开始上传",
+    handler: typeof options.handler === "function" ? options.handler : null
+  });
+}
+
+function closeUploadPanel() {
+  if (uploadPanel.uploading) return;
+  uploadPanel.open = false;
+  uploadPanel.handler = null;
+}
+
+async function submitUploadPanel(files = []) {
+  if (uploadPanel.uploading) return;
+  const selectedFiles = Array.from(files || []).filter(Boolean);
+  if (!selectedFiles.length) {
+    notify("请先选择要上传的文件");
+    return;
+  }
+  if (typeof uploadPanel.handler !== "function") {
+    notify("当前上传入口未配置处理方式");
+    return;
+  }
+  try {
+    uploadPanel.uploading = true;
+    const shouldClose = await uploadPanel.handler(selectedFiles);
+    if (shouldClose !== false) {
+      uploadPanel.open = false;
+      uploadPanel.handler = null;
+    }
+  } catch (error) {
+    notify(error.message || "上传失败");
+  } finally {
+    uploadPanel.uploading = false;
+  }
 }
 
 function readFileAsDataUrl(file) {
@@ -14070,6 +14793,40 @@ async function uploadStoredFileFor(entityType, entityId, category, file, targetR
     loading.value = false;
     options.onFinish?.();
   }
+}
+
+async function uploadStoredFilesFor(entityType, entityId, category, files = [], targetRows, options = {}) {
+  const selectedFiles = Array.from(files || []).filter(Boolean);
+  if (!selectedFiles.length) return { success: 0, failed: 0 };
+  if (!entityId) {
+    notify(options.missingEntityMessage || "请先保存资料，再上传附件");
+    return { success: 0, failed: selectedFiles.length };
+  }
+
+  let success = 0;
+  let failed = 0;
+  options.onStart?.(selectedFiles[0]);
+  try {
+    for (const [index, file] of selectedFiles.entries()) {
+      options.onProgress?.(file, index, selectedFiles.length);
+      const uploaded = await uploadStoredFileFor(entityType, entityId, category, file, targetRows, {
+        ...options,
+        onStart: undefined,
+        onFinish: undefined
+      });
+      if (uploaded) {
+        success += 1;
+      } else {
+        failed += 1;
+      }
+    }
+  } finally {
+    options.onFinish?.();
+  }
+
+  const result = { success, failed };
+  options.onComplete?.(result);
+  return result;
 }
 
 async function uploadFileFor(entityType, entityId, category, event, targetRows, options = {}) {
@@ -14508,6 +15265,15 @@ watch(() => customerForm.type, (type) => {
     : "";
 });
 
+watch(() => customerForm.customerCategory, (category) => {
+  if (customerForm.type !== "客户" || normalizeCustomerCategory(category) !== "报关客户") return;
+  Object.entries(DEFAULT_CUSTOMS_CUSTOMER_CONFIG).forEach(([key, value]) => {
+    if (customerForm[key] === "" || customerForm[key] === null || customerForm[key] === undefined) {
+      customerForm[key] = value;
+    }
+  });
+});
+
 function toggleVehicleDriverBatchSelection() {
   if (activeVehicleTab.value === "车辆管理") {
     if (visibleVehicles.value.length === 0) {
@@ -14532,12 +15298,24 @@ function invoiceValue(customer, key) {
   return customer?.invoice?.[key] || "";
 }
 
+function customerConfigNumber(value, fallback) {
+  if (value === "" || value === null || value === undefined) return fallback;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
 function buildCustomerPayload() {
   return {
     ...customerForm,
     customerCategory: customerForm.type === "客户" ? normalizeCustomerCategory(customerForm.customerCategory) : "",
     settlementCurrency: customerForm.type === "客户" ? (customerForm.settlementCurrency || "人民币结算") : "",
     taxNo: customerForm.invoiceTax || customerForm.taxNo,
+    customsHomeItemCount: customerConfigNumber(customerForm.customsHomeItemCount, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsHomeItemCount),
+    customsPageItemCount: customerConfigNumber(customerForm.customsPageItemCount, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsPageItemCount),
+    customsImportHomeFee: customerConfigNumber(customerForm.customsImportHomeFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportHomeFee),
+    customsExportHomeFee: customerConfigNumber(customerForm.customsExportHomeFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportHomeFee),
+    customsImportPageFee: customerConfigNumber(customerForm.customsImportPageFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee),
+    customsExportPageFee: customerConfigNumber(customerForm.customsExportPageFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee),
     invoice: {
       title: customerForm.invoiceTitle || customerForm.name,
       taxNo: customerForm.invoiceTax,
@@ -14649,6 +15427,12 @@ function openCustomerModal(customer = null, createType = activePartnerType.value
     invoiceBank: invoiceValue(customer, "bank"),
     invoiceAccount: invoiceValue(customer, "account"),
     invoiceAddressPhone: invoiceValue(customer, "addressPhone"),
+    customsHomeItemCount: Number(customer?.customsHomeItemCount ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsHomeItemCount),
+    customsPageItemCount: Number(customer?.customsPageItemCount ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsPageItemCount),
+    customsImportHomeFee: Number(customer?.customsImportHomeFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportHomeFee),
+    customsExportHomeFee: Number(customer?.customsExportHomeFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportHomeFee),
+    customsImportPageFee: Number(customer?.customsImportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee),
+    customsExportPageFee: Number(customer?.customsExportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee),
     invoicePasteText: ""
   });
   customerModalOpen.value = true;
@@ -14689,6 +15473,7 @@ function resetOrderForm() {
     customer: "",
     businessType: "",
     port: "",
+    needsWeighing: false,
     direction: "",
     tonnage: "",
     currency: "港币",
@@ -14912,6 +15697,7 @@ async function openOrderModal(customer = null, order = null, options = {}) {
       customer: order.customer || "",
       businessType: order.businessType || "",
       port: order.port || "",
+      needsWeighing: booleanFlag(order.needsWeighing, false),
       direction: order.direction || "",
       tonnage: order.tonnage || "",
       currency: order.currency || "",
@@ -15031,6 +15817,7 @@ function closeOrderModal() {
   orderModalOpen.value = false;
   orderAuditMode.value = false;
   orderViewMode.value = false;
+  closeOrderFeeNamePicker();
 }
 
 async function submitOrderModal() {
@@ -15140,13 +15927,56 @@ function orderUploadStatusOptions() {
   };
 }
 
-function uploadOrderFile(event) {
+async function uploadOrderFiles(files, category = "订单附件") {
   if (orderAttachmentUploading.value) {
-    event.target.value = "";
+    notify("附件正在上传，请稍候");
+    return false;
+  }
+  const result = await uploadStoredFilesFor("order", editingOrderNo.value, category, files, orderAttachmentRows, {
+    ...orderUploadStatusOptions(),
+    missingEntityMessage: "请先保存订单，再上传附件",
+    onProgress(file, index, total) {
+      setOrderAttachmentUploadStatus(`正在上传 ${index + 1}/${total}：${file.name}`, "busy");
+    },
+    onComplete({ success, failed }) {
+      const tone = failed ? "error" : "success";
+      const message = failed
+        ? `已上传 ${success} 个附件，${failed} 个失败`
+        : `已上传 ${success} 个附件`;
+      setOrderAttachmentUploadStatus(message, tone);
+      scheduleClearOrderAttachmentUploadStatus(failed ? 7000 : 4200);
+    }
+  });
+  return result.failed === 0;
+}
+
+function openOrderFileUploadPanel() {
+  if (orderAttachmentUploading.value) {
     notify("附件正在上传，请稍候");
     return;
   }
-  uploadFileFor("order", editingOrderNo.value, "订单附件", event, orderAttachmentRows, orderUploadStatusOptions());
+  if (!editingOrderNo.value) {
+    notify("请先保存订单，再上传附件");
+    return;
+  }
+  openUploadPanel({
+    title: "上传订单附件",
+    description: "可拖拽单据图片或 PDF，也可以从微信复制图片后直接粘贴。",
+    accept: FILE_UPLOAD_ACCEPT,
+    multiple: true,
+    handler(files) {
+      return uploadOrderFiles(files, "订单附件");
+    }
+  });
+}
+
+function uploadOrderFile(event) {
+  if (event?.target?.files) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    return uploadOrderFiles(files, "订单附件");
+  }
+  openOrderFileUploadPanel();
 }
 
 function feeAttachmentCategory(fee, index) {
@@ -15209,23 +16039,39 @@ async function confirmSaveOrderWithMissingAdvanceReceipts() {
   return window.confirm(missingAdvanceReceiptMessage(missingLabels));
 }
 
-function uploadOrderFeeFile(fee, index, event) {
+function openOrderFeeUploadPanel(fee, index) {
   if (orderAttachmentUploading.value) {
-    event.target.value = "";
     notify("附件正在上传，请稍候");
     return;
   }
   if (!editingOrderNo.value) {
-    event.target.value = "";
     notify("请先保存订单，再上传收费项目附件");
     return;
   }
   if (!String(fee?.name || "").trim()) {
-    event.target.value = "";
     notify("请先选择收费项目，再上传附件");
     return;
   }
-  uploadFileFor("order", editingOrderNo.value, feeAttachmentCategory(fee, index), event, orderAttachmentRows, orderUploadStatusOptions());
+  const category = feeAttachmentCategory(fee, index);
+  openUploadPanel({
+    title: `上传${fee.name}票据`,
+    description: "支持拖拽、选择文件和粘贴微信复制的图片，上传后会归档到当前收费项目。",
+    accept: FILE_UPLOAD_ACCEPT,
+    multiple: true,
+    handler(files) {
+      return uploadOrderFiles(files, category);
+    }
+  });
+}
+
+function uploadOrderFeeFile(fee, index, event) {
+  if (event?.target?.files) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    if (!files.length) return false;
+    return uploadOrderFiles(files, feeAttachmentCategory(fee, index));
+  }
+  openOrderFeeUploadPanel(fee, index);
 }
 
 async function loadCustomerFiles() {
@@ -15234,32 +16080,101 @@ async function loadCustomerFiles() {
     : [];
 }
 
+async function uploadCustomerFiles(files) {
+  const result = await uploadStoredFilesFor("customer", selectedCustomer.value?.id, "客户附件", files, customerFileRows, {
+    missingEntityMessage: "请先保存客户，再上传附件"
+  });
+  await loadCustomerFiles().catch((error) => notify(error.message));
+  return result.failed === 0;
+}
+
+function openCustomerFileUploadPanel() {
+  if (!selectedCustomer.value?.id) {
+    notify("请先保存客户，再上传附件");
+    return;
+  }
+  openUploadPanel({
+    title: "上传客户附件",
+    description: "客户合同、资质、往来附件会保存到 OSS 附件库。",
+    accept: FILE_UPLOAD_ACCEPT,
+    multiple: true,
+    handler: uploadCustomerFiles
+  });
+}
+
 function uploadCustomerFile(event) {
-  uploadFileFor("customer", selectedCustomer.value?.id, "客户附件", event, customerFileRows)
-    ?.then?.(() => loadCustomerFiles().catch((error) => notify(error.message)));
+  if (event?.target?.files) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    return uploadCustomerFiles(files);
+  }
+  openCustomerFileUploadPanel();
 }
 
 async function loadVehicleFiles() {
   vehicleFileRows.value = selectedVehicle.value ? await loadFiles("vehicle", selectedVehicle.value.plate) : [];
 }
 
-function uploadVehicleFile(event) {
-  uploadFileFor("vehicle", selectedVehicle.value?.plate, "车辆证件", event, vehicleFileRows);
+async function uploadVehicleFiles(files, category = "车辆证件", plate = selectedVehicle.value?.plate) {
+  const result = await uploadStoredFilesFor("vehicle", plate, category, files, vehicleFileRows, {
+    missingEntityMessage: category.includes("保险") ? "请先保存车辆，再上传保险单据" : "请先保存车辆，再上传证件"
+  });
+  return result.failed === 0;
 }
 
-function uploadVehicleInsuranceFile(category, event) {
+function openVehicleFileUploadPanel() {
+  if (!selectedVehicle.value?.plate) {
+    notify("请先保存车辆，再上传证件");
+    return;
+  }
+  openUploadPanel({
+    title: "上传车辆证件",
+    description: "保险单、年审资料等文件会保存到 OSS 附件库。",
+    accept: FILE_UPLOAD_ACCEPT,
+    multiple: true,
+    handler(files) {
+      return uploadVehicleFiles(files, "车辆证件", selectedVehicle.value?.plate);
+    }
+  });
+}
+
+function uploadVehicleFile(event) {
+  if (event?.target?.files) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    return uploadVehicleFiles(files);
+  }
+  openVehicleFileUploadPanel();
+}
+
+function openVehicleInsuranceUploadPanel(category) {
   const targetPlate = editingVehiclePlate.value || "";
   if (!targetPlate) {
-    event.target.value = "";
     notify("请先保存车辆，再上传保险单据");
     return;
   }
   if (vehicleForm.plate && vehicleForm.plate !== editingVehiclePlate.value) {
-    event.target.value = "";
     notify("车牌已修改，请先保存车辆后再上传保险单据");
     return;
   }
-  uploadFileFor("vehicle", targetPlate, category, event, vehicleFileRows);
+  openUploadPanel({
+    title: `上传${category}`,
+    description: "支持拖拽保险单图片或 PDF，也可以从微信复制图片后粘贴。",
+    accept: FILE_UPLOAD_ACCEPT,
+    multiple: true,
+    handler(files) {
+      return uploadVehicleFiles(files, category, targetPlate);
+    }
+  });
+}
+
+function uploadVehicleInsuranceFile(category, event) {
+  if (event?.target?.files) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    return uploadVehicleFiles(files, category, editingVehiclePlate.value || "");
+  }
+  openVehicleInsuranceUploadPanel(category);
 }
 
 function vehicleInsuranceFiles(category) {
@@ -15270,8 +16185,34 @@ async function loadDriverFiles() {
   driverFileRows.value = selectedDriver.value ? await loadFiles("driver", selectedDriver.value.id) : [];
 }
 
+async function uploadDriverFiles(files) {
+  const result = await uploadStoredFilesFor("driver", selectedDriver.value?.id, "司机证件", files, driverFileRows, {
+    missingEntityMessage: "请先保存司机，再上传证件"
+  });
+  return result.failed === 0;
+}
+
+function openDriverFileUploadPanel() {
+  if (!selectedDriver.value?.id) {
+    notify("请先保存司机，再上传证件");
+    return;
+  }
+  openUploadPanel({
+    title: "上传司机证件",
+    description: "驾驶证、身份证、港澳证等文件会保存到 OSS 附件库。",
+    accept: FILE_UPLOAD_ACCEPT,
+    multiple: true,
+    handler: uploadDriverFiles
+  });
+}
+
 function uploadDriverFile(event) {
-  uploadFileFor("driver", selectedDriver.value?.id, "司机证件", event, driverFileRows);
+  if (event?.target?.files) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    return uploadDriverFiles(files);
+  }
+  openDriverFileUploadPanel();
 }
 
 function addFeeRow() {
@@ -15472,7 +16413,7 @@ async function deleteSelectedOrders() {
   }
   const locked = targets.filter((item) => !canDeleteOrder(item));
   if (locked.length) {
-    notify(currentAccountCanDeleteInTransitOrder.value ? "已审核订单不可删除，请取消勾选后再操作" : "已审核或通关中订单不可删除，请取消勾选后再操作");
+    notify(currentAccountCanDeleteAdminOnlyOrder.value ? "已审核订单不可删除，请取消勾选后再操作" : "已审核、待确认或通关中订单不可删除，请取消勾选后再操作");
     return;
   }
   if (!window.confirm(`确定删除 ${targets.length} 条订单？删除后会进入回收站。`)) return;
@@ -15492,8 +16433,8 @@ async function deleteSelectedOrders() {
 
 async function deleteOrder(order) {
   if (!canDeleteOrder(order)) {
-    if (order.status === "通关中") {
-      notify("通关中订单不可删除，请使用管理员账号操作");
+    if (ADMIN_ONLY_DELETE_ORDER_STATUSES.includes(order.status)) {
+      notify(`${order.status}订单不可删除，请使用管理员账号操作`);
       return;
     }
     notify("已审核订单不可删除");
@@ -15589,7 +16530,7 @@ async function deleteSelectedCustomerOrders() {
   if (targets.length === 0) return;
   const locked = targets.filter((item) => !canDeleteOrder(item));
   if (locked.length) {
-    notify(currentAccountCanDeleteInTransitOrder.value ? "已审核订单不可删除，请先取消审核或取消勾选" : "已审核或通关中订单不可删除，请先取消勾选");
+    notify(currentAccountCanDeleteAdminOnlyOrder.value ? "已审核订单不可删除，请先取消审核或取消勾选" : "已审核、待确认或通关中订单不可删除，请先取消勾选");
     return;
   }
   if (!window.confirm(`确定删除 ${targets.length} 条订单？删除后会进入回收站。`)) return;
@@ -15607,13 +16548,24 @@ async function deleteSelectedCustomerOrders() {
   }
 }
 
-async function openRecycleBin() {
+async function openRecycleBin(scope = "orders") {
   try {
-    recycleRows.value = await ordersApi.listRecycleOrders();
+    recycleScope.value = scope === "all" ? "all" : "orders";
+    activeRecycleTab.value = "orders";
+    const [orderRowsData, customsRowsData] = await Promise.all([
+      ordersApi.listRecycleOrders(),
+      recycleScope.value === "all" ? customsBusinessApi.listRecycleCustomsBusinesses() : Promise.resolve([])
+    ]);
+    recycleRows.value = orderRowsData;
+    customsBusinessRecycleRows.value = customsRowsData;
     recycleModalOpen.value = true;
   } catch (error) {
     notify(error.message);
   }
+}
+
+function setRecycleTab(tab) {
+  activeRecycleTab.value = tab === "customsBusiness" ? "customsBusiness" : "orders";
 }
 
 async function restoreOrder(order) {
@@ -17145,11 +18097,12 @@ const CUSTOMS_STATEMENT_EXPORT_HEADERS = [
   "进出口",
   "品名项数",
   "续页",
-  "报关费",
   "续页费",
+  "报关费",
   "舱单费",
   "报检费",
   "查验费",
+  "核注费",
   "其他费用",
   "合计",
   "备注"
@@ -17165,11 +18118,12 @@ function customsStatementExportRow(item = {}, index = 0) {
     item.direction || "",
     item.itemCount || "",
     item.pageCount || "",
-    money(item.customsFee),
     money(item.pageFee),
+    money(item.customsFee),
     money(item.manifestFee),
     money(item.inspectionFee),
     money(item.checkFee),
+    money(item.verificationFee),
     money(item.otherFee),
     money(item.total),
     item.remark || ""
@@ -17178,24 +18132,7 @@ function customsStatementExportRow(item = {}, index = 0) {
 
 function customsStatementTotalRow(rows = []) {
   const total = rows.reduce((sum, row) => sum + Number(row.total || 0), 0);
-  return [
-    "合计",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    money(total),
-    ""
-  ];
+  return ["合计", ...Array.from({ length: 14 }, () => ""), money(total), ""];
 }
 
 function customsStatementExportFilename(company = "公司", start = "", end = "", extension = "xlsx") {
@@ -17223,7 +18160,8 @@ async function exportCustomsStatementByFormat(format = "excel", row = activeStat
       period: periodFilterValue("customsStatement"),
       start,
       end,
-      title: `报关对账单-${company}`
+      title: `报关对账单-${company}`,
+      columns: customsBusinessExportColumns.value
     });
     downloadBlob(blob, customsStatementExportFilename(company, start, end, normalizedFormat === "pdf" ? "pdf" : "xlsx"));
     await markStatementDownloaded("customs", company, start, end);
@@ -17721,21 +18659,11 @@ function exportCustomers() {
   const rows = selectedCustomerIds.value.length
     ? visibleCustomers.value.filter((item) => selectedCustomerIds.value.includes(item.id))
     : visibleCustomers.value;
+  const columns = customerPageColumns.value;
   exportCsv(
     `${activeCustomerListLabel.value}${selectedCustomerIds.value.length ? "已选" : "筛选"}导出-${todayInputValue()}.csv`,
-    ["编号", "类型", "名称", "城市", "账期", "结算币种", "应收人民币", "应收港币", "最近订单日期", "创建日期"],
-    rows.map((item) => [
-      item.id,
-      item.type,
-      item.name,
-      item.city,
-      item.term,
-      item.type === "客户" ? (item.settlementCurrency || "人民币结算") : "",
-      item.receivableRMB,
-      item.receivableHKD,
-      partnerRecentOrderDate(item),
-      item.createdAt
-    ])
+    columns.map((column) => column.label),
+    rows.map((item) => columns.map((column) => customerListDetailCellText(item, column.key)))
   );
   notify(selectedCustomerIds.value.length
     ? `已导出已选 ${rows.length} 个${activeCustomerListLabel.value}`
@@ -18801,6 +19729,43 @@ async function saveCurrentFeesAsTemplate() {
   }
 }
 
+function openOrderFeeNamePicker(index) {
+  if (orderReadOnlyMode.value) return;
+  orderFeeNamePickerOpenIndex.value = index;
+  orderFeeNameSearchKeyword.value = "";
+}
+
+function closeOrderFeeNamePicker() {
+  orderFeeNamePickerOpenIndex.value = null;
+  orderFeeNameSearchKeyword.value = "";
+}
+
+function handleOrderFeeNameInput(index, event) {
+  if (orderReadOnlyMode.value) return;
+  orderFeeNamePickerOpenIndex.value = index;
+  orderFeeNameSearchKeyword.value = String(event?.target?.value || "");
+}
+
+function chooseOrderFeeName(index, item) {
+  const fee = orderFees.value[index];
+  if (!fee || !item) return;
+  fillFeeFromItem(fee, item.id);
+  closeOrderFeeNamePicker();
+}
+
+function handleOrderFeeNameKeydown(index, event) {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeOrderFeeNamePicker();
+    return;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    const item = orderFeeNameOptions.value[0];
+    if (item) chooseOrderFeeName(index, item);
+  }
+}
+
 function fillFeeFromItem(fee, id) {
   const item = feeItemRows.value.find((row) => row.id === Number(id));
   if (!item) {
@@ -19717,13 +20682,11 @@ function insertTemplateVariable(variable) {
   item.text = appendTemplateVariableText(item.text, variable);
 }
 
-function uploadTemplateLogo(event) {
-  const file = event.target.files?.[0];
-  event.target.value = "";
+function applyTemplateLogoFile(file) {
   if (!file) return;
   if (!file.type.startsWith("image/")) {
     notify("请上传图片文件");
-    return;
+    return false;
   }
   const reader = new FileReader();
   reader.onload = () => {
@@ -19736,6 +20699,26 @@ function uploadTemplateLogo(event) {
     templateDesigner.logoY = Number(templateDesigner.logoY || 12);
   };
   reader.readAsDataURL(file);
+  return true;
+}
+
+function openTemplateLogoUploadPanel() {
+  openUploadPanel({
+    title: "上传模板 Logo",
+    description: "支持拖拽、选择文件和粘贴微信复制的图片，Logo 会写入当前模板设计。",
+    accept: "image/*",
+    multiple: false,
+    submitLabel: "使用图片",
+    handler(files) {
+      return applyTemplateLogoFile(files[0]);
+    }
+  });
+}
+
+function uploadTemplateLogo(event) {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  return applyTemplateLogoFile(file);
 }
 
 function clearTemplateLogo() {
@@ -20786,17 +21769,7 @@ function orderDetailFeeRows(order = {}) {
               <thead>
                 <tr>
                   <th><input type="checkbox" :checked="visibleCustomers.length > 0 && selectedCustomerIds.length === visibleCustomers.length" @change="selectedCustomerIds = $event.target.checked ? visibleCustomers.map((item) => item.id) : []" /></th>
-                  <th v-for="column in [
-                    { key: 'id', label: `${activeCustomerListLabel}编号` },
-                    { key: 'name', label: `${activeCustomerListLabel}名称` },
-                    { key: 'city', label: '城市' },
-                    { key: 'term', label: '账期' },
-                    { key: 'settlementCurrency', label: '结算币种' },
-                    { key: 'receivableRMB', label: '应收人民币' },
-                    { key: 'receivableHKD', label: '应收港币' },
-                    { key: 'recentOrderDate', label: '最近订单日期' },
-                    { key: 'createdAt', label: '创建日期' }
-                  ]" :key="column.key" :class="['sortable', { sorted: tableSortDirection('customers', column.key) }]" @click="toggleTableSort('customers', column)">
+                  <th v-for="column in customerPageColumns" :key="column.key" :class="['sortable', { sorted: tableSortDirection('customers', column.key) }]" @click="toggleTableSort('customers', column)">
                     <button class="table-sort-trigger" type="button">
                       <span>{{ column.label }}</span>
                       <span class="sort-mark">{{ tableSortDirection('customers', column.key) === 'asc' ? '↑' : tableSortDirection('customers', column.key) === 'desc' ? '↓' : '' }}</span>
@@ -20813,15 +21786,7 @@ function orderDetailFeeRows(order = {}) {
                   @click="selectedCustomerId = item.id"
                 >
                   <td><input v-model="selectedCustomerIds" type="checkbox" :value="item.id" @click.stop /></td>
-                  <td>{{ item.id }}</td>
-                  <td>{{ item.name }}</td>
-                  <td>{{ item.city }}</td>
-                  <td>{{ item.term }}</td>
-                  <td>{{ item.type === '客户' ? (item.settlementCurrency || '人民币结算') : '-' }}</td>
-                  <td>人民币 {{ Number(item.receivableRMB || 0).toLocaleString() }}</td>
-                  <td>港币 {{ Number(item.receivableHKD || 0).toLocaleString() }}</td>
-                  <td>{{ partnerRecentOrderDate(item) }}</td>
-                  <td>{{ item.createdAt }}</td>
+                  <td v-for="column in customerPageColumns" :key="column.key">{{ customerListDetailCellText(item, column.key) }}</td>
                   <td><button class="icon-btn" @click.stop="openCustomerModal(item)"><IconSvg name="edit" />编辑</button></td>
                 </tr>
               </tbody>
@@ -21105,7 +22070,7 @@ function orderDetailFeeRows(order = {}) {
 	                  </div>
                 </span>
                 <button class="danger-btn small" type="button" @click="deleteSelectedCustomerOrders"><IconSvg name="trash" />批量删除</button>
-                <button class="ghost-btn small" type="button" @click="openRecycleBin"><IconSvg name="archive" />回收站</button>
+                <button class="ghost-btn small" type="button" @click="openRecycleBin('orders')"><IconSvg name="archive" />回收站</button>
               </div>
               <div class="customer-order-table-wrap">
               <table class="data-table compact customer-order-table" :style="customerOrderTableStyle()">
@@ -21401,10 +22366,9 @@ function orderDetailFeeRows(order = {}) {
             </table>
             <div v-else-if="activeCustomerDetailTab === '附件管理'" class="file-panel">
               <div class="file-toolbar">
-                <label class="file-upload-btn">
-                  上传附件
-                  <input type="file" :accept="FILE_UPLOAD_ACCEPT" @change="uploadCustomerFile" />
-                </label>
+                <button class="file-upload-btn" type="button" @click="openCustomerFileUploadPanel">
+                  <IconSvg name="upload" />上传附件
+                </button>
                 <span class="hint">客户合同、资质、往来附件会保存到 OSS 附件库。</span>
               </div>
               <table class="data-table compact">
@@ -21414,7 +22378,7 @@ function orderDetailFeeRows(order = {}) {
                     <td>{{ file.sourceLabel || (file.entityType === 'order' ? '订单附件' : '客户附件') }}</td>
                     <td>{{ file.orderNo || '' }}</td>
                     <td>{{ file.category || '' }}</td>
-                    <td>{{ file.filename }}</td>
+	                    <td class="file-name-column"><span class="file-name-cell" :title="file.filename">{{ file.filename }}</span></td>
                     <td>{{ fileSizeText(file.size) }}</td>
                     <td>{{ file.createdAt }}</td>
                     <td class="row-actions">
@@ -21582,7 +22546,7 @@ function orderDetailFeeRows(order = {}) {
               <IconSvg name="eye" /><span class="sr-only">查看</span>
             </button>
             <button class="danger-btn order-icon-btn" title="批量删除" aria-label="批量删除" @click="deleteSelectedOrders"><IconSvg name="trash" /><span class="sr-only">批量删除</span></button>
-            <button class="ghost-btn order-icon-btn" title="回收站" aria-label="回收站" @click="openRecycleBin"><IconSvg name="archive" /><span class="sr-only">回收站</span></button>
+            <button class="ghost-btn order-icon-btn" title="回收站" aria-label="回收站" @click="openRecycleBin('orders')"><IconSvg name="archive" /><span class="sr-only">回收站</span></button>
           </div>
         </div>
         <div class="table-card full-height order-table-card">
@@ -22164,14 +23128,14 @@ function orderDetailFeeRows(order = {}) {
                   </tbody>
                 </table>
                 <div class="file-toolbar">
-                  <label class="file-upload-btn"><IconSvg name="upload" />上传证件/保险单<input type="file" :accept="FILE_UPLOAD_ACCEPT" @change="uploadVehicleFile" /></label>
+                  <button class="file-upload-btn" type="button" @click="openVehicleFileUploadPanel"><IconSvg name="upload" />上传证件/保险单</button>
                   <span class="hint">每年保险单、年审资料都可保存，支持预览和下载。</span>
                 </div>
                 <table class="data-table compact">
                   <thead><tr><th>文件名</th><th>大小</th><th>上传时间</th><th>操作</th></tr></thead>
                   <tbody>
                     <tr v-for="file in vehicleFileRows" :key="file.id">
-                      <td>{{ file.filename }}</td><td>{{ fileSizeText(file.size) }}</td><td>{{ file.createdAt }}</td>
+	                      <td class="file-name-column"><span class="file-name-cell" :title="file.filename">{{ file.filename }}</span></td><td>{{ fileSizeText(file.size) }}</td><td>{{ file.createdAt }}</td>
                       <td class="row-actions"><button class="icon-btn" @click="openStoredFile(file, 'preview')"><IconSvg name="eye" />预览</button><button class="icon-btn" @click="openStoredFile(file, 'download')"><IconSvg name="download" />下载</button><button class="icon-btn danger" @click="deleteFile(file, vehicleFileRows)"><IconSvg name="trash" />删除</button></td>
                     </tr>
                     <tr v-if="vehicleFileRows.length === 0"><td colspan="4">暂无证件附件</td></tr>
@@ -22272,14 +23236,14 @@ function orderDetailFeeRows(order = {}) {
               </div>
               <div v-else-if="activeDriverDetailTab === '证件照片'" class="file-panel">
                 <div class="file-toolbar">
-                  <label class="file-upload-btn"><IconSvg name="upload" />上传司机证件<input type="file" :accept="FILE_UPLOAD_ACCEPT" @change="uploadDriverFile" /></label>
+                  <button class="file-upload-btn" type="button" @click="openDriverFileUploadPanel"><IconSvg name="upload" />上传司机证件</button>
                   <span class="hint">驾驶证、身份证、港澳证等文件会保存到 OSS 附件库。</span>
                 </div>
                 <table class="data-table compact">
                   <thead><tr><th>文件名</th><th>大小</th><th>上传时间</th><th>操作</th></tr></thead>
                   <tbody>
                     <tr v-for="file in driverFileRows" :key="file.id">
-                      <td>{{ file.filename }}</td><td>{{ fileSizeText(file.size) }}</td><td>{{ file.createdAt }}</td>
+	                      <td class="file-name-column"><span class="file-name-cell" :title="file.filename">{{ file.filename }}</span></td><td>{{ fileSizeText(file.size) }}</td><td>{{ file.createdAt }}</td>
                       <td class="row-actions"><button class="icon-btn" @click="openStoredFile(file, 'preview')"><IconSvg name="eye" />预览</button><button class="icon-btn" @click="openStoredFile(file, 'download')"><IconSvg name="download" />下载</button><button class="icon-btn danger" @click="deleteFile(file, driverFileRows)"><IconSvg name="trash" />删除</button></td>
                     </tr>
                     <tr v-if="driverFileRows.length === 0"><td colspan="4">暂无司机证件</td></tr>
@@ -23187,14 +24151,14 @@ function orderDetailFeeRows(order = {}) {
           <div class="statement-date-selects period-filter-controls">
             <div class="segmented statement-mode-tabs">
               <button
-                v-for="mode in PERIOD_FILTER_MODES"
+                v-for="mode in CUSTOMS_STATEMENT_PERIOD_MODES"
                 :key="mode.key"
                 type="button"
                 :class="{ active: periodFilterMode('customsStatement') === mode.key }"
                 @click="setPeriodFilterMode('customsStatement', mode.key)"
               >{{ mode.label }}</button>
             </div>
-            <label v-if="periodFilterMode('customsStatement') !== 'all'">年份
+            <label v-if="!['all', 'range'].includes(periodFilterMode('customsStatement'))">年份
               <select :value="periodFilterYear('customsStatement')" @change="setPeriodFilterYear('customsStatement', $event.target.value)">
                 <option v-for="year in periodYearOptions('customsStatement')" :key="year" :value="year">{{ year }}年</option>
               </select>
@@ -23203,6 +24167,20 @@ function orderDetailFeeRows(order = {}) {
               <select :value="periodFilterMonth('customsStatement')" @change="setPeriodFilterMonth('customsStatement', $event.target.value)">
                 <option v-for="item in PERIOD_MONTH_OPTIONS" :key="item.value" :value="item.value">{{ item.label }}</option>
               </select>
+            </label>
+            <label v-if="periodFilterMode('customsStatement') === 'range'">开始日期
+              <input
+                type="date"
+                :value="periodFilterRangeStart('customsStatement')"
+                @change="setPeriodFilterRangeStart('customsStatement', $event.target.value)"
+              />
+            </label>
+            <label v-if="periodFilterMode('customsStatement') === 'range'">结束日期
+              <input
+                type="date"
+                :value="periodFilterRangeEnd('customsStatement')"
+                @change="setPeriodFilterRangeEnd('customsStatement', $event.target.value)"
+              />
             </label>
             <label class="monthly-exchange-rate-field">当月汇率
               <input
@@ -23218,6 +24196,25 @@ function orderDetailFeeRows(order = {}) {
           </div>
           <span class="finance-period-chip">当前范围：{{ customsStatementRangeLabel() }}</span>
         </div>
+        <div class="customs-business-search-row customs-statement-search-row">
+          <label class="customs-business-search-field customs-statement-search-field">
+            <IconSvg name="search" />
+            <input
+              v-model.trim="customsStatementCompanySearch"
+              type="search"
+              placeholder="搜索公司名称"
+            />
+            <button
+              v-if="customsStatementCompanySearch"
+              type="button"
+              class="customs-business-search-clear"
+              aria-label="清空搜索"
+              @click="customsStatementCompanySearch = ''"
+            >
+              x
+            </button>
+          </label>
+        </div>
         <div class="finance-summary-grid">
           <div class="finance-summary-card"><span>公司数</span><strong>{{ customsStatementSummary.companyCount }}</strong></div>
           <div class="finance-summary-card"><span>报关记录</span><strong>{{ customsStatementSummary.recordCount }}</strong></div>
@@ -23229,13 +24226,13 @@ function orderDetailFeeRows(order = {}) {
             <div class="table-card-head">
               <div>
                 <strong>报关账单列表</strong>
-                <span>{{ customsStatementRangeLabel() }} · 按公司汇总报关业务</span>
+                <span>{{ customsStatementRangeLabel() }} · 显示 {{ filteredCustomsStatementRows.length }} / {{ customsStatementRows.length }} 家公司</span>
               </div>
             </div>
             <table class="data-table compact statement-customs-table">
               <thead><tr><th>排名</th><th>公司</th><th>份数</th><th>报关票数</th><th>应收人民币</th><th>操作</th><th>状态</th></tr></thead>
               <tbody>
-                <tr v-for="(row, index) in customsStatementRows" :key="row.company">
+                <tr v-for="(row, index) in filteredCustomsStatementRows" :key="row.company">
                   <td>{{ index + 1 }}</td>
                   <td>{{ row.company }}</td>
                   <td>{{ row.count }}</td>
@@ -23262,7 +24259,7 @@ function orderDetailFeeRows(order = {}) {
                     <span v-else class="statement-status-text">未导出</span>
                   </td>
                 </tr>
-                <tr v-if="customsStatementRows.length === 0"><td colspan="7">暂无报关对账数据</td></tr>
+                <tr v-if="filteredCustomsStatementRows.length === 0"><td colspan="7">{{ customsStatementCompanySearch ? '暂无匹配的报关对账公司' : '暂无报关对账数据' }}</td></tr>
               </tbody>
             </table>
           </div>
@@ -23668,7 +24665,7 @@ function orderDetailFeeRows(order = {}) {
                   </div>
                   <div class="boss-dashboard-detail-table-wrap">
                     <table class="data-table compact">
-                      <thead><tr><th>日期</th><th>单号</th><th>公司</th><th>进出口</th><th>报关费</th><th>续页费</th><th>其他报关费用</th><th>合计</th></tr></thead>
+                      <thead><tr><th>日期</th><th>单号</th><th>公司</th><th>进出口</th><th>报关费</th><th>续页费</th><th>核注费</th><th>其他报关费用</th><th>合计</th></tr></thead>
                       <tbody>
                         <tr v-for="row in bossDashboardCustomsRevenueRows" :key="row.id">
                           <td>{{ row.date }}</td>
@@ -23677,10 +24674,11 @@ function orderDetailFeeRows(order = {}) {
                           <td>{{ row.direction }}</td>
                           <td>{{ row.customsFee }}</td>
                           <td>{{ row.pageFee }}</td>
+                          <td>{{ row.verificationFee }}</td>
                           <td>{{ row.otherFee }}</td>
                           <td><strong>{{ row.total }}</strong></td>
                         </tr>
-                        <tr v-if="bossDashboardCustomsRevenueRows.length === 0"><td colspan="8">暂无报关利润</td></tr>
+                        <tr v-if="bossDashboardCustomsRevenueRows.length === 0"><td colspan="9">暂无报关利润</td></tr>
                       </tbody>
                     </table>
                   </div>
@@ -24119,14 +25117,14 @@ function orderDetailFeeRows(order = {}) {
           <div class="statement-date-selects period-filter-controls">
             <div class="segmented statement-mode-tabs">
               <button
-                v-for="mode in PERIOD_FILTER_MODES"
+                v-for="mode in CUSTOMS_BUSINESS_PERIOD_FILTER_MODES"
                 :key="mode.key"
                 type="button"
                 :class="{ active: periodFilterMode('customsBusiness') === mode.key }"
                 @click="setPeriodFilterMode('customsBusiness', mode.key)"
               >{{ mode.label }}</button>
             </div>
-            <label v-if="periodFilterMode('customsBusiness') !== 'all'">年份
+            <label v-if="['month', 'year'].includes(periodFilterMode('customsBusiness'))">年份
               <select :value="periodFilterYear('customsBusiness')" @change="setPeriodFilterYear('customsBusiness', $event.target.value)">
                 <option v-for="year in periodYearOptions('customsBusiness')" :key="year" :value="year">{{ year }}年</option>
               </select>
@@ -24136,8 +25134,39 @@ function orderDetailFeeRows(order = {}) {
                 <option v-for="item in PERIOD_MONTH_OPTIONS" :key="item.value" :value="item.value">{{ item.label }}</option>
               </select>
             </label>
+            <label v-if="periodFilterMode('customsBusiness') === 'day'">日期
+              <input
+                type="date"
+                :value="periodFilterDay('customsBusiness')"
+                @change="setPeriodFilterDay('customsBusiness', $event.target.value)"
+              />
+            </label>
           </div>
-          <button class="primary-btn" type="button" @click="openCustomsBusinessModal"><IconSvg name="plus" />新增报关业务</button>
+          <div class="customs-business-top-actions">
+            <span class="column-manager-wrap customs-business-column-manager" @click.stop>
+              <button class="ghost-btn small" type="button" title="调整列表列顺序" aria-label="调整列表列顺序" @click="customsBusinessColumnMenuOpen = !customsBusinessColumnMenuOpen"><IconSvg name="list" />列顺序</button>
+              <div v-if="customsBusinessColumnMenuOpen" class="column-manager-menu customs-business-column-menu" @click.stop>
+                <div
+                  v-for="column in orderedCustomsBusinessColumns.filter((item) => item.key !== 'actions')"
+                  :key="column.key"
+                  class="column-manager-row customs-business-column-row"
+                  draggable="true"
+                  @dragstart="startCustomsBusinessColumnDrag(column, $event)"
+                  @dragover.prevent
+                  @dragenter.prevent="dropCustomsBusinessColumn(column)"
+                  @drop.prevent="dropCustomsBusinessColumn(column)"
+                >
+                  <span class="column-manager-drag"><IconSvg name="list" /></span>
+                  <span class="column-manager-check checked"><IconSvg name="check" /></span>
+                  <span>{{ column.label }}</span>
+                  <button class="icon-btn icon-only" type="button" title="上移" @click.stop.prevent="moveCustomsBusinessColumn(column, -1)"><IconSvg name="chevronUp" /></button>
+                  <button class="icon-btn icon-only" type="button" title="下移" @click.stop.prevent="moveCustomsBusinessColumn(column, 1)"><IconSvg name="chevronDown" /></button>
+                  <button class="icon-btn icon-only" type="button" title="恢复默认列序" @click.stop.prevent="resetCustomsBusinessColumnOrder"><IconSvg name="refresh" /></button>
+                </div>
+              </div>
+            </span>
+            <button class="primary-btn" type="button" @click="openCustomsBusinessModal"><IconSvg name="plus" />新增报关业务</button>
+          </div>
         </div>
         <div class="customs-business-search-row">
           <label class="customs-business-search-field">
@@ -24177,46 +25206,35 @@ function orderDetailFeeRows(order = {}) {
         </div>
         <div class="table-card finance-table-card">
           <table class="data-table compact boss-data-table customs-business-table" :style="{ minWidth: customsBusinessTableMinWidth }">
+            <colgroup>
+              <col v-for="column in orderedCustomsBusinessColumns" :key="column.key" :style="customsBusinessColumnStyle(column)" />
+            </colgroup>
             <thead>
               <tr>
-                <th>日期</th>
-                <th>报关单号</th>
-                <th>六联单号</th>
-                <th>公司</th>
-                <th>进出口</th>
-                <th>品名项数</th>
-                <th>续页</th>
-                <th>报关费</th>
-                <th>续页费</th>
-                <th>舱单费</th>
-                <th>报检费</th>
-                <th>查验费</th>
-                <th>其他费用</th>
-                <th v-for="column in customsBusinessCustomColumns" :key="column">{{ column }}</th>
-                <th>合计</th>
-                <th>备注</th>
+                <th
+                  v-for="column in orderedCustomsBusinessColumns"
+                  :key="column.key"
+                  :class="{ 'customs-business-actions-col': column.key === 'actions', 'customs-business-amount-col': column.amount }"
+                >{{ column.label }}</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="row in filteredCustomsBusinessRows" :key="row.id">
-                <td>{{ row.date }}</td>
-                <td>{{ row.declarationNo }}</td>
-                <td>{{ row.sixSheetNo }}</td>
-                <td>{{ row.company }}</td>
-                <td>{{ row.direction }}</td>
-                <td>{{ row.itemCount || '' }}</td>
-                <td>{{ row.pageCount || '' }}</td>
-                <td>{{ money(row.customsFee) }}</td>
-                <td>{{ money(row.pageFee) }}</td>
-                <td>{{ money(row.manifestFee) }}</td>
-                <td>{{ money(row.inspectionFee) }}</td>
-                <td>{{ money(row.checkFee) }}</td>
-                <td>{{ money(row.otherFee) }}</td>
-                <td v-for="column in customsBusinessCustomColumns" :key="`${row.id}-${column}`">{{ customsBusinessCustomFieldDisplay(row, column) }}</td>
-                <td><strong>{{ money(row.total) }}</strong></td>
-                <td>{{ row.remark }}</td>
+                <td
+                  v-for="column in orderedCustomsBusinessColumns"
+                  :key="`${row.id}-${column.key}`"
+                  :class="[{ 'customs-business-actions-col': column.key === 'actions', 'customs-business-amount-col': column.amount, 'customs-business-text-col': ['company', 'remark'].includes(column.key) }, column.key === 'actions' ? 'row-actions' : '']"
+                >
+                  <template v-if="column.key === 'actions'">
+                    <button class="icon-btn icon-only" type="button" title="编辑报关业务" aria-label="编辑报关业务" @click="openEditCustomsBusinessModal(row)"><IconSvg name="edit" /></button>
+                    <button class="icon-btn icon-only" type="button" title="复制报关单" aria-label="复制报关单" @click="openCopyCustomsBusinessModal(row)"><IconSvg name="copy" /></button>
+                    <button class="icon-btn icon-only danger" type="button" title="删除报关业务" aria-label="删除报关业务" @click="deleteCustomsBusiness(row)"><IconSvg name="trash" /></button>
+                  </template>
+                  <strong v-else-if="column.key === 'total'">{{ customsBusinessCellText(row, column) }}</strong>
+                  <template v-else>{{ customsBusinessCellText(row, column) }}</template>
+                </td>
               </tr>
-              <tr v-if="filteredCustomsBusinessRows.length === 0"><td :colspan="15 + customsBusinessCustomColumns.length">暂无匹配的报关业务</td></tr>
+              <tr v-if="filteredCustomsBusinessRows.length === 0"><td :colspan="orderedCustomsBusinessColumns.length">暂无匹配的报关业务</td></tr>
             </tbody>
           </table>
         </div>
@@ -24894,7 +25912,7 @@ function orderDetailFeeRows(order = {}) {
           <div class="toolbar-actions security-actions">
             <button class="primary-btn" @click="exportLocalBackup"><IconSvg name="download" />立即备份</button>
             <button class="ghost-btn" @click="showRestoreNotice"><IconSvg name="upload" />恢复/导入</button>
-            <button class="ghost-btn" @click="openRecycleBin"><IconSvg name="archive" />回收站</button>
+            <button class="ghost-btn" @click="openRecycleBin('all')"><IconSvg name="archive" />回收站</button>
             <button class="ghost-btn" @click="refreshAuditLogs"><IconSvg name="refresh" />刷新审计日志</button>
           </div>
         </div>
@@ -24918,16 +25936,17 @@ function orderDetailFeeRows(order = {}) {
         </div>
         <div class="table-card audit-table">
           <table>
-            <thead><tr><th>时间</th><th>操作</th><th>对象</th><th>关联记录</th><th>说明</th></tr></thead>
+            <thead><tr><th>时间</th><th>操作人</th><th>操作</th><th>对象</th><th>关联记录</th><th>说明</th></tr></thead>
             <tbody>
               <tr v-for="item in auditRows" :key="item.id">
                 <td>{{ formatAuditTime(item.createdAt) }}</td>
+                <td>{{ item.actorName || item.actor || '-' }}</td>
                 <td>{{ auditActionText(item.action) }}</td>
                 <td>{{ auditEntityText(item.entityType) }}</td>
                 <td>{{ auditRecordText(item) }}</td>
                 <td>{{ item.detail }}</td>
               </tr>
-              <tr v-if="auditRows.length === 0"><td colspan="5">暂无审计记录</td></tr>
+              <tr v-if="auditRows.length === 0"><td colspan="6">暂无审计记录</td></tr>
             </tbody>
           </table>
         </div>
@@ -25248,7 +26267,6 @@ function orderDetailFeeRows(order = {}) {
               </details>
               <button class="ghost-btn small" type="button" @click="resetOrderColumnOrder"><IconSvg name="list" />恢复列序</button>
               <button class="ghost-btn small" type="button" @click="resetOrderColumnWidths"><IconSvg name="refresh" />恢复列宽</button>
-              <button class="ghost-btn small" type="button" @click="orderListDetailScope === 'customer' ? exportCustomerOrders('excel') : exportOrdersByFormat('excel')"><IconSvg name="download" />导出</button>
               <button type="button" class="icon-btn" @click="closeOrderListDetail"><IconSvg name="close" />关闭</button>
             </div>
           </div>
@@ -25919,10 +26937,9 @@ function orderDetailFeeRows(order = {}) {
                 <section class="template-panel-section">
                   <div class="template-logo-tools">
                     <strong>Logo</strong>
-                    <label class="ghost-btn small template-logo-upload">
+                    <button class="ghost-btn small template-logo-upload" type="button" @click="openTemplateLogoUploadPanel">
                       <IconSvg name="upload" />上传
-                      <input type="file" accept="image/*" @change="uploadTemplateLogo" />
-                    </label>
+                    </button>
                     <button v-if="templateDesigner.logo" class="ghost-btn small danger" type="button" @click="clearTemplateLogo">
                       <IconSvg name="trash" />移除
                     </button>
@@ -26115,6 +27132,26 @@ function orderDetailFeeRows(order = {}) {
                   <option>港币结算</option>
                 </select>
               </label>
+              <template v-if="customerForm.type === '客户' && normalizeCustomerCategory(customerForm.customerCategory) === '报关客户'">
+                <label>主页品名项
+                  <input v-model.number="customerForm.customsHomeItemCount" type="number" min="0" step="1" />
+                </label>
+                <label>续页品名项
+                  <input v-model.number="customerForm.customsPageItemCount" type="number" min="0" step="1" />
+                </label>
+                <label>进口主页费用
+                  <input v-model.number="customerForm.customsImportHomeFee" type="number" min="0" step="0.01" />
+                </label>
+                <label>出口主页费用
+                  <input v-model.number="customerForm.customsExportHomeFee" type="number" min="0" step="0.01" />
+                </label>
+                <label>进口续页费用
+                  <input v-model.number="customerForm.customsImportPageFee" type="number" min="0" step="0.01" />
+                </label>
+                <label>出口续页费用
+                  <input v-model.number="customerForm.customsExportPageFee" type="number" min="0" step="0.01" />
+                </label>
+              </template>
               <label class="span-6">复制文本识别
                 <textarea
                   v-model.trim="customerForm.invoicePasteText"
@@ -26210,6 +27247,12 @@ function orderDetailFeeRows(order = {}) {
               </label>
               <label v-else>车牌<input v-model.trim="dispatchForm.plate" placeholder="外派车牌/待定" /></label>
               <label>口岸<select v-model="dispatchForm.port"><option value=""></option><option>深圳湾海关</option><option>莲塘海关</option><option>文锦渡海关</option><option>大桥海关</option></select></label>
+              <label class="dispatch-boolean-field">是否过磅
+                <span class="boolean-toggle">
+                  <input v-model="dispatchForm.needsWeighing" type="checkbox" />
+                  <span>{{ dispatchForm.needsWeighing ? '过磅' : '不用过磅' }}</span>
+                </span>
+              </label>
               <label>进出口<select v-model="dispatchForm.direction"><option value=""></option><option>出口</option><option>进口</option></select></label>
               <label>吨位<select v-model="dispatchForm.tonnage"><option value=""></option><option v-for="item in TONNAGE_OPTIONS" :key="item">{{ item }}</option></select></label>
               <label>件数/板数<input v-model.trim="dispatchForm.quantity" placeholder="例如：20件 / 4板" /></label>
@@ -26505,7 +27548,7 @@ function orderDetailFeeRows(order = {}) {
         :show-submit="!orderViewMode"
         @close="closeOrderModal"
         @submit="submitOrderModal"
-        @panel-click="dispatchMessageOpen = false; loadFeeTemplateMenuOpen = false; closeRouteTreeDropdown(); orderCustomerPickerOpen = false"
+	        @panel-click="dispatchMessageOpen = false; loadFeeTemplateMenuOpen = false; closeRouteTreeDropdown(); orderCustomerPickerOpen = false; closeOrderFeeNamePicker()"
       >
           <div class="modal-body order-modal-review-body" :class="{ 'is-readonly': orderReadOnlyMode }">
             <fieldset class="order-modal-readonly-fieldset" :disabled="orderReadOnlyMode">
@@ -26768,27 +27811,43 @@ function orderDetailFeeRows(order = {}) {
                     :class="{ 'company-self-pay-row': isCompanySelfPayFee(fee), 'other-expense-cost-row': isOtherExpenseCostFee(fee) }"
                   >
                     <td>{{ index + 1 }}</td>
-	                    <td>
+		                    <td class="invoice-name-cell">
 		                      <div class="fee-name-picker">
-	                        <select
-	                          :value="fee.feeItemId || feeItemRows.find((item) => item.name === fee.name)?.id || ''"
-	                          :title="companyCoveredFeeTooltip(fee)"
-                            :disabled="orderReadOnlyMode"
-	                          @change="fillFeeFromItem(fee, $event.target.value)"
-                        >
-	                          <option value="">请选择项目</option>
-	                          <option v-for="item in sortedFeeItemRows" :key="item.id" :value="item.id">{{ item.name }}</option>
-	                        </select>
-	                        <button v-if="!orderReadOnlyMode" class="table-op icon-only" type="button" aria-label="设置收费项目" title="设置收费项目" @click.stop="openFeeItemManager(index)"><IconSvg name="edit" /></button>
-                        <label
+                            <span class="searchable-select order-fee-name-search" @click.stop>
+                              <input
+                                :value="orderFeeNamePickerOpenIndex === index ? orderFeeNameSearchKeyword : fee.name"
+                                :title="companyCoveredFeeTooltip(fee)"
+                                :placeholder="orderFeeNamePickerOpenIndex === index ? '搜索项目名称 / 类别 / 币种' : '请选择项目'"
+                                :readonly="orderReadOnlyMode"
+                                @focus="openOrderFeeNamePicker(index)"
+                                @input="handleOrderFeeNameInput(index, $event)"
+                                @keydown="handleOrderFeeNameKeydown(index, $event)"
+                              />
+                              <div v-if="orderFeeNamePickerOpenIndex === index" class="searchable-select-dropdown order-fee-name-dropdown">
+                                <button
+                                  v-for="item in orderFeeNameOptions"
+                                  :key="item.id"
+                                  type="button"
+                                  @mousedown.prevent
+                                  @click="chooseOrderFeeName(index, item)"
+                                >
+                                  <strong>{{ item.name }}</strong>
+                                  <span>{{ feeItemCategoryLabel(item.category) }} · {{ currencyCodeDisplay(item.currency) }}</span>
+                                </button>
+                                <p v-if="orderFeeNameOptions.length === 0">暂无匹配的收费项目</p>
+                              </div>
+                            </span>
+		                        <button v-if="!orderReadOnlyMode" class="table-op icon-only" type="button" aria-label="设置收费项目" title="设置收费项目" @click.stop="openFeeItemManager(index)"><IconSvg name="edit" /></button>
+                        <button
                           v-if="!orderReadOnlyMode && editingOrderNo && fee.name"
                           class="fee-row-upload"
                           :class="{ 'is-uploading': orderAttachmentUploading }"
                           title="上传此收费项目的单据"
+                          type="button"
+                          @click="openOrderFeeUploadPanel(fee, index)"
                         >
                           <IconSvg name="paperclip" />
-                          <input type="file" :accept="FILE_UPLOAD_ACCEPT" :disabled="orderAttachmentUploading" @change="uploadOrderFeeFile(fee, index, $event)" />
-                        </label>
+                        </button>
                         <button
                           v-else-if="!orderReadOnlyMode"
                           class="fee-row-upload is-disabled"
@@ -26805,7 +27864,7 @@ function orderDetailFeeRows(order = {}) {
                           :key="file.id"
                           class="fee-row-file-chip"
                         >
-                          {{ file.filename }}
+	                          <span class="file-chip-name" :title="file.filename">{{ file.filename }}</span>
                           <button type="button" title="预览" @click="openStoredFile(file, 'preview')"><IconSvg name="eye" /></button>
                           <button type="button" title="下载" @click="openStoredFile(file, 'download')"><IconSvg name="download" /></button>
                           <button v-if="!orderReadOnlyMode" type="button" title="删除" @click="deleteFile(file, orderAttachmentRows)"><IconSvg name="trash" /></button>
@@ -26879,6 +27938,7 @@ function orderDetailFeeRows(order = {}) {
               :format-size="fileSizeText"
               :readonly="orderReadOnlyMode"
               @upload="uploadOrderFile"
+              @open-upload="openOrderFileUploadPanel"
               @disabled-upload="notify('请先保存订单，再上传附件')"
               @preview="openStoredFile($event, 'preview')"
               @download="openStoredFile($event, 'download')"
@@ -27281,9 +28341,9 @@ function orderDetailFeeRows(order = {}) {
               <label>保险到期提醒<input v-model.trim="vehicleForm.insuranceReminder" /></label>
               <label class="vehicle-insurance-upload">大陆保险单据
                 <span class="vehicle-insurance-row">
-                  <span class="file-upload-btn compact"><IconSvg name="paperclip" />上传<input type="file" :accept="FILE_UPLOAD_ACCEPT" @change="uploadVehicleInsuranceFile('大陆保险单据', $event)" /></span>
+                  <button class="file-upload-btn compact" type="button" @click="openVehicleInsuranceUploadPanel('大陆保险单据')"><IconSvg name="paperclip" />上传</button>
                   <span v-for="file in vehicleInsuranceFiles('大陆保险单据')" :key="file.id" class="fee-row-file-chip">
-                    {{ file.filename }}
+	                    <span class="file-chip-name" :title="file.filename">{{ file.filename }}</span>
                     <button type="button" title="预览" @click="openStoredFile(file, 'preview')"><IconSvg name="eye" /></button>
                     <button type="button" title="删除" @click="deleteFile(file, vehicleFileRows)"><IconSvg name="trash" /></button>
                   </span>
@@ -27291,9 +28351,9 @@ function orderDetailFeeRows(order = {}) {
               </label>
               <label class="vehicle-insurance-upload">香港保险单据
                 <span class="vehicle-insurance-row">
-                  <span class="file-upload-btn compact"><IconSvg name="paperclip" />上传<input type="file" :accept="FILE_UPLOAD_ACCEPT" @change="uploadVehicleInsuranceFile('香港保险单据', $event)" /></span>
+                  <button class="file-upload-btn compact" type="button" @click="openVehicleInsuranceUploadPanel('香港保险单据')"><IconSvg name="paperclip" />上传</button>
                   <span v-for="file in vehicleInsuranceFiles('香港保险单据')" :key="file.id" class="fee-row-file-chip">
-                    {{ file.filename }}
+	                    <span class="file-chip-name" :title="file.filename">{{ file.filename }}</span>
                     <button type="button" title="预览" @click="openStoredFile(file, 'preview')"><IconSvg name="eye" /></button>
                     <button type="button" title="删除" @click="deleteFile(file, vehicleFileRows)"><IconSvg name="trash" /></button>
                   </span>
@@ -27403,21 +28463,17 @@ function orderDetailFeeRows(order = {}) {
               <div class="vehicle-expense-receipt-panel span-2">
                 <div class="vehicle-expense-receipt-head">
                   <strong>票据</strong>
-                  <label
+                  <button
                     class="fee-row-upload vehicle-expense-receipt-upload"
                     :class="{ 'is-uploading': vehicleExpenseReceiptUploading, 'is-disabled': vehicleExpenseSaving || vehicleRows.length === 0 }"
                     title="上传票据"
                     aria-label="上传票据"
+                    type="button"
+                    :disabled="vehicleExpenseSaving || vehicleExpenseReceiptUploading || vehicleRows.length === 0"
+                    @click="openVehicleExpenseReceiptUploadPanel"
                   >
                     <IconSvg name="paperclip" />
-                    <input
-                      type="file"
-                      multiple
-                      :accept="FILE_UPLOAD_ACCEPT"
-                      :disabled="vehicleExpenseSaving || vehicleExpenseReceiptUploading || vehicleRows.length === 0"
-                      @change="handleVehicleExpenseReceiptFiles"
-                    />
-                  </label>
+                  </button>
                 </div>
                 <div v-if="vehicleExpenseReceiptUploadStatus" class="upload-status-pill vehicle-expense-upload-status" :class="`is-${vehicleExpenseReceiptUploadTone}`" aria-live="polite">
                   <span class="upload-status-dot" aria-hidden="true"></span>
@@ -27454,66 +28510,158 @@ function orderDetailFeeRows(order = {}) {
       </div>
 
 	    <div v-if="recycleModalOpen" class="modal-backdrop">
-	      <section class="modal-card compact-modal">
-        <div class="modal-head">
-          <h2>订单回收站</h2>
-            <button type="button" class="icon-btn" @click="recycleModalOpen = false"><IconSvg name="close" />关闭</button>
+	      <section class="modal-card compact-modal recycle-modal">
+	        <div class="modal-head">
+	          <h2>{{ recycleScope === 'all' ? '回收站' : '订单回收站' }}</h2>
+	          <button type="button" class="icon-btn" @click="recycleModalOpen = false"><IconSvg name="close" />关闭</button>
           </div>
           <div class="modal-body">
-            <table>
-              <thead>
-                <tr>
-                  <th>订单号</th>
-                  <th>客户</th>
-                  <th>日期</th>
-                  <th>状态</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="order in recycleRows" :key="order.no">
-                  <td>{{ order.no }}</td>
-                  <td>{{ order.customer }}</td>
-                  <td>{{ order.date }}</td>
-                  <td>{{ order.status }}</td>
-                  <td><button class="icon-btn success" @click="restoreOrder(order)"><IconSvg name="restore" />恢复</button></td>
-                </tr>
-                <tr v-if="recycleRows.length === 0">
-                  <td colspan="5">暂无回收站数据</td>
-                </tr>
-              </tbody>
-            </table>
-        </div>
+            <div v-if="recycleScope === 'all'" class="recycle-tabs segmented" role="tablist" aria-label="回收站分类">
+              <button
+                type="button"
+                :class="{ active: activeRecycleTab === 'orders' }"
+                role="tab"
+                :aria-selected="activeRecycleTab === 'orders'"
+                @click="setRecycleTab('orders')"
+              >订单</button>
+              <button
+                type="button"
+                :class="{ active: activeRecycleTab === 'customsBusiness' }"
+                role="tab"
+                :aria-selected="activeRecycleTab === 'customsBusiness'"
+                @click="setRecycleTab('customsBusiness')"
+              >报关业务</button>
+            </div>
+
+            <div v-if="activeRecycleTab === 'orders'" class="recycle-section">
+              <table class="data-table compact">
+                <thead>
+                  <tr>
+                    <th>订单号</th>
+                    <th>客户</th>
+                    <th>日期</th>
+                    <th>状态</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="order in recycleRows" :key="order.no">
+                    <td>{{ order.no }}</td>
+                    <td>{{ order.customer }}</td>
+                    <td>{{ order.date }}</td>
+                    <td>{{ order.status }}</td>
+                    <td><button class="icon-btn success" @click="restoreOrder(order)"><IconSvg name="restore" />恢复</button></td>
+                  </tr>
+                  <tr v-if="recycleRows.length === 0">
+                    <td colspan="5">{{ recycleScope === 'all' ? '暂无订单回收站数据' : '暂无回收站数据' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div v-if="recycleScope === 'all' && activeRecycleTab === 'customsBusiness'" class="recycle-section">
+              <table class="data-table compact">
+                <thead>
+                  <tr>
+                    <th>日期</th>
+                    <th>报关单号</th>
+                    <th>六联单号</th>
+                    <th>公司</th>
+                    <th>进出口</th>
+                    <th>删除时间</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in customsBusinessRecycleRows" :key="row.id">
+                    <td>{{ row.date }}</td>
+                    <td>{{ row.declarationNo }}</td>
+                    <td>{{ row.sixSheetNo }}</td>
+                    <td>{{ row.company }}</td>
+                    <td>{{ row.direction }}</td>
+                    <td>{{ row.deletedAt }}</td>
+                    <td><button class="icon-btn success" type="button" @click="restoreCustomsBusiness(row)"><IconSvg name="restore" />恢复</button></td>
+                  </tr>
+                  <tr v-if="customsBusinessRecycleRows.length === 0">
+                    <td colspan="7">暂无报关业务回收站数据</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
 	      </section>
 	    </div>
 
 	    <div v-if="customsBusinessModalOpen" class="modal-backdrop">
-	      <form class="modal-card compact-modal customs-business-modal" @submit.prevent="saveCustomsBusiness">
+	      <form class="modal-card compact-modal customs-business-modal" @click="closeCustomsBusinessCompanyPicker" @submit.prevent="saveCustomsBusiness">
 	        <div class="modal-head">
 	          <h2>
-	            新增报关业务
+	            {{ copyingCustomsBusinessId ? '复制报关单' : (editingCustomsBusinessId ? '编辑报关业务' : '新增报关业务') }}
 	            <span class="order-title-meta">{{ customsBusinessForm.date }}</span>
 	          </h2>
-	          <button type="button" class="icon-btn" @click="customsBusinessModalOpen = false"><IconSvg name="close" />关闭</button>
+	          <button type="button" class="icon-btn" @click="closeCustomsBusinessModal"><IconSvg name="close" />关闭</button>
 	        </div>
 	        <div class="form-grid customs-business-form-grid">
 	          <label>日期<input v-model="customsBusinessForm.date" type="date" /></label>
 	          <label>报关单号<input v-model.trim="customsBusinessForm.declarationNo" /></label>
 	          <label>六联单号<input v-model.trim="customsBusinessForm.sixSheetNo" /></label>
-	          <label class="span-2">公司
-	            <select v-model="customsBusinessForm.company" class="customs-business-company-select">
-	              <option value="">{{ customsBusinessCustomerOptions.length ? '请选择报关客户' : '暂无报关客户' }}</option>
-	              <option v-for="customer in customsBusinessCustomerOptions" :key="customer.id" :value="customer.name">{{ customer.name }}</option>
-	            </select>
+	          <label class="span-2 customs-business-company-field">公司
+	            <span class="searchable-select customs-business-company-combobox" @click.stop>
+	              <IconSvg class="customs-business-company-search-icon" name="search" />
+	              <input
+	                :value="customsBusinessCompanySearch"
+	                class="customs-business-company-input"
+	                type="search"
+	                placeholder="搜索并选择报关客户"
+	                autocomplete="off"
+	                @focus="openCustomsBusinessCompanyPicker"
+	                @input="handleCustomsBusinessCompanyInput"
+	                @keydown.enter.prevent="confirmFirstCustomsBusinessCompanyOption"
+	                @keydown.esc.prevent="closeCustomsBusinessCompanyPicker"
+	              />
+	              <button
+	                v-if="customsBusinessCompanySearch"
+	                class="customs-business-company-clear"
+	                type="button"
+	                title="清空公司"
+	                aria-label="清空公司"
+	                @click="clearCustomsBusinessCompany"
+	              ><IconSvg name="close" /></button>
+	              <button
+	                class="customs-business-company-toggle"
+	                type="button"
+	                title="展开公司列表"
+	                aria-label="展开公司列表"
+	                @click="customsBusinessCompanyPickerOpen ? closeCustomsBusinessCompanyPicker() : openCustomsBusinessCompanyPicker()"
+	              ><IconSvg name="chevronDown" /></button>
+	              <div v-if="customsBusinessCompanyPickerOpen" class="searchable-select-dropdown customs-business-company-dropdown">
+	                <button
+	                  v-for="customer in customsBusinessFilteredCustomerOptions"
+	                  :key="customer.id"
+	                  type="button"
+	                  :class="{ active: String(customer.name || '').trim() === customsBusinessForm.company }"
+	                  @click="selectCustomsBusinessCompany(customer)"
+	                >
+	                  <strong>{{ customer.name }}</strong>
+	                  <span>
+	                    <IconSvg v-if="String(customer.name || '').trim() === customsBusinessForm.company" name="check" />
+	                    {{ customer.id }}
+	                  </span>
+	                </button>
+	                <p v-if="customsBusinessFilteredCustomerOptions.length === 0">{{ customsBusinessCustomerOptions.length ? '暂无匹配公司' : '暂无报关客户' }}</p>
+	              </div>
+	            </span>
 	          </label>
-	          <label>进出口<select v-model="customsBusinessForm.direction"><option value=""></option><option>进口</option><option>出口</option><option>金二出口</option><option>香港报关</option></select></label>
+	          <label>进出口<select v-model="customsBusinessForm.direction"><option value=""></option><option>进口</option><option>出口</option><option>金二进口</option><option>金二出口</option></select></label>
 	          <label>品名项数<input v-model.number="customsBusinessForm.itemCount" type="number" min="0" step="1" /></label>
-	          <label>续页<input v-model.number="customsBusinessForm.pageCount" type="number" min="0" step="1" /></label>
+	          <label>续页<input :value="customsBusinessForm.pageCount" type="number" min="0" step="1" readonly /></label>
+	          <label>续页费<input :value="money(customsBusinessForm.pageFee)" readonly /></label>
+	          <label>主页费用<input :value="customsBusinessHomeFeeDisplay" readonly /></label>
 	          <label>报关费<input v-model.number="customsBusinessForm.customsFee" type="number" min="0" step="0.01" /></label>
-	          <label>续页费<input v-model.number="customsBusinessForm.pageFee" type="number" min="0" step="0.01" /></label>
 	          <label>舱单费<input v-model.number="customsBusinessForm.manifestFee" type="number" min="0" step="0.01" /></label>
 	          <label>报检费<input v-model.number="customsBusinessForm.inspectionFee" type="number" min="0" step="0.01" /></label>
 	          <label>查验费<input v-model.number="customsBusinessForm.checkFee" type="number" min="0" step="0.01" /></label>
+	          <label>核注费<input v-model.number="customsBusinessForm.verificationFee" type="number" min="0" step="0.01" /></label>
 	          <label>其他费用<input v-model.number="customsBusinessForm.otherFee" type="number" min="0" step="0.01" /></label>
 	          <div class="span-4 customs-business-custom-fields">
 	            <div class="customs-business-custom-head">
@@ -27534,8 +28682,8 @@ function orderDetailFeeRows(order = {}) {
 	          <label class="span-4">备注<textarea v-model.trim="customsBusinessForm.remark" rows="3" /></label>
 	        </div>
 	        <div class="modal-actions">
-	          <button type="button" class="ghost-btn" @click="customsBusinessModalOpen = false">取消</button>
-	          <button type="submit" class="primary-btn" :disabled="customsBusinessSaving"><IconSvg name="save" />{{ customsBusinessSaving ? '保存中' : '保存报关业务' }}</button>
+	          <button type="button" class="ghost-btn" @click="closeCustomsBusinessModal">取消</button>
+	          <button type="submit" class="primary-btn" :disabled="customsBusinessSaving"><IconSvg name="save" />{{ customsBusinessSaving ? '保存中' : (copyingCustomsBusinessId ? '新增报关单' : (editingCustomsBusinessId ? '保存修改' : '保存报关业务')) }}</button>
 	        </div>
 	      </form>
 	    </div>
@@ -27674,7 +28822,7 @@ function orderDetailFeeRows(order = {}) {
             <tbody>
               <tr v-for="file in attachmentRecycleRows" :key="file.id">
                 <td>{{ file.category || '订单附件' }}</td>
-                <td>{{ file.filename }}</td>
+	                <td class="file-name-column"><span class="file-name-cell" :title="file.filename">{{ file.filename }}</span></td>
                 <td>{{ fileSizeText(file.size) }}</td>
                 <td>{{ file.createdAt }}</td>
                 <td>{{ file.deletedAt }}</td>
@@ -27691,6 +28839,18 @@ function orderDetailFeeRows(order = {}) {
         </div>
       </section>
     </div>
+
+    <UploadDropzoneModal
+      :open="uploadPanel.open"
+      :title="uploadPanel.title"
+      :description="uploadPanel.description"
+      :accept="uploadPanel.accept"
+      :multiple="uploadPanel.multiple"
+      :uploading="uploadPanel.uploading"
+      :submit-label="uploadPanel.submitLabel"
+      @submit="submitUploadPanel"
+      @close="closeUploadPanel"
+    />
 
     <FilePreviewModal
       :open="filePreviewOpen"

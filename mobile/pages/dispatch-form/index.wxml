@@ -270,10 +270,8 @@
       <view wx:elif="{{!addressBookVisibleRows.length}}" class="address-empty">请先选择经营单位后再查看或新建联系人地址。</view>
       <scroll-view wx:else scroll-y class="address-list">
         <view wx:for="{{addressBookVisibleRows}}" wx:key="id" class="address-card {{item.selected ? 'selected' : ''}}" data-id="{{item.id}}" bindtap="toggleAddressBookSelection">
-          <view class="address-card-check">
-            <checkbox-group data-id="{{item.id}}" catchtap="noop" bindchange="onAddressBookCheckboxChange">
-              <checkbox color="#1769e0" value="{{item.id}}" checked="{{addressBookSelectedIds.indexOf(item.id) >= 0}}" />
-            </checkbox-group>
+          <view class="address-card-check {{item.selected ? 'checked' : ''}}">
+            <text wx:if="{{item.selected}}" class="address-card-checkmark">✓</text>
           </view>
           <view class="address-card-body">
             <view class="address-card-title">

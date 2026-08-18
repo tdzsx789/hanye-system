@@ -8,10 +8,33 @@ export function listAllCustomsBusinesses() {
   return apiFetchList("/customs-businesses?period=all");
 }
 
+export function listRecycleCustomsBusinesses() {
+  return apiFetchList("/customs-businesses/recycle");
+}
+
 export function createCustomsBusiness(payload) {
   return apiFetch("/customs-businesses", {
     method: "POST",
     body: JSON.stringify(payload)
+  });
+}
+
+export function updateCustomsBusiness(id, payload) {
+  return apiFetch(`/customs-businesses/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function deleteCustomsBusiness(id) {
+  return apiFetch(`/customs-businesses/${encodeURIComponent(id)}`, {
+    method: "DELETE"
+  });
+}
+
+export function restoreCustomsBusiness(id) {
+  return apiFetch(`/customs-businesses/${encodeURIComponent(id)}/restore`, {
+    method: "POST"
   });
 }
 

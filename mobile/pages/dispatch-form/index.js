@@ -1,6 +1,7 @@
 const api = require("../../utils/api");
 const { clearDispatchFormContext, DISPATCH_DATE_KEY, getDispatchFormContext } = require("../../utils/context");
 const { todayInputValue } = require("../../utils/date");
+const { dispatchCopyQuery, dispatchSharePath, enableShareMenu, shareImageUrl } = require("../../utils/share");
 const {
   BUSINESS_TYPE_OPTIONS,
   DIRECTION_OPTIONS,
@@ -351,6 +352,7 @@ Page({
   },
 
   onLoad() {
+    enableShareMenu();
     this.addressBookAreaCatalog = buildAddressBookAreaCatalog();
     const context = getDispatchFormContext();
     const mode = context.mode || "new";
@@ -384,6 +386,34 @@ Page({
     });
     wx.setNavigationBarTitle({ title: titleForMode(mode) });
     this.loadReferences();
+  },
+
+  onShow() {
+    enableShareMenu();
+  },
+
+  onShareAppMessage() {
+    const date = this.data.form && this.data.form.date ? this.data.form.date : this.data.originDate;
+    return {
+      title: `${this.data.title || "排车单"} - 汉业排车`,
+      path: dispatchSharePath(date || todayInputValue(), "all"),
+      imageUrl: shareImageUrl()
+    };
+  },
+
+  onShareTimeline() {
+    const date = this.data.form && this.data.form.date ? this.data.form.date : this.data.originDate;
+    return {
+      title: `${this.data.title || "排车单"} - 汉业排车`,
+      query: dispatchCopyQuery(date || todayInputValue(), "all")
+    };
+  },
+
+  onCopyUrl() {
+    const date = this.data.form && this.data.form.date ? this.data.form.date : this.data.originDate;
+    return {
+      query: dispatchCopyQuery(date || todayInputValue(), "all")
+    };
   },
 
   onUnload() {
@@ -730,13 +760,6 @@ Page({
     if (!id) return;
     const selected = new Set((this.data.addressBookSelectedIds || []).map((item) => String(item)));
     this.setAddressBookSelection(id, !selected.has(id));
-  },
-
-  onAddressBookCheckboxChange(event) {
-    const id = String(event.currentTarget.dataset.id || "").trim();
-    if (!id) return;
-    const values = Array.isArray(event.detail.value) ? event.detail.value.map((item) => String(item)) : [];
-    this.setAddressBookSelection(id, values.indexOf(id) >= 0);
   },
 
   async saveAddressBookEntry() {

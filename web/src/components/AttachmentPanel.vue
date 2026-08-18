@@ -49,11 +49,11 @@ defineProps({
   }
 });
 
-const emit = defineEmits(["upload", "disabledUpload", "preview", "download", "delete", "recycle"]);
+const emit = defineEmits(["upload", "openUpload", "disabledUpload", "preview", "download", "delete", "recycle"]);
 
 const columns = [
   { key: "category", label: "分类" },
-  { key: "filename", label: "文件名" },
+  { key: "filename", label: "文件名", cellClass: "file-name-column" },
   { key: "size", label: "大小" },
   { key: "createdAt", label: "上传时间" },
   { key: "actions", label: "操作", cellClass: "row-actions" }
@@ -63,10 +63,16 @@ const columns = [
 <template>
   <div class="file-panel">
     <div v-if="!readonly" class="file-toolbar">
-      <label v-if="canUpload" class="file-upload-btn" :class="{ 'is-uploading': uploading }">
+      <button
+        v-if="canUpload"
+        class="file-upload-btn"
+        :class="{ 'is-uploading': uploading }"
+        type="button"
+        :disabled="uploading"
+        @click="emit('openUpload')"
+      >
         <IconSvg name="upload" />{{ uploadLabel }}
-        <input type="file" :accept="accept" :disabled="uploading" @change="emit('upload', $event)" />
-      </label>
+      </button>
       <button v-else class="file-upload-btn is-disabled" type="button" @click="emit('disabledUpload')">
         <IconSvg name="upload" />{{ uploadLabel }}
       </button>
@@ -77,6 +83,9 @@ const columns = [
     </div>
     <DataTable :columns="columns" :rows="files" :empty-text="emptyText">
       <template #cell-category="{ row }">{{ row.category || '附件' }}</template>
+      <template #cell-filename="{ row }">
+        <span class="file-name-cell" :title="row.filename">{{ row.filename }}</span>
+      </template>
       <template #cell-size="{ row }">{{ formatSize(row.size) }}</template>
       <template #cell-actions="{ row }">
         <button class="icon-btn" type="button" @click="emit('preview', row)"><IconSvg name="eye" />预览</button>

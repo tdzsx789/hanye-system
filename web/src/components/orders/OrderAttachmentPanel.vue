@@ -29,7 +29,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(["upload", "preview", "download", "delete", "recycle", "disabledUpload"]);
+const emit = defineEmits(["upload", "openUpload", "preview", "download", "delete", "recycle", "disabledUpload"]);
 
 const canUpload = computed(() => Boolean(props.orderNo) && !props.readonly);
 const hint = computed(() =>
@@ -53,6 +53,7 @@ const hint = computed(() =>
     :readonly="readonly"
     :format-size="formatSize"
     @upload="emit('upload', $event)"
+    @open-upload="emit('openUpload')"
     @disabled-upload="emit('disabledUpload')"
     @preview="emit('preview', $event)"
     @download="emit('download', $event)"

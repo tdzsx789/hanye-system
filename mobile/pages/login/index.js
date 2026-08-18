@@ -1,7 +1,8 @@
 const api = require("../../utils/api");
-const { DEFAULT_API_BASE_URL, setApiBaseUrl } = require("../../utils/config");
+const { resetApiBaseUrl } = require("../../utils/config");
 const { getSession, isSessionExpired, setSession } = require("../../utils/session");
 const { hasDispatchAccess } = require("../../utils/dispatch");
+const { enableShareMenu, shareImageUrl } = require("../../utils/share");
 
 Page({
   data: {
@@ -12,8 +13,34 @@ Page({
   },
 
   onLoad() {
-    setApiBaseUrl(DEFAULT_API_BASE_URL);
+    enableShareMenu();
+    resetApiBaseUrl();
     this.tryResumeSession();
+  },
+
+  onShow() {
+    enableShareMenu();
+  },
+
+  onShareAppMessage() {
+    return {
+      title: "汉业排车",
+      path: "/pages/login/index",
+      imageUrl: shareImageUrl()
+    };
+  },
+
+  onShareTimeline() {
+    return {
+      title: "汉业排车",
+      query: ""
+    };
+  },
+
+  onCopyUrl() {
+    return {
+      query: ""
+    };
   },
 
   async tryResumeSession() {
@@ -42,7 +69,7 @@ Page({
       wx.showToast({ title: "请输入账号和密码", icon: "none" });
       return;
     }
-    setApiBaseUrl(DEFAULT_API_BASE_URL);
+    resetApiBaseUrl();
     this.setData({ loading: true });
     try {
       const result = await api.login({ username, password });

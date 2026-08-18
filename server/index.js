@@ -2,6 +2,7 @@ import cors from "cors";
 import ExcelJS from "exceljs";
 import express from "express";
 import OSS from "ali-oss";
+import { AsyncLocalStorage } from "node:async_hooks";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import zlib from "node:zlib";
@@ -16,7 +17,7 @@ import {
   verifyPassword
 } from "./auth.js";
 import PDFDocument from "pdfkit";
-import { db, databaseInfo, withAdvisoryLock, writeAudit } from "./db.js";
+import { db, databaseInfo, withAdvisoryLock, writeAudit as writeAuditRecord } from "./db.js";
 
 const app = express();
 const port = Number(process.env.PORT || 5174);
@@ -69,6 +70,15 @@ const ossClient = OSS_ENABLED ? new OSS({
   secure: !falsyEnv(process.env.OSS_SECURE)
 }) : null;
 const fileStorageProvider = ossClient ? "oss" : "oss-unconfigured";
+const auditActorContext = new AsyncLocalStorage();
+
+function auditActorFromAccount(account = {}) {
+  return String(account.name || account.displayName || account.username || "").trim() || "admin";
+}
+
+async function writeAudit(action, entityType, entityId, detail = "") {
+  await writeAuditRecord(action, entityType, entityId, detail, auditActorContext.getStore() || "admin");
+}
 
 if (OSS_CONFIG_REQUESTED && !OSS_ENABLED) {
   console.warn("OSS config is incomplete. File uploads are disabled until OSS is configured.");
@@ -151,12 +161,14 @@ function booleanFlag(value, fallback = false) {
   if (typeof value === "boolean") return value;
   if (typeof value === "number") return value !== 0;
   const text = String(value).trim().toLowerCase();
-  if (["1", "true", "yes", "on"].includes(text)) return true;
-  if (["0", "false", "no", "off"].includes(text)) return false;
+  if (["1", "true", "yes", "on", "过磅"].includes(text)) return true;
+  if (["0", "false", "no", "off", "不用过磅"].includes(text)) return false;
   return fallback;
 }
 
-function requestHasTransitDeletePermission(req) {
+const ADMIN_ONLY_DELETE_ORDER_STATUSES = new Set(["待确认", "通关中"]);
+
+function requestHasAdminOrderDeletePermission(req) {
   return normalizeAccountRole(req.account?.role) === "管理员";
 }
 
@@ -230,6 +242,14 @@ function normalizeEffectiveDate(value = "", fallback = todayInputValue()) {
 
 function mapCustomer(row) {
   const customerCategory = row.type === "客户" && row.customer_category === "报关客户" ? "报关客户" : row.type === "客户" ? "运输客户" : "";
+  const customsDefaults = {
+    customsHomeItemCount: 6,
+    customsPageItemCount: 14,
+    customsImportHomeFee: 100,
+    customsExportHomeFee: 150,
+    customsImportPageFee: 30,
+    customsExportPageFee: 30
+  };
   return {
     id: row.id,
     type: row.type,
@@ -248,6 +268,12 @@ function mapCustomer(row) {
     receivableRMB: row.receivable_rmb,
     receivableHKD: row.receivable_hkd,
     recentOrder: row.recent_order,
+    customsHomeItemCount: Number(row.customs_home_item_count ?? customsDefaults.customsHomeItemCount),
+    customsPageItemCount: Number(row.customs_page_item_count ?? customsDefaults.customsPageItemCount),
+    customsImportHomeFee: Number(row.customs_import_home_fee ?? customsDefaults.customsImportHomeFee),
+    customsExportHomeFee: Number(row.customs_export_home_fee ?? customsDefaults.customsExportHomeFee),
+    customsImportPageFee: Number(row.customs_import_page_fee ?? customsDefaults.customsImportPageFee),
+    customsExportPageFee: Number(row.customs_export_page_fee ?? customsDefaults.customsExportPageFee),
     createdAt: row.created_at,
     invoice: {
       title: row.invoice_title || row.name || "",
@@ -262,6 +288,10 @@ function mapCustomer(row) {
 
 function normalizeCustomerPayload(body, id = "") {
   const invoice = body.invoice || {};
+  const numericOrDefault = (value, fallback) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
+  };
   const name = String(body.name || "").trim();
   const address = String(body.address || invoice.address || "").trim();
   const taxNo = String(body.taxNo || invoice.taxNo || "").trim();
@@ -286,6 +316,12 @@ function normalizeCustomerPayload(body, id = "") {
     receivableRMB: Number(body.receivableRMB || 0),
     receivableHKD: Number(body.receivableHKD || 0),
     recentOrder: String(body.recentOrder || "-").trim(),
+    customsHomeItemCount: numericOrDefault(body.customsHomeItemCount ?? body.customs_home_item_count, 6),
+    customsPageItemCount: numericOrDefault(body.customsPageItemCount ?? body.customs_page_item_count, 14),
+    customsImportHomeFee: numericOrDefault(body.customsImportHomeFee ?? body.customs_import_home_fee, 100),
+    customsExportHomeFee: numericOrDefault(body.customsExportHomeFee ?? body.customs_export_home_fee, 150),
+    customsImportPageFee: numericOrDefault(body.customsImportPageFee ?? body.customs_import_page_fee, 30),
+    customsExportPageFee: numericOrDefault(body.customsExportPageFee ?? body.customs_export_page_fee, 30),
     createdAt: body.createdAt || todayInputValue(),
     invoiceTitle: String(body.invoiceTitle || invoice.title || name).trim(),
     invoiceTaxNo: String(body.invoiceTax || invoice.taxNo || taxNo).trim(),
@@ -2595,12 +2631,14 @@ function mapCustomsBusiness(row) {
     manifestFee: Number(row.manifest_fee || 0),
     inspectionFee: Number(row.inspection_fee || 0),
     checkFee: Number(row.check_fee || 0),
+    verificationFee: Number(row.verification_fee || 0),
     otherFee: Number(row.other_fee || 0),
     customFields: normalizeCustomsBusinessCustomFields(row.custom_fields),
     total: Number(row.total || 0),
     remark: row.remark || "",
     createdAt: row.created_at || "",
-    updatedAt: row.updated_at || ""
+    updatedAt: row.updated_at || "",
+    deletedAt: row.deleted_at || ""
   };
 }
 
@@ -2876,6 +2914,21 @@ function customsBusinessPeriodBounds(query = {}) {
   const mode = String(query.mode || "").trim();
   if (period === "all" || mode === "all") return { start: "", end: "" };
 
+  const periodDayMatched = period.match(/^day:(\d{4}-\d{2}-\d{2})$/);
+  if (periodDayMatched || mode === "day") {
+    const day = normalizeCustomsBusinessDate(periodDayMatched?.[1] || query.day || query.date);
+    return { start: day, end: addInputDays(day, 1) };
+  }
+
+  const rangeMatched = period.match(/^range:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$/);
+  if (rangeMatched || mode === "range") {
+    const start = normalizeCustomsBusinessDate(rangeMatched?.[1] || query.start || query.from || query.begin);
+    const end = normalizeCustomsBusinessDate(rangeMatched?.[2] || query.end || query.to);
+    const first = start <= end ? start : end;
+    const last = start <= end ? end : start;
+    return { start: first, end: addInputDays(last, 1) };
+  }
+
   const periodYearMatched = period.match(/^year:(\d{4})$/);
   if (periodYearMatched || mode === "year") {
     const year = normalizeCustomsYear(periodYearMatched?.[1] || query.year);
@@ -2895,15 +2948,20 @@ const CUSTOMS_STATEMENT_EXPORT_COLUMNS = [
   { key: "direction", label: "进出口", width: 10, pdfWidth: 42 },
   { key: "itemCount", label: "品名项数", width: 10, pdfWidth: 34, amount: true },
   { key: "pageCount", label: "续页", width: 8, pdfWidth: 30, amount: true },
-  { key: "customsFee", label: "报关费", width: 11, pdfWidth: 44, amount: true },
   { key: "pageFee", label: "续页费", width: 11, pdfWidth: 44, amount: true },
+  { key: "customsFee", label: "报关费", width: 11, pdfWidth: 44, amount: true },
   { key: "manifestFee", label: "舱单费", width: 11, pdfWidth: 44, amount: true },
   { key: "inspectionFee", label: "报检费", width: 11, pdfWidth: 44, amount: true },
   { key: "checkFee", label: "查验费", width: 11, pdfWidth: 44, amount: true },
+  { key: "verificationFee", label: "核注费", width: 11, pdfWidth: 44, amount: true },
   { key: "otherFee", label: "其他费用", width: 12, pdfWidth: 44, amount: true },
   { key: "total", label: "合计", width: 12, pdfWidth: 48, amount: true },
   { key: "remark", label: "备注", width: 20, pdfWidth: 66 }
 ];
+
+const CUSTOMS_STATEMENT_EXPORT_COLUMN_MAP = new Map(
+  CUSTOMS_STATEMENT_EXPORT_COLUMNS.map((column) => [column.key, column])
+);
 
 function customsStatementSafeCompany(value = "") {
   return String(value || "").trim() || "未填写公司";
@@ -2913,22 +2971,57 @@ function customsStatementFilename(company = "公司", start = "", end = "", exte
   return `${exportFilenamePart(company)}_报关对账_${start || "全部"}_${end || "全部"}.${extension}`;
 }
 
+function normalizeCustomsStatementExportColumns(columns = []) {
+  const normalized = [];
+  const seen = new Set(["__sequence", "actions"]);
+  if (Array.isArray(columns)) {
+    columns.forEach((column) => {
+      const key = String(column?.key || "").trim();
+      if (!key || seen.has(key)) return;
+      if (key.startsWith("custom:")) {
+        const label = String(column?.label || key.slice(7)).trim().slice(0, 40);
+        if (!label) return;
+        normalized.push({ key, label, width: Math.max(10, Math.min(24, Math.ceil(label.length * 1.6 + 6))), pdfWidth: 44, amount: true, custom: true });
+        seen.add(key);
+        return;
+      }
+      const baseColumn = CUSTOMS_STATEMENT_EXPORT_COLUMN_MAP.get(key);
+      if (!baseColumn) return;
+      normalized.push({
+        ...baseColumn,
+        label: String(column?.label || baseColumn.label || key).trim().slice(0, 40) || baseColumn.label
+      });
+      seen.add(key);
+    });
+  }
+  const columnsWithSequence = [
+    CUSTOMS_STATEMENT_EXPORT_COLUMN_MAP.get("__sequence"),
+    ...(normalized.length ? normalized : CUSTOMS_STATEMENT_EXPORT_COLUMNS.filter((column) => column.key !== "__sequence"))
+  ].filter(Boolean);
+  return columnsWithSequence;
+}
+
 function customsStatementExportValue(row = {}, column = {}, index = 0) {
   if (column.key === "__sequence") return index + 1;
+  if (column.custom) {
+    const name = String(column.key || "").slice(7);
+    const customField = normalizeCustomsBusinessCustomFields(row.customFields).find((field) => field.name === name);
+    return customField ? Number(customField.value || 0) || "" : "";
+  }
   const value = row[column.key];
   if (column.amount) return Number(value || 0) || "";
   return value ?? "";
 }
 
-function customsStatementExportRows(rows = []) {
+function customsStatementExportRows(rows = [], columns = CUSTOMS_STATEMENT_EXPORT_COLUMNS) {
   return rows.map((row, index) =>
-    CUSTOMS_STATEMENT_EXPORT_COLUMNS.map((column) => customsStatementExportValue(row, column, index))
+    columns.map((column) => customsStatementExportValue(row, column, index))
   );
 }
 
-function customsStatementTotalRow(rows = []) {
+function customsStatementTotalRow(rows = [], columns = CUSTOMS_STATEMENT_EXPORT_COLUMNS) {
   const total = rows.reduce((sum, row) => sum + Number(row.total || 0), 0);
-  return CUSTOMS_STATEMENT_EXPORT_COLUMNS.map((column, index) => {
+  return columns.map((column, index) => {
     if (index === 0) return "合计";
     if (column.key === "total") return total || "";
     return "";
@@ -2958,7 +3051,8 @@ function customsStatementExportContext(body = {}) {
   const end = String(body.end || "").trim();
   const rangeLabel = start || end ? `${start || "全部"} 至 ${end || "全部"}` : "全部";
   const title = String(body.title || `${company}报关对账单`).trim() || `${company}报关对账单`;
-  return { company, period, start, end, rangeLabel, title };
+  const columns = normalizeCustomsStatementExportColumns(body.columns);
+  return { company, period, start, end, rangeLabel, title, columns };
 }
 
 const CUSTOMS_STATEMENT_OUTER_BORDER = { style: "medium", color: { argb: "FF000000" } };
@@ -2988,6 +3082,7 @@ function customsStatementTableBorder(rowNumber, columnNumber, tableStartRow, tab
 }
 
 async function renderCustomsStatementXlsxBuffer(rows = [], context = {}) {
+  const columns = Array.isArray(context.columns) && context.columns.length ? context.columns : CUSTOMS_STATEMENT_EXPORT_COLUMNS;
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "汉业管理系统";
   workbook.created = new Date();
@@ -3008,10 +3103,10 @@ async function renderCustomsStatementXlsxBuffer(rows = [], context = {}) {
       footer: 0.1
     }
   };
-  CUSTOMS_STATEMENT_EXPORT_COLUMNS.forEach((column, index) => {
+  columns.forEach((column, index) => {
     worksheet.getColumn(index + 1).width = column.width;
   });
-  const mergeEndColumn = CUSTOMS_STATEMENT_EXPORT_COLUMNS.length;
+  const mergeEndColumn = columns.length;
   worksheet.mergeCells(1, 1, 1, mergeEndColumn);
   const titleCell = worksheet.getCell(1, 1);
   titleCell.value = context.title || "报关对账单";
@@ -3027,10 +3122,10 @@ async function renderCustomsStatementXlsxBuffer(rows = [], context = {}) {
   worksheet.getRow(2).height = 22;
 
   const tableStartRow = 4;
-  const bodyRows = [...customsStatementExportRows(rows), customsStatementTotalRow(rows)];
+  const bodyRows = [...customsStatementExportRows(rows, columns), customsStatementTotalRow(rows, columns)];
   const tableEndRow = tableStartRow + bodyRows.length;
   const headerRow = worksheet.getRow(tableStartRow);
-  headerRow.values = CUSTOMS_STATEMENT_EXPORT_COLUMNS.map((column) => column.label);
+  headerRow.values = columns.map((column) => column.label);
   headerRow.height = 34;
   for (let columnNumber = 1; columnNumber <= mergeEndColumn; columnNumber += 1) {
     const cell = headerRow.getCell(columnNumber);
@@ -3048,7 +3143,7 @@ async function renderCustomsStatementXlsxBuffer(rows = [], context = {}) {
     row.height = 22;
     for (let columnNumber = 1; columnNumber <= mergeEndColumn; columnNumber += 1) {
       const cell = row.getCell(columnNumber);
-      const column = CUSTOMS_STATEMENT_EXPORT_COLUMNS[columnNumber - 1] || {};
+      const column = columns[columnNumber - 1] || {};
       if (column.amount && cell.value !== "") cell.numFmt = "#,##0.##";
       cell.font = { name: "Microsoft YaHei", size: 8, bold: isTotalRow, color: { argb: "FF17233C" } };
       cell.alignment = {
@@ -3103,6 +3198,7 @@ function customsPdfRowHeight(doc, values = [], columns = CUSTOMS_STATEMENT_EXPOR
 }
 
 function renderCustomsStatementPdf(res, rows = [], context = {}, filename = "") {
+  const columns = Array.isArray(context.columns) && context.columns.length ? context.columns : CUSTOMS_STATEMENT_EXPORT_COLUMNS;
   const doc = new PDFDocument({ size: "A4", layout: "landscape", margin: 18, bufferPages: true });
   const fontConfig = resolvePdfFontConfig();
   let fontUnavailable = false;
@@ -3125,7 +3221,7 @@ function renderCustomsStatementPdf(res, rows = [], context = {}, filename = "") 
   const pageLeft = doc.page.margins.left;
   const pageTop = doc.page.margins.top;
   const pageBottom = doc.page.height - doc.page.margins.bottom;
-  const tableWidth = CUSTOMS_STATEMENT_EXPORT_COLUMNS.reduce((sum, column) => sum + Number(column.pdfWidth || 0), 0);
+  const tableWidth = columns.reduce((sum, column) => sum + Number(column.pdfWidth || 0), 0);
   const tableLeft = pageLeft + Math.max(0, (doc.page.width - pageLeft - doc.page.margins.right - tableWidth) / 2);
   let y = pageTop;
 
@@ -3147,7 +3243,7 @@ function renderCustomsStatementPdf(res, rows = [], context = {}, filename = "") 
 
   function drawTableHeader() {
     let x = tableLeft;
-    CUSTOMS_STATEMENT_EXPORT_COLUMNS.forEach((column) => {
+    columns.forEach((column) => {
       drawCustomsPdfCell(doc, column.label, x, y, column.pdfWidth, 20, {
         fill: "#f1f5f9",
         bold: true,
@@ -3169,14 +3265,14 @@ function renderCustomsStatementPdf(res, rows = [], context = {}, filename = "") 
 
   drawTitle();
   drawTableHeader();
-  const bodyRows = [...customsStatementExportRows(rows), customsStatementTotalRow(rows)];
+  const bodyRows = [...customsStatementExportRows(rows, columns), customsStatementTotalRow(rows, columns)];
   bodyRows.forEach((values, rowIndex) => {
     const isTotalRow = rowIndex === bodyRows.length - 1;
-    const height = customsPdfRowHeight(doc, values);
+    const height = customsPdfRowHeight(doc, values, columns);
     ensureRowSpace(height);
     let x = tableLeft;
     values.forEach((value, columnIndex) => {
-      const column = CUSTOMS_STATEMENT_EXPORT_COLUMNS[columnIndex] || {};
+      const column = columns[columnIndex] || {};
       const displayValue = column.amount && value !== "" ? formatExportAmount(value, false) : value;
       drawCustomsPdfCell(doc, displayValue, x, y, column.pdfWidth, height, {
         fill: isTotalRow ? "#f1f5f9" : "#ffffff",
@@ -3216,14 +3312,16 @@ function customsBusinessCustomFieldsTotal(fields = []) {
 }
 
 function normalizeCustomsBusinessPayload(body = {}) {
+  const homeFee = numberField(body.homeFee ?? body.home_fee);
   const customsFee = numberField(body.customsFee ?? body.customs_fee);
   const pageFee = numberField(body.pageFee ?? body.page_fee);
   const manifestFee = numberField(body.manifestFee ?? body.manifest_fee);
   const inspectionFee = numberField(body.inspectionFee ?? body.inspection_fee);
   const checkFee = numberField(body.checkFee ?? body.check_fee);
+  const verificationFee = numberField(body.verificationFee ?? body.verification_fee);
   const otherFee = numberField(body.otherFee ?? body.other_fee);
   const customFields = normalizeCustomsBusinessCustomFields(body.customFields ?? body.custom_fields);
-  const computedTotal = customsFee + pageFee + manifestFee + inspectionFee + checkFee + otherFee
+  const computedTotal = homeFee + customsFee + pageFee + manifestFee + inspectionFee + checkFee + verificationFee
     + customsBusinessCustomFieldsTotal(customFields);
   return {
     date: normalizeCustomsBusinessDate(body.date ?? body.businessDate ?? body.business_date),
@@ -3233,11 +3331,13 @@ function normalizeCustomsBusinessPayload(body = {}) {
     direction: String(body.direction ?? "").trim(),
     itemCount: numberField(body.itemCount ?? body.item_count),
     pageCount: numberField(body.pageCount ?? body.page_count),
+    homeFee,
     customsFee,
     pageFee,
     manifestFee,
     inspectionFee,
     checkFee,
+    verificationFee,
     otherFee,
     customFields,
     customFieldsJson: JSON.stringify(customFields),
@@ -3296,6 +3396,7 @@ function mapAccount(row) {
     id: row.id,
     username: row.username,
     displayName: row.display_name,
+    name: row.display_name,
     role,
     roleLevel: roleLevelFor(role),
     status: row.status,
@@ -3310,9 +3411,11 @@ function mapAccount(row) {
 }
 
 function mapAuditLog(row) {
+  const actorName = row.actor || "admin";
   return {
     id: row.id,
-    actor: row.actor,
+    actor: actorName,
+    actorName,
     action: row.action,
     entityType: row.entity_type,
     entityId: row.entity_id,
@@ -3513,6 +3616,16 @@ function requiredModuleForRequest(req) {
 }
 
 function authorizeApiRequest(req, res, next) {
+  if (req.path.startsWith("/reminders") && req.method === "GET") {
+    const canReadReminders = canAccessModule(req.account?.role, "vehicleDriver")
+      || canAccessModule(req.account?.role, "dispatchBoard");
+    if (!canReadReminders) {
+      res.status(403).json({ message: "当前账号无权访问该功能" });
+      return;
+    }
+    next();
+    return;
+  }
   if (req.path.startsWith("/vehicle-profit-exchange-rates")) {
     const canAccessExchangeRates = VEHICLE_PROFIT_EXCHANGE_RATE_MODULES.some((moduleId) => canAccessModule(req.account?.role, moduleId));
     if (!canAccessExchangeRates) {
@@ -3541,7 +3654,9 @@ function authorizeApiRequest(req, res, next) {
   next();
 }
 
-app.use("/api", authenticateApiRequest, authorizeApiRequest);
+app.use("/api", authenticateApiRequest, (req, res, next) => {
+  auditActorContext.run(auditActorFromAccount(req.account), () => next());
+}, authorizeApiRequest);
 
 app.get("/api/auth/me", async (req, res) => {
   res.json({ account: req.account, roles: ACCOUNT_ROLES });
@@ -3651,6 +3766,15 @@ app.get("/api/customs-businesses", async (req, res) => {
   res.json(rows.map(mapCustomsBusiness));
 });
 
+app.get("/api/customs-businesses/recycle", async (_req, res) => {
+  const rows = await db.prepare(`
+    SELECT * FROM customs_businesses
+    WHERE deleted_at IS NOT NULL
+    ORDER BY deleted_at DESC, business_date DESC, id DESC
+  `).all();
+  res.json(rows.map(mapCustomsBusiness));
+});
+
 app.post("/api/customs-businesses/export/excel", async (req, res) => {
   const context = customsStatementExportContext(req.body || {});
   const rows = await loadCustomsStatementExportRows(context.company, context.period);
@@ -3701,14 +3825,93 @@ app.post("/api/customs-businesses", async (req, res) => {
   const result = await db.prepare(`
     INSERT INTO customs_businesses
       (business_date, declaration_no, six_sheet_no, company, direction, item_count, page_count,
-       customs_fee, page_fee, manifest_fee, inspection_fee, check_fee, other_fee, custom_fields, total, remark)
+       customs_fee, page_fee, manifest_fee, inspection_fee, check_fee, verification_fee, other_fee, custom_fields, total, remark)
     VALUES
       (@date, @declarationNo, @sixSheetNo, @company, @direction, @itemCount, @pageCount,
-       @customsFee, @pageFee, @manifestFee, @inspectionFee, @checkFee, @otherFee, @customFieldsJson, @total, @remark)
+       @customsFee, @pageFee, @manifestFee, @inspectionFee, @checkFee, @verificationFee, @otherFee, @customFieldsJson, @total, @remark)
   `).run(item);
   await writeAudit("create", "customs_business", String(result.lastInsertId), `${item.date}/${item.company}/${item.declarationNo || item.sixSheetNo}`);
   const row = await db.prepare("SELECT * FROM customs_businesses WHERE id = ?").get(result.lastInsertId);
   res.status(201).json(mapCustomsBusiness(row));
+});
+
+app.put("/api/customs-businesses/:id", async (req, res) => {
+  const id = Number(req.params.id || 0);
+  const current = await db.prepare("SELECT * FROM customs_businesses WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!current) {
+    res.status(404).json({ message: "报关业务不存在或已删除" });
+    return;
+  }
+
+  const item = normalizeCustomsBusinessPayload(req.body || {});
+  if (!item.company) {
+    res.status(400).json({ message: "请填写公司名称" });
+    return;
+  }
+  if (!item.declarationNo && !item.sixSheetNo) {
+    res.status(400).json({ message: "请填写报关单号或六联单号" });
+    return;
+  }
+
+  await db.prepare(`
+    UPDATE customs_businesses
+    SET business_date = @date,
+        declaration_no = @declarationNo,
+        six_sheet_no = @sixSheetNo,
+        company = @company,
+        direction = @direction,
+        item_count = @itemCount,
+        page_count = @pageCount,
+        customs_fee = @customsFee,
+        page_fee = @pageFee,
+        manifest_fee = @manifestFee,
+        inspection_fee = @inspectionFee,
+        check_fee = @checkFee,
+        verification_fee = @verificationFee,
+        other_fee = @otherFee,
+        custom_fields = @customFieldsJson,
+        total = @total,
+        remark = @remark,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = @id AND deleted_at IS NULL
+  `).run({ ...item, id });
+  await writeAudit("update", "customs_business", String(id), `${item.date}/${item.company}/${item.declarationNo || item.sixSheetNo}`);
+  const row = await db.prepare("SELECT * FROM customs_businesses WHERE id = ?").get(id);
+  res.json(mapCustomsBusiness(row));
+});
+
+app.delete("/api/customs-businesses/:id", async (req, res) => {
+  const id = Number(req.params.id || 0);
+  const row = await db.prepare("SELECT * FROM customs_businesses WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!row) {
+    res.status(404).json({ message: "报关业务不存在或已删除" });
+    return;
+  }
+  await db.prepare(`
+    UPDATE customs_businesses
+    SET deleted_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND deleted_at IS NULL
+  `).run(id);
+  await writeAudit("delete", "customs_business", String(id), `${row.business_date}/${row.company}/${row.declaration_no || row.six_sheet_no}`);
+  res.json({ ok: true });
+});
+
+app.post("/api/customs-businesses/:id/restore", async (req, res) => {
+  const id = Number(req.params.id || 0);
+  const result = await db.prepare(`
+    UPDATE customs_businesses
+    SET deleted_at = NULL,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND deleted_at IS NOT NULL
+  `).run(id);
+  if (result.changes === 0) {
+    res.status(404).json({ message: "回收站内找不到该报关业务" });
+    return;
+  }
+  await writeAudit("restore", "customs_business", String(id), "从回收站恢复");
+  const row = await db.prepare("SELECT * FROM customs_businesses WHERE id = ?").get(id);
+  res.json(mapCustomsBusiness(row));
 });
 
 app.get("/api/files", async (req, res) => {
@@ -3922,7 +4125,13 @@ app.patch("/api/customers/:id", async (req, res) => {
         invoice_tax_no = @invoiceTaxNo,
         invoice_bank = @invoiceBank,
         invoice_account = @invoiceAccount,
-        invoice_address_phone = @invoiceAddressPhone
+        invoice_address_phone = @invoiceAddressPhone,
+        customs_home_item_count = @customsHomeItemCount,
+        customs_page_item_count = @customsPageItemCount,
+        customs_import_home_fee = @customsImportHomeFee,
+        customs_export_home_fee = @customsExportHomeFee,
+        customs_import_page_fee = @customsImportPageFee,
+        customs_export_page_fee = @customsExportPageFee
     WHERE id = @id AND deleted_at IS NULL
   `).run(item);
   if (result.changes === 0) {
@@ -3945,11 +4154,15 @@ app.post("/api/customers", async (req, res) => {
     INSERT INTO customers
       (id, type, customer_category, name, province, city, address, term, settlement_currency, receivable_rmb, receivable_hkd, recent_order, created_at,
        tax_no, contact, mobile, driver_wage_adjust_hkd, default_template_id,
-       invoice_title, invoice_tax_no, invoice_bank, invoice_account, invoice_address_phone)
+       invoice_title, invoice_tax_no, invoice_bank, invoice_account, invoice_address_phone,
+       customs_home_item_count, customs_page_item_count, customs_import_home_fee, customs_export_home_fee,
+       customs_import_page_fee, customs_export_page_fee)
     VALUES
       (@id, @type, @customerCategory, @name, @province, @city, @address, @term, @settlementCurrency, @receivableRMB, @receivableHKD, @recentOrder, @createdAt,
        @taxNo, @contact, @mobile, @driverWageAdjustHKD, @defaultTemplateId,
-       @invoiceTitle, @invoiceTaxNo, @invoiceBank, @invoiceAccount, @invoiceAddressPhone)
+       @invoiceTitle, @invoiceTaxNo, @invoiceBank, @invoiceAccount, @invoiceAddressPhone,
+       @customsHomeItemCount, @customsPageItemCount, @customsImportHomeFee, @customsExportHomeFee,
+       @customsImportPageFee, @customsExportPageFee)
   `).run(item);
   await writeAudit("create", "customer", item.id, item.name);
   res.status(201).json(mapCustomer(await db.prepare("SELECT * FROM customers WHERE id = ?").get(item.id)));
@@ -4272,6 +4485,7 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
       customer: String(item.customer || ""),
       plate: String(item.plate || ""),
       port: String(item.port || ""),
+      needsWeighing: booleanFlag(item.needsWeighing ?? item.needs_weighing, false),
       direction: String(item.direction || ""),
       tonnage: String(item.tonnage || ""),
       quantity: item.quantity ?? "",
@@ -4717,8 +4931,8 @@ app.delete("/api/orders/:no", async (req, res) => {
     res.status(409).json({ message: "已审核订单不可删除" });
     return;
   }
-  if (row.status === "通关中" && !requestHasTransitDeletePermission(req)) {
-    res.status(403).json({ message: "通关中订单不可删除，请使用管理员账号操作" });
+  if (ADMIN_ONLY_DELETE_ORDER_STATUSES.has(row.status) && !requestHasAdminOrderDeletePermission(req)) {
+    res.status(403).json({ message: `${row.status}订单不可删除，请使用管理员账号操作` });
     return;
   }
 

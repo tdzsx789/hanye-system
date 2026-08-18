@@ -72,6 +72,10 @@ function listDrivers() {
   return requestList("/drivers");
 }
 
+function listExpiryReminders() {
+  return request("/reminders/expiry");
+}
+
 function listFreightRates() {
   return requestList("/freight-rates");
 }
@@ -107,6 +111,7 @@ module.exports = {
   listCustomerContacts,
   listDispatchPlans,
   listDrivers,
+  listExpiryReminders,
   listOrders,
   listVehicles,
   login,

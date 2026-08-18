@@ -2,6 +2,7 @@ const api = require("../../utils/api");
 const { DISPATCH_DATE_KEY, setDispatchFormContext } = require("../../utils/context");
 const { addDaysToInputDate, formatDateLabel, todayInputValue } = require("../../utils/date");
 const { clearSession } = require("../../utils/session");
+const { dispatchCopyQuery, dispatchSharePath, enableShareMenu, shareImageUrl } = require("../../utils/share");
 const {
   buildDispatchWarnings,
   createDispatchRowFromOrder,
@@ -101,16 +102,40 @@ Page({
     warnings: []
   },
 
-  onLoad() {
+  onLoad(options) {
+    enableShareMenu();
     const today = todayInputValue();
     this.dispatchToday = today;
     const storedDate = wx.getStorageSync(DISPATCH_DATE_KEY);
-    const initialDate = storedDate === today ? storedDate : today;
+    const optionDate = String(options && options.date ? options.date : "").slice(0, 10);
+    const initialDate = optionDate || (storedDate === today ? storedDate : today);
     if (storedDate !== initialDate) wx.setStorageSync(DISPATCH_DATE_KEY, initialDate);
     this.setData({
+      activeStatus: options && options.status ? decodeURIComponent(options.status) : "all",
       dispatchDate: initialDate,
       dateLabel: formatDateLabel(initialDate)
     });
+  },
+
+  onShareAppMessage() {
+    return {
+      title: `${formatDateLabel(this.data.dispatchDate)} 汉业排车表`,
+      path: dispatchSharePath(this.data.dispatchDate, this.data.activeStatus),
+      imageUrl: shareImageUrl()
+    };
+  },
+
+  onShareTimeline() {
+    return {
+      title: `${formatDateLabel(this.data.dispatchDate)} 汉业排车表`,
+      query: dispatchCopyQuery(this.data.dispatchDate, this.data.activeStatus)
+    };
+  },
+
+  onCopyUrl() {
+    return {
+      query: dispatchCopyQuery(this.data.dispatchDate, this.data.activeStatus)
+    };
   },
 
   syncDispatchDateForToday() {
@@ -130,6 +155,7 @@ Page({
   },
 
   async onShow() {
+    enableShareMenu();
     this.syncDispatchDateForToday();
     const account = await getApp().ensureLogin();
     if (!account) {
@@ -155,15 +181,20 @@ Page({
   async loadBoard(options) {
     const silent = options && options.silent;
     const date = this.data.dispatchDate;
+    this.expiryReminderRows = null;
     if (!silent) this.setData({ loading: true });
     wx.showNavigationBarLoading();
     try {
-      const [plan, orders, vehicles, drivers] = await Promise.all([
+      const [plan, orders, vehicles, drivers, expiryReminders] = await Promise.all([
         api.getDispatchPlan(date),
         api.listOrders(),
         api.listVehicles(),
-        api.listDrivers()
+        api.listDrivers(),
+        api.listExpiryReminders().catch(() => null)
       ]);
+      this.expiryReminderRows = Array.isArray(expiryReminders && expiryReminders.rows)
+        ? expiryReminders.rows
+        : null;
       const rows = sortDispatchRows(plan && plan.rows ? plan.rows : [], orders, date);
       this.setData({
         drivers,
@@ -198,7 +229,14 @@ Page({
       selected: selectedIds.has(row.id)
     }));
     const selectedDisplayRows = displayRows.filter((row) => row.selected);
-    const warnings = buildDispatchWarnings(rawRows, this.data.orders, this.data.vehicles, this.data.drivers, date);
+    const serverWarnings = Array.isArray(this.expiryReminderRows)
+      ? this.expiryReminderRows
+        .map((row) => String(row && row.message || "").trim())
+        .filter(Boolean)
+      : null;
+    const warnings = serverWarnings !== null
+      ? Array.from(new Set(serverWarnings))
+      : buildDispatchWarnings(rawRows, this.data.orders, this.data.vehicles, this.data.drivers, date);
     const emptyText = emptyTextForStatus(activeStatus);
     this.setData({
       dateLabel: formatDateLabel(date),
