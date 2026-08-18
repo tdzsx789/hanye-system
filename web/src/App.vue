@@ -13646,7 +13646,6 @@ function isCustomerOrderColumnVisible(key) {
 }
 
 function isOrderColumnVisible(key) {
-  if (ORDER_LEFT_STICKY_KEYS.includes(key)) return true;
   if (ORDER_RIGHT_STICKY_KEYS.includes(key)) return true;
   return orderColumnVisibility[key] !== false;
 }
@@ -13666,7 +13665,7 @@ function setCustomerOrderColumnVisible(column, visible) {
 }
 
 function setOrderColumnVisible(column, visible) {
-  if (column.locked || isOrderLeftStickyColumn(column) || isOrderRightStickyColumn(column)) return;
+  if (column.locked || isOrderRightStickyColumn(column)) return;
   orderColumnVisibility[column.key] = visible;
   localStorage.setItem(ORDER_COLUMN_VISIBILITY_KEY, JSON.stringify({ ...orderColumnVisibility }));
 }
@@ -16799,11 +16798,11 @@ async function restoreOrder(order) {
   }
 }
 
-const ORDER_EXPORT_HEADERS = ["排车单号", "订单号", "创建者", "客户", "业务类型", "口岸", "进出口", "吨位", "币种", "件数/板数", "重量", "车辆来源", "车牌", "司机", "运输模式", "外派供应商", "装货地", "卸货地", "日期", "应收港币", "应收人民币", "状态"];
+const ORDER_EXPORT_HEADERS = ["排车单号", "订单号", "客户", "业务类型", "口岸", "进出口", "吨位", "币种", "件数/板数", "重量", "车辆来源", "车牌", "司机", "运输模式", "外派供应商", "装货地", "卸货地", "日期", "应收港币", "应收人民币", "状态"];
 
 function orderExportRows(orders) {
   return orders.map((item) => [
-    item.dispatchNo, item.no, item.createdByName || item.createdByUsername || "", item.customer, item.businessType, item.port, item.direction, item.tonnage,
+    item.dispatchNo, item.no, item.customer, item.businessType, item.port, item.direction, item.tonnage,
     currencyCodeDisplay(item.currency), item.quantity, item.weight, item.vehicleSource, item.plate, item.driver, item.transportMode, item.supplier,
     item.loading, item.unloading, item.date, item.receivableHKD, item.receivableRMB, item.status
   ]);
@@ -22789,12 +22788,12 @@ function orderDetailFeeRows(order = {}) {
                     <label
                       v-for="column in orderColumns.filter((item) => !isOrderRightStickyColumn(item))"
                       :key="column.key"
-                      :class="{ disabled: column.locked || isOrderLeftStickyColumn(column) }"
+                      :class="{ disabled: column.locked }"
                     >
                       <input
                         type="checkbox"
                         :checked="isOrderColumnVisible(column.key)"
-                        :disabled="column.locked || isOrderLeftStickyColumn(column)"
+                        :disabled="column.locked"
                         @change="setOrderColumnVisible(column, $event.target.checked)"
                       />
                       {{ column.label }}
@@ -22830,7 +22829,7 @@ function orderDetailFeeRows(order = {}) {
                         <div
                           v-for="menuColumn in orderColumns.filter((item) => !item.locked && !isOrderRightStickyColumn(item))"
                           :key="menuColumn.key"
-                          :class="['column-manager-row', { disabled: isOrderLeftStickyColumn(menuColumn) }]"
+                          class="column-manager-row"
                           :draggable="!isOrderLeftStickyColumn(menuColumn)"
                           @dragstart="isOrderLeftStickyColumn(menuColumn) ? $event.preventDefault() : startOrderColumnDrag(menuColumn, $event)"
                           @dragover.prevent
@@ -22842,8 +22841,7 @@ function orderDetailFeeRows(order = {}) {
                             class="column-manager-check"
                             :class="{ checked: isOrderColumnVisible(menuColumn.key) }"
                             type="button"
-                            :title="isOrderLeftStickyColumn(menuColumn) ? '固定列' : '显示/隐藏'"
-                            :disabled="isOrderLeftStickyColumn(menuColumn)"
+                            title="显示/隐藏"
                             @click.stop.prevent="toggleOrderColumnVisible(menuColumn)"
                           ><IconSvg v-if="isOrderColumnVisible(menuColumn.key)" name="check" /></button>
                           <span>{{ menuColumn.label }}</span>
@@ -25466,8 +25464,6 @@ function orderDetailFeeRows(order = {}) {
             <option value="">全部进出口</option>
             <option v-for="direction in customsBusinessDirectionFilterOptions" :key="direction" :value="direction">{{ direction }}</option>
           </select>
-        </div>
-        <div class="customs-business-filter-actions">
           <button class="ghost-btn small" type="button" :disabled="!customsBusinessFiltersActive" @click="clearCustomsBusinessFilters">
             <IconSvg name="refresh" />清空筛选
           </button>
@@ -26548,12 +26544,12 @@ function orderDetailFeeRows(order = {}) {
                   <label
                     v-for="column in orderListDetailManageColumns"
                     :key="column.key"
-                    :class="{ disabled: column.locked || isOrderLeftStickyColumn(column) || isOrderRightStickyColumn(column) }"
+                    :class="{ disabled: column.locked || isOrderRightStickyColumn(column) }"
                   >
                     <input
                       type="checkbox"
                       :checked="isOrderColumnVisible(column.key)"
-                      :disabled="column.locked || isOrderLeftStickyColumn(column) || isOrderRightStickyColumn(column)"
+                      :disabled="column.locked || isOrderRightStickyColumn(column)"
                       @change="toggleOrderColumnVisible(column)"
                     />
                     <span>{{ column.label }}</span>

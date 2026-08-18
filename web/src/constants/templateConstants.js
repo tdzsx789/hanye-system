@@ -7,7 +7,7 @@ export const TEMPLATE_SYSTEM_MANAGED_COLUMNS = [
   TEMPLATE_SYSTEM_SEQUENCE_COLUMN,
   ...TEMPLATE_SYSTEM_TOTAL_COLUMNS
 ];
-export const TEMPLATE_REMOVED_COLUMN_KEYS = new Set(["receivableHKD", "receivableRMB"]);
+export const TEMPLATE_REMOVED_COLUMN_KEYS = new Set(["receivableHKD", "receivableRMB", "createdByName"]);
 export const TEMPLATE_ORDER_BASE_COLUMNS = [
   { key: "tonnage", label: "吨位", width: 54 },
   { key: "quantity", label: "件/板数", width: 64 },
@@ -20,7 +20,6 @@ export const TEMPLATE_ORDER_BASE_COLUMNS = [
   { key: "vehicleSource", label: "车辆来源", width: 78 },
   { key: "plate", label: "车牌", width: 72 },
   { key: "driver", label: "司机", width: 64 },
-  { key: "createdByName", label: "创建者", width: 72 },
   { key: "transportMode", label: "运输模式", width: 76 },
   { key: "supplier", label: "外派供应商", width: 96 }
 ];

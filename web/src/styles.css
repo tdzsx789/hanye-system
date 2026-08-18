@@ -3827,26 +3827,15 @@ select {
 }
 
 .customs-business-search-row {
+  position: relative;
+  z-index: 30;
   display: flex;
   align-items: center;
   flex-wrap: nowrap;
   gap: 8px;
   min-height: 40px;
   padding: 0;
-  overflow-x: auto;
-  scrollbar-width: thin;
-}
-
-.customs-business-filter-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.customs-business-filter-actions .column-manager-wrap {
-  z-index: 60;
+  overflow: visible;
 }
 
 .customs-business-search-field {

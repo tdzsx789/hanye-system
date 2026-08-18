@@ -405,7 +405,6 @@ function creatorFieldsHaveValue(fields = {}) {
 const ORDER_EXPORT_COLUMNS = [
   ["排车单号", "dispatchNo", 82],
   ["订单号", "no", 82],
-  ["创建者", "createdByName", 56],
   ["客户", "customer", 118],
   ["业务", "businessType", 46],
   ["口岸", "port", 70],
@@ -421,6 +420,7 @@ const ORDER_EXPORT_COLUMNS = [
   ["人民币", "receivableRMB", 54],
   ["状态", "status", 50]
 ];
+const ORDER_EXPORT_REMOVED_COLUMN_KEYS = new Set(["createdByName"]);
 const ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS = [
   { key: "__rmbTotal", label: "RMB合计", width: 64, fontSize: 8, system: true },
   { key: "__hkdTotal", label: "HKD合计", width: 64, fontSize: 8, system: true }
@@ -485,7 +485,7 @@ function normalizeExportTemplate(template = null) {
     footerFontSize: Number(template.footerFontSize || 9),
     footerTextColor,
     columns: columns
-      .filter((column) => column?.visible !== false)
+      .filter((column) => column?.visible !== false && !ORDER_EXPORT_REMOVED_COLUMN_KEYS.has(String(column.key || "")))
       .map((column) => ({
         label: String(column.label || column.key || ""),
         key: String(column.key || ""),
@@ -972,7 +972,10 @@ function exportColumnsFromTemplate(template = null) {
   const columns = normalized?.columns?.length
     ? normalized.columns
     : ORDER_EXPORT_COLUMNS.map(([label, key, width]) => ({ label, key, width }));
-  const withoutSequenceColumn = columns.filter((column) => column.key !== ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key);
+  const withoutSequenceColumn = columns.filter((column) =>
+    column.key !== ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key
+    && !ORDER_EXPORT_REMOVED_COLUMN_KEYS.has(String(column.key || ""))
+  );
   const visibleColumns = withoutSequenceColumn.filter((column) => column.visible !== false);
   const bodyColumns = visibleColumns.filter((column) => !ORDER_EXPORT_SYSTEM_TOTAL_COLUMN_KEYS.has(column.key));
   const totalColumns = ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS.map((systemColumn) => ({
@@ -1325,6 +1328,62 @@ function statementReceiptImageExtension(file = {}) {
   return "";
 }
 
+function statementReceiptImageLabel(file = {}) {
+  const category = String(file.category || "").trim();
+  if (category.startsWith("收费项目-")) {
+    const name = category.replace(/^收费项目-/, "").trim();
+    if (name) return name;
+  }
+  return "订单附件";
+}
+
+function statementImageDimensions(buffer, extension = "") {
+  const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || []);
+  if (!bytes.length) return null;
+  if (extension === "png" && bytes.length >= 24 && bytes.readUInt32BE(12) === 0x49484452) {
+    return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+  }
+  if (extension === "jpeg") {
+    let offset = 2;
+    while (offset + 9 < bytes.length) {
+      if (bytes[offset] !== 0xff) {
+        offset += 1;
+        continue;
+      }
+      const marker = bytes[offset + 1];
+      if (marker === 0xd8 || marker === 0xd9) {
+        offset += 2;
+        continue;
+      }
+      const size = bytes.readUInt16BE(offset + 2);
+      if (size < 2) break;
+      if (
+        marker === 0xc0 || marker === 0xc1 || marker === 0xc2 || marker === 0xc3
+        || marker === 0xc5 || marker === 0xc6 || marker === 0xc7
+        || marker === 0xc9 || marker === 0xca || marker === 0xcb
+        || marker === 0xcd || marker === 0xce || marker === 0xcf
+      ) {
+        return {
+          height: bytes.readUInt16BE(offset + 5),
+          width: bytes.readUInt16BE(offset + 7)
+        };
+      }
+      offset += 2 + size;
+    }
+  }
+  return null;
+}
+
+function fitImageBox(imageWidth, imageHeight, maxWidth = 160, maxHeight = 140) {
+  const width = Math.max(1, Number(imageWidth || 1));
+  const height = Math.max(1, Number(imageHeight || 1));
+  const ratio = Math.min(maxWidth / width, maxHeight / height, 1);
+  return {
+    width: Math.round(width * ratio),
+    height: Math.round(height * ratio)
+  };
+}
+
 function statementReceiptDateLabel(value = "") {
   const text = String(value || "").trim();
   const match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -1390,19 +1449,14 @@ async function addStatementReceiptSheet(workbook, orders = []) {
     margins: { left: 0.35, right: 0.35, top: 0.35, bottom: 0.35, header: 0.1, footer: 0.1 }
   };
   worksheet.columns = [
-    { width: 18 },
-    { width: 24 },
-    { width: 24 },
-    { width: 24 },
-    { width: 24 }
+    { width: 26 },
+    { width: 26 },
+    { width: 26 }
   ];
   const border = { style: "thin", color: { argb: excelArgb("#d9e3f2") } };
-  const imageWidth = 160;
-  const imageHeight = 112;
-  const imagesPerRow = 3;
   let cursorRow = 1;
   if (!receiptRows.length) {
-    worksheet.mergeCells(cursorRow, 1, cursorRow, 5);
+    worksheet.mergeCells(cursorRow, 1, cursorRow, 3);
     const emptyCell = worksheet.getCell(cursorRow, 1);
     emptyCell.value = "未找到可导出的票据图片";
     emptyCell.font = { name: "Microsoft YaHei", size: 12, bold: true, color: { argb: excelArgb("#b91c1c") } };
@@ -1420,7 +1474,13 @@ async function addStatementReceiptSheet(workbook, orders = []) {
   });
   const sortedGroups = Array.from(grouped.entries()).sort(([left], [right]) => left.localeCompare(right));
   for (const [date, files] of sortedGroups) {
-    worksheet.mergeCells(cursorRow, 1, cursorRow, 5);
+    if (files.length > worksheet.columnCount) {
+      for (let index = worksheet.columnCount + 1; index <= files.length; index += 1) {
+        worksheet.getColumn(index).width = 26;
+      }
+    }
+    const lastColumn = Math.max(1, files.length);
+    worksheet.mergeCells(cursorRow, 1, cursorRow, lastColumn);
     const dateCell = worksheet.getCell(cursorRow, 1);
     dateCell.value = statementReceiptDateLabel(date);
     dateCell.font = { name: "Microsoft YaHei", size: 13, bold: true, color: { argb: excelArgb("#17233c") } };
@@ -1430,34 +1490,48 @@ async function addStatementReceiptSheet(workbook, orders = []) {
     worksheet.getRow(cursorRow).height = 24;
     cursorRow += 1;
 
-    for (let index = 0; index < files.length; index += imagesPerRow) {
-      const batch = files.slice(index, index + imagesPerRow);
-      const imageRowNumber = cursorRow;
-      worksheet.getRow(imageRowNumber).height = 90;
-      for (let itemIndex = 0; itemIndex < batch.length; itemIndex += 1) {
-        const file = batch[itemIndex];
-        const startColumn = 1 + itemIndex * 2;
-        const imageBuffer = await fetchReceiptImageBuffer(file);
-        if (!imageBuffer) {
-          const imageCell = worksheet.getCell(imageRowNumber, startColumn);
-          imageCell.value = "图片读取失败";
-          imageCell.font = { name: "Microsoft YaHei", size: 10, color: { argb: excelArgb("#dc2626") } };
-          imageCell.alignment = { vertical: "middle", horizontal: "center" };
-          imageCell.border = { top: border, left: border, bottom: border, right: border };
-          continue;
-        }
-        const imageId = workbook.addImage({
-          buffer: imageBuffer,
-          extension: file.extension
-        });
-        worksheet.addImage(imageId, {
-          tl: { col: startColumn - 1 + 0.08, row: imageRowNumber - 1 + 0.12 },
-          ext: { width: imageWidth, height: imageHeight },
-          editAs: "oneCell"
-        });
+    const titleRowNumber = cursorRow;
+    const imageRowNumber = cursorRow + 1;
+    const rowHeights = [];
+    files.forEach((file, itemIndex) => {
+      const startColumn = 1 + itemIndex;
+      const titleCell = worksheet.getCell(titleRowNumber, startColumn);
+      titleCell.value = statementReceiptImageLabel(file);
+      titleCell.font = { name: "Microsoft YaHei", size: 10, bold: true, color: { argb: excelArgb("#334155") } };
+      titleCell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+      titleCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: excelArgb("#f8fafc") } };
+      titleCell.border = { top: border, left: border, bottom: border, right: border };
+    });
+    for (let itemIndex = 0; itemIndex < files.length; itemIndex += 1) {
+      const file = files[itemIndex];
+      const startColumn = 1 + itemIndex;
+      const imageBuffer = await fetchReceiptImageBuffer(file);
+      if (!imageBuffer) {
+        const imageCell = worksheet.getCell(imageRowNumber, startColumn);
+        imageCell.value = "图片读取失败";
+        imageCell.font = { name: "Microsoft YaHei", size: 10, color: { argb: excelArgb("#dc2626") } };
+        imageCell.alignment = { vertical: "middle", horizontal: "center" };
+        imageCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: excelArgb("#fff1f2") } };
+        imageCell.border = { top: border, left: border, bottom: border, right: border };
+        rowHeights.push(72);
+        continue;
       }
-      cursorRow += 2;
+      const dims = statementImageDimensions(imageBuffer, file.extension) || { width: 4, height: 3 };
+      const box = fitImageBox(dims.width, dims.height, 180, 160);
+      const imageId = workbook.addImage({
+        buffer: imageBuffer,
+        extension: file.extension
+      });
+      worksheet.addImage(imageId, {
+        tl: { col: startColumn - 1 + 0.08, row: imageRowNumber - 1 + 0.12 },
+        ext: { width: box.width, height: box.height },
+        editAs: "oneCell"
+      });
+      rowHeights.push(box.height + 18);
     }
+    worksheet.getRow(titleRowNumber).height = 22;
+    worksheet.getRow(imageRowNumber).height = Math.max(88, ...rowHeights);
+    cursorRow += 2;
     cursorRow += 1;
   }
 }
