@@ -1891,19 +1891,31 @@ function renderOrdersExcelHtml(orders, title = "订单导出", templatePayload =
 </html>`;
 }
 
+const ORDER_DEFAULT_SORT_SQL = `
+      ORDER BY
+        CASE WHEN COALESCE(NULLIF(plate, ''), NULLIF(supplier, '')) IS NULL THEN 1 ELSE 0 END,
+        COALESCE(NULLIF(plate, ''), NULLIF(supplier, '')),
+        order_date ASC,
+        no ASC
+    `;
+
 async function loadExportOrders(orderNos = []) {
   if (orderNos.length > 0) {
     const placeholders = orderNos.map(() => "?").join(",");
     const rows = await db.prepare(`
       SELECT * FROM orders
       WHERE deleted_at IS NULL AND no IN (${placeholders})
-      ORDER BY order_date DESC, no DESC
+      ${ORDER_DEFAULT_SORT_SQL}
     `).all(...orderNos);
     const orderIndex = new Map(orderNos.map((no, index) => [no, index]));
     const hydrated = await hydrateOrderFees(rows.map(mapOrder));
     return hydrated.sort((a, b) => (orderIndex.get(a.no) ?? 0) - (orderIndex.get(b.no) ?? 0));
   }
-  const rows = await db.prepare("SELECT * FROM orders WHERE deleted_at IS NULL ORDER BY order_date DESC, no DESC").all();
+  const rows = await db.prepare(`
+    SELECT * FROM orders
+    WHERE deleted_at IS NULL
+    ${ORDER_DEFAULT_SORT_SQL}
+  `).all();
   return hydrateOrderFees(rows.map(mapOrder));
 }
 
@@ -4657,7 +4669,11 @@ app.delete("/api/customer-contacts/:id", async (req, res) => {
 });
 
 app.get("/api/orders", async (_req, res) => {
-  const rows = await db.prepare("SELECT * FROM orders WHERE deleted_at IS NULL ORDER BY order_date DESC, no DESC").all();
+  const rows = await db.prepare(`
+    SELECT * FROM orders
+    WHERE deleted_at IS NULL
+    ${ORDER_DEFAULT_SORT_SQL}
+  `).all();
   res.json(await hydrateOrderFees(rows.map(mapOrder)));
 });
 

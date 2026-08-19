@@ -202,20 +202,22 @@ function dispatchPlanSourceRank(row) {
 
 function dispatchPlanGroupKey(row) {
   if (dispatchPlanSourceRank(row) === 1) {
-    return valueText((row && row.supplier) || (row && row.order && row.order.supplier)) || "未指定供应商";
+    return valueText((row && row.supplier) || (row && row.order && row.order.supplier));
   }
-  return valueText(row && row.plate) || "未定车牌";
+  return valueText(row && row.plate);
 }
 
 function compareDispatchRows(left, right) {
+  const leftGroup = dispatchPlanGroupKey(left);
+  const rightGroup = dispatchPlanGroupKey(right);
+  if (!leftGroup && rightGroup) return 1;
+  if (!rightGroup && leftGroup) return -1;
+  const groupCompare = leftGroup.localeCompare(rightGroup, "zh-Hans-CN", { numeric: true, sensitivity: "base" });
+  if (groupCompare !== 0) return groupCompare;
   const leftDate = valueText((left && left.date) || (left && left.order && left.order.date));
   const rightDate = valueText((right && right.date) || (right && right.order && right.order.date));
   const dateCompare = leftDate.localeCompare(rightDate);
   if (dateCompare !== 0) return dateCompare;
-  const sourceCompare = dispatchPlanSourceRank(left) - dispatchPlanSourceRank(right);
-  if (sourceCompare !== 0) return sourceCompare;
-  const groupCompare = dispatchPlanGroupKey(left).localeCompare(dispatchPlanGroupKey(right), "zh-Hans-CN", { numeric: true });
-  if (groupCompare !== 0) return groupCompare;
   const timeCompare = dispatchPlanTimeRank(left && left.loadTime) - dispatchPlanTimeRank(right && right.loadTime);
   if (timeCompare !== 0) return timeCompare;
   const noCompare = valueText(left && left.dispatchNo).localeCompare(valueText(right && right.dispatchNo), "zh-Hans-CN", { numeric: true });

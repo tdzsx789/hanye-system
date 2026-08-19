@@ -297,12 +297,10 @@ applySavedColumnOrder(orderColumns, ORDER_COLUMN_ORDER_KEY);
 pinColumnAfter(customerOrderColumns, "date", "select", CUSTOMER_ORDER_COLUMN_ORDER_KEY);
 pinColumnAfter(orderColumns, "sequence", "select", ORDER_COLUMN_ORDER_KEY);
 pinColumnAfter(orderColumns, "date", "sequence", ORDER_COLUMN_ORDER_KEY);
-pinColumnAfter(orderColumns, "no", "date", ORDER_COLUMN_ORDER_KEY);
+pinColumnAfter(orderColumns, "plate", "date", ORDER_COLUMN_ORDER_KEY);
+pinColumnAfter(orderColumns, "no", "plate", ORDER_COLUMN_ORDER_KEY);
 pinColumnAfter(orderColumns, "dispatchNo", "no", ORDER_COLUMN_ORDER_KEY);
 pinColumnAfter(orderColumns, "createdByName", "dispatchNo", ORDER_COLUMN_ORDER_KEY);
-pinColumnAfter(orderColumns, "plate", "customer", ORDER_COLUMN_ORDER_KEY);
-pinColumnAfter(orderColumns, "driver", "plate", ORDER_COLUMN_ORDER_KEY);
-pinColumnAfter(orderColumns, "supplier", "driver", ORDER_COLUMN_ORDER_KEY);
 
 function dataTableStorageKey(tableId, feature) {
   return `hanye_data_table_${tableId}_${feature}`;
@@ -1803,12 +1801,10 @@ function restoreOrderColumnsFromPreferences() {
   applySavedColumnOrder(orderColumns, ORDER_COLUMN_ORDER_KEY);
   pinColumnAfter(orderColumns, "sequence", "select", ORDER_COLUMN_ORDER_KEY);
   pinColumnAfter(orderColumns, "date", "sequence", ORDER_COLUMN_ORDER_KEY);
-  pinColumnAfter(orderColumns, "no", "date", ORDER_COLUMN_ORDER_KEY);
+  pinColumnAfter(orderColumns, "plate", "date", ORDER_COLUMN_ORDER_KEY);
+  pinColumnAfter(orderColumns, "no", "plate", ORDER_COLUMN_ORDER_KEY);
   pinColumnAfter(orderColumns, "dispatchNo", "no", ORDER_COLUMN_ORDER_KEY);
   pinColumnAfter(orderColumns, "createdByName", "dispatchNo", ORDER_COLUMN_ORDER_KEY);
-  pinColumnAfter(orderColumns, "plate", "customer", ORDER_COLUMN_ORDER_KEY);
-  pinColumnAfter(orderColumns, "driver", "plate", ORDER_COLUMN_ORDER_KEY);
-  pinColumnAfter(orderColumns, "supplier", "driver", ORDER_COLUMN_ORDER_KEY);
 }
 
 function restoreDispatchColumnsFromPreferences() {
@@ -3761,17 +3757,15 @@ function dispatchPlanGroupKey(row = {}) {
 }
 
 function compareDispatchPlanRowsForAutoSort(left = {}, right = {}) {
-  const dateCompare = String(dispatchPlanDate(left) || "").localeCompare(String(dispatchPlanDate(right) || ""));
-  if (dateCompare !== 0) return dateCompare;
-
-  const leftSourceRank = dispatchPlanSourceRank(left);
-  const rightSourceRank = dispatchPlanSourceRank(right);
-  if (leftSourceRank !== rightSourceRank) return leftSourceRank - rightSourceRank;
-
   const leftGroup = dispatchPlanGroupKey(left);
   const rightGroup = dispatchPlanGroupKey(right);
-  const groupCompare = leftGroup.localeCompare(rightGroup, "zh-Hans-CN", { numeric: true });
+  if (!leftGroup && rightGroup) return 1;
+  if (!rightGroup && leftGroup) return -1;
+  const groupCompare = leftGroup.localeCompare(rightGroup, "zh-Hans-CN", { numeric: true, sensitivity: "base" });
   if (groupCompare !== 0) return groupCompare;
+
+  const dateCompare = compareSortValues(dispatchPlanDate(left), dispatchPlanDate(right));
+  if (dateCompare !== 0) return dateCompare;
 
   const timeCompare = dispatchPlanTimeRank(left.loadTime) - dispatchPlanTimeRank(right.loadTime);
   if (timeCompare !== 0) return timeCompare;
@@ -14058,6 +14052,15 @@ function toggleTableSort(tableId, column = {}) {
   localStorage.setItem(tableSortKey(tableId), JSON.stringify(state));
 }
 
+function resetTableSort(tableId) {
+  if (!tableId) return;
+  const state = loadTableSortState(tableId);
+  state.key = "";
+  state.direction = "";
+  localStorage.removeItem(tableSortKey(tableId));
+  notify("已恢复默认排序");
+}
+
 function tableSortLabel(tableId, column = {}) {
   const direction = tableSortDirection(tableId, column.key);
   if (direction === "asc") return "升序";
@@ -14108,9 +14111,47 @@ function compareSortValues(left, right) {
   return String(a.value).localeCompare(String(b.value), "zh-Hans-CN", { numeric: true });
 }
 
+function orderDefaultGroupKey(order = {}) {
+  const plate = String(order.plate || "").trim();
+  if (plate) return plate;
+  return String(order.supplier || "").trim();
+}
+
+function compareOrderRowsForDefaultSort(left = {}, right = {}) {
+  const leftGroup = orderDefaultGroupKey(left);
+  const rightGroup = orderDefaultGroupKey(right);
+  if (!leftGroup && rightGroup) return 1;
+  if (!rightGroup && leftGroup) return -1;
+  const groupCompare = leftGroup.localeCompare(rightGroup, "zh-Hans-CN", { numeric: true, sensitivity: "base" });
+  if (groupCompare !== 0) return groupCompare;
+
+  const leftDate = parseInputDate(left.date || left.order?.date || "");
+  const rightDate = parseInputDate(right.date || right.order?.date || "");
+  if (leftDate && rightDate) {
+    const dateCompare = leftDate.getTime() - rightDate.getTime();
+    if (dateCompare !== 0) return dateCompare;
+  } else if (leftDate || rightDate) {
+    return leftDate ? -1 : 1;
+  }
+
+  const noCompare = String(left.no || "").localeCompare(String(right.no || ""), "zh-Hans-CN", { numeric: true, sensitivity: "base" });
+  if (noCompare !== 0) return noCompare;
+  return (left.__sortIndex ?? 0) - (right.__sortIndex ?? 0);
+}
+
 function sortRowsByTable(rows = [], tableId, fallbackIndexKey = "__sortIndex") {
   const state = loadTableSortState(tableId);
-  if (!state.key || !state.direction) return rows;
+  if (!state.key || !state.direction) {
+    if (!["orders", "customerOrders", "relatedVehicleOrders", "relatedDriverOrders"].includes(tableId)) return rows;
+    return rows
+      .map((row, index) => ({ row, index }))
+      .sort((left, right) => {
+        const compared = compareOrderRowsForDefaultSort(left.row, right.row);
+        if (compared !== 0) return compared;
+        return (left.row?.[fallbackIndexKey] ?? left.index) - (right.row?.[fallbackIndexKey] ?? right.index);
+      })
+      .map((item) => item.row);
+  }
   const direction = state.direction === "desc" ? -1 : 1;
   return rows
     .map((row, index) => ({ row, index }))
@@ -24712,6 +24753,7 @@ function orderDetailFeeRows(order = {}) {
                     </div>
                   </div>
                 </span>
+                <button class="ghost-btn small" type="button" @click="resetTableSort('orders')"><IconSvg name="refresh" />恢复排序</button>
                 <button class="ghost-btn small" type="button" @click="resetOrderColumnWidths"><IconSvg name="refresh" />恢复列宽</button>
 	            <button class="ghost-btn order-icon-btn" type="button" :title="selectedOrderNos.length ? `查看已选 ${selectedOrderNos.length} 条` : '查看当前筛选列表'" aria-label="查看订单列表" @click="openOrderListDetail">
 	              <IconSvg name="eye" /><span class="sr-only">查看</span>
@@ -24974,6 +25016,7 @@ function orderDetailFeeRows(order = {}) {
                     </div>
                   </div>
                 </span>
+                <button class="ghost-btn small" type="button" @click="resetTableSort('dispatchBoard')"><IconSvg name="refresh" />恢复排序</button>
                 <button class="ghost-btn small" type="button" @click="resetDataTableColumnWidths('dispatch_board', dispatchTableColumns, dispatchTableColumnWidths)"><IconSvg name="refresh" />恢复列宽</button>
                 <button class="ghost-btn small" type="button" @click="saveDispatchPlan">
                   <IconSvg name="save" />保存
