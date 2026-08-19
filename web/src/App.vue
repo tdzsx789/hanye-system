@@ -9,6 +9,7 @@ import {
   authApi,
   customersApi,
   customsBusinessApi,
+  otherBusinessApi,
   dispatchApi,
   filesApi,
   financeApi,
@@ -19,7 +20,9 @@ import {
   templatesApi,
   vehiclesApi
 } from "./api/index.js";
+import { createRealtimeClient } from "./api/realtime.js";
 import IconSvg from "./components/IconSvg.vue";
+import AttachmentPanel from "./components/AttachmentPanel.vue";
 import FilePreviewModal from "./components/FilePreviewModal.vue";
 import UploadDropzoneModal from "./components/UploadDropzoneModal.vue";
 import OrderAttachmentPanel from "./components/orders/OrderAttachmentPanel.vue";
@@ -208,6 +211,7 @@ const COMPANY_ENTRY_TYPE_OPTIONS = [
   { value: "income", label: "收入" }
 ];
 const COMPANY_EXPENSE_CUSTOM_CATEGORY_VALUE = "__custom_company_expense_category__";
+const DRIVER_EMPLOYMENT_STATUS_OPTIONS = ["在职", "离职"];
 const CUSTOMER_CATEGORY_OPTIONS = ["运输客户", "报关客户"];
 const DEFAULT_CUSTOMS_CUSTOMER_CONFIG = {
   customsHomeItemCount: 6,
@@ -234,7 +238,7 @@ const CUSTOMS_BUSINESS_PREFIX_COLUMNS = [
   { key: "date", label: "日期", width: 96 },
   { key: "declarationNo", label: "报关单号", width: 136 },
   { key: "sixSheetNo", label: "六联单号", width: 128 },
-  { key: "company", label: "公司", width: 220 },
+  { key: "company", label: "客户", width: 220 },
   { key: "direction", label: "进出口", width: 92 },
   { key: "itemCount", label: "品名项数", width: 86 },
   { key: "pageCount", label: "续页", width: 72 },
@@ -250,6 +254,22 @@ const CUSTOMS_BUSINESS_SUFFIX_COLUMNS = [
   { key: "total", label: "合计", width: 96, amount: true },
   { key: "remark", label: "备注", width: 180 },
   { key: "actions", label: "操作", width: 120, exportable: false }
+];
+const OTHER_BUSINESS_TABLE_ID = "other_business";
+const OTHER_BUSINESS_COLUMN_ORDER_KEY = dataTableStorageKey(OTHER_BUSINESS_TABLE_ID, "order");
+const OTHER_BUSINESS_PREFIX_COLUMNS = [
+  { key: "date", label: "日期", width: 96 },
+  { key: "title", label: "标题", width: 180 },
+  { key: "customer", label: "客户", width: 220 },
+  { key: "income", label: "基础收入", width: 100, amount: true },
+  { key: "cost", label: "基础成本", width: 100, amount: true }
+];
+const OTHER_BUSINESS_SUFFIX_COLUMNS = [
+  { key: "totalIncome", label: "收入合计", width: 108, amount: true },
+  { key: "totalCost", label: "成本合计", width: 108, amount: true },
+  { key: "profit", label: "利润", width: 108, amount: true },
+  { key: "remark", label: "备注", width: 180 },
+  { key: "actions", label: "操作", width: 92, exportable: false }
 ];
 
 function migrateCustomsBusinessColumnOrder(saved = []) {
@@ -271,10 +291,12 @@ function migrateCustomsBusinessColumnOrder(saved = []) {
 }
 
 const customsBusinessColumnOrder = ref(migrateCustomsBusinessColumnOrder(loadStoredJson(CUSTOMS_BUSINESS_COLUMN_ORDER_KEY, [])));
+const otherBusinessColumnOrder = ref(loadStoredJson(OTHER_BUSINESS_COLUMN_ORDER_KEY, []));
 applySavedColumnOrder(customerOrderColumns, CUSTOMER_ORDER_COLUMN_ORDER_KEY);
 applySavedColumnOrder(orderColumns, ORDER_COLUMN_ORDER_KEY);
 pinColumnAfter(customerOrderColumns, "date", "select", CUSTOMER_ORDER_COLUMN_ORDER_KEY);
-pinColumnAfter(orderColumns, "date", "select", ORDER_COLUMN_ORDER_KEY);
+pinColumnAfter(orderColumns, "sequence", "select", ORDER_COLUMN_ORDER_KEY);
+pinColumnAfter(orderColumns, "date", "sequence", ORDER_COLUMN_ORDER_KEY);
 pinColumnAfter(orderColumns, "no", "date", ORDER_COLUMN_ORDER_KEY);
 pinColumnAfter(orderColumns, "dispatchNo", "no", ORDER_COLUMN_ORDER_KEY);
 pinColumnAfter(orderColumns, "createdByName", "dispatchNo", ORDER_COLUMN_ORDER_KEY);
@@ -311,9 +333,21 @@ function applyDataTableColumnOrder(columns, tableId) {
     saved = [];
   }
   if (tableId === "dispatch_board" && saved.length) {
+    saved = migrateSavedDataTableColumnAfter(saved, tableId, "plate", "loadTime", "plate_after_load_time_migrated_v1");
     saved = migrateSavedDataTableColumnAfter(saved, tableId, "status", "plate", "status_after_plate_migrated_v1");
     saved = migrateSavedDataTableColumnAfter(saved, tableId, "driver", "plate", "driver_after_plate_migrated_v1");
+    saved = migrateSavedDataTableColumnAfter(saved, tableId, "supplier", "driver", "supplier_after_driver_migrated_v1");
     saved = migrateSavedDataTableColumnAfter(saved, tableId, "createdByName", "dispatchNo", "creator_after_dispatch_no_migrated_v1");
+    saved = saved.filter((key) => key !== "vehicleSource");
+    const supplierIndex = saved.indexOf("supplier");
+    const driverIndex = saved.indexOf("driver");
+    if (driverIndex >= 0) {
+      if (supplierIndex >= 0) saved.splice(supplierIndex, 1);
+      const nextDriverIndex = saved.indexOf("driver");
+      saved.splice(nextDriverIndex + 1, 0, "supplier");
+    } else if (supplierIndex < 0) {
+      saved.push("supplier");
+    }
   }
   if (!saved.length) return;
   const indexMap = new Map(saved.map((key, index) => [key, index]));
@@ -334,6 +368,7 @@ function moveDataTableColumn(columns, tableId, draggedKey, targetKey) {
   const targetIndex = columns.findIndex((column) => column.key === targetKey);
   columns.splice(targetIndex, 0, moved);
   localStorage.setItem(dataTableStorageKey(tableId, "order"), JSON.stringify(columns.filter((column) => !column.locked).map((column) => column.key)));
+  if (tableId === "dispatch_board") saveAccountTablePreferencesSoon();
 }
 
 function moveDataTableColumnByOffset(columns, tableId, column, offset) {
@@ -349,6 +384,7 @@ function moveDataTableColumnByOffset(columns, tableId, column, offset) {
   const nextIndex = columns.findIndex((item) => item.key === targetMovableKey);
   columns.splice(offset > 0 ? nextIndex + 1 : nextIndex, 0, moved);
   localStorage.setItem(dataTableStorageKey(tableId, "order"), JSON.stringify(columns.filter((item) => !item.locked).map((item) => item.key)));
+  if (tableId === "dispatch_board") saveAccountTablePreferencesSoon();
 }
 
 function resetDataTableColumnWidths(tableId, columns, widths) {
@@ -356,6 +392,7 @@ function resetDataTableColumnWidths(tableId, columns, widths) {
   columns.forEach((column) => {
     widths[column.key] = column.width;
   });
+  if (tableId === "dispatch_board") saveAccountTablePreferencesSoon();
   notify("已恢复自适应列宽");
 }
 
@@ -367,6 +404,7 @@ function resetDataTableColumnOrder(columns, tableId) {
     (left.defaultIndex ?? 0) - (right.defaultIndex ?? 0)
   );
   columns.splice(0, columns.length, ...lockedStart, ...movable, ...lockedEnd);
+  if (tableId === "dispatch_board") saveAccountTablePreferencesSoon();
   notify("已恢复默认列顺序");
 }
 
@@ -606,6 +644,7 @@ function normalizeCustomerRecord(customer = {}) {
   return {
     ...row,
     customerCategory: row.type === "客户" ? customerCategoryValue(row) : "",
+    shortName: String(row.shortName || row.short_name || "").trim(),
     customsHomeItemCount: Number(row.customsHomeItemCount ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsHomeItemCount),
     customsPageItemCount: Number(row.customsPageItemCount ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsPageItemCount),
     customsImportHomeFee: Number(row.customsImportHomeFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportHomeFee),
@@ -613,6 +652,62 @@ function normalizeCustomerRecord(customer = {}) {
     customsImportPageFee: Number(row.customsImportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee),
     customsExportPageFee: Number(row.customsExportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee)
   };
+}
+
+function driverEmploymentStatus(driver = {}) {
+  const status = String(driver?.employmentStatus || driver?.employment_status || "").trim();
+  return DRIVER_EMPLOYMENT_STATUS_OPTIONS.includes(status) ? status : "在职";
+}
+
+function normalizeDriverRecord(driver = {}) {
+  return {
+    ...driver,
+    employmentStatus: driverEmploymentStatus(driver)
+  };
+}
+
+function customerShortDisplay(customer = null) {
+  if (!customer) return "";
+  return String(customer.shortName || customer.short_name || customer.name || "").trim();
+}
+
+function customerOptionPrimaryDisplay(customer = null) {
+  return customerShortDisplay(customer);
+}
+
+function partnerDisplayLabel(value = "", type = "") {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const match = customerRows.value.find((item) =>
+    (!type || item.type === type) &&
+    (
+      String(item.name || "").trim() === text
+      || String(item.shortName || item.short_name || "").trim() === text
+      || String(item.id || "").trim() === text
+    )
+  );
+  return customerShortDisplay(match) || text;
+}
+
+function orderCustomerDisplay(order = {}) {
+  return partnerDisplayLabel(order.customer || order.customerName || "", "客户") || "-";
+}
+
+function supplierDisplayLabel(value = "") {
+  return partnerDisplayLabel(value, "供应商") || String(value || "").trim();
+}
+
+function findPartnerByTypedLabel(value = "", type = "") {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  return customerRows.value.find((item) =>
+    (!type || item.type === type) &&
+    (
+      String(item.name || "").trim() === text
+      || String(item.shortName || item.short_name || "").trim() === text
+      || String(item.id || "").trim() === text
+    )
+  ) || null;
 }
 
 function partnerDisplayName(type = "客户", category = "运输客户") {
@@ -940,9 +1035,11 @@ const activeCustomerListLabel = computed(() =>
   partnerDisplayName(activePartnerType.value, activeCustomerCategory.value)
 );
 const storedVehicleTab = localStorage.getItem("hanye_vehicle_tab");
-const activeVehicleTab = ref(["车辆管理", "司机管理"].includes(storedVehicleTab) ? storedVehicleTab : "车辆管理");
+const initialRouteKey = String(location.hash || "").replace("#", "").split("?")[0];
+const activeVehicleTab = ref(initialRouteKey === "driverManage" ? "司机管理" : (["车辆管理", "司机管理"].includes(storedVehicleTab) ? storedVehicleTab : "车辆管理"));
 const activeVehicleDetailTab = ref("车辆资料");
 const activeDriverDetailTab = ref("司机资料");
+const formerDriverListOpen = ref(false);
 const activeCustomerDetailTab = ref("订单管理");
 const activeOrderDetailTab = ref("收费项目");
 const orderDateFilterMode = ref(normalizeDateFilterMode(localStorage.getItem("hanye_order_date_filter_mode")));
@@ -979,6 +1076,7 @@ const bossCompanyExpenseEditForm = reactive({
   note: ""
 });
 const customsBusinessPeriodFilter = ref(currentPeriodMonthKey());
+const otherBusinessPeriodFilter = ref(normalizePeriodFilter(localStorage.getItem("hanye_other_business_period_filter") || currentPeriodMonthKey()));
 const customsStatementPeriodFilter = ref(normalizePeriodFilter(localStorage.getItem("hanye_customs_statement_period_filter") || currentPeriodMonthKey()));
 const customsStatementCompanySearch = ref("");
 const vehicleExpensePeriodFilter = ref(normalizePeriodFilter(localStorage.getItem("hanye_vehicle_expense_period_filter") || currentPeriodMonthKey()));
@@ -1001,13 +1099,21 @@ const statementCustomerUnreceivedAmounts = reactive(loadStoredJson(STATEMENT_CUS
 const customsBusinessRows = ref([]);
 const customsBusinessAllRows = ref([]);
 const customsBusinessRecycleRows = ref([]);
+const otherBusinessRows = ref([]);
+const otherBusinessAllRows = ref([]);
+const otherBusinessRecycleRows = ref([]);
 const editingCustomsBusinessId = ref("");
 const copyingCustomsBusinessId = ref("");
+const editingOtherBusinessId = ref("");
 const customsBusinessCompanySearch = ref("");
 const customsBusinessCompanyPickerOpen = ref(false);
 const customsBusinessSearchKeyword = ref("");
 const customsBusinessCompanyFilter = ref("");
 const customsBusinessDirectionFilter = ref("");
+const otherBusinessCustomerSearch = ref("");
+const otherBusinessCustomerPickerOpen = ref(false);
+const otherBusinessSearchKeyword = ref("");
+const otherBusinessCustomerFilter = ref("");
 const driverRouteAdjustRules = ref([]);
 const driverRouteAdjustForm = reactive({
   customerName: "",
@@ -1043,6 +1149,7 @@ const periodFilterRefs = {
   statement: statementMonthFilter,
   boss: bossPeriodFilter,
   customsBusiness: customsBusinessPeriodFilter,
+  otherBusiness: otherBusinessPeriodFilter,
   customsStatement: customsStatementPeriodFilter,
   vehicleExpenses: vehicleExpensePeriodFilter,
   dispatchRange: dispatchRangePeriodFilter
@@ -1052,6 +1159,8 @@ const dispatchDate = ref(initialDispatchDate);
 const activeDispatchStatusPool = ref(DISPATCH_PLAN_DEFAULT_STATUS);
 const dispatchPlanRows = ref([]);
 const dispatchLoadedDates = ref([dispatchDate.value]);
+const dispatchPlanBaseRowsByDate = reactive({});
+const dispatchPlanUpdatedAtByDate = reactive({});
 const selectedDispatchPlanIds = ref([]);
 const dispatchModalOpen = ref(false);
 const dispatchDuplicateModalOpen = ref(false);
@@ -1093,6 +1202,7 @@ const driverAdjustmentRows = ref([]);
 const recycleRows = ref([]);
 const recycleScope = ref("orders");
 const activeRecycleTab = ref("orders");
+const dispatchRecycleRows = ref([]);
 const feeItemRows = ref([]);
 const freightRateRows = ref([]);
 const templateRows = ref([]);
@@ -1199,6 +1309,10 @@ let noticeTimer;
 let orderAttachmentUploadStatusTimer;
 let orderFeeCostSyncTimer;
 let vehicleExpenseReceiptUploadStatusTimer;
+let realtimeClient = null;
+let realtimeRefreshTimer = null;
+let dispatchPlanAutoSavePromise = Promise.resolve();
+let modalDragState = null;
 const bossVehicleExchangeRateSaveTimers = {};
 let bossVehicleExchangeRateSaveRequestId = 0;
 let customerOrderResizeState = null;
@@ -1210,6 +1324,12 @@ let draggedCustomerOrderColumnKey = "";
 let draggedOrderColumnKey = "";
 let draggedDispatchTableColumnKey = "";
 let draggedCustomsBusinessColumnKey = "";
+let draggedOtherBusinessColumnKey = "";
+const realtimePendingRefresh = {
+  database: false,
+  dispatch: false,
+  reminders: false
+};
 
 const customerModalOpen = ref(false);
 const contactModalOpen = ref(false);
@@ -1242,16 +1362,22 @@ const customerOrderColumnMenuOpen = ref(false);
 const orderColumnMenuOpen = ref(false);
 const dispatchColumnMenuOpen = ref(false);
 const customsBusinessColumnMenuOpen = ref(false);
+const otherBusinessColumnMenuOpen = ref(false);
 const accountPasswordModalOpen = ref(false);
 const accountProfileModalOpen = ref(false);
 const accountCreateModalOpen = ref(false);
 const accountEditModalOpen = ref(false);
 const customsBusinessModalOpen = ref(false);
+const otherBusinessModalOpen = ref(false);
 const accountPasswordSaving = ref(false);
 const accountProfileSaving = ref(false);
 const accountCreateSaving = ref(false);
 const accountEditSaving = ref(false);
 const customsBusinessSaving = ref(false);
+const otherBusinessSaving = ref(false);
+const otherBusinessAttachmentRows = ref([]);
+const otherBusinessAttachmentUploading = ref(false);
+const otherBusinessDraftAttachmentEntityId = ref("");
 const vehicleExpenseSaving = ref(false);
 const orderExportExchangeMode = ref("");
 const orderExportExchangeRate = ref("");
@@ -1331,10 +1457,33 @@ function blankCustomsBusinessForm() {
 
 const customsBusinessForm = reactive(blankCustomsBusinessForm());
 
+function createBlankOtherBusinessCustomField() {
+  return {
+    name: "",
+    income: 0,
+    cost: 0
+  };
+}
+
+function blankOtherBusinessForm() {
+  return {
+    date: todayInputValue(),
+    title: "",
+    customer: "",
+    cost: 0,
+    income: 0,
+    customFields: [],
+    remark: ""
+  };
+}
+
+const otherBusinessForm = reactive(blankOtherBusinessForm());
+
 const customerForm = reactive({
   type: "客户",
   customerCategory: "运输客户",
   name: "",
+  shortName: "",
   province: "",
   city: "",
   address: "",
@@ -1424,6 +1573,7 @@ const dispatchForm = reactive({
   supplier: "",
   note: ""
 });
+const dispatchLoadHourDraft = ref("");
 
 const DISPATCH_LOAD_HOUR_OPTIONS = Array.from({ length: 24 }, (_, index) => String(index).padStart(2, "0"));
 const DISPATCH_LOAD_MINUTE_OPTIONS = ["00", "15", "30", "45"];
@@ -1577,6 +1727,8 @@ const financeWageDetailLockedColumns = ref(loadStoredJson(dataTableStorageKey("f
 const dispatchTableColumnWidths = reactive(loadDataTableColumnWidths("dispatch_board", dispatchTableColumns));
 const dispatchTableColumnVisibility = reactive(loadDataTableColumnVisibility("dispatch_board", dispatchTableColumns));
 applyDataTableColumnOrder(dispatchTableColumns, "dispatch_board");
+const orderColumnOrderMenuOpen = ref(false);
+const dispatchColumnOrderMenuOpen = ref(false);
 const customerListDetailColumnWidths = reactive(loadDataTableColumnWidths("customer_list_detail", customerListDetailColumns));
 const customerListDetailColumnVisibility = reactive(loadDataTableColumnVisibility("customer_list_detail", customerListDetailColumns));
 applyDataTableColumnOrder(customerListDetailColumns, "customer_list_detail");
@@ -1601,13 +1753,145 @@ function ensureOrderSupplierColumnVisible() {
 
 ensureOrderSupplierColumnVisible();
 
+let accountTablePreferencesSaveTimer = null;
+
+function accountTablePreferencesSnapshot() {
+  return {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    density: dataTableDensity.value,
+    order: {
+      widths: loadStoredJson(ORDER_COLUMN_STORAGE_KEY, {}),
+      visibility: loadStoredJson(ORDER_COLUMN_VISIBILITY_KEY, {}),
+      order: loadStoredJson(ORDER_COLUMN_ORDER_KEY, []),
+      locked: loadStoredJson(ORDER_COLUMN_LOCKED_KEY, [])
+    },
+    dispatchBoard: {
+      widths: loadStoredJson(dataTableStorageKey("dispatch_board", "widths"), {}),
+      visibility: loadStoredJson(dataTableStorageKey("dispatch_board", "visibility"), {}),
+      order: loadStoredJson(dataTableStorageKey("dispatch_board", "order"), [])
+    },
+    customsBusiness: {
+      order: loadStoredJson(CUSTOMS_BUSINESS_COLUMN_ORDER_KEY, [])
+    },
+    otherBusiness: {
+      order: loadStoredJson(OTHER_BUSINESS_COLUMN_ORDER_KEY, [])
+    }
+  };
+}
+
+function restoreObject(target, value = {}) {
+  Object.keys(target).forEach((key) => delete target[key]);
+  Object.assign(target, value && typeof value === "object" && !Array.isArray(value) ? value : {});
+}
+
+function restoreColumnWidths(widths, columns, saved = {}) {
+  columns.forEach((column) => {
+    widths[column.key] = clampColumnWidth(column, Number(saved?.[column.key]));
+  });
+}
+
+function restoreColumnVisibility(visibility, columns, saved = {}) {
+  restoreObject(visibility, columns.reduce((next, column) => {
+    next[column.key] = column.locked ? true : saved?.[column.key] !== false;
+    return next;
+  }, {}));
+}
+
+function restoreOrderColumnsFromPreferences() {
+  orderColumns.splice(0, orderColumns.length, ...createOrderColumns());
+  applySavedColumnOrder(orderColumns, ORDER_COLUMN_ORDER_KEY);
+  pinColumnAfter(orderColumns, "sequence", "select", ORDER_COLUMN_ORDER_KEY);
+  pinColumnAfter(orderColumns, "date", "sequence", ORDER_COLUMN_ORDER_KEY);
+  pinColumnAfter(orderColumns, "no", "date", ORDER_COLUMN_ORDER_KEY);
+  pinColumnAfter(orderColumns, "dispatchNo", "no", ORDER_COLUMN_ORDER_KEY);
+  pinColumnAfter(orderColumns, "createdByName", "dispatchNo", ORDER_COLUMN_ORDER_KEY);
+  pinColumnAfter(orderColumns, "plate", "customer", ORDER_COLUMN_ORDER_KEY);
+  pinColumnAfter(orderColumns, "driver", "plate", ORDER_COLUMN_ORDER_KEY);
+  pinColumnAfter(orderColumns, "supplier", "driver", ORDER_COLUMN_ORDER_KEY);
+}
+
+function restoreDispatchColumnsFromPreferences() {
+  dispatchTableColumns.splice(0, dispatchTableColumns.length, ...createDispatchTableColumns());
+  applyDataTableColumnOrder(dispatchTableColumns, "dispatch_board");
+}
+
+function applyAccountTablePreferences(preferences = {}) {
+  const orderPrefs = preferences.order || {};
+  const dispatchPrefs = preferences.dispatchBoard || {};
+  const customsPrefs = preferences.customsBusiness || {};
+  const otherBusinessPrefs = preferences.otherBusiness || {};
+  if (preferences.density) {
+    localStorage.setItem("hanye_data_table_density", preferences.density);
+    dataTableDensity.value = dataTableDensityOptions.some((item) => item.key === preferences.density)
+      ? preferences.density
+      : "compact";
+  }
+  saveStoredJson(ORDER_COLUMN_STORAGE_KEY, orderPrefs.widths || {});
+  saveStoredJson(ORDER_COLUMN_VISIBILITY_KEY, orderPrefs.visibility || {});
+  saveStoredJson(ORDER_COLUMN_ORDER_KEY, orderPrefs.order || []);
+  saveStoredJson(ORDER_COLUMN_LOCKED_KEY, orderPrefs.locked || []);
+  saveStoredJson(dataTableStorageKey("dispatch_board", "widths"), dispatchPrefs.widths || {});
+  saveStoredJson(dataTableStorageKey("dispatch_board", "visibility"), dispatchPrefs.visibility || {});
+  saveStoredJson(dataTableStorageKey("dispatch_board", "order"), dispatchPrefs.order || []);
+  saveStoredJson(CUSTOMS_BUSINESS_COLUMN_ORDER_KEY, customsPrefs.order || []);
+  saveStoredJson(OTHER_BUSINESS_COLUMN_ORDER_KEY, otherBusinessPrefs.order || []);
+
+  orderLockedColumns.value = Array.isArray(orderPrefs.locked) ? orderPrefs.locked : [];
+  restoreOrderColumnsFromPreferences();
+  restoreColumnWidths(orderColumnWidths, orderColumns, orderPrefs.widths || {});
+  restoreColumnVisibility(orderColumnVisibility, orderColumns, orderPrefs.visibility || {});
+  ensureOrderSupplierColumnVisible();
+
+  restoreDispatchColumnsFromPreferences();
+  restoreColumnWidths(dispatchTableColumnWidths, dispatchTableColumns, dispatchPrefs.widths || {});
+  restoreColumnVisibility(dispatchTableColumnVisibility, dispatchTableColumns, dispatchPrefs.visibility || {});
+
+  customsBusinessColumnOrder.value = Array.isArray(customsPrefs.order) ? customsPrefs.order : [];
+  otherBusinessColumnOrder.value = Array.isArray(otherBusinessPrefs.order) ? otherBusinessPrefs.order : [];
+}
+
+async function syncAccountTablePreferencesFromServer() {
+  if (!authToken.value) return;
+  const preferences = await authApi.getTablePreferences();
+  if (preferences && Object.keys(preferences).length) {
+    applyAccountTablePreferences(preferences);
+    return;
+  }
+  await authApi.updateTablePreferences(accountTablePreferencesSnapshot());
+}
+
+function saveAccountTablePreferencesSoon() {
+  if (!authToken.value || !loggedIn.value) return;
+  window.clearTimeout(accountTablePreferencesSaveTimer);
+  accountTablePreferencesSaveTimer = window.setTimeout(() => {
+    authApi.updateTablePreferences(accountTablePreferencesSnapshot())
+      .then((preferences) => {
+        if (currentSessionAccount.value) {
+          setSessionAccount({ ...currentSessionAccount.value, tablePreferences: preferences });
+        }
+      })
+      .catch((error) => notify(error.message || "表格喜好同步失败"));
+  }, 500);
+}
+
 const addressBookForm = reactive({
   area: "",
+  city: "",
+  district: "",
   contact: "",
   phone: "",
   address: "",
   note: ""
 });
+const addressBookDistrictSearch = ref("");
+const addressBookDistrictPickerOpen = ref(false);
+const dispatchLocationDistrictPicker = reactive({
+  key: "",
+  keyword: ""
+});
+const dispatchLocationInputComposing = reactive({});
+const dispatchLocationDrafts = reactive({});
 
 const vehicleForm = reactive({
   plate: "",
@@ -1653,6 +1937,7 @@ const driverForm = reactive({
   birthday: "",
   hireDate: "",
   leaveDate: "",
+  employmentStatus: "在职",
   expireAt: "",
   status: "正常",
   note: ""
@@ -1809,7 +2094,7 @@ let templateAutosaveApplying = false;
 let templateLastSavedSnapshot = "";
 const templateDesigner = reactive({
   orientation: "portrait",
-  header: "公司名称 / 导出标题\n日期：{{date}}",
+  header: "客户 / 导出标题\n日期：{{date}}",
   headerX: 18,
   headerY: 18,
   headerTextItems: [],
@@ -2172,6 +2457,9 @@ const dispatchModalNo = computed(() => {
 const customerModalTitleId = computed(() => editingCustomerId.value || "KH00021053");
 const availableCustomerCities = computed(() => chinaProvinceCities[customerForm.province] || []);
 const orderModalTitleNo = computed(() => editingOrderNo.value || generateOrderNo(orderForm.date || todayInputValue()));
+const orderModalCustomerTitle = computed(() =>
+  partnerDisplayLabel(orderForm.customer || "", "客户") || orderForm.customer || ""
+);
 
 const selectedVehicleDriverCount = computed(() =>
   activeVehicleTab.value === "车辆管理" ? selectedVehiclePlates.value.length : selectedDriverIds.value.length
@@ -2212,8 +2500,10 @@ const selectedVehicle = computed(() =>
   vehicleRows.value.find((item) => item.plate === selectedVehiclePlate.value) || vehicleRows.value[0]
 );
 
+const activeDriverRows = computed(() => driverRows.value.filter((driver) => driverEmploymentStatus(driver) === "在职"));
+const formerDriverRows = computed(() => driverRows.value.filter((driver) => driverEmploymentStatus(driver) === "离职"));
 const selectedDriver = computed(() =>
-  driverRows.value.find((item) => item.id === selectedDriverId.value) || driverRows.value[0]
+  driverRows.value.find((item) => item.id === selectedDriverId.value) || activeDriverRows.value[0] || driverRows.value[0]
 );
 const selectedDriverIsMainlandRider = computed(() => selectedDriver.value?.type === "大陆骑师");
 const driverTypeOptions = computed(() => {
@@ -2222,11 +2512,11 @@ const driverTypeOptions = computed(() => {
     .filter(Boolean);
   return Array.from(new Set([...DEFAULT_DRIVER_TYPES, ...customTypes]));
 });
-const hongKongDriverOptions = computed(() => driverRows.value.filter((driver) => (driver.type || "香港司机") === "香港司机"));
-const mainlandDriverOptions = computed(() => driverRows.value.filter((driver) => driver.type === "大陆骑师"));
+const hongKongDriverOptions = computed(() => activeDriverRows.value.filter((driver) => (driver.type || "香港司机") === "香港司机"));
+const mainlandDriverOptions = computed(() => activeDriverRows.value.filter((driver) => driver.type === "大陆骑师"));
 const generalDriverOptions = computed(() => {
-  const preferred = driverRows.value.filter((driver) => !["大陆骑师"].includes(driver.type || "香港司机"));
-  return preferred.length ? preferred : driverRows.value;
+  const preferred = activeDriverRows.value.filter((driver) => !["大陆骑师"].includes(driver.type || "香港司机"));
+  return preferred.length ? preferred : activeDriverRows.value;
 });
 const orderIsCustomsOnly = computed(() => orderForm.businessType === "报关");
 const orderHasTransportFields = computed(() => orderForm.businessType !== "报关");
@@ -2658,8 +2948,8 @@ const visibleVehicles = computed(() => {
 
 const visibleDrivers = computed(() => {
   const keyword = vehicleDriverSearch.value.trim().toLowerCase();
-  const rows = !keyword ? driverRows.value : driverRows.value.filter((item) =>
-    [item.name, item.phone, item.license, item.expireAt, item.status, item.note]
+  const rows = !keyword ? activeDriverRows.value : activeDriverRows.value.filter((item) =>
+    [item.type, item.name, item.phone, item.idNo, item.license, item.hireDate, item.leaveDate, item.expireAt, driverEmploymentStatus(item), item.status, item.note]
       .some((value) => String(value || "").toLowerCase().includes(keyword))
   );
   return sortRowsByTable(rows, "drivers");
@@ -2884,7 +3174,7 @@ async function uploadVehicleExpenseReceiptFiles(expenseId, files = []) {
     }
   });
   if (!validFiles.length) {
-    setVehicleExpenseReceiptUploadStatus("未上传，所选文件仅支持图片或 PDF，且不能超过 8MB", "error");
+    setVehicleExpenseReceiptUploadStatus("未上传，所选文件仅支持图片、PDF 或 Excel，且不能超过 8MB", "error");
     scheduleClearVehicleExpenseReceiptUploadStatus(7000);
     return { success: 0, failed };
   }
@@ -3191,6 +3481,31 @@ function normalizeDispatchPlanRows(rows = [], date = dispatchDate.value) {
   return normalizedRows;
 }
 
+function cloneDispatchPlanRows(rows = []) {
+  return JSON.parse(JSON.stringify(Array.isArray(rows) ? rows : []));
+}
+
+function setDispatchPlanBaseRows(date, rows = [], updatedAt = "") {
+  if (!date) return;
+  dispatchPlanBaseRowsByDate[date] = cloneDispatchPlanRows(rows);
+  dispatchPlanUpdatedAtByDate[date] = updatedAt || "";
+}
+
+function updateDispatchPlanBaseFromRecord(record = {}, fallbackDate = dispatchDate.value) {
+  const date = record.date || fallbackDate;
+  const rows = normalizeDispatchPlanRows(Array.isArray(record.rows) ? record.rows : [], date);
+  setDispatchPlanBaseRows(date, rows, record.updatedAt || "");
+  return rows;
+}
+
+function dispatchRowRef(row = {}) {
+  return {
+    id: String(row.id || "").trim(),
+    dispatchNo: String(row.dispatchNo || "").trim(),
+    orderNo: String(row.orderNo || "").trim()
+  };
+}
+
 function applyDispatchPlanRows(rows = [], date = dispatchDate.value, loadedDates = [date]) {
   const normalizedRows = normalizeDispatchPlanRows(rows, date);
   closeDispatchDriverPicker();
@@ -3202,12 +3517,17 @@ function applyDispatchPlanRows(rows = [], date = dispatchDate.value, loadedDates
 }
 
 async function persistDispatchPlanRows(date = dispatchDate.value, rows = dispatchPlanRows.value) {
-  return dispatchApi.saveDispatchPlan(date, rows);
+  const result = await dispatchApi.saveDispatchPlan(date, rows, {
+    baseRows: dispatchPlanBaseRowsByDate[date] || [],
+    updatedAt: dispatchPlanUpdatedAtByDate[date] || ""
+  });
+  updateDispatchPlanBaseFromRecord(result, date);
+  return result;
 }
 
 async function readDispatchPlanRowsForDate(date = dispatchDate.value) {
   const result = await dispatchApi.getDispatchPlan(date);
-  return Array.isArray(result.rows) ? result.rows : [];
+  return updateDispatchPlanBaseFromRecord(result, date);
 }
 
 async function appendDispatchPlanRowsToDate(date, rowsToAppend = []) {
@@ -3260,7 +3580,7 @@ async function loadDispatchPlan(date = dispatchDate.value) {
   }
   try {
     const result = await dispatchApi.getDispatchPlan(date);
-    const rows = Array.isArray(result.rows) ? result.rows : [];
+    const rows = updateDispatchPlanBaseFromRecord(result, date);
     applyDispatchPlanRows(rows, date, [date]);
   } catch (error) {
     if (dispatchPlanRows.value.length === 0) selectedDispatchPlanIds.value = [];
@@ -3289,6 +3609,7 @@ async function loadDispatchPlansForCurrentFilter() {
       () => dispatchApi.listDispatchPlans({ period, start, end }),
       "排车计划"
     );
+    rowsByDate.forEach((record) => updateDispatchPlanBaseFromRecord(record, record.date));
     const rows = rowsByDate.flatMap(({ date, rows }) =>
       normalizeDispatchPlanRows(rows, date)
     );
@@ -3344,26 +3665,74 @@ function dispatchLoadTimePart(value = "", part = "hour") {
   return part === "minute" ? minute : hour;
 }
 
+function syncDispatchLoadHourDraft() {
+  dispatchLoadHourDraft.value = dispatchLoadTimePart(dispatchForm.loadTime, "hour");
+}
+
+function setDispatchFormLoadHourInput(value = "") {
+  const digits = String(value || "").replace(/\D/g, "").slice(0, 2);
+  dispatchLoadHourDraft.value = digits;
+  const currentMinute = dispatchLoadTimePart(dispatchForm.loadTime, "minute") || "00";
+  if (!digits) {
+    dispatchForm.loadTime = "";
+    return;
+  }
+  dispatchForm.loadTime = `${digits}:${currentMinute}`;
+}
+
+function commitDispatchFormLoadHourInput() {
+  const digits = String(dispatchLoadHourDraft.value || "").replace(/\D/g, "").slice(0, 2);
+  if (!digits) {
+    dispatchForm.loadTime = "";
+    dispatchLoadHourDraft.value = "";
+    return;
+  }
+  const hour = Math.min(23, Math.max(0, Number(digits)));
+  const minute = dispatchLoadTimePart(dispatchForm.loadTime, "minute") || "00";
+  dispatchForm.loadTime = normalizeDispatchLoadTime(`${hour}:${minute}`);
+  syncDispatchLoadHourDraft();
+}
+
 function setDispatchFormLoadTimePart(part = "hour", value = "") {
   const currentHour = dispatchLoadTimePart(dispatchForm.loadTime, "hour");
   const currentMinute = dispatchLoadTimePart(dispatchForm.loadTime, "minute") || "00";
   if (part === "hour") {
     dispatchForm.loadTime = value ? normalizeDispatchLoadTime(`${value}:${currentMinute}`) : "";
+    syncDispatchLoadHourDraft();
     return;
   }
-  if (!currentHour) return;
-  dispatchForm.loadTime = normalizeDispatchLoadTime(`${currentHour}:${value || "00"}`);
+  const draftHour = String(dispatchLoadHourDraft.value || currentHour || "").replace(/\D/g, "").slice(0, 2);
+  if (!draftHour) return;
+  dispatchForm.loadTime = normalizeDispatchLoadTime(`${draftHour}:${value || "00"}`);
+  syncDispatchLoadHourDraft();
 }
 
-function clearDispatchFormLoadTime() {
-  dispatchForm.loadTime = "";
+function setDispatchRowLoadTimePart(row, part = "hour", value = "") {
+  const target = findDispatchPlanRowTarget(row);
+  if (!target) return;
+  const currentHour = dispatchLoadTimePart(target.loadTime, "hour");
+  const currentMinute = dispatchLoadTimePart(target.loadTime, "minute") || "00";
+  if (part === "hour") {
+    const digits = String(value || "").replace(/\D/g, "").slice(0, 2);
+    target.loadTime = digits ? `${digits}:${currentMinute}` : "";
+  } else if (currentHour) {
+    target.loadTime = normalizeDispatchLoadTime(`${currentHour}:${value || "00"}`);
+  }
+  queueDispatchPlanAutoSave();
+}
+
+function commitDispatchRowLoadHourInput(row) {
+  const target = findDispatchPlanRowTarget(row);
+  if (!target) return;
+  target.loadTime = normalizeDispatchLoadTime(target.loadTime);
+  queueDispatchPlanAutoSave();
 }
 
 function handleDispatchRowLoadTimeChange(row) {
-  const target = dispatchPlanRows.value[row.index];
+  const target = findDispatchPlanRowTarget(row);
   if (!target) return;
   target.loadTime = normalizeDispatchLoadTime(target.loadTime);
-  saveDispatchPlan({ silent: true });
+  queueDispatchPlanAutoSave();
 }
 
 function handleDispatchPlateInput(row) {
@@ -3375,6 +3744,7 @@ function handleDispatchPlateInput(row) {
 
 function handleDispatchFormLoadTimeChange() {
   dispatchForm.loadTime = normalizeDispatchLoadTime(dispatchForm.loadTime);
+  syncDispatchLoadHourDraft();
 }
 
 function dispatchPlanSourceRank(row = {}) {
@@ -3422,6 +3792,19 @@ function dispatchPlanDate(row = {}) {
   return row.date || dispatchRowLiveOrder(row)?.date || row.order?.date || dispatchDate.value;
 }
 
+function findDispatchPlanRowTarget(row = {}) {
+  const refId = String(row?.id || "").trim();
+  const refDispatchNo = String(row?.dispatchNo || "").trim();
+  const refOrderNo = String(row?.orderNo || "").trim();
+  return dispatchPlanRows.value.find((item) => {
+    if (!item) return false;
+    if (refId && String(item.id || "").trim() === refId) return true;
+    if (refDispatchNo && String(item.dispatchNo || "").trim() === refDispatchNo) return true;
+    if (refOrderNo && String(item.orderNo || "").trim() === refOrderNo) return true;
+    return false;
+  }) || dispatchPlanRows.value[row?.index];
+}
+
 async function saveDispatchPlan({ silent = false, throwOnError = false } = {}) {
   if (!canAccessModule("dispatchBoard")) {
     if (!silent) notify("当前账号无权保存排车计划");
@@ -3441,10 +3824,21 @@ async function saveDispatchPlan({ silent = false, throwOnError = false } = {}) {
     if (!silent) notify("排车计划已保存");
     return true;
   } catch (error) {
+    if (error?.status === 409) {
+      await loadDispatchPlansForCurrentFilter();
+    }
     if (!silent) notify(error.message || "排车计划保存到服务器失败");
     if (throwOnError) throw error;
     return false;
   }
+}
+
+function queueDispatchPlanAutoSave() {
+  dispatchPlanAutoSavePromise = dispatchPlanAutoSavePromise
+    .catch(() => {})
+    .then(() => saveDispatchPlan({ silent: true }))
+    .catch(() => false);
+  return dispatchPlanAutoSavePromise;
 }
 
 function dispatchStatusOptionsForRow(row) {
@@ -3689,6 +4083,7 @@ function resetDispatchForm() {
   editingDispatchRowId.value = "";
   copyingDispatchRowId.value = "";
   dispatchCustomerKeyword.value = "";
+  dispatchLoadHourDraft.value = "";
   dispatchCustomerPickerOpen.value = false;
 }
 
@@ -3720,7 +4115,8 @@ function fillDispatchFormFromPlanRow(row, fallbackDate = dispatchDate.value || o
     supplier: order.supplier || row.supplier || "",
     note: row.note || order.remark || ""
   });
-  dispatchCustomerKeyword.value = customerName;
+  dispatchCustomerKeyword.value = partnerDisplayLabel(customerName, "客户") || customerName;
+  syncDispatchLoadHourDraft();
   dispatchCustomerPickerOpen.value = false;
 }
 
@@ -3805,13 +4201,14 @@ function createManualDispatchPlanRow() {
 }
 
 async function saveEditedDispatchPlanRow() {
+  commitDispatchFormLoadHourInput();
   const targetIndex = dispatchPlanRows.value.findIndex((row) => row.id === editingDispatchRowId.value);
   if (targetIndex < 0) {
     notify("找不到要编辑的排车单");
     return;
   }
   if (!dispatchForm.customer.trim()) {
-    notify("请选择或输入经营单位");
+    notify("请选择或输入客户");
     return;
   }
   const matchedCustomer = customerRows.value.find(
@@ -3819,6 +4216,11 @@ async function saveEditedDispatchPlanRow() {
   );
   if (!matchedCustomer) {
     notify("请选择客户资料中的有效客户");
+    return;
+  }
+  const invalidLocation = invalidDispatchLocationMessage("loading") || invalidDispatchLocationMessage("unloading");
+  if (invalidLocation) {
+    notify(invalidLocation);
     return;
   }
 
@@ -3871,8 +4273,10 @@ async function saveEditedDispatchPlanRow() {
       }
     }
 
-    dispatchPlanRows.value.splice(targetIndex, 1);
     if (planDate !== dispatchDate.value) {
+      dispatchPlanRows.value.splice(targetIndex, 1);
+      const deleteResult = await dispatchApi.deleteDispatchPlanRows(dispatchDate.value, [dispatchRowRef(originalRow)]);
+      if (deleteResult?.plan) updateDispatchPlanBaseFromRecord(deleteResult.plan, dispatchDate.value);
       await saveDispatchPlan({ silent: true, throwOnError: true });
       await appendDispatchPlanRowsToDate(planDate, [updatedRow]);
       dispatchDate.value = planDate;
@@ -3892,12 +4296,13 @@ async function saveEditedDispatchPlanRow() {
 }
 
 async function saveManualDispatchPlanRow() {
+  commitDispatchFormLoadHourInput();
   if (editingDispatchRowId.value) {
     await saveEditedDispatchPlanRow();
     return;
   }
   if (!dispatchForm.customer.trim()) {
-    notify("请选择或输入经营单位");
+    notify("请选择或输入客户");
     return;
   }
   const matchedCustomer = customerRows.value.find(
@@ -3905,6 +4310,11 @@ async function saveManualDispatchPlanRow() {
   );
   if (!matchedCustomer) {
     notify("请选择客户资料中的有效客户");
+    return;
+  }
+  const invalidLocation = invalidDispatchLocationMessage("loading") || invalidDispatchLocationMessage("unloading");
+  if (invalidLocation) {
+    notify(invalidLocation);
     return;
   }
   dispatchForm.customerId = matchedCustomer.id;
@@ -4178,6 +4588,7 @@ async function removeDispatchPlanRow(index) {
   const row = dispatchPlanRows.value[index];
   if (!row) return;
   const linkedOrder = linkedOrderForDispatchRow(row);
+  const planDate = dispatchPlanDate(row);
   if (linkedOrder) {
     try {
       await ordersApi.deleteOrder(linkedOrder.no);
@@ -4190,18 +4601,26 @@ async function removeDispatchPlanRow(index) {
       if (message.includes("不存在或已删除")) {
         orderRows.value = orderRows.value.filter((item) => item.no !== linkedOrder.no);
         removeDispatchRowsByOrderRefs([linkedOrder]);
-        await saveDispatchPlan({ silent: true });
+        const deleteResult = await dispatchApi.deleteDispatchPlanRows(planDate, [dispatchRowRef(row)]);
+        if (deleteResult?.plan) updateDispatchPlanBaseFromRecord(deleteResult.plan, planDate);
         return;
       }
       notify(error.message);
       return;
     }
   }
+  try {
+    const deleteResult = await dispatchApi.deleteDispatchPlanRows(planDate, [dispatchRowRef(row)]);
+    if (deleteResult?.plan) updateDispatchPlanBaseFromRecord(deleteResult.plan, planDate);
+  } catch (error) {
+    notify(error.message || "排车单删除失败");
+    return;
+  }
   dispatchPlanRows.value.splice(index, 1);
   selectedDispatchPlanIds.value = selectedDispatchPlanIds.value.filter((id) =>
     dispatchPlanRows.value.some((row) => row.id === id)
   );
-  await saveDispatchPlan({ silent: true });
+  notify(`排车单 ${row.dispatchNo || ""} 已移入回收站`);
 }
 
 function moveDispatchPlanRow(index, offset) {
@@ -4253,13 +4672,14 @@ function removeDispatchRowsByOrderRefs(orderRefs = []) {
 }
 
 function dispatchShortLocation(value = "") {
-  const parts = String(value || "")
+  const firstAddress = String(value || "")
     .replace(/\r/g, "\n")
-    .split(/[\n；;\/]+/)
+    .split(/[\n；;]/)
     .map((part) => part.trim())
-    .filter(Boolean);
-  if (!parts.length) return "";
-  return parts.slice(0, 2).join(" / ");
+    .find(Boolean) || "";
+  if (!firstAddress || !firstAddress.includes("/")) return "";
+  const [city = "", district = ""] = firstAddress.split("/").map((part) => part.trim());
+  return [city, district].map((part) => String(part || "").trim()).filter(Boolean).join(" / ");
 }
 
 function dispatchOrderRouteText(order) {
@@ -4317,9 +4737,15 @@ function spreadsheetWrappedRowHeight(value = "", base = 20, perLine = 18, max = 
 
 function dispatchVehicleSourceText(row) {
   const order = row?.order || {};
-  if (order.vehicleSource === "外派车辆") return order.supplier || "外派供应商";
+  if (order.vehicleSource === "外派车辆") return supplierDisplayLabel(order.supplier) || "外派供应商";
   if (order.vehicleSource === "本公司车辆") return "本公司";
   return order.vehicleSource || "-";
+}
+
+function dispatchSupplierText(row = {}) {
+  const order = row.order || {};
+  if (order.vehicleSource === "外派车辆") return supplierDisplayLabel(order.supplier || row.supplier || "") || "外派供应商";
+  return "-";
 }
 
 function dispatchWeighingText(value) {
@@ -4376,55 +4802,49 @@ async function exportDispatchPlanRows() {
     notify("暂无可导出的排车数据");
     return;
   }
-  const headers = [
-    "序号",
-    "装车时间",
-    "经营单位",
-    "业务类型",
-    "车牌",
-    "司机",
-    "口岸",
-    "进出口",
-    "吨位",
-    "件数/板数",
-    "装卸",
-    "车辆来源",
-    "排车状态",
-    "备注"
-  ];
-  const exportRows = rows.map((row, index) => {
-    const order = row.order || {};
-    return [
-      index + 1,
-      row.loadTime || "",
-      order.customer || row.customer || "",
-      order.businessType || row.businessType || "",
-      row.plate || "",
-      row.driver || "",
-      order.port || row.port || "",
-      order.direction || row.direction || "",
-      order.tonnage || row.tonnage || "",
-      order.quantity || row.quantity || "",
-      dispatchExportRouteText(row),
-      dispatchVehicleSourceText(row),
-      row.status || DISPATCH_PLAN_DEFAULT_STATUS,
-      row.note || ""
-    ];
-  });
-  const routeColumnIndex = headers.indexOf("装卸");
-  await exportXlsx(
-    `排车表_${dispatchDate.value}_${selectedRows.length ? "已选" : "全部"}${rows.length}单.xlsx`,
-    headers,
-    exportRows,
-    "排车表",
-    {
-      columnWidths: {
-        [routeColumnIndex]: { wch: 54 }
-      },
-      rowHeights: exportRows.map((row) => ({ hpt: spreadsheetWrappedRowHeight(row[routeColumnIndex]) }))
+  try {
+    loading.value = true;
+    const response = await fetch(`${API_BASE}/dispatch-plans/export/xlsx`, {
+      method: "POST",
+      headers: apiRequestHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        date: dispatchDate.value,
+        scope: selectedRows.length ? "已选" : "全部",
+        rows: rows.map((row) => ({
+          id: row.id,
+          dispatchNo: row.dispatchNo,
+          orderNo: row.orderNo,
+          customer: row.customer,
+          customerShortName: customerShortDisplay(findPartnerByTypedLabel(row.order?.customer || row.customer || "", "客户")),
+          plate: row.plate,
+          port: row.port,
+          direction: row.direction,
+          tonnage: row.tonnage,
+          quantity: row.quantity,
+          loading: row.loading,
+          unloading: row.unloading,
+          loadTime: row.loadTime,
+          vehicleSource: row.vehicleSource,
+          supplier: row.supplier,
+          driver: row.driver,
+          hkDriver: row.hkDriver,
+          mainlandDriver: row.mainlandDriver,
+          note: row.note,
+          order: row.order || {}
+        }))
+      })
+    });
+    if (!response.ok) {
+      throw new Error(await apiDownloadErrorMessage(response, "排车表 Excel 导出失败"));
     }
-  );
-  notify(selectedRows.length ? `已导出已选 ${rows.length} 单` : `已导出当前列表 ${rows.length} 单`);
+    const blob = await response.blob();
+    downloadBlob(blob, `排车表_${dispatchDate.value}_${selectedRows.length ? "已选" : "全部"}${rows.length}单.xlsx`);
+    notify(selectedRows.length ? `已导出已选 ${rows.length} 单` : `已导出当前列表 ${rows.length} 单`);
+  } catch (error) {
+    notify(error.message || "排车表 Excel 导出失败");
+  } finally {
+    loading.value = false;
+  }
 }
 
 async function applyDispatchPlanToOrders() {
@@ -5272,6 +5692,48 @@ function customsBusinessCustomFieldName(field = {}) {
   return String(field?.name ?? field?.label ?? field?.key ?? "").trim();
 }
 
+function customsBusinessIntegerValue(value) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number) || number < 0) return 0;
+  return Math.round(number);
+}
+
+function preventCustomsBusinessDecimalInput(event) {
+  if ([".", "e", "E", "+", "-"].includes(event?.key)) {
+    event.preventDefault();
+  }
+}
+
+function normalizeCustomsBusinessIntegerInput(target, key, event) {
+  if (!target || !key) return;
+  const nextValue = customsBusinessIntegerValue(event?.target?.value ?? target[key]);
+  target[key] = nextValue;
+  if (event?.target && event.target.value !== String(nextValue)) {
+    event.target.value = String(nextValue);
+  }
+}
+
+function normalizeCustomsBusinessFormIntegers() {
+  [
+    "itemCount",
+    "pageCount",
+    "customsFee",
+    "pageFee",
+    "manifestFee",
+    "inspectionFee",
+    "checkFee",
+    "verificationFee",
+    "otherFee"
+  ].forEach((key) => {
+    customsBusinessForm[key] = customsBusinessIntegerValue(customsBusinessForm[key]);
+  });
+  if (Array.isArray(customsBusinessForm.customFields)) {
+    customsBusinessForm.customFields.forEach((field) => {
+      field.value = customsBusinessIntegerValue(field.value);
+    });
+  }
+}
+
 function customsBusinessCustomFieldAmount(field = {}) {
   const amount = Number(field?.value ?? field?.amount ?? field?.fee ?? 0);
   return Number.isFinite(amount) ? amount : 0;
@@ -5311,7 +5773,7 @@ function removeCustomsBusinessCustomField(index) {
 }
 
 const customsBusinessFormTotal = computed(() =>
-  Number(customsBusinessHomeFee.value || 0)
+  customsBusinessIntegerValue(customsBusinessHomeFee.value)
   + Number(customsBusinessForm.pageFee || 0)
   + Number(customsBusinessForm.customsFee || 0)
   + Number(customsBusinessForm.manifestFee || 0)
@@ -5343,8 +5805,9 @@ const customsBusinessFilteredCustomerOptions = computed(() => {
   const selectedCompany = String(customsBusinessForm.company || "").trim();
   const filtered = customsBusinessCustomerOptions.value.filter((customer) => {
     const name = String(customer.name || "").trim();
+    const shortName = customerShortDisplay(customer);
     if (!keyword) return true;
-    return normalizedCustomsBusinessSearchText(name).includes(keyword);
+    return normalizedCustomsBusinessSearchText([name, shortName, customer.id].join(" ")).includes(keyword);
   });
   if (selectedCompany && !filtered.some((customer) => String(customer.name || "").trim() === selectedCompany)) {
     const selected = customsBusinessCustomerOptions.value.find((customer) => String(customer.name || "").trim() === selectedCompany);
@@ -5358,6 +5821,7 @@ function findCustomsBusinessCustomerByName(company = customsBusinessForm.company
   if (!target) return null;
   return customsBusinessCustomerOptions.value.find((customer) =>
     String(customer.name || "").trim() === target
+    || String(customer.shortName || customer.short_name || "").trim() === target
   ) || null;
 }
 
@@ -5372,8 +5836,12 @@ function openCustomsBusinessCompanyPicker() {
 function closeCustomsBusinessCompanyPicker() {
   customsBusinessCompanyPickerOpen.value = false;
   const selectedCompany = String(customsBusinessForm.company || "").trim();
-  if (selectedCompany && customsBusinessCompanySearch.value !== selectedCompany) {
-    customsBusinessCompanySearch.value = selectedCompany;
+  if (selectedCompany) {
+    const selectedCustomer = findCustomsBusinessCustomerByName(selectedCompany);
+    const displayName = customerShortDisplay(selectedCustomer) || selectedCompany;
+    if (customsBusinessCompanySearch.value !== displayName) {
+      customsBusinessCompanySearch.value = displayName;
+    }
   }
 }
 
@@ -5388,7 +5856,7 @@ function handleCustomsBusinessCompanyInput(event) {
 function selectCustomsBusinessCompany(customer) {
   const company = String(customer?.name || "").trim();
   customsBusinessForm.company = company;
-  customsBusinessCompanySearch.value = company;
+  customsBusinessCompanySearch.value = customerShortDisplay(customer) || company;
   customsBusinessCompanyPickerOpen.value = false;
 }
 
@@ -5456,7 +5924,7 @@ const calculatedCustomsBusinessPageFee = computed(() =>
 
 const customsBusinessHomeFeeDisplay = computed(() => {
   if (!customsBusinessSelectedCustomer.value || !customsBusinessDirectionFeeType()) return "";
-  return money(customsBusinessHomeFee.value);
+  return money(customsBusinessIntegerValue(customsBusinessHomeFee.value));
 });
 
 function syncCalculatedCustomsBusinessCharges() {
@@ -5469,7 +5937,7 @@ function syncCalculatedCustomsBusinessCharges() {
     return;
   }
   const nextPageCount = calculatedCustomsBusinessPageCount.value;
-  const nextPageFee = Number(calculatedCustomsBusinessPageFee.value.toFixed(2));
+  const nextPageFee = customsBusinessIntegerValue(calculatedCustomsBusinessPageFee.value);
   if (Number(customsBusinessForm.pageCount || 0) !== nextPageCount) {
     customsBusinessForm.pageCount = nextPageCount;
   }
@@ -5625,7 +6093,7 @@ function customsBusinessCellText(row = {}, column = {}) {
     date: row.date || "",
     declarationNo: row.declarationNo || "",
     sixSheetNo: row.sixSheetNo || "",
-    company: row.company || "",
+    company: partnerDisplayLabel(row.company || "", "客户") || row.company || "",
     direction: row.direction || "",
     itemCount: row.itemCount || "",
     pageCount: row.pageCount || "",
@@ -5648,6 +6116,7 @@ function saveCustomsBusinessColumnOrder(columns = orderedCustomsBusinessColumns.
     .map((column) => column.key);
   customsBusinessColumnOrder.value = keys;
   saveStoredJson(CUSTOMS_BUSINESS_COLUMN_ORDER_KEY, keys);
+  saveAccountTablePreferencesSoon();
 }
 
 function moveCustomsBusinessColumn(column = {}, offset = 0) {
@@ -5689,6 +6158,7 @@ function endCustomsBusinessColumnDrag() {
 function resetCustomsBusinessColumnOrder() {
   localStorage.removeItem(CUSTOMS_BUSINESS_COLUMN_ORDER_KEY);
   customsBusinessColumnOrder.value = [];
+  saveAccountTablePreferencesSoon();
   notify("已恢复报关业务默认列顺序");
 }
 
@@ -5736,6 +6206,401 @@ const customsBusinessSummary = computed(() => {
   };
 });
 
+function otherBusinessAmount(value) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number) || number < 0) return 0;
+  return Number(number.toFixed(2));
+}
+
+function normalizeOtherBusinessAmountInput(target, key, event) {
+  if (!target || !key) return;
+  const rawValue = event?.target?.value ?? target[key];
+  const nextValue = otherBusinessAmount(rawValue);
+  target[key] = nextValue;
+  if (event?.type === "input") {
+    const text = String(rawValue ?? "");
+    if (text === "" || /^\d+(?:\.\d{0,2})?$/.test(text)) return;
+  }
+  if (event?.target && event.target.value !== String(nextValue)) {
+    event.target.value = String(nextValue);
+  }
+}
+
+function otherBusinessCustomFieldName(field = {}) {
+  return String(field?.name ?? field?.label ?? field?.key ?? "").trim();
+}
+
+function normalizeOtherBusinessCustomFields(fields = []) {
+  if (!Array.isArray(fields)) return [];
+  const fieldsByName = new Map();
+  fields.forEach((field) => {
+    const name = otherBusinessCustomFieldName(field);
+    if (!name) return;
+    const current = fieldsByName.get(name) || { name, income: 0, cost: 0 };
+    current.income = otherBusinessAmount(current.income + otherBusinessAmount(field.income ?? field.revenue ?? field.amount ?? field.value));
+    current.cost = otherBusinessAmount(current.cost + otherBusinessAmount(field.cost ?? field.expense));
+    current.profit = Number((current.income - current.cost).toFixed(2));
+    fieldsByName.set(name, current);
+  });
+  return Array.from(fieldsByName.values()).slice(0, 40);
+}
+
+function otherBusinessCustomFieldProfit(field = {}) {
+  return Number((otherBusinessAmount(field.income) - otherBusinessAmount(field.cost)).toFixed(2));
+}
+
+function otherBusinessRowTotals(row = {}) {
+  const customTotals = normalizeOtherBusinessCustomFields(row.customFields)
+    .reduce((sum, field) => ({
+      income: sum.income + otherBusinessAmount(field.income),
+      cost: sum.cost + otherBusinessAmount(field.cost)
+    }), { income: 0, cost: 0 });
+  const totalIncome = otherBusinessAmount(otherBusinessAmount(row.income ?? row.revenue) + customTotals.income);
+  const totalCost = otherBusinessAmount(otherBusinessAmount(row.cost ?? row.expense) + customTotals.cost);
+  return {
+    totalIncome,
+    totalCost,
+    profit: Number((totalIncome - totalCost).toFixed(2))
+  };
+}
+
+function normalizeOtherBusinessFormAmounts() {
+  otherBusinessForm.cost = otherBusinessAmount(otherBusinessForm.cost);
+  otherBusinessForm.income = otherBusinessAmount(otherBusinessForm.income);
+  if (Array.isArray(otherBusinessForm.customFields)) {
+    otherBusinessForm.customFields.forEach((field) => {
+      field.income = otherBusinessAmount(field.income);
+      field.cost = otherBusinessAmount(field.cost);
+    });
+  }
+}
+
+function otherBusinessHasIncompleteCustomField() {
+  return Array.isArray(otherBusinessForm.customFields)
+    && otherBusinessForm.customFields.some((field) =>
+      !otherBusinessCustomFieldName(field)
+      && (otherBusinessAmount(field.income) !== 0 || otherBusinessAmount(field.cost) !== 0)
+    );
+}
+
+function addOtherBusinessCustomField() {
+  if (!Array.isArray(otherBusinessForm.customFields)) {
+    otherBusinessForm.customFields = [];
+  }
+  otherBusinessForm.customFields.push(createBlankOtherBusinessCustomField());
+}
+
+function removeOtherBusinessCustomField(index) {
+  if (!Array.isArray(otherBusinessForm.customFields)) return;
+  otherBusinessForm.customFields.splice(index, 1);
+}
+
+const otherBusinessFormTotals = computed(() => {
+  const customTotals = normalizeOtherBusinessCustomFields(otherBusinessForm.customFields)
+    .reduce((sum, field) => ({
+      income: sum.income + otherBusinessAmount(field.income),
+      cost: sum.cost + otherBusinessAmount(field.cost)
+    }), { income: 0, cost: 0 });
+  const totalIncome = otherBusinessAmount(otherBusinessForm.income + customTotals.income);
+  const totalCost = otherBusinessAmount(otherBusinessForm.cost + customTotals.cost);
+  return {
+    totalIncome,
+    totalCost,
+    profit: Number((totalIncome - totalCost).toFixed(2))
+  };
+});
+
+const otherBusinessCustomerOptions = computed(() =>
+  customerRows.value
+    .filter((item) => item.type === "客户" && String(item.name || "").trim())
+    .slice()
+    .sort((left, right) =>
+      String(left.name || "").localeCompare(String(right.name || ""), "zh-Hans-CN", {
+        numeric: true,
+        sensitivity: "base"
+      })
+    )
+);
+
+const otherBusinessFilteredCustomerOptions = computed(() => {
+  const keyword = normalizedCustomsBusinessSearchText(otherBusinessCustomerSearch.value);
+  const selectedCustomer = String(otherBusinessForm.customer || "").trim();
+  const filtered = otherBusinessCustomerOptions.value.filter((customer) => {
+    const name = String(customer.name || "").trim();
+    const shortName = customerShortDisplay(customer);
+    if (!keyword) return true;
+    return normalizedCustomsBusinessSearchText([name, shortName, customer.id].join(" ")).includes(keyword);
+  });
+  if (selectedCustomer && !filtered.some((customer) => String(customer.name || "").trim() === selectedCustomer)) {
+    const selected = otherBusinessCustomerOptions.value.find((customer) => String(customer.name || "").trim() === selectedCustomer);
+    if (selected) filtered.unshift(selected);
+  }
+  return filtered;
+});
+
+function findOtherBusinessCustomerByName(customerName = otherBusinessForm.customer) {
+  const target = String(customerName || "").trim();
+  if (!target) return null;
+  return otherBusinessCustomerOptions.value.find((customer) =>
+    String(customer.name || "").trim() === target
+    || String(customer.shortName || customer.short_name || "").trim() === target
+  ) || null;
+}
+
+function otherBusinessCustomerSelectedFromCustomers(customer = otherBusinessForm.customer) {
+  return Boolean(findOtherBusinessCustomerByName(customer));
+}
+
+function openOtherBusinessCustomerPicker() {
+  otherBusinessCustomerPickerOpen.value = true;
+}
+
+function closeOtherBusinessCustomerPicker() {
+  otherBusinessCustomerPickerOpen.value = false;
+  const selectedCustomer = String(otherBusinessForm.customer || "").trim();
+  if (selectedCustomer) {
+    const customer = findOtherBusinessCustomerByName(selectedCustomer);
+    otherBusinessCustomerSearch.value = customerShortDisplay(customer) || selectedCustomer;
+  }
+}
+
+function handleOtherBusinessCustomerInput(event) {
+  const value = String(event?.target?.value || "").trim();
+  otherBusinessCustomerSearch.value = value;
+  otherBusinessCustomerPickerOpen.value = true;
+  const exactCustomer = findOtherBusinessCustomerByName(value);
+  otherBusinessForm.customer = exactCustomer ? exactCustomer.name : "";
+}
+
+function selectOtherBusinessCustomer(customer) {
+  const customerName = String(customer?.name || "").trim();
+  otherBusinessForm.customer = customerName;
+  otherBusinessCustomerSearch.value = customerShortDisplay(customer) || customerName;
+  otherBusinessCustomerPickerOpen.value = false;
+}
+
+function clearOtherBusinessCustomer() {
+  otherBusinessForm.customer = "";
+  otherBusinessCustomerSearch.value = "";
+  otherBusinessCustomerPickerOpen.value = true;
+}
+
+function confirmFirstOtherBusinessCustomerOption() {
+  const [firstCustomer] = otherBusinessFilteredCustomerOptions.value;
+  if (firstCustomer) selectOtherBusinessCustomer(firstCustomer);
+}
+
+function otherBusinessSearchValues(row = {}) {
+  return [
+    row.title,
+    row.customer,
+    row.remark,
+    row.date,
+    row.income,
+    row.cost,
+    row.totalIncome,
+    row.totalCost,
+    row.profit,
+    ...normalizeOtherBusinessCustomFields(row.customFields).flatMap((field) => [field.name, field.income, field.cost, field.profit])
+  ];
+}
+
+function otherBusinessNameValues(row = {}) {
+  return [row.customer];
+}
+
+function otherBusinessMatchesFilters(row = {}) {
+  const keyword = normalizedCustomsBusinessSearchText(otherBusinessSearchKeyword.value);
+  if (keyword && !otherBusinessSearchValues(row).some((value) =>
+    normalizedCustomsBusinessSearchText(value).includes(keyword)
+  )) return false;
+  if (otherBusinessCustomerFilter.value) {
+    const customerValues = otherBusinessNameValues(row).map(normalizedOrderFilterText);
+    if (!customerValues.includes(otherBusinessCustomerFilter.value)) return false;
+  }
+  return true;
+}
+
+const filteredOtherBusinessRows = computed(() =>
+  otherBusinessRows.value.filter((row) => otherBusinessMatchesFilters(row))
+);
+
+const otherBusinessCustomColumns = computed(() => {
+  const names = [];
+  const seen = new Set();
+  otherBusinessRows.value.forEach((row) => {
+    normalizeOtherBusinessCustomFields(row.customFields).forEach((field) => {
+      if (seen.has(field.name)) return;
+      seen.add(field.name);
+      names.push(field.name);
+    });
+  });
+  return names;
+});
+
+function otherBusinessCustomColumnKey(name = "") {
+  return `custom:${String(name || "").trim()}`;
+}
+
+function otherBusinessCustomColumnName(key = "") {
+  return String(key || "").startsWith("custom:") ? String(key).slice(7) : "";
+}
+
+const otherBusinessBaseColumns = computed(() => {
+  const customColumns = otherBusinessCustomColumns.value.map((name) => ({
+    key: otherBusinessCustomColumnKey(name),
+    label: name,
+    width: 148,
+    amount: true,
+    custom: true
+  }));
+  return [
+    ...OTHER_BUSINESS_PREFIX_COLUMNS,
+    ...customColumns,
+    ...OTHER_BUSINESS_SUFFIX_COLUMNS
+  ].map((column, index) => ({ ...column, defaultIndex: index }));
+});
+
+const orderedOtherBusinessColumns = computed(() => {
+  const columns = otherBusinessBaseColumns.value;
+  const byKey = new Map(columns.map((column) => [column.key, column]));
+  const savedKeys = Array.isArray(otherBusinessColumnOrder.value)
+    ? otherBusinessColumnOrder.value.filter((key) => byKey.has(key) && key !== "actions")
+    : [];
+  const used = new Set(savedKeys);
+  const ordered = savedKeys.map((key) => byKey.get(key));
+  columns
+    .filter((column) => column.key !== "actions" && !used.has(column.key))
+    .forEach((column) => {
+      const insertIndex = ordered.findIndex((item) => (item.defaultIndex ?? 999) > (column.defaultIndex ?? 999));
+      if (insertIndex >= 0) ordered.splice(insertIndex, 0, column);
+      else ordered.push(column);
+    });
+  const actionsColumn = byKey.get("actions");
+  return actionsColumn ? [...ordered, actionsColumn] : ordered;
+});
+
+const otherBusinessTableMinWidth = computed(() =>
+  `${orderedOtherBusinessColumns.value.reduce((sum, column) => sum + Number(column.width || 96), 0)}px`
+);
+
+function otherBusinessCustomFieldEntry(row = {}, columnName = "") {
+  const target = String(columnName || "").trim();
+  if (!target) return null;
+  return normalizeOtherBusinessCustomFields(row.customFields)
+    .find((field) => field.name === target) || null;
+}
+
+function otherBusinessCustomFieldDisplay(row = {}, columnName = "") {
+  const field = otherBusinessCustomFieldEntry(row, columnName);
+  if (!field) return "";
+  return `收入 ${money(field.income)} / 成本 ${money(field.cost)} / 利润 ${money(otherBusinessCustomFieldProfit(field))}`;
+}
+
+function otherBusinessColumnStyle(column = {}) {
+  const width = Number(column.width || 96);
+  return { width: `${width}px`, minWidth: `${width}px` };
+}
+
+function otherBusinessCellText(row = {}, column = {}) {
+  if (column.custom) return otherBusinessCustomFieldDisplay(row, otherBusinessCustomColumnName(column.key));
+  const values = {
+    date: row.date || "",
+    title: row.title || "",
+    customer: partnerDisplayLabel(row.customer || "", "客户") || row.customer || "",
+    income: money(row.income),
+    cost: money(row.cost),
+    totalIncome: money(otherBusinessRowTotals(row).totalIncome),
+    totalCost: money(otherBusinessRowTotals(row).totalCost),
+    profit: money(otherBusinessRowTotals(row).profit),
+    remark: row.remark || ""
+  };
+  return values[column.key] ?? "";
+}
+
+function saveOtherBusinessColumnOrder(columns = orderedOtherBusinessColumns.value) {
+  const keys = columns
+    .filter((column) => column.key !== "actions")
+    .map((column) => column.key);
+  otherBusinessColumnOrder.value = keys;
+  saveStoredJson(OTHER_BUSINESS_COLUMN_ORDER_KEY, keys);
+  saveAccountTablePreferencesSoon();
+}
+
+function moveOtherBusinessColumn(column = {}, offset = 0) {
+  if (!column?.key || column.key === "actions") return;
+  const columns = orderedOtherBusinessColumns.value.filter((item) => item.key !== "actions");
+  const fromIndex = columns.findIndex((item) => item.key === column.key);
+  const toIndex = fromIndex + offset;
+  if (fromIndex < 0 || toIndex < 0 || toIndex >= columns.length) return;
+  const [moved] = columns.splice(fromIndex, 1);
+  columns.splice(toIndex, 0, moved);
+  saveOtherBusinessColumnOrder(columns);
+}
+
+function startOtherBusinessColumnDrag(column, event) {
+  if (!column?.key || column.key === "actions") return;
+  draggedOtherBusinessColumnKey = column.key;
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", column.key);
+}
+
+function dropOtherBusinessColumn(column) {
+  if (!draggedOtherBusinessColumnKey || !column?.key || column.key === "actions") return;
+  const columns = orderedOtherBusinessColumns.value.filter((item) => item.key !== "actions");
+  const fromIndex = columns.findIndex((item) => item.key === draggedOtherBusinessColumnKey);
+  const toIndex = columns.findIndex((item) => item.key === column.key);
+  if (fromIndex >= 0 && toIndex >= 0 && fromIndex !== toIndex) {
+    const [moved] = columns.splice(fromIndex, 1);
+    const nextTargetIndex = columns.findIndex((item) => item.key === column.key);
+    columns.splice(nextTargetIndex, 0, moved);
+    saveOtherBusinessColumnOrder(columns);
+  }
+  draggedOtherBusinessColumnKey = "";
+}
+
+function endOtherBusinessColumnDrag() {
+  draggedOtherBusinessColumnKey = "";
+}
+
+function resetOtherBusinessColumnOrder() {
+  localStorage.removeItem(OTHER_BUSINESS_COLUMN_ORDER_KEY);
+  otherBusinessColumnOrder.value = [];
+  saveAccountTablePreferencesSoon();
+  notify("已恢复其他业务默认列顺序");
+}
+
+const otherBusinessCustomerFilterOptions = computed(() =>
+  orderFilterOptionValues(otherBusinessRows.value, otherBusinessNameValues)
+);
+
+const otherBusinessFiltersActive = computed(() =>
+  Boolean(otherBusinessSearchKeyword.value.trim() || otherBusinessCustomerFilter.value)
+);
+
+function clearOtherBusinessFilters() {
+  otherBusinessSearchKeyword.value = "";
+  otherBusinessCustomerFilter.value = "";
+}
+
+watch(otherBusinessCustomerFilterOptions, (options) => {
+  if (otherBusinessCustomerFilter.value && !options.includes(otherBusinessCustomerFilter.value)) {
+    otherBusinessCustomerFilter.value = "";
+  }
+});
+
+const otherBusinessSummary = computed(() => {
+  const rows = filteredOtherBusinessRows.value;
+  const income = rows.reduce((sum, row) => sum + otherBusinessRowTotals(row).totalIncome, 0);
+  const cost = rows.reduce((sum, row) => sum + otherBusinessRowTotals(row).totalCost, 0);
+  return {
+    count: rows.length,
+    income,
+    cost,
+    profit: income - cost
+  };
+});
+
 function inputMonthKey(value) {
   const matched = String(value || "").match(/^(\d{4})-(\d{2})/);
   return matched ? `${matched[1]}-${matched[2]}` : "";
@@ -5746,13 +6611,19 @@ function currentPeriodMonthKey() {
 }
 
 const STATEMENT_PERIOD_MODES = PERIOD_FILTER_MODES;
-const CUSTOMS_STATEMENT_PERIOD_MODES = [
+const STATEMENT_RECONCILIATION_PERIOD_MODES = [
   ...PERIOD_FILTER_MODES,
   { key: "range", label: "自定义范围" }
 ];
+const CUSTOMS_STATEMENT_PERIOD_MODES = STATEMENT_RECONCILIATION_PERIOD_MODES;
 const CUSTOMS_BUSINESS_PERIOD_FILTER_MODES = [
   { key: "month", label: "按月查看" },
   { key: "day", label: "按天查看" },
+  { key: "year", label: "按年查看" },
+  { key: "all", label: "全部" }
+];
+const OTHER_BUSINESS_PERIOD_FILTER_MODES = [
+  { key: "month", label: "按月查看" },
   { key: "year", label: "按年查看" },
   { key: "all", label: "全部" }
 ];
@@ -6033,9 +6904,11 @@ function periodSourceDates(scope) {
       : [item.date]),
     ...bossCompanyProfitRows.map((item) => `${item.period}-01`),
     ...bossCompanyExpenseRows.value.map((item) => `${bossCompanyExpensePeriodMonth(item)}-01`),
-    ...customsBusinessAllRows.value.map((item) => item.date)
+    ...customsBusinessAllRows.value.map((item) => item.date),
+    ...otherBusinessAllRows.value.map((item) => item.date)
   ];
   if (scope === "customsBusiness" || scope === "customsStatement") return customsBusinessRows.value.map((item) => item.date);
+  if (scope === "otherBusiness") return otherBusinessRows.value.map((item) => item.date);
   if (scope === "vehicleExpenses") return vehicleExpenseRows.value.flatMap((item) => item.type === "annual"
     ? [vehicleExpenseAnnualStartDate(item), vehicleExpenseAnnualEndDate(item)]
     : [item.date]);
@@ -6233,11 +7106,13 @@ function resetPeriodFiltersForModuleNavigation() {
   statementMonthFilter.value = currentMonth;
   bossPeriodFilter.value = currentMonth;
   customsBusinessPeriodFilter.value = currentMonth;
+  otherBusinessPeriodFilter.value = currentMonth;
   customsStatementPeriodFilter.value = currentMonth;
   vehicleExpensePeriodFilter.value = currentMonth;
   dispatchRangePeriodFilter.value = currentMonth;
   localStorage.setItem("hanye_order_period_filter", currentMonth);
   localStorage.setItem("hanye_finance_period_filter", currentMonth);
+  localStorage.setItem("hanye_other_business_period_filter", currentMonth);
   localStorage.setItem("hanye_customs_statement_period_filter", currentMonth);
   localStorage.setItem("hanye_vehicle_expense_period_filter", currentMonth);
   localStorage.setItem("hanye_dispatch_range_period_filter", currentMonth);
@@ -6316,6 +7191,9 @@ function setStatementPeriodMode(mode) {
   const { year, month } = statementSelectedParts();
   if (mode === "year") {
     setStatementYearFilter(year);
+  } else if (mode === "range") {
+    const { start, end } = statementDateRangeBounds();
+    setPeriodFilterValue("statement", `range:${start || `${year}-${month}-01`}:${end || todayInputValue()}`);
   } else if (mode === "all") {
     setStatementAllFilter();
   } else {
@@ -6863,6 +7741,12 @@ const bossCustomsBusinessRows = computed(() =>
   )
 );
 
+const bossOtherBusinessRows = computed(() =>
+  otherBusinessAllRows.value.filter((row) =>
+    dateMatchesPeriodFilter(row.date, bossPeriodFilter.value)
+  )
+);
+
 const bossAdjustmentRows = computed(() =>
   driverAdjustmentRows.value.filter((item) => dateMatchesPeriodFilter(item.date, bossPeriodFilter.value))
 );
@@ -7316,6 +8200,17 @@ function customsBusinessRevenueBreakdown(sourceRows = []) {
   }), { hkd: 0, rmb: 0 });
 }
 
+function otherBusinessRevenueBreakdown(sourceRows = []) {
+  return sourceRows.reduce((sum, row) => {
+    const totals = otherBusinessRowTotals(row);
+    return {
+      income: sum.income + totals.totalIncome,
+      cost: sum.cost + totals.totalCost,
+      profit: sum.profit + totals.profit
+    };
+  }, { income: 0, cost: 0, profit: 0 });
+}
+
 function orderDriverRows(order) {
   return driverRows.value.filter((driver) => orderMatchesDriverForWage(order, driver));
 }
@@ -7611,7 +8506,7 @@ function bossVehicleProfitDetailOrderRows(plate = "") {
       order,
       no: order.no || "-",
       date: order.date || "-",
-      customer: order.customer || "-",
+      customer: partnerDisplayLabel(order.customer || "", "客户") || order.customer || "-",
       driver: bossVehicleOrderDriverName(order) || "-",
       transportMode: normalizeTransportMode(order.transportMode || "") || "-",
       route: relatedOrderRouteText(order) || "-",
@@ -8111,7 +9006,7 @@ function bossSupplierProfitDetailOrderRows(supplier = "", monthKey = "") {
       order,
       no: order.no || "-",
       date: order.date || "-",
-      customer: order.customer || "-",
+      customer: partnerDisplayLabel(order.customer || "", "客户") || order.customer || "-",
       businessType: order.businessType || "-",
       plate: order.plate || "-",
       route: relatedOrderRouteText(order) || "-",
@@ -8350,7 +9245,7 @@ const bossCompanyProfitDisplayRows = computed(() => {
   const monthGroups = new Map();
   const ensureMonthGroup = (monthKey) => {
     if (!monthKey) return null;
-    const group = monthGroups.get(monthKey) || { orders: [], customsRows: [] };
+    const group = monthGroups.get(monthKey) || { orders: [], customsRows: [], otherBusinessRows: [] };
     monthGroups.set(monthKey, group);
     return group;
   };
@@ -8363,6 +9258,11 @@ const bossCompanyProfitDisplayRows = computed(() => {
     const monthKey = inputMonthKey(row.date);
     const group = ensureMonthGroup(monthKey);
     if (group) group.customsRows.push(row);
+  });
+  bossOtherBusinessRows.value.forEach((row) => {
+    const monthKey = inputMonthKey(row.date);
+    const group = ensureMonthGroup(monthKey);
+    if (group) group.otherBusinessRows.push(row);
   });
   bossCompanyExpenseRows.value.forEach((row) => {
     const periodMonth = bossCompanyExpensePeriodMonth(row);
@@ -8377,10 +9277,11 @@ const bossCompanyProfitDisplayRows = computed(() => {
       const transportOrders = orders.filter((order) => String(order.businessType || "").includes("运输"));
       const transportRevenue = orderReceivableBreakdown(transportOrders);
       const customsRevenue = customsBusinessRevenueBreakdown(group.customsRows);
+      const otherBusinessRevenue = otherBusinessRevenueBreakdown(group.otherBusinessRows);
       const otherIncomeRMB = bossOtherIncomeTotalForMonth(period);
       const revenue = {
         hkd: transportRevenue.hkd + customsRevenue.hkd,
-        rmb: transportRevenue.rmb + customsRevenue.rmb
+        rmb: transportRevenue.rmb + customsRevenue.rmb + otherBusinessRevenue.income
       };
       const vehicleCost = bossVehicleCostForOrders(transportOrders, period);
       const expenseRMB = bossExpenseTotalForMonth(period);
@@ -8394,9 +9295,10 @@ const bossCompanyProfitDisplayRows = computed(() => {
       const customsProfitHKD = customsRevenue.hkd;
       const customsProfitRMB = customsRevenue.rmb;
       const customsProfitRMBEquivalent = customsRevenueRMBEquivalent;
+      const otherBusinessProfitRMB = otherBusinessRevenue.profit;
       const netProfitHKD = transportProfitHKD + customsProfitHKD;
-      const netProfitRMB = transportProfitRMB + customsProfitRMB + otherIncomeRMB - expenseRMB;
-      const netProfitRMBEquivalent = transportProfitRMBEquivalent + customsProfitRMBEquivalent + otherIncomeRMB - expenseRMB;
+      const netProfitRMB = transportProfitRMB + customsProfitRMB + otherBusinessProfitRMB + otherIncomeRMB - expenseRMB;
+      const netProfitRMBEquivalent = transportProfitRMBEquivalent + customsProfitRMBEquivalent + otherBusinessProfitRMB + otherIncomeRMB - expenseRMB;
       return {
         period,
         transportRevenue: moneyPairDisplay(transportRevenue.hkd, transportRevenue.rmb),
@@ -8407,6 +9309,9 @@ const bossCompanyProfitDisplayRows = computed(() => {
         customsRevenueRMB: moneyRmbDisplay(customsRevenueRMBEquivalent),
         customsProfit: moneyPairDisplay(customsProfitHKD, customsProfitRMB),
         customsProfitRMB: moneyRmbDisplay(customsProfitRMBEquivalent),
+        otherBusinessIncome: otherBusinessRevenue.income ? moneyRmbDisplay(otherBusinessRevenue.income) : "-",
+        otherBusinessCost: otherBusinessRevenue.cost ? moneyRmbDisplay(otherBusinessRevenue.cost) : "-",
+        otherBusinessProfit: otherBusinessProfitRMB ? moneyRmbDisplay(otherBusinessProfitRMB) : "-",
         revenueRMBDisplay: moneyRmbDisplay(revenueRMBEquivalent),
         vehicleCost: moneyPairDisplay(vehicleCost.hkd, vehicleCost.rmb),
         vehicleCostRMB: moneyRmbDisplay(vehicleCostRMBEquivalent),
@@ -8427,6 +9332,9 @@ const bossCompanyProfitDisplayRows = computed(() => {
         customsProfitHKD,
         customsProfitRMB,
         customsProfitRMBEquivalent,
+        otherBusinessIncomeRMB: otherBusinessRevenue.income,
+        otherBusinessCostRMB: otherBusinessRevenue.cost,
+        otherBusinessProfitRMB,
         revenueHKD: revenue.hkd,
         revenueRMB: revenue.rmb,
         revenueRMBEquivalent,
@@ -8453,6 +9361,9 @@ const bossCompanyProfitSummary = computed(() => {
     customsRMB: sum.customsRMB + row.customsRMB,
     customsProfitHKD: sum.customsProfitHKD + row.customsProfitHKD,
     customsProfitRMB: sum.customsProfitRMB + row.customsProfitRMB,
+    otherBusinessIncomeRMB: sum.otherBusinessIncomeRMB + row.otherBusinessIncomeRMB,
+    otherBusinessCostRMB: sum.otherBusinessCostRMB + row.otherBusinessCostRMB,
+    otherBusinessProfitRMB: sum.otherBusinessProfitRMB + row.otherBusinessProfitRMB,
     revenueHKD: sum.revenueHKD + row.revenueHKD,
     revenueRMB: sum.revenueRMB + row.revenueRMB,
     netProfitHKD: sum.netProfitHKD + row.netProfitHKD,
@@ -8475,6 +9386,9 @@ const bossCompanyProfitSummary = computed(() => {
     customsRMB: 0,
     customsProfitHKD: 0,
     customsProfitRMB: 0,
+    otherBusinessIncomeRMB: 0,
+    otherBusinessCostRMB: 0,
+    otherBusinessProfitRMB: 0,
     revenueHKD: 0,
     revenueRMB: 0,
     netProfitHKD: 0,
@@ -8498,6 +9412,9 @@ const bossCompanyProfitSummary = computed(() => {
     customsRevenueRMB: moneyRmbDisplay(summary.customsRevenueRMBEquivalent),
     customsProfit: moneyPairDisplay(summary.customsProfitHKD, summary.customsProfitRMB),
     customsProfitRMB: moneyRmbDisplay(summary.customsProfitRMBEquivalent),
+    otherBusinessIncomeRMB: moneyRmbDisplay(summary.otherBusinessIncomeRMB),
+    otherBusinessCostRMB: moneyRmbDisplay(summary.otherBusinessCostRMB),
+    otherBusinessProfitRMB: moneyRmbDisplay(summary.otherBusinessProfitRMB),
     revenue: moneyPairDisplay(summary.revenueHKD, summary.revenueRMB),
     revenueRMB: moneyRmbDisplay(summary.revenueRMBEquivalent),
     vehicleCostRMB: moneyRmbDisplay(summary.vehicleCostRMBEquivalent),
@@ -8508,6 +9425,7 @@ const bossCompanyProfitSummary = computed(() => {
     revenueRMBEquivalent: summary.revenueRMBEquivalent,
     transportProfitRMBEquivalent: summary.transportProfitRMBEquivalent,
     customsProfitRMBEquivalent: summary.customsProfitRMBEquivalent,
+    otherBusinessProfitRMBValue: summary.otherBusinessProfitRMB,
     otherIncomeRMBValue: summary.otherIncomeRMB,
     expenseRMB: summary.expenseRMB,
     netProfitRMBEquivalent: summary.netProfitRMBEquivalent,
@@ -8517,18 +9435,32 @@ const bossCompanyProfitSummary = computed(() => {
 
 const bossCustomerProfitDisplayRows = computed(() => {
   const groups = new Map();
-  bossOrderRows.value.forEach((order) => {
-    const customer = String(order.customer || "未填写客户").trim();
+  const ensureCustomerGroup = (customerName = "未填写客户") => {
+    const customer = String(customerName || "未填写客户").trim() || "未填写客户";
     const row = groups.get(customer) || {
       customer,
       orderCount: 0,
+      otherBusinessCount: 0,
       revenueHKD: 0,
-      revenueRMB: 0
+      revenueRMB: 0,
+      otherBusinessIncomeRMB: 0,
+      otherBusinessProfitRMB: 0
     };
+    groups.set(customer, row);
+    return row;
+  };
+  bossOrderRows.value.forEach((order) => {
+    const row = ensureCustomerGroup(order.customer);
     row.orderCount += 1;
     row.revenueHKD += Number(order.receivableHKD || 0);
     row.revenueRMB += Number(order.receivableRMB || 0);
-    groups.set(customer, row);
+  });
+  bossOtherBusinessRows.value.forEach((item) => {
+    const row = ensureCustomerGroup(item.customer);
+    const totals = otherBusinessRowTotals(item);
+    row.otherBusinessCount += 1;
+    row.otherBusinessIncomeRMB += totals.totalIncome;
+    row.otherBusinessProfitRMB += totals.profit;
   });
   const costRatio = rmbEquivalent(
     bossFinanceSummary.value.driverPayableHKD + bossFinanceSummary.value.supplierPayableHKD,
@@ -8539,13 +9471,15 @@ const bossCustomerProfitDisplayRows = computed(() => {
       const costHKD = row.revenueHKD * costRatio;
       const costRMB = row.revenueRMB * costRatio;
       const profitHKD = row.revenueHKD - costHKD;
-      const profitRMB = row.revenueRMB - costRMB;
+      const profitRMB = row.revenueRMB - costRMB + row.otherBusinessProfitRMB;
+      const totalRevenueRMB = row.revenueRMB + row.otherBusinessIncomeRMB;
       return {
         customer: row.customer,
         orderCount: row.orderCount,
-        revenue: moneyPairDisplay(row.revenueHKD, row.revenueRMB),
+        orderCountText: row.otherBusinessCount ? `${row.orderCount} 单 / 其他 ${row.otherBusinessCount} 条` : row.orderCount,
+        revenue: moneyPairDisplay(row.revenueHKD, totalRevenueRMB),
         profit: moneyPairDisplay(profitHKD, profitRMB),
-        margin: marginText(profitHKD, profitRMB, row.revenueHKD, row.revenueRMB),
+        margin: marginText(profitHKD, profitRMB, row.revenueHKD, totalRevenueRMB),
         profitEquivalent: rmbEquivalent(profitHKD, profitRMB)
       };
     })
@@ -8563,7 +9497,7 @@ const bossDashboardTransportRevenueRows = computed(() =>
       return {
         no: order.no,
         date: order.date,
-        customer: order.customer || "-",
+        customer: partnerDisplayLabel(order.customer || "", "客户") || order.customer || "-",
         businessType: order.businessType || "-",
         plate: order.plate || "-",
         route: relatedOrderRouteText(order) || "-",
@@ -8597,7 +9531,7 @@ const bossDashboardCustomsRevenueRows = computed(() =>
       id: row.id,
       date: row.date,
       no: row.declarationNo || row.sixSheetNo || "-",
-      company: row.company || "-",
+      company: partnerDisplayLabel(row.company || "", "客户") || row.company || "-",
       direction: row.direction || "-",
       customsFee: moneyRmbDisplay(row.customsFee || 0),
       pageFee: moneyRmbDisplay(row.pageFee || 0),
@@ -8607,6 +9541,24 @@ const bossDashboardCustomsRevenueRows = computed(() =>
       totalValue: Number(row.total || 0)
     }))
     .sort((left, right) => right.totalValue - left.totalValue || String(right.date || "").localeCompare(String(left.date || "")))
+);
+
+const bossDashboardOtherBusinessRows = computed(() =>
+  bossOtherBusinessRows.value
+    .map((row) => ({
+      id: row.id,
+      date: row.date,
+      title: row.title || "-",
+      customer: partnerDisplayLabel(row.customer || "", "客户") || row.customer || "-",
+      income: moneyRmbDisplay(row.totalIncome || 0),
+      cost: moneyRmbDisplay(row.totalCost || 0),
+      profit: moneyRmbDisplay(row.profit || 0),
+      profitValue: Number(row.profit || 0),
+      customFields: normalizeOtherBusinessCustomFields(row.customFields)
+        .map((field) => `${field.name}: 收入 ${money(field.income)} / 成本 ${money(field.cost)} / 利润 ${money(otherBusinessCustomFieldProfit(field))}`)
+        .join("；") || "-"
+    }))
+    .sort((left, right) => right.profitValue - left.profitValue || String(right.date || "").localeCompare(String(left.date || "")))
 );
 
 const bossDashboardExpenseRows = computed(() =>
@@ -8690,7 +9642,7 @@ const bossDashboardUnreceivedRows = computed(() => {
       const paymentStatus = statementStatus === "已收款" ? "已收款" : "未收款";
       if (paymentStatus === "已收款") return null;
       const sourceRows = bossCustomsBusinessRows.value.filter((item) =>
-        (String(item.company || "").trim() || "未填写公司") === row.company
+        (String(item.company || "").trim() || "未填写客户") === row.company
       );
       const latestRow = sourceRows
         .slice()
@@ -8748,7 +9700,7 @@ const bossDashboardDetailSummaryCards = computed(() => {
     const summary = bossDashboardUnreceivedSummary.value;
     return [
       { label: "未收客户", value: `${summary.customerCount} 个`, note: periodFilterLabelByScope("boss") },
-      { label: "未收报关公司", value: `${summary.customsCompanyCount} 个`, note: `报关记录 ${summary.customsRecordCount} 条` },
+      { label: "未收报关客户", value: `${summary.customsCompanyCount} 个`, note: `报关记录 ${summary.customsRecordCount} 条` },
       { label: "关联订单", value: `${summary.orderCount} 单`, note: "客户对账单未收范围" },
       { label: "未收港币", value: moneyHkdDisplay(summary.hkd), note: "客户对账单未收金额" },
       { label: "未收人民币", value: moneyRmbDisplay(summary.rmb), note: "客户对账单 + 报关对账单" },
@@ -8758,9 +9710,10 @@ const bossDashboardDetailSummaryCards = computed(() => {
   return [
     { label: "运输利润", value: bossCompanyProfitSummary.value.transportProfitRMB, note: `运输订单 ${bossDashboardTransportRevenueRows.value.length} 单` },
     { label: "报关利润", value: bossCompanyProfitSummary.value.customsProfitRMB, note: `报关业务 ${bossDashboardCustomsRevenueRows.value.length} 条` },
+    { label: "其他业务利润", value: bossCompanyProfitSummary.value.otherBusinessProfitRMB, note: `其他业务 ${bossDashboardOtherBusinessRows.value.length} 条` },
     { label: "其他收入", value: bossCompanyProfitSummary.value.otherIncomeRMB, note: `收入记录 ${bossDashboardOtherIncomeRows.value.length} 条` },
     { label: "公司级支出", value: bossCompanyProfitSummary.value.expensesRMB, note: `支出记录 ${bossDashboardExpenseRows.value.length} 条` },
-    { label: "净利润", value: bossCompanyProfitSummary.value.netProfitRMB, note: "运输利润 + 报关利润 + 其他收入 - 公司级支出" }
+    { label: "净利润", value: bossCompanyProfitSummary.value.netProfitRMB, note: "运输利润 + 报关利润 + 其他业务利润 + 其他收入 - 公司级支出" }
   ];
 });
 
@@ -8779,7 +9732,7 @@ const bossDashboardDetailSubtitle = computed(() => {
 const bossDashboardKpiRows = computed(() => [
   { label: "净利润", value: bossCompanyProfitSummary.value.netProfit, note: "点击查看利润构成", action: "profit" },
   { label: "净利润（RMB）", value: bossCompanyProfitSummary.value.netProfitRMB, note: "点击查看折算明细", action: "profit" },
-  { label: "总收入（RMB）", value: moneyRmbDisplay(bossCompanyProfitSummary.value.revenueRMBEquivalent + bossCompanyProfitSummary.value.otherIncomeRMBValue), note: `点击查看收入构成 · 订单 ${bossFinanceSummary.value.orderCount} 单 / 报关 ${bossCustomsBusinessRows.value.length} 条`, action: "revenue" },
+  { label: "总收入（RMB）", value: moneyRmbDisplay(bossCompanyProfitSummary.value.revenueRMBEquivalent + bossCompanyProfitSummary.value.otherIncomeRMBValue), note: `点击查看收入构成 · 订单 ${bossFinanceSummary.value.orderCount} 单 / 报关 ${bossCustomsBusinessRows.value.length} 条 / 其他业务 ${bossOtherBusinessRows.value.length} 条`, action: "revenue" },
   { label: "未收款", value: moneyPairDisplay(bossDashboardUnreceivedSummary.value.hkd, bossDashboardUnreceivedSummary.value.rmb), note: "客户对账单 + 报关对账单未收", action: "unreceived" }
 ]);
 
@@ -8860,7 +9813,7 @@ const statementSupplierSummary = computed(() => ({
 function buildCustomsStatementRows(sourceRows = []) {
   const groups = new Map();
   sourceRows.forEach((item) => {
-    const company = String(item.company || "").trim() || "未填写公司";
+    const company = String(item.company || "").trim() || "未填写客户";
     const row = groups.get(company) || {
       company,
       count: 0,
@@ -8915,9 +9868,9 @@ function customsStatementDateRangeBounds() {
 }
 
 function customsStatementRowsForCompany(company = "") {
-  const target = String(company || "").trim() || "未填写公司";
+  const target = String(company || "").trim() || "未填写客户";
   return customsBusinessRows.value
-    .filter((row) => (String(row.company || "").trim() || "未填写公司") === target)
+    .filter((row) => (String(row.company || "").trim() || "未填写客户") === target)
     .sort((left, right) =>
       String(left.date || "").localeCompare(String(right.date || ""))
       || String(left.declarationNo || "").localeCompare(String(right.declarationNo || ""))
@@ -9148,7 +10101,7 @@ function customsStatementRowKey(row = {}) {
 async function openCustomsStatementExportMenu(row = {}) {
   const key = customsStatementRowKey(row);
   if (!key || !row.company) {
-    notify("当前公司信息不完整，无法导出报关对账单");
+    notify("当前客户信息不完整，无法导出报关对账单");
     return;
   }
   if (statementExportMenuOpen.value && statementExportMenuType.value === "customs" && statementExportMenuKey.value === key) {
@@ -9172,8 +10125,10 @@ const activeStatementExportRow = computed(() => {
 
 const activeStatementExportEntityName = computed(() => {
   const row = activeStatementExportRow.value || {};
-  if (statementExportMenuType.value === "customs") return row.company || "";
-  return statementExportMenuType.value === "supplier" ? row.supplier : row.customer;
+  if (statementExportMenuType.value === "customs") return partnerDisplayLabel(row.company || "", "客户") || row.company || "";
+  return statementExportMenuType.value === "supplier"
+    ? row.supplier
+    : (partnerDisplayLabel(row.customer || "", "客户") || row.customer || "");
 });
 
 const statementExportDialogMetaItems = computed(() => {
@@ -9695,7 +10650,7 @@ const orderCustomerOptions = computed(() => {
     .filter((item) => item.type === "客户")
     .filter((item) => {
       if (!keyword) return true;
-      return normalizeLocationText([item.id, item.name, item.taxNo, item.mobile, item.contact].join(" ")).includes(keyword);
+      return normalizeLocationText([item.id, item.name, item.shortName, item.taxNo, item.mobile, item.contact].join(" ")).includes(keyword);
     })
     .slice(0, 80);
 });
@@ -9706,7 +10661,7 @@ const orderSupplierOptions = computed(() => {
     .filter((item) => item.type === "供应商")
     .filter((item) => {
       if (!keyword) return true;
-      return normalizeLocationText([item.id, item.name, item.taxNo, item.mobile, item.contact].join(" ")).includes(keyword);
+      return normalizeLocationText([item.id, item.name, item.shortName, item.taxNo, item.mobile, item.contact].join(" ")).includes(keyword);
     })
     .slice(0, 80);
 });
@@ -9717,7 +10672,7 @@ const dispatchCustomerOptions = computed(() => {
     .filter((item) => item.type === "客户")
     .filter((item) => {
       if (!keyword) return true;
-      return normalizeLocationText([item.id, item.name, item.taxNo, item.mobile, item.contact, item.type].join(" ")).includes(keyword);
+      return normalizeLocationText([item.id, item.name, item.shortName, item.taxNo, item.mobile, item.contact, item.type].join(" ")).includes(keyword);
     })
     .slice(0, 100);
 });
@@ -9869,8 +10824,15 @@ const orderFiltersActive = computed(() =>
 function selectDispatchCustomer(customer) {
   dispatchForm.customerId = customer?.id || "";
   dispatchForm.customer = customer?.name || "";
-  dispatchCustomerKeyword.value = customer?.name || "";
+  dispatchCustomerKeyword.value = customerShortDisplay(customer) || "";
   dispatchCustomerPickerOpen.value = false;
+}
+
+function handleDispatchCustomerInput() {
+  const customer = findPartnerByTypedLabel(dispatchCustomerKeyword.value, "客户");
+  dispatchForm.customer = customer?.name || dispatchCustomerKeyword.value;
+  dispatchForm.customerId = customer?.id || "";
+  dispatchCustomerPickerOpen.value = true;
 }
 
 function handleDispatchVehicleSourceChange() {
@@ -10483,7 +11445,7 @@ function findRouteFreightTemplate() {
 const routeFreightPreview = computed(() => {
   const pricedLocation = orderFreightPricedLocationText();
   const missing = [
-    ["经营单位", orderForm.customer || orderForm.customerId],
+    ["客户", orderForm.customer || orderForm.customerId],
     ["进出口", orderForm.direction],
     ["吨位", orderForm.tonnage],
     ["币种", currencyCodeDisplay(orderFreightCurrency())],
@@ -12091,6 +13053,14 @@ function currentAddressBookCustomerId() {
   return orderForm.customerId || selectedCustomer.value?.id || "";
 }
 
+const dispatchCustomerSelected = computed(() => {
+  const customerName = String(dispatchForm.customer || "").trim();
+  if (!customerName && !dispatchForm.customerId) return false;
+  return customerRows.value.some(
+    (item) => item.type === "客户" && (item.id === dispatchForm.customerId || item.name === customerName)
+  );
+});
+
 const customerContactAddressOptions = computed(() => {
   const customerId = currentAddressBookCustomerId();
   if (!customerId) return [];
@@ -12120,15 +13090,25 @@ const customerContactAddressOptions = computed(() => {
     .filter((item) => item.area || item.address || item.contact || item.phone);
 });
 
-const addressBookAreaLevel1Options = computed(() =>
+const addressBookCityOptions = computed(() =>
   uniqueSorted(templateLocationGroups.value.map((group) => group.level1))
 );
 
+const addressBookAreaLevel1Options = addressBookCityOptions;
+
 const addressBookAreaLevel2Options = computed(() => {
-  if (!addressBookAreaTree.level1) return [];
+  const city = String(addressBookForm.city || "").trim();
+  if (!city) return [];
   return uniqueSorted(templateLocationGroups.value
-    .filter((group) => group.level1 === addressBookAreaTree.level1)
+    .filter((group) => group.level1 === city)
     .map((group) => group.level2));
+});
+
+const addressBookFilteredDistrictOptions = computed(() => {
+  const keyword = normalizeLocationText(addressBookDistrictSearch.value);
+  const options = addressBookAreaLevel2Options.value;
+  if (!keyword) return options;
+  return options.filter((district) => normalizeLocationText(district).includes(keyword));
 });
 
 const addressBookAreaLevel3Options = computed(() => {
@@ -12141,6 +13121,28 @@ const addressBookAreaLevel3Options = computed(() => {
 const addressBookAreaTreeValue = computed(() =>
   formatFreightLocationOption([addressBookAreaTree.level1, addressBookAreaTree.level2, addressBookAreaTree.level3])
 );
+
+const locationCityOptions = computed(() =>
+  uniqueSorted([
+    ...Object.values(chinaProvinceCities).flat(),
+    ...templateLocationGroups.value.map((group) => group.level1),
+    ...customerContactRows.value.map((item) => splitLocationParts(contactAreaText(item)).city),
+    ...addressBookRows.value.map((item) => splitLocationParts(item.area).city),
+    ...orderRows.value.flatMap((order) => [
+      splitLocationParts(order.loading).city,
+      splitLocationParts(order.unloading).city
+    ])
+  ].filter(Boolean))
+);
+
+function locationDistrictOptions(city = "") {
+  const selectedCity = String(city || "").trim();
+  if (!selectedCity) return [];
+  return uniqueSorted(templateLocationGroups.value
+    .filter((group) => group.level1 === selectedCity)
+    .map((group) => group.level2)
+    .filter(Boolean));
+}
 
 const contactAreaLevel1Options = computed(() =>
   uniqueSorted(templateLocationGroups.value.map((group) => group.level1))
@@ -12948,6 +13950,76 @@ async function refreshCurrentAccount(options = {}) {
   return null;
 }
 
+function realtimeAffectedModules(event = {}) {
+  return new Set(Array.isArray(event.affectedModules) ? event.affectedModules.map(String) : []);
+}
+
+function shouldRefreshRemindersForRealtime(event = {}) {
+  const modules = realtimeAffectedModules(event);
+  return modules.has("reminders") || ["driver", "vehicle", "vehicle_expense"].includes(String(event.entityType || ""));
+}
+
+async function flushRealtimeRefresh() {
+  const pending = { ...realtimePendingRefresh };
+  realtimePendingRefresh.database = false;
+  realtimePendingRefresh.dispatch = false;
+  realtimePendingRefresh.reminders = false;
+
+  try {
+    if (pending.database) {
+      await loadDatabaseData({ preserveSelection: true, silent: true });
+    }
+    if (pending.reminders && loggedIn.value) {
+      await loadExpiryReminders({ silent: true, showPopup: activeModule.value === "home" });
+    }
+    if (pending.dispatch && loggedIn.value && canAccessModule("dispatchBoard")) {
+      await loadDispatchPlansForCurrentFilter();
+    }
+  } catch (error) {
+    console.warn("Realtime refresh failed", error);
+  }
+}
+
+function scheduleRealtimeRefresh(event = {}) {
+  if (!loggedIn.value) return;
+  const modules = realtimeAffectedModules(event);
+  realtimePendingRefresh.database = true;
+  realtimePendingRefresh.dispatch = realtimePendingRefresh.dispatch || modules.has("dispatchBoard");
+  realtimePendingRefresh.reminders = realtimePendingRefresh.reminders || shouldRefreshRemindersForRealtime(event);
+  window.clearTimeout(realtimeRefreshTimer);
+  realtimeRefreshTimer = window.setTimeout(() => {
+    realtimeRefreshTimer = null;
+    flushRealtimeRefresh();
+  }, 500);
+}
+
+function closeRealtimeConnection() {
+  window.clearTimeout(realtimeRefreshTimer);
+  realtimeRefreshTimer = null;
+  realtimePendingRefresh.database = false;
+  realtimePendingRefresh.dispatch = false;
+  realtimePendingRefresh.reminders = false;
+  if (realtimeClient) {
+    realtimeClient.disconnect();
+    realtimeClient = null;
+  }
+}
+
+function ensureRealtimeConnection() {
+  if (!loggedIn.value || !authToken.value) {
+    closeRealtimeConnection();
+    return;
+  }
+  if (!realtimeClient) {
+    realtimeClient = createRealtimeClient({
+      getToken: () => authToken.value,
+      onChange: scheduleRealtimeRefresh,
+      onStatus: (_status) => {}
+    });
+  }
+  realtimeClient.connect();
+}
+
 function tableSortKey(tableId) {
   return `hanye_table_sort_${tableId}`;
 }
@@ -13254,6 +14326,11 @@ watch(activeModule, (moduleId) => {
       notify(error.message || "报关业务加载失败");
     });
   }
+  if (loggedIn.value && moduleId === "otherBusiness") {
+    loadOtherBusinesses({ silent: true }).catch((error) => {
+      notify(error.message || "其他业务加载失败");
+    });
+  }
   if (loggedIn.value && moduleId === "financeCustomsStatements") {
     loadCustomsBusinesses({ silent: true }).catch((error) => {
       notify(error.message || "报关对账单加载失败");
@@ -13262,6 +14339,9 @@ watch(activeModule, (moduleId) => {
   if (loggedIn.value && BOSS_CENTER_MODULES.includes(moduleId)) {
     loadAllCustomsBusinesses({ silent: true }).catch((error) => {
       notify(error.message || "报关业务加载失败");
+    });
+    loadAllOtherBusinesses({ silent: true }).catch((error) => {
+      notify(error.message || "其他业务加载失败");
     });
   }
 }, { immediate: true });
@@ -13274,6 +14354,13 @@ watch(bossPeriodFilter, () => {
 watch(customsBusinessPeriodFilter, () => {
   if (loggedIn.value && activeModule.value === "customsBusiness") {
     loadCustomsBusinesses().catch((error) => notify(error.message || "报关业务加载失败"));
+  }
+});
+
+watch(otherBusinessPeriodFilter, () => {
+  localStorage.setItem("hanye_other_business_period_filter", otherBusinessPeriodFilter.value);
+  if (loggedIn.value && activeModule.value === "otherBusiness") {
+    loadOtherBusinesses().catch((error) => notify(error.message || "其他业务加载失败"));
   }
 });
 
@@ -13370,17 +14457,83 @@ function selectAddressBookAreaLevel(level, value) {
     addressBookAreaTree.level1 = selected ? "" : value;
     addressBookAreaTree.level2 = "";
     addressBookAreaTree.level3 = "";
+    addressBookForm.city = addressBookAreaTree.level1;
+    addressBookForm.district = "";
   } else if (level === 2) {
     const selected = addressBookAreaTree.level2 === value;
     addressBookAreaTree.level2 = selected ? "" : value;
     addressBookAreaTree.level3 = "";
+    addressBookForm.district = addressBookAreaTree.level2;
   } else {
     addressBookAreaTree.level3 = addressBookAreaTree.level3 === value ? "" : value;
   }
 }
 
+function handleAddressBookCityChange() {
+  const city = String(addressBookForm.city || "").trim();
+  const validDistricts = new Set(
+    templateLocationGroups.value
+      .filter((group) => group.level1 === city)
+      .map((group) => group.level2)
+      .filter(Boolean)
+  );
+  if (!city || (addressBookForm.district && !validDistricts.has(String(addressBookForm.district || "").trim()))) {
+    addressBookForm.district = "";
+  }
+  addressBookDistrictSearch.value = "";
+  addressBookDistrictPickerOpen.value = false;
+}
+
+function openAddressBookDistrictPicker() {
+  if (!addressBookForm.city) return;
+  addressBookDistrictSearch.value = String(addressBookForm.district || "").trim();
+  addressBookDistrictPickerOpen.value = true;
+}
+
+function closeAddressBookDistrictPicker() {
+  addressBookDistrictPickerOpen.value = false;
+  const value = String(addressBookDistrictSearch.value || addressBookForm.district || "").trim();
+  addressBookForm.district = value;
+  addressBookDistrictSearch.value = value;
+}
+
+function handleAddressBookDistrictInput(event) {
+  const value = String(event?.target?.value || "").trim();
+  addressBookDistrictSearch.value = value;
+  addressBookForm.district = value;
+  addressBookDistrictPickerOpen.value = true;
+}
+
+function selectAddressBookDistrict(value = "") {
+  const district = String(value || "").trim();
+  addressBookForm.district = district;
+  addressBookDistrictSearch.value = district;
+  addressBookDistrictPickerOpen.value = false;
+}
+
+function toggleAddressBookDistrictPicker() {
+  if (addressBookDistrictPickerOpen.value) {
+    closeAddressBookDistrictPicker();
+    return;
+  }
+  openAddressBookDistrictPicker();
+}
+
+function clearAddressBookDistrict() {
+  addressBookForm.district = "";
+  addressBookDistrictSearch.value = "";
+  addressBookDistrictPickerOpen.value = true;
+}
+
+function confirmFirstAddressBookDistrictOption() {
+  const [firstDistrict] = addressBookFilteredDistrictOptions.value;
+  selectAddressBookDistrict(firstDistrict || addressBookDistrictSearch.value);
+}
+
 function confirmAddressBookAreaSelection() {
   addressBookForm.area = addressBookAreaTreeValue.value;
+  addressBookForm.city = addressBookAreaTree.level1;
+  addressBookForm.district = addressBookAreaTree.level2;
   addressBookAreaTree.open = false;
 }
 
@@ -13497,6 +14650,7 @@ function resizeOrderColumn(event) {
 function stopOrderColumnResize() {
   if (orderResizeState) {
     saveOrderColumnWidths();
+    saveAccountTablePreferencesSoon();
   }
   orderResizeState = null;
   document.body.classList.remove("is-column-resizing");
@@ -13592,6 +14746,113 @@ function dataTableColumnStyle(widths, key) {
   return { width: `${widths[key] || 80}px` };
 }
 
+function formerDriverColumnStyle(column = {}) {
+  if (column.key !== "actions") return dataTableColumnStyle(driverListDetailColumnWidths, column.key);
+  return { width: `${Math.max(Number(driverListDetailColumnWidths.actions || 0), 112)}px` };
+}
+
+function isModalDragInteractiveTarget(target) {
+  return target instanceof Element && Boolean(target.closest([
+    "button",
+    "input",
+    "select",
+    "textarea",
+    "a",
+    "img",
+    "iframe",
+    "video",
+    "canvas",
+    "label",
+    "summary",
+    "table",
+    "[role='button']",
+    "[contenteditable='true']",
+    ".column-resize-handle",
+    ".modal-detail-actions",
+    ".searchable-select-dropdown",
+    ".address-book-area-dropdown",
+    ".upload-dropzone",
+    ".data-table-column-popover"
+  ].join(", ")));
+}
+
+function isModalDragScrollbarTarget(event, target, card) {
+  if (!(target instanceof Element)) return false;
+  const scrollHost = target.closest(".modal-card, .modal-body, .full-detail-body, .file-preview-body, .table-wrap");
+  if (!scrollHost || !card.contains(scrollHost)) return false;
+  const rect = scrollHost.getBoundingClientRect();
+  const verticalScrollbarWidth = rect.width - scrollHost.clientWidth;
+  const horizontalScrollbarHeight = rect.height - scrollHost.clientHeight;
+  const hasVerticalScrollbar = scrollHost.scrollHeight > scrollHost.clientHeight && verticalScrollbarWidth > 0;
+  const hasHorizontalScrollbar = scrollHost.scrollWidth > scrollHost.clientWidth && horizontalScrollbarHeight > 0;
+  return (
+    (hasVerticalScrollbar && event.clientX >= rect.right - verticalScrollbarWidth) ||
+    (hasHorizontalScrollbar && event.clientY >= rect.bottom - horizontalScrollbarHeight)
+  );
+}
+
+function startModalDrag(event) {
+  if (event.button !== 0) return;
+  const target = event.target;
+  if (isModalDragInteractiveTarget(target)) return;
+  const card = target instanceof Element ? target.closest(".modal-card") : null;
+  if (!card) return;
+  if (isModalDragScrollbarTarget(event, target, card)) return;
+  const backdrop = card.closest(".modal-backdrop");
+  if (!backdrop) return;
+  const rect = card.getBoundingClientRect();
+  const backdropRect = backdrop.getBoundingClientRect();
+  modalDragState = {
+    card,
+    offsetX: event.clientX - rect.left,
+    offsetY: event.clientY - rect.top,
+    width: rect.width,
+    height: rect.height,
+    backdropLeft: backdropRect.left,
+    backdropTop: backdropRect.top,
+    backdropRight: backdropRect.right,
+    backdropBottom: backdropRect.bottom,
+    left: rect.left,
+    top: rect.top
+  };
+  card.style.position = "fixed";
+  card.style.left = `${rect.left}px`;
+  card.style.top = `${rect.top}px`;
+  card.style.right = "auto";
+  card.style.bottom = "auto";
+  card.style.margin = "0";
+  card.style.transform = "none";
+  document.body.classList.add("is-modal-dragging");
+  event.preventDefault();
+  event.stopPropagation();
+  window.addEventListener("pointermove", moveModalDrag);
+  window.addEventListener("pointerup", stopModalDrag);
+}
+
+function moveModalDrag(event) {
+  if (!modalDragState) return;
+  const nextLeft = Math.min(
+    modalDragState.backdropRight - modalDragState.width - 8,
+    Math.max(modalDragState.backdropLeft + 8, event.clientX - modalDragState.offsetX)
+  );
+  const nextTop = Math.min(
+    modalDragState.backdropBottom - modalDragState.height - 8,
+    Math.max(modalDragState.backdropTop + 8, event.clientY - modalDragState.offsetY)
+  );
+  modalDragState.left = nextLeft;
+  modalDragState.top = nextTop;
+  modalDragState.card.style.left = `${nextLeft}px`;
+  modalDragState.card.style.top = `${nextTop}px`;
+}
+
+function stopModalDrag() {
+  if (!modalDragState) return;
+  modalDragState = null;
+  document.body.classList.remove("is-modal-dragging");
+  window.removeEventListener("pointermove", moveModalDrag);
+  window.removeEventListener("pointerup", stopModalDrag);
+}
+
 function startDataTableColumnResize(tableId, widths, column, event) {
   event.preventDefault();
   event.stopPropagation();
@@ -13619,6 +14880,7 @@ function resizeDataTableColumn(event) {
 function stopDataTableColumnResize() {
   if (dataTableResizeState) {
     localStorage.setItem(dataTableStorageKey(dataTableResizeState.tableId, "widths"), JSON.stringify({ ...dataTableResizeState.widths }));
+    if (dataTableResizeState.tableId === "dispatch_board") saveAccountTablePreferencesSoon();
   }
   dataTableResizeState = null;
   document.body.classList.remove("is-column-resizing");
@@ -13630,11 +14892,13 @@ function setDataTableColumnVisible(tableId, visibility, column, visible) {
   if (column.locked) return;
   visibility[column.key] = visible;
   localStorage.setItem(dataTableStorageKey(tableId, "visibility"), JSON.stringify({ ...visibility }));
+  if (tableId === "dispatch_board") saveAccountTablePreferencesSoon();
 }
 
 function setDataTableDensity(value) {
   dataTableDensity.value = dataTableDensityOptions.some((item) => item.key === value) ? value : "compact";
   localStorage.setItem("hanye_data_table_density", dataTableDensity.value);
+  saveAccountTablePreferencesSoon();
 }
 
 function dataTableDensityClass() {
@@ -13668,6 +14932,7 @@ function setOrderColumnVisible(column, visible) {
   if (column.locked || isOrderRightStickyColumn(column)) return;
   orderColumnVisibility[column.key] = visible;
   localStorage.setItem(ORDER_COLUMN_VISIBILITY_KEY, JSON.stringify({ ...orderColumnVisibility }));
+  saveAccountTablePreferencesSoon();
 }
 
 function toggleCustomerOrderColumnVisible(column) {
@@ -13715,6 +14980,7 @@ function toggleCustomerOrderColumnLock(column) {
 function toggleOrderColumnLock(column) {
   if (isOrderLeftStickyColumn(column) || isOrderRightStickyColumn(column)) return;
   toggleManagedColumnLock(orderColumns, orderLockedColumns, column, ORDER_COLUMN_LOCKED_KEY, ORDER_COLUMN_ORDER_KEY);
+  saveAccountTablePreferencesSoon();
 }
 
 function moveColumn(columns, draggedKey, targetKey, storageKey) {
@@ -13726,6 +14992,7 @@ function moveColumn(columns, draggedKey, targetKey, storageKey) {
   const nextIndex = columns.findIndex((column) => column.key === targetKey);
   columns.splice(nextIndex, 0, moved);
   localStorage.setItem(storageKey, JSON.stringify(columns.filter((column) => !column.locked && !column.leftPinned && !column.rightPinned).map((column) => column.key)));
+  if (storageKey === ORDER_COLUMN_ORDER_KEY) saveAccountTablePreferencesSoon();
 }
 
 function moveColumnByOffset(columns, column, offset, storageKey) {
@@ -13741,6 +15008,7 @@ function moveColumnByOffset(columns, column, offset, storageKey) {
   const nextIndex = columns.findIndex((item) => item.key === targetMovableKey);
   columns.splice(offset > 0 ? nextIndex + 1 : nextIndex, 0, moved);
   localStorage.setItem(storageKey, JSON.stringify(columns.filter((item) => !item.locked && !item.leftPinned && !item.rightPinned).map((item) => item.key)));
+  if (storageKey === ORDER_COLUMN_ORDER_KEY) saveAccountTablePreferencesSoon();
 }
 
 function resetManagedColumnWidths(columns, widths, storageKey) {
@@ -13772,10 +15040,12 @@ function resetManagedColumnOrder(columns, lockedRef, orderStorageKey, lockedStor
 
 function resetOrderColumnWidths() {
   resetManagedColumnWidths(orderColumns, orderColumnWidths, ORDER_COLUMN_STORAGE_KEY);
+  saveAccountTablePreferencesSoon();
 }
 
 function resetOrderColumnOrder() {
   resetManagedColumnOrder(orderColumns, orderLockedColumns, ORDER_COLUMN_ORDER_KEY, ORDER_COLUMN_LOCKED_KEY);
+  saveAccountTablePreferencesSoon();
 }
 
 function resetCustomerOrderColumnWidths() {
@@ -13824,12 +15094,14 @@ function startDispatchColumnDrag(column, event) {
 
 function dropDispatchColumn(column) {
   moveDataTableColumn(dispatchTableColumns, "dispatch_board", draggedDispatchTableColumnKey, column.key);
+  saveAccountTablePreferencesSoon();
   draggedDispatchTableColumnKey = "";
 }
 
 function customerOrderCellText(order, key) {
   const values = {
     no: order.no,
+    customer: orderCustomerDisplay(order),
     businessType: order.businessType,
     port: order.port,
     direction: order.direction,
@@ -13852,11 +15124,12 @@ function customerOrderCellText(order, key) {
   return values[key] ?? "";
 }
 
-function orderCellText(order, key) {
+function orderCellText(order, key, index = -1) {
   const values = {
+    sequence: index >= 0 ? index + 1 : "",
     no: order.no,
     dispatchNo: order.dispatchNo || "",
-    customer: order.customer,
+    customer: orderCustomerDisplay(order),
     businessType: order.businessType,
     port: order.port,
     direction: order.direction,
@@ -13869,7 +15142,7 @@ function orderCellText(order, key) {
     driver: orderDetailDriverText(order),
     createdByName: order.createdByName || order.createdByUsername || "-",
     transportMode: normalizeTransportMode(order.transportMode || "") || "-",
-    supplier: order.supplier,
+    supplier: supplierDisplayLabel(order.supplier),
     loading: relatedOrderLocationText(order.loading),
     unloading: relatedOrderLocationText(order.unloading),
     date: order.date,
@@ -13880,6 +15153,8 @@ function orderCellText(order, key) {
 }
 
 function orderTableCellTitle(order, key) {
+  if (key === "customer") return order?.customer || "";
+  if (key === "supplier") return order?.supplier || "";
   if (key === "loading" || key === "unloading") return order?.[key] || "";
   if (isOrderFullDisplayColumn(key)) return orderCellText(order, key);
   return "";
@@ -13985,17 +15260,17 @@ function dispatchListDetailCellText(row = {}, key = "") {
     loadTime: `${order.date || row.date || dispatchDate.value} ${row.loadTime || "-"}`,
     dispatchNo: row.dispatchNo || "-",
     createdByName: row.createdByName || row.createdByUsername || "-",
-    customer: order.customer || row.customer || "-",
+    customer: partnerDisplayLabel(order.customer || row.customer || "", "客户") || "-",
     businessType: order.businessType || row.businessType || "-",
     plate: row.plate || "-",
     driver: dispatchDriverText(row),
+    supplier: order.vehicleSource === "外派车辆" ? (supplierDisplayLabel(order.supplier || row.supplier || "") || "外派供应商") : "-",
     port: order.port || row.port || "-",
     direction: order.direction || row.direction || "-",
     tonnage: order.tonnage || row.tonnage || "-",
     quantity: order.quantity || row.quantity || "-",
     weight: order.weight || row.weight || "-",
     route: dispatchOrderRouteText(order),
-    vehicleSource: dispatchVehicleSourceText(row),
     status: row.status || DISPATCH_PLAN_DEFAULT_STATUS,
     note: row.note || "-"
   };
@@ -14004,6 +15279,7 @@ function dispatchListDetailCellText(row = {}, key = "") {
   if (key === "createdByName") return row.createdByName || row.createdByUsername || "-";
   if (key === "businessType") return order.businessType || row.businessType || "-";
   if (key === "driver") return dispatchDriverText(row);
+  if (key === "supplier") return order.vehicleSource === "外派车辆" ? (supplierDisplayLabel(order.supplier || row.supplier || "") || "外派供应商") : "-";
   return values[key] ?? order[key] ?? row[key] ?? "-";
 }
 
@@ -14032,6 +15308,7 @@ function driverListDetailCellText(item = {}, key = "") {
     birthday: item.birthday || "-",
     hireDate: item.hireDate || "-",
     leaveDate: item.leaveDate || "-",
+    employmentStatus: driverEmploymentStatus(item),
     expireAt: item.expireAt || "-",
     status: item.status || "-",
     note: item.note || "-"
@@ -14096,6 +15373,59 @@ function addressBookOptionValue(option = {}) {
   return String(option.value || option.address || option.pathLabel || "").trim();
 }
 
+function splitLocationParts(value = "") {
+  const text = String(value || "").trim();
+  const parts = text
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length <= 1 && text) {
+    const cities = [...Object.values(chinaProvinceCities).flat(), "香港", "澳门"]
+      .sort((left, right) => right.length - left.length);
+    const city = cities.find((item) => text.includes(item)) || "";
+    const afterCity = city ? text.slice(text.indexOf(city) + city.length).trim() : text;
+    const district = afterCity.match(/^([\u4e00-\u9fa5A-Za-z0-9]+?(?:区|县|镇|乡|街道))/u)?.[1] || "";
+    const detail = district ? afterCity.slice(district.length).trim() : afterCity;
+    return {
+      city,
+      district,
+      detail: city || district ? detail : text
+    };
+  }
+  return {
+    city: parts[0] || "",
+    district: parts[1] || "",
+    detail: parts.slice(2).join(" / ")
+  };
+}
+
+function composeLocationParts(city = "", district = "", detail = "") {
+  return [city, district, detail]
+    .map((part) => String(part || "").trim())
+    .filter(Boolean)
+    .join(" / ");
+}
+
+function splitDispatchLocationParts(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return { city: "", district: "", detail: "" };
+  if (text.includes("/")) {
+    const parts = text.split("/").map((part) => part.trim());
+    return {
+      city: parts[0] || "",
+      district: parts[1] || "",
+      detail: parts.slice(2).join(" / ")
+    };
+  }
+  return splitLocationParts(text);
+}
+
+function composeDispatchLocationParts(city = "", district = "", detail = "") {
+  const values = [city, district, detail].map((part) => String(part || "").trim());
+  if (!values.some(Boolean)) return "";
+  return values.join(" / ");
+}
+
 function splitAddressBookLocationValue(value = "") {
   return String(value || "")
     .replace(/\r/g, "\n")
@@ -14123,6 +15453,204 @@ function updateDispatchLocationEntry(target, index, value) {
   const entries = dispatchLocationEntries(target);
   entries[index] = value;
   setDispatchLocationEntries(target, entries);
+}
+
+function updateDispatchLocationEntryPart(target, index, part, value) {
+  const entries = dispatchLocationEntries(target);
+  const current = splitDispatchLocationParts(entries[index] || "");
+  current[part] = String(value || "").trim();
+  entries[index] = composeDispatchLocationParts(current.city, current.district, current.detail);
+  setDispatchLocationEntries(target, entries);
+}
+
+function dispatchLocationInputKey(target, index, part) {
+  return `${target}:${index}:${part}`;
+}
+
+function dispatchLocationDraftKey(target, index) {
+  return `${target}:${index}`;
+}
+
+function ensureDispatchLocationDraft(target, index) {
+  const key = dispatchLocationDraftKey(target, index);
+  if (!dispatchLocationDrafts[key]) {
+    dispatchLocationDrafts[key] = {};
+  }
+  return dispatchLocationDrafts[key];
+}
+
+function dispatchLocationDraftValue(target, index, part) {
+  const key = dispatchLocationDraftKey(target, index);
+  const draft = dispatchLocationDrafts[key];
+  if (draft && Object.prototype.hasOwnProperty.call(draft, part)) {
+    return String(draft[part] || "");
+  }
+  return splitDispatchLocationParts(dispatchLocationEntries(target)[index] || "")[part] || "";
+}
+
+function dispatchLocationPartValue(target, index, part) {
+  return dispatchLocationDraftValue(target, index, part).trim();
+}
+
+function dispatchLocationCityValue(target, index) {
+  return dispatchLocationPartValue(target, index, "city");
+}
+
+function dispatchLocationDistrictValue(target, index) {
+  return dispatchLocationPartValue(target, index, "district");
+}
+
+function dispatchLocationHasCity(target, index) {
+  return Boolean(dispatchLocationCityValue(target, index));
+}
+
+function setDispatchLocationDraftPart(target, index, part, value) {
+  const draft = ensureDispatchLocationDraft(target, index);
+  draft[part] = String(value || "");
+}
+
+function clearDispatchLocationDraftPart(target, index, part) {
+  const key = dispatchLocationDraftKey(target, index);
+  const draft = dispatchLocationDrafts[key];
+  if (!draft) return;
+  delete draft[part];
+  if (!Object.keys(draft).length) delete dispatchLocationDrafts[key];
+}
+
+function setDispatchLocationInputComposing(target, index, part, composing) {
+  dispatchLocationInputComposing[dispatchLocationInputKey(target, index, part)] = Boolean(composing);
+}
+
+function isDispatchLocationInputComposing(target, index, part) {
+  return Boolean(dispatchLocationInputComposing[dispatchLocationInputKey(target, index, part)]);
+}
+
+function handleDispatchLocationTextInput(target, index, part, event) {
+  if (event?.isComposing || isDispatchLocationInputComposing(target, index, part)) return;
+  const value = event?.target?.value || "";
+  setDispatchLocationDraftPart(target, index, part, value);
+  if (part === "district") {
+    dispatchLocationDistrictPicker.key = dispatchLocationDistrictKey(target, index);
+    dispatchLocationDistrictPicker.keyword = String(value || "").trim();
+  }
+}
+
+function handleDispatchLocationTextCompositionStart(target, index, part) {
+  setDispatchLocationInputComposing(target, index, part, true);
+}
+
+function handleDispatchLocationTextCompositionEnd(target, index, part, event) {
+  setDispatchLocationInputComposing(target, index, part, false);
+  const value = event?.target?.value || "";
+  setDispatchLocationDraftPart(target, index, part, value);
+  if (part === "district") {
+    dispatchLocationDistrictPicker.key = dispatchLocationDistrictKey(target, index);
+    dispatchLocationDistrictPicker.keyword = String(value || "").trim();
+  }
+}
+
+function commitDispatchLocationDraftPart(target, index, part) {
+  const value = dispatchLocationDraftValue(target, index, part);
+  if (part === "city") {
+    updateDispatchLocationCity(target, index, value);
+  } else {
+    updateDispatchLocationEntryPart(target, index, part, value);
+  }
+  clearDispatchLocationDraftPart(target, index, part);
+}
+
+function updateDispatchLocationCity(target, index, value) {
+  if (isDispatchLocationInputComposing(target, index, "city")) return;
+  const entries = dispatchLocationEntries(target);
+  const current = splitDispatchLocationParts(entries[index] || "");
+  const nextCity = String(value || "").trim();
+  if (current.city !== nextCity) {
+    current.district = "";
+    if (dispatchLocationDistrictSearchKey(target, index)) {
+      dispatchLocationDistrictPicker.keyword = "";
+      dispatchLocationDistrictPicker.key = "";
+    }
+  }
+  current.city = nextCity;
+  entries[index] = composeDispatchLocationParts(current.city, current.district, current.detail);
+  setDispatchLocationEntries(target, entries);
+}
+
+function dispatchLocationDistrictKey(target, index) {
+  return `${target}:${index}`;
+}
+
+function dispatchLocationDistrictSearchKey(target, index) {
+  return dispatchLocationDistrictPicker.key === dispatchLocationDistrictKey(target, index);
+}
+
+function dispatchLocationDistrictOptions(target, index) {
+  return locationDistrictOptions(dispatchLocationCityValue(target, index));
+}
+
+function dispatchFilteredDistrictOptions(target, index) {
+  const keyword = normalizeLocationText(dispatchLocationDistrictPicker.keyword);
+  const options = dispatchLocationDistrictOptions(target, index);
+  if (!keyword) return options;
+  return options.filter((district) => normalizeLocationText(district).includes(keyword));
+}
+
+function openDispatchLocationDistrictPicker(target, index) {
+  if (!dispatchLocationHasCity(target, index)) return;
+  dispatchLocationDistrictPicker.key = dispatchLocationDistrictKey(target, index);
+  dispatchLocationDistrictPicker.keyword = dispatchLocationDistrictValue(target, index);
+}
+
+function closeDispatchLocationDistrictPicker(target, index) {
+  if (!dispatchLocationDistrictSearchKey(target, index)) return;
+  const entries = dispatchLocationEntries(target);
+  const current = splitDispatchLocationParts(entries[index] || "");
+  const value = String(dispatchLocationDistrictPicker.keyword || dispatchLocationDraftValue(target, index, "district") || current.district || "").trim();
+  current.district = value;
+  entries[index] = composeDispatchLocationParts(current.city, current.district, current.detail);
+  setDispatchLocationEntries(target, entries);
+  dispatchLocationDistrictPicker.key = "";
+  dispatchLocationDistrictPicker.keyword = value;
+  clearDispatchLocationDraftPart(target, index, "district");
+}
+
+function selectDispatchLocationDistrict(target, index, value = "") {
+  const district = String(value || "").trim();
+  const entries = dispatchLocationEntries(target);
+  const current = splitDispatchLocationParts(entries[index] || "");
+  current.district = district;
+  entries[index] = composeDispatchLocationParts(current.city, current.district, current.detail);
+  setDispatchLocationEntries(target, entries);
+  dispatchLocationDistrictPicker.key = "";
+  dispatchLocationDistrictPicker.keyword = district;
+  clearDispatchLocationDraftPart(target, index, "district");
+}
+
+function clearDispatchLocationDistrict(target, index) {
+  const entries = dispatchLocationEntries(target);
+  const current = splitDispatchLocationParts(entries[index] || "");
+  current.district = "";
+  entries[index] = composeDispatchLocationParts(current.city, current.district, current.detail);
+  setDispatchLocationEntries(target, entries);
+  dispatchLocationDistrictPicker.key = dispatchLocationDistrictKey(target, index);
+  dispatchLocationDistrictPicker.keyword = "";
+  clearDispatchLocationDraftPart(target, index, "district");
+}
+
+function confirmFirstDispatchLocationDistrictOption(target, index) {
+  const [firstDistrict] = dispatchFilteredDistrictOptions(target, index);
+  selectDispatchLocationDistrict(target, index, firstDistrict || dispatchLocationDistrictPicker.keyword);
+}
+
+function invalidDispatchLocationMessage(target) {
+  const label = target === "unloading" ? "卸货地" : "装货地";
+  const entries = dispatchLocationEntries(target).filter((item) => String(item || "").trim());
+  if (!entries.length) return `请填写${label}`;
+  const invalidIndex = entries.findIndex((entry) => {
+    const parts = splitDispatchLocationParts(entry);
+    return !parts.city || !parts.district || !parts.detail;
+  });
+  return invalidIndex >= 0 ? `${label}第 ${invalidIndex + 1} 条需要填写市、区和详细地址` : "";
 }
 
 function removeDispatchLocationEntry(target, index) {
@@ -14190,6 +15718,10 @@ function openLocationPicker(target, mode = "template", owner = "order") {
 }
 
 function openDispatchLocationPicker(target) {
+  if (!dispatchCustomerSelected.value) {
+    notify("请先选择客户，再添加装货地或卸货地");
+    return;
+  }
   openLocationPicker(target, "addressBook", "dispatch");
 }
 
@@ -14202,6 +15734,8 @@ function resetAddressBookForm() {
   editingAddressBookId.value = "";
   Object.assign(addressBookForm, {
     area: "",
+    city: "",
+    district: "",
     contact: "",
     phone: "",
     address: "",
@@ -14212,6 +15746,8 @@ function resetAddressBookForm() {
 function startNewAddressBookEntry() {
   resetAddressBookForm();
   syncAddressBookAreaTreeFromValue("");
+  addressBookDistrictSearch.value = "";
+  addressBookDistrictPickerOpen.value = false;
   addressBookFormOpen.value = true;
 }
 
@@ -14259,6 +15795,11 @@ async function syncAddressBookEntryToCustomerContact(row, contactId = "", custom
 }
 
 async function saveAddressBookEntry() {
+  addressBookForm.area = composeLocationParts(addressBookForm.city, addressBookForm.district);
+  if (!String(addressBookForm.city || "").trim() || !String(addressBookForm.district || "").trim()) {
+    notify("请填写市和区");
+    return;
+  }
   const address = String(addressBookForm.address || "").trim();
   if (!address) {
     notify("请填写详细地址");
@@ -14296,14 +15837,18 @@ function editAddressBookEntry(option) {
   if (!row) return;
   editingAddressBookId.value = row.id;
   addressBookFormOpen.value = true;
-  syncAddressBookAreaTreeFromValue(contactAreaText(row) || "");
+  const areaParts = splitLocationParts(contactAreaText(row) || "");
   Object.assign(addressBookForm, {
     area: contactAreaText(row) || "",
+    city: areaParts.city,
+    district: areaParts.district,
     contact: row.name || "",
     phone: row.mobile || row.phone || "",
     address: contactAddressText(row) || "",
     note: row.remark || ""
   });
+  addressBookDistrictSearch.value = String(areaParts.district || "").trim();
+  addressBookDistrictPickerOpen.value = false;
 }
 
 async function deleteAddressBookEntry(id) {
@@ -14564,20 +16109,20 @@ function assignCustomsBusinessForm(row = {}) {
     sixSheetNo: row.sixSheetNo || "",
     company: row.company || "",
     direction: row.direction || "",
-    itemCount: Number(row.itemCount || 0),
-    pageCount: Number(row.pageCount || 0),
-    customsFee: Number(row.customsFee || 0),
-    pageFee: Number(row.pageFee || 0),
-    manifestFee: Number(row.manifestFee || 0),
-    inspectionFee: Number(row.inspectionFee || 0),
-    checkFee: Number(row.checkFee || 0),
-    verificationFee: Number(row.verificationFee || 0),
-    otherFee: Number(row.otherFee || 0),
+    itemCount: customsBusinessIntegerValue(row.itemCount),
+    pageCount: customsBusinessIntegerValue(row.pageCount),
+    customsFee: customsBusinessIntegerValue(row.customsFee),
+    pageFee: customsBusinessIntegerValue(row.pageFee),
+    manifestFee: customsBusinessIntegerValue(row.manifestFee),
+    inspectionFee: customsBusinessIntegerValue(row.inspectionFee),
+    checkFee: customsBusinessIntegerValue(row.checkFee),
+    verificationFee: customsBusinessIntegerValue(row.verificationFee),
+    otherFee: customsBusinessIntegerValue(row.otherFee),
     customFields: normalizeCustomsBusinessCustomFields(row.customFields)
-      .map((field) => ({ name: field.name, value: Number(field.value || 0) })),
+      .map((field) => ({ name: field.name, value: customsBusinessIntegerValue(field.value) })),
     remark: row.remark || ""
   });
-  customsBusinessCompanySearch.value = String(row.company || "");
+  customsBusinessCompanySearch.value = partnerDisplayLabel(row.company || "", "客户") || String(row.company || "");
   customsBusinessCompanyPickerOpen.value = false;
 }
 
@@ -14644,7 +16189,7 @@ async function saveCustomsBusiness() {
     return;
   }
   if (!customsBusinessCompanySelectedFromCustomers(company)) {
-    notify("请从报关客户列表中选择公司");
+    notify("请从报关客户列表中选择客户");
     return;
   }
   if (!customsBusinessForm.declarationNo.trim() && !customsBusinessForm.sixSheetNo.trim()) {
@@ -14655,7 +16200,9 @@ async function saveCustomsBusiness() {
     notify("请填写自定义类目名称，或删除空白类目");
     return;
   }
+  normalizeCustomsBusinessFormIntegers();
   syncCalculatedCustomsBusinessCharges();
+  normalizeCustomsBusinessFormIntegers();
   const customFields = normalizeCustomsBusinessCustomFields(customsBusinessForm.customFields);
   try {
     customsBusinessSaving.value = true;
@@ -14664,7 +16211,7 @@ async function saveCustomsBusiness() {
     const payload = {
       ...customsBusinessForm,
       company,
-      homeFee: customsBusinessHomeFee.value,
+      homeFee: customsBusinessIntegerValue(customsBusinessHomeFee.value),
       customFields,
       total: customsBusinessFormTotal.value
     };
@@ -14704,6 +16251,246 @@ async function restoreCustomsBusiness(row) {
     notify(`已恢复报关业务：${restored.company || restored.declarationNo || restored.sixSheetNo || restored.id}`);
   } catch (error) {
     notify(error.message || "恢复报关业务失败");
+  }
+}
+
+async function loadAllOtherBusinesses(options = {}) {
+  const canReadOtherBusinessRows = canAccessModule("otherBusiness") || BOSS_CENTER_MODULES.some((moduleId) => canAccessModule(moduleId));
+  if (!loggedIn.value || !canReadOtherBusinessRows) {
+    otherBusinessAllRows.value = [];
+    return [];
+  }
+  otherBusinessAllRows.value = await apiFetchListFrom(otherBusinessApi.listAllOtherBusinesses, "其他业务", options);
+  return otherBusinessAllRows.value;
+}
+
+function resetOtherBusinessForm() {
+  Object.assign(otherBusinessForm, blankOtherBusinessForm());
+  editingOtherBusinessId.value = "";
+  otherBusinessCustomerSearch.value = "";
+  otherBusinessCustomerPickerOpen.value = false;
+  if (!otherBusinessDraftAttachmentEntityId.value) {
+    otherBusinessDraftAttachmentEntityId.value = `draft-other-business-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+}
+
+function assignOtherBusinessForm(row = {}) {
+  Object.assign(otherBusinessForm, {
+    date: row.date || todayInputValue(),
+    title: row.title || "",
+    customer: row.customer || "",
+    cost: otherBusinessAmount(row.cost),
+    income: otherBusinessAmount(row.income),
+    customFields: normalizeOtherBusinessCustomFields(row.customFields)
+      .map((field) => ({
+        name: field.name,
+        income: otherBusinessAmount(field.income),
+        cost: otherBusinessAmount(field.cost)
+      })),
+    remark: row.remark || ""
+  });
+  otherBusinessCustomerSearch.value = partnerDisplayLabel(row.customer || "", "客户") || String(row.customer || "");
+  otherBusinessCustomerPickerOpen.value = false;
+}
+
+function upsertOtherBusinessRows(item, options = {}) {
+  const append = options.position === "append";
+  const mergeRows = (rows) => {
+    const withoutCurrent = rows.filter((row) => row.id !== item.id);
+    return append ? [...withoutCurrent, item] : [item, ...withoutCurrent];
+  };
+  otherBusinessAllRows.value = mergeRows(otherBusinessAllRows.value);
+  if (dateMatchesPeriodFilter(item.date, otherBusinessPeriodFilter.value)) {
+    otherBusinessRows.value = mergeRows(otherBusinessRows.value);
+  } else {
+    otherBusinessRows.value = otherBusinessRows.value.filter((row) => row.id !== item.id);
+  }
+}
+
+async function loadOtherBusinesses(options = {}) {
+  const canReadOtherBusinessRows = canAccessModule("otherBusiness");
+  if (!loggedIn.value || !canReadOtherBusinessRows) {
+    otherBusinessRows.value = [];
+    return [];
+  }
+  otherBusinessRows.value = await apiFetchListFrom(() => otherBusinessApi.listOtherBusinesses(periodFilterValue("otherBusiness")), "其他业务", options);
+  return otherBusinessRows.value;
+}
+
+function openOtherBusinessModal() {
+  resetOtherBusinessForm();
+  otherBusinessForm.date = periodFilterDateValue(otherBusinessPeriodFilter.value);
+  otherBusinessAttachmentRows.value = [];
+  if (!otherBusinessDraftAttachmentEntityId.value) {
+    otherBusinessDraftAttachmentEntityId.value = `draft-other-business-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+  otherBusinessModalOpen.value = true;
+}
+
+function openEditOtherBusinessModal(row) {
+  editingOtherBusinessId.value = String(row?.id || "");
+  otherBusinessDraftAttachmentEntityId.value = editingOtherBusinessId.value;
+  assignOtherBusinessForm(row);
+  loadOtherBusinessFiles(editingOtherBusinessId.value).catch((error) => notify(error.message || "其他业务附件加载失败"));
+  otherBusinessModalOpen.value = true;
+}
+
+function closeOtherBusinessModal() {
+  otherBusinessModalOpen.value = false;
+  editingOtherBusinessId.value = "";
+  otherBusinessCustomerSearch.value = "";
+  otherBusinessCustomerPickerOpen.value = false;
+  otherBusinessAttachmentRows.value = [];
+  otherBusinessAttachmentUploading.value = false;
+  otherBusinessDraftAttachmentEntityId.value = "";
+}
+
+async function saveOtherBusiness() {
+  const title = String(otherBusinessForm.title || "").trim();
+  const customer = String(otherBusinessForm.customer || "").trim();
+  if (!title) {
+    notify("请填写标题");
+    return;
+  }
+  if (!customer) {
+    notify("请选择客户");
+    return;
+  }
+  if (!otherBusinessCustomerSelectedFromCustomers(customer)) {
+    notify("请从客户列表中选择客户");
+    return;
+  }
+  if (otherBusinessHasIncompleteCustomField()) {
+    notify("请填写自定义类目名称，或删除空白类目");
+    return;
+  }
+  normalizeOtherBusinessFormAmounts();
+  const customFields = normalizeOtherBusinessCustomFields(otherBusinessForm.customFields);
+  const totals = otherBusinessFormTotals.value;
+  try {
+    otherBusinessSaving.value = true;
+    const isEditing = Boolean(editingOtherBusinessId.value);
+    const payload = {
+      ...otherBusinessForm,
+      title,
+      customer,
+      customFields,
+      totalIncome: totals.totalIncome,
+      totalCost: totals.totalCost,
+      profit: totals.profit
+    };
+    const item = isEditing
+      ? await otherBusinessApi.updateOtherBusiness(editingOtherBusinessId.value, payload)
+      : await otherBusinessApi.createOtherBusiness(payload);
+    upsertOtherBusinessRows(item);
+    if (!isEditing && otherBusinessDraftAttachmentEntityId.value && otherBusinessDraftAttachmentEntityId.value !== String(item.id || "")) {
+      await rebindOtherBusinessDraftFiles(String(item.id || ""));
+    }
+    if (isEditing) {
+      closeOtherBusinessModal();
+      notify("已更新其他业务");
+      return;
+    }
+    editingOtherBusinessId.value = String(item.id || "");
+    await loadOtherBusinessFiles(editingOtherBusinessId.value);
+    notify("已新增其他业务，可继续上传相关文件");
+  } catch (error) {
+    notify(error.message || "保存其他业务失败");
+  } finally {
+    otherBusinessSaving.value = false;
+  }
+}
+
+async function loadOtherBusinessFiles(otherBusinessId = editingOtherBusinessId.value) {
+  otherBusinessAttachmentRows.value = otherBusinessId ? await loadFiles("otherBusiness", otherBusinessId) : [];
+}
+
+async function rebindOtherBusinessDraftFiles(entityId) {
+  const draftEntityId = String(otherBusinessDraftAttachmentEntityId.value || "").trim();
+  if (!draftEntityId || !entityId || draftEntityId === entityId) return;
+  const draftFiles = await loadFiles("otherBusiness", draftEntityId);
+  for (const file of draftFiles) {
+    await filesApi.moveFileById(file.id, { entityType: "otherBusiness", entityId });
+  }
+  otherBusinessAttachmentRows.value = await loadFiles("otherBusiness", entityId);
+  otherBusinessDraftAttachmentEntityId.value = entityId;
+}
+
+function otherBusinessUploadOptions() {
+  return {
+    onStart() {
+      otherBusinessAttachmentUploading.value = true;
+    },
+    onFinish() {
+      otherBusinessAttachmentUploading.value = false;
+    }
+  };
+}
+
+async function uploadOtherBusinessFiles(files) {
+  if (otherBusinessAttachmentUploading.value) {
+    notify("附件正在上传，请稍候");
+    return false;
+  }
+  const entityId = String(editingOtherBusinessId.value || otherBusinessDraftAttachmentEntityId.value || "").trim();
+  if (!entityId) {
+    otherBusinessDraftAttachmentEntityId.value = `draft-other-business-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+  const result = await uploadStoredFilesFor("otherBusiness", otherBusinessDraftAttachmentEntityId.value || entityId, "相关文件", files, otherBusinessAttachmentRows, {
+    ...otherBusinessUploadOptions(),
+    missingEntityMessage: "请先保存其他业务"
+  });
+  return result.failed === 0;
+}
+
+function openOtherBusinessFileUploadPanel() {
+  if (otherBusinessAttachmentUploading.value) {
+    notify("附件正在上传，请稍候");
+    return;
+  }
+  openUploadPanel({
+    title: "上传相关文件",
+    description: "优先支持 Excel 和 PDF，也支持图片，上传后会归档到当前其他业务。",
+    accept: FILE_UPLOAD_ACCEPT,
+    multiple: true,
+    handler(files) {
+      return uploadOtherBusinessFiles(files);
+    }
+  });
+}
+
+function uploadOtherBusinessFile(event) {
+  if (event?.target?.files) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    return uploadOtherBusinessFiles(files);
+  }
+  openOtherBusinessFileUploadPanel();
+}
+
+async function deleteOtherBusiness(row) {
+  if (!row?.id) return;
+  const label = [row.date, row.customer, row.title].filter(Boolean).join(" / ");
+  if (!window.confirm(`确定删除其他业务 ${label || row.id}？删除后会进入回收站。`)) return;
+  try {
+    await otherBusinessApi.deleteOtherBusiness(row.id);
+    otherBusinessRows.value = otherBusinessRows.value.filter((item) => item.id !== row.id);
+    otherBusinessAllRows.value = otherBusinessAllRows.value.filter((item) => item.id !== row.id);
+    notify("其他业务已移入回收站");
+  } catch (error) {
+    notify(error.message || "删除其他业务失败");
+  }
+}
+
+async function restoreOtherBusiness(row) {
+  if (!row?.id) return;
+  try {
+    const restored = await otherBusinessApi.restoreOtherBusiness(row.id);
+    upsertOtherBusinessRows(restored);
+    otherBusinessRecycleRows.value = otherBusinessRecycleRows.value.filter((item) => item.id !== restored.id);
+    notify(`已恢复其他业务：${restored.title || restored.customer || restored.id}`);
+  } catch (error) {
+    notify(error.message || "恢复其他业务失败");
   }
 }
 
@@ -14866,7 +16653,7 @@ function compressedImageFilename(filename) {
 
 function uploadFileValidationMessage(file) {
   const extension = String(file?.name || "").split(".").pop()?.toLowerCase() || "";
-  if (!SAFE_UPLOAD_EXTENSIONS.has(extension)) return "仅支持图片或 PDF 文件";
+  if (!SAFE_UPLOAD_EXTENSIONS.has(extension)) return "仅支持图片、PDF 或 Excel 文件";
   if (file.size > MAX_UPLOAD_BYTES) return "文件不能超过 8MB";
   return "";
 }
@@ -15093,11 +16880,12 @@ function keepSelection(previousValue, rows, key, fallback = "") {
 }
 
 async function loadDatabaseData(options = {}) {
-  const { preserveSelection = false } = options;
+  const { preserveSelection = false, silent = false } = options;
   const canLoadCustomers = canAccessModule("customers");
   const canLoadOrders = canAccessModule("orders");
   const canLoadCustomsBusiness = canAccessModule("customsBusiness") || canAccessModule("financeCustomsStatements");
   const customsBusinessLoadScope = activeModule.value === "financeCustomsStatements" ? "customsStatement" : "customsBusiness";
+  const canLoadOtherBusiness = canAccessModule("otherBusiness") || BOSS_CENTER_MODULES.some((moduleId) => canAccessModule(moduleId));
   const canLoadVehicleDriver = canAccessModule("vehicleDriver");
   const canLoadVehicleExpenses = canLoadVehicleDriver || VEHICLE_EXPENSE_MODULES.some((moduleId) => canAccessModule(moduleId));
   const canLoadDriverWageRules = canAccessModule("financeCostCenter");
@@ -15121,7 +16909,7 @@ async function loadDatabaseData(options = {}) {
     masterId: selectedMasterId.value,
     accountId: selectedAccountId.value
   };
-  loading.value = true;
+  if (!silent) loading.value = true;
   try {
     const [
       customerData,
@@ -15144,6 +16932,8 @@ async function loadDatabaseData(options = {}) {
       statementDownloadData,
       customsBusinessData,
       customsBusinessAllData,
+      otherBusinessData,
+      otherBusinessAllData,
       companyExpenseData,
       auditData
     ] = await Promise.all([
@@ -15167,16 +16957,20 @@ async function loadDatabaseData(options = {}) {
       canLoadStatementDownloads ? apiFetchListFrom(financeApi.listStatementDownloads, "对账下载记录") : Promise.resolve([]),
       canLoadCustomsBusiness ? apiFetchListFrom(() => customsBusinessApi.listCustomsBusinesses(periodFilterValue(customsBusinessLoadScope)), "报关业务") : Promise.resolve([]),
       canLoadCustomsBusiness ? apiFetchListFrom(customsBusinessApi.listAllCustomsBusinesses, "报关业务") : Promise.resolve([]),
+      canLoadOtherBusiness && canAccessModule("otherBusiness") ? apiFetchListFrom(() => otherBusinessApi.listOtherBusinesses(periodFilterValue("otherBusiness")), "其他业务") : Promise.resolve([]),
+      canLoadOtherBusiness ? apiFetchListFrom(otherBusinessApi.listAllOtherBusinesses, "其他业务") : Promise.resolve([]),
       canLoadCompanyExpenses ? apiFetchListFrom(financeApi.listCompanyExpenses, "公司级收支") : Promise.resolve([]),
       canLoadAuditLogs ? apiFetchListFrom(securityApi.listAuditLogs, "审计记录") : Promise.resolve([])
     ]);
     const normalizedCustomerData = customerData.map(normalizeCustomerRecord);
+    const normalizedDriverData = driverData.map(normalizeDriverRecord);
+    const activeDriverData = normalizedDriverData.filter((item) => driverEmploymentStatus(item) === "在职");
     customerRows.value = normalizedCustomerData;
     customerContactRows.value = customerContactData;
     orderRows.value = orderData;
     vehicleRows.value = vehicleData;
     vehicleExpenseRows.value = vehicleExpenseData;
-    driverRows.value = driverData;
+    driverRows.value = normalizedDriverData;
     driverWageRuleRows.value = driverWageRuleData;
     costCenterRateRows.value = costCenterRateData;
     bossVehicleExchangeRateRows.value = bossVehicleExchangeRateData;
@@ -15193,6 +16987,8 @@ async function loadDatabaseData(options = {}) {
     statementDownloadRows.value = statementDownloadData;
     customsBusinessRows.value = customsBusinessData;
     customsBusinessAllRows.value = customsBusinessAllData;
+    otherBusinessRows.value = otherBusinessData;
+    otherBusinessAllRows.value = otherBusinessAllData;
     bossCompanyExpenseRows.value = sortBossCompanyExpenseRows(companyExpenseData);
     await migrateLegacyClientStorageToPostgres({ canLoadDriverRouteAdjustRules, canLoadStatementDownloads, canLoadBossVehicleExchangeRates });
     auditRows.value = auditData;
@@ -15205,8 +17001,8 @@ async function loadDatabaseData(options = {}) {
       ? keepSelection(previousSelection.vehiclePlate, vehicleData, "plate", vehicleData[0]?.plate || "")
       : (vehicleData[0]?.plate || "");
     selectedDriverId.value = preserveSelection
-      ? keepSelection(previousSelection.driverId, driverData, "id", driverData[0]?.id || null)
-      : (driverData[0]?.id || null);
+      ? keepSelection(previousSelection.driverId, activeDriverData, "id", activeDriverData[0]?.id || null)
+      : (activeDriverData[0]?.id || null);
     selectedDriverWageRuleId.value = preserveSelection
       ? keepSelection(previousSelection.driverWageRuleId, driverWageRuleData, "id", driverWageRuleData.find((item) => item.driverId === selectedDriverId.value)?.id || null)
       : (driverWageRuleData.find((item) => item.driverId === selectedDriverId.value)?.id || null);
@@ -15238,9 +17034,13 @@ async function loadDatabaseData(options = {}) {
     editAccount(accountData.find((item) => item.id === selectedAccountId.value) || accountData[0] || null);
     apiStatus.value = "";
   } catch (error) {
-    apiStatus.value = `接口未连接，请先启动后端：${error.message}`;
+    if (silent) {
+      console.warn("Realtime data refresh failed", error);
+    } else {
+      apiStatus.value = `接口未连接，请先启动后端：${error.message}`;
+    }
   } finally {
-    loading.value = false;
+    if (!silent) loading.value = false;
   }
 }
 
@@ -15328,6 +17128,8 @@ async function login() {
     if (!result.token) throw new Error("登录凭证生成失败");
     saveLoginSession(result.token || "", result.account || { username: loginForm.username, role: "司机" }, result.expiresAt);
     loggedIn.value = true;
+    ensureRealtimeConnection();
+    await syncAccountTablePreferencesFromServer();
     if (!canAccessModule(activeModule.value)) {
       activeModule.value = firstAccessibleModule.value;
       location.hash = activeModule.value === "vehicleDriver" ? "vehicleManage" : activeModule.value;
@@ -15344,6 +17146,10 @@ async function login() {
 }
 
 function logout(options = {}) {
+  closeRealtimeConnection();
+  window.clearTimeout(accountTablePreferencesSaveTimer);
+  Object.keys(dispatchPlanBaseRowsByDate).forEach((key) => delete dispatchPlanBaseRowsByDate[key]);
+  Object.keys(dispatchPlanUpdatedAtByDate).forEach((key) => delete dispatchPlanUpdatedAtByDate[key]);
   clearStoredSession();
   authToken.value = "";
   currentSessionAccount.value = null;
@@ -15357,12 +17163,14 @@ function logout(options = {}) {
 }
 
 function closeTransientUi() {
+  stopModalDrag();
   customerModalOpen.value = false;
   orderModalOpen.value = false;
   recycleModalOpen.value = false;
   vehicleModalOpen.value = false;
   vehicleExpenseModalOpen.value = false;
   driverModalOpen.value = false;
+  formerDriverListOpen.value = false;
   closeFilePreview();
   dispatchMessageOpen.value = false;
   customerOrderColumnMenuOpen.value = false;
@@ -15374,6 +17182,9 @@ function closeTransientUi() {
   accountCreateModalOpen.value = false;
   accountEditModalOpen.value = false;
   customsBusinessModalOpen.value = false;
+  otherBusinessModalOpen.value = false;
+  otherBusinessColumnMenuOpen.value = false;
+  otherBusinessCustomerPickerOpen.value = false;
   activeBossVehicleProfitDetailPlate.value = "";
   activeBossSupplierProfitDetailName.value = "";
   activeBossSupplierProfitDetailMonth.value = "";
@@ -15500,6 +17311,7 @@ function customerConfigNumber(value, fallback) {
 function buildCustomerPayload() {
   return {
     ...customerForm,
+    shortName: String(customerForm.shortName || "").trim(),
     customerCategory: customerForm.type === "客户" ? normalizeCustomerCategory(customerForm.customerCategory) : "",
     settlementCurrency: customerForm.type === "客户" ? (customerForm.settlementCurrency || "人民币结算") : "",
     taxNo: customerForm.invoiceTax || customerForm.taxNo,
@@ -15606,6 +17418,7 @@ function openCustomerModal(customer = null, createType = activePartnerType.value
     type,
     customerCategory,
     name: customer?.name || "",
+    shortName: customer?.shortName || "",
     province: customer?.province || "",
     city: customer?.city || "",
     address: customer?.address || "",
@@ -15705,24 +17518,33 @@ function resetOrderForm() {
 function syncOrderCustomerFromId() {
   const customer = customerRows.value.find((item) => item.id === orderForm.customerId);
   orderForm.customer = customer?.name || "";
-  orderCustomerKeyword.value = customer?.name || "";
+  orderCustomerKeyword.value = customerShortDisplay(customer) || "";
 }
 
 function openOrderCustomerPicker() {
-  orderCustomerKeyword.value = orderForm.customer || "";
+  orderCustomerKeyword.value = partnerDisplayLabel(orderForm.customer, "客户") || orderForm.customer || "";
   orderCustomerPickerOpen.value = true;
+}
+
+function handleOrderCustomerInput() {
+  const customer = findPartnerByTypedLabel(orderCustomerKeyword.value, "客户");
+  orderForm.customerId = customer?.id || "";
+  orderForm.customer = customer?.name || orderCustomerKeyword.value;
+  orderCustomerPickerOpen.value = true;
+  scheduleAutoFreightSync();
+  scheduleOrderFeeCostSync();
 }
 
 function selectOrderCustomer(customer) {
   orderForm.customerId = customer?.id || "";
   orderForm.customer = customer?.name || "";
-  orderCustomerKeyword.value = customer?.name || "";
+  orderCustomerKeyword.value = customerShortDisplay(customer) || "";
   orderCustomerPickerOpen.value = false;
   if (!editingOrderNo.value && !pendingDispatchBindId.value) {
     const bindableRows = bindableDispatchRowsForCustomer(orderForm.customer);
     if (bindableRows.length) {
       const targetRow = bindableRows[0];
-      const shouldBind = window.confirm(`发现该经营单位有未绑定排车单 ${targetRow.dispatchNo}，是否绑定并自动带入排车信息？`);
+      const shouldBind = window.confirm(`发现该客户有未绑定排车单 ${targetRow.dispatchNo}，是否绑定并自动带入排车信息？`);
       if (shouldBind) applyDispatchRowToOrderForm(targetRow);
     }
   }
@@ -15825,7 +17647,7 @@ function handleOrderVehicleSourceChange() {
     orderForm.hkDriver = "";
     orderForm.mainlandDriver = "";
     orderForm.transportMode = "";
-    orderSupplierKeyword.value = orderForm.supplier || orderSupplierKeyword.value || "";
+    orderSupplierKeyword.value = supplierDisplayLabel(orderForm.supplier) || orderSupplierKeyword.value || "";
   } else {
     orderForm.supplier = "";
     orderSupplierKeyword.value = "";
@@ -15839,19 +17661,20 @@ function handleOrderVehicleSourceChange() {
 }
 
 function openOrderSupplierPicker() {
-  orderSupplierKeyword.value = orderForm.supplier || "";
+  orderSupplierKeyword.value = supplierDisplayLabel(orderForm.supplier) || orderForm.supplier || "";
   orderSupplierPickerOpen.value = true;
 }
 
 function handleOrderSupplierInput() {
-  orderForm.supplier = orderSupplierKeyword.value;
+  const supplier = findPartnerByTypedLabel(orderSupplierKeyword.value, "供应商");
+  orderForm.supplier = supplier?.name || orderSupplierKeyword.value;
   orderSupplierPickerOpen.value = true;
   scheduleOrderFeeCostSync();
 }
 
 function selectOrderSupplier(supplier) {
   orderForm.supplier = supplier?.name || "";
-  orderSupplierKeyword.value = supplier?.name || "";
+  orderSupplierKeyword.value = customerShortDisplay(supplier) || "";
   orderSupplierPickerOpen.value = false;
   scheduleOrderFeeCostSync();
 }
@@ -16018,13 +17841,13 @@ async function openOrderModal(customer = null, order = null, options = {}) {
     const bindableRows = bindableDispatchRowsForCustomer(orderForm.customer);
     if (bindableRows.length) {
       const targetRow = bindableRows[0];
-      const shouldBind = window.confirm(`发现该经营单位有未绑定排车单 ${targetRow.dispatchNo}，是否绑定并自动带入排车信息？`);
+      const shouldBind = window.confirm(`发现该客户有未绑定排车单 ${targetRow.dispatchNo}，是否绑定并自动带入排车信息？`);
       if (shouldBind) applyDispatchRowToOrderForm(targetRow);
     }
   }
-  orderCustomerKeyword.value = orderForm.customer || "";
+  orderCustomerKeyword.value = partnerDisplayLabel(orderForm.customer, "客户") || orderForm.customer || "";
   orderCustomerPickerOpen.value = false;
-  orderSupplierKeyword.value = orderForm.supplier || "";
+  orderSupplierKeyword.value = supplierDisplayLabel(orderForm.supplier) || orderForm.supplier || "";
   orderSupplierPickerOpen.value = false;
   orderModalOpen.value = true;
   scheduleAutoFreightSync();
@@ -16032,6 +17855,7 @@ async function openOrderModal(customer = null, order = null, options = {}) {
 }
 
 function closeOrderModal() {
+  stopModalDrag();
   orderModalOpen.value = false;
   orderAuditMode.value = false;
   orderViewMode.value = false;
@@ -16180,7 +18004,7 @@ function openOrderFileUploadPanel() {
   }
   openUploadPanel({
     title: "上传订单附件",
-    description: "可拖拽单据图片或 PDF，也可以从微信复制图片后直接粘贴。",
+    description: "可拖拽单据 Excel、PDF 或图片，也可以从微信复制图片后直接粘贴。",
     accept: FILE_UPLOAD_ACCEPT,
     multiple: true,
     handler(files) {
@@ -16771,12 +18595,16 @@ async function openRecycleBin(scope = "orders") {
   try {
     recycleScope.value = scope === "all" ? "all" : "orders";
     activeRecycleTab.value = "orders";
-    const [orderRowsData, customsRowsData] = await Promise.all([
+    const [orderRowsData, dispatchRowsData, customsRowsData, otherRowsData] = await Promise.all([
       ordersApi.listRecycleOrders(),
-      recycleScope.value === "all" ? customsBusinessApi.listRecycleCustomsBusinesses() : Promise.resolve([])
+      recycleScope.value === "all" ? dispatchApi.listRecycleDispatchPlans() : Promise.resolve([]),
+      recycleScope.value === "all" ? customsBusinessApi.listRecycleCustomsBusinesses() : Promise.resolve([]),
+      recycleScope.value === "all" ? otherBusinessApi.listRecycleOtherBusinesses() : Promise.resolve([])
     ]);
     recycleRows.value = orderRowsData;
+    dispatchRecycleRows.value = dispatchRowsData;
     customsBusinessRecycleRows.value = customsRowsData;
+    otherBusinessRecycleRows.value = otherRowsData;
     recycleModalOpen.value = true;
   } catch (error) {
     notify(error.message);
@@ -16784,15 +18612,41 @@ async function openRecycleBin(scope = "orders") {
 }
 
 function setRecycleTab(tab) {
-  activeRecycleTab.value = tab === "customsBusiness" ? "customsBusiness" : "orders";
+  activeRecycleTab.value = ["orders", "dispatchPlans", "customsBusiness", "otherBusiness"].includes(tab) ? tab : "orders";
 }
 
 async function restoreOrder(order) {
   try {
-    const restored = await ordersApi.restoreOrder(order.no);
+    const result = await ordersApi.restoreOrder(order.no);
+    const restored = result?.order || result;
     orderRows.value.unshift(restored);
     recycleRows.value = recycleRows.value.filter((item) => item.no !== restored.no);
-    notify(`已恢复订单：${restored.no}`);
+    const restoredDispatchRows = Array.isArray(result?.dispatchRows) ? result.dispatchRows : [];
+    if (restoredDispatchRows.length) {
+      const restoredDispatchIds = new Set(restoredDispatchRows.map((item) => item.id));
+      dispatchRecycleRows.value = dispatchRecycleRows.value.filter((item) => !restoredDispatchIds.has(item.id));
+      if (canAccessModule("dispatchBoard")) {
+        await loadDispatchPlansForCurrentFilter();
+      }
+    }
+    notify(restoredDispatchRows.length ? `已恢复订单 ${restored.no} 及关联排车单` : `已恢复订单：${restored.no}`);
+  } catch (error) {
+    notify(error.message);
+  }
+}
+
+async function restoreDispatchRecycleRow(row) {
+  try {
+    const result = await dispatchApi.restoreRecycleDispatchPlan(row.id);
+    dispatchRecycleRows.value = dispatchRecycleRows.value.filter((item) => item.id !== row.id);
+    if (result?.order) {
+      orderRows.value = [result.order, ...orderRows.value.filter((item) => item.no !== result.order.no)];
+      recycleRows.value = recycleRows.value.filter((item) => item.no !== result.order.no);
+    }
+    if (canAccessModule("dispatchBoard")) {
+      await loadDispatchPlansForCurrentFilter();
+    }
+    notify(result?.order ? `已恢复排车单 ${row.dispatchNo || ""} 及关联订单` : `已恢复排车单：${row.dispatchNo || row.id}`);
   } catch (error) {
     notify(error.message);
   }
@@ -17273,6 +19127,7 @@ function openOrderListDetail(scope = "orders") {
 }
 
 function closeOrderListDetail() {
+  stopModalDrag();
   orderListDetailOpen.value = false;
 }
 
@@ -17285,6 +19140,7 @@ function openCustomerListDetail() {
 }
 
 function closeCustomerListDetail() {
+  stopModalDrag();
   customerListDetailOpen.value = false;
 }
 
@@ -17297,6 +19153,7 @@ function openDispatchListDetail() {
 }
 
 function closeDispatchListDetail() {
+  stopModalDrag();
   dispatchListDetailOpen.value = false;
 }
 
@@ -17309,7 +19166,21 @@ function openVehicleDriverListDetail() {
 }
 
 function closeVehicleDriverListDetail() {
+  stopModalDrag();
   vehicleDriverListDetailOpen.value = false;
+}
+
+function openFormerDriverList() {
+  if (!formerDriverRows.value.length) {
+    notify("暂无离职司机");
+    return;
+  }
+  formerDriverListOpen.value = true;
+}
+
+function closeFormerDriverList() {
+  stopModalDrag();
+  formerDriverListOpen.value = false;
 }
 
 function exportOrders(templateRow = selectedTemplate.value) {
@@ -17486,6 +19357,7 @@ function openDriverModal(driver = null) {
     birthday: driver?.birthday || "",
     hireDate: driver?.hireDate || "",
     leaveDate: driver?.leaveDate || "",
+    employmentStatus: driverEmploymentStatus(driver),
     expireAt: driver?.expireAt || "",
     status: driver?.status || "正常",
     note: driver?.note || ""
@@ -17518,11 +19390,13 @@ async function saveDriver() {
   try {
     syncDriverBirthdayFromIdNo();
     loading.value = true;
-    const item = await vehiclesApi.saveDriver(editingDriverId.value, driverForm);
+    const item = normalizeDriverRecord(await vehiclesApi.saveDriver(editingDriverId.value, driverForm));
     driverRows.value = editingDriverId.value
       ? driverRows.value.map((row) => row.id === item.id ? item : row)
       : [item, ...driverRows.value];
-    selectedDriverId.value = item.id;
+    selectedDriverId.value = driverEmploymentStatus(item) === "在职"
+      ? item.id
+      : (activeDriverRows.value[0]?.id || null);
     driverModalOpen.value = false;
     await loadExpiryReminders({ silent: true, showPopup: activeModule.value === "home" });
     notify(`已保存司机：${item.name}`);
@@ -18325,7 +20199,7 @@ const CUSTOMS_STATEMENT_EXPORT_HEADERS = [
   "日期",
   "报关单号",
   "六联单号",
-  "公司",
+  "客户",
   "进出口",
   "品名项数",
   "续页",
@@ -18367,7 +20241,7 @@ function customsStatementTotalRow(rows = []) {
   return ["合计", ...Array.from({ length: 14 }, () => ""), money(total), ""];
 }
 
-function customsStatementExportFilename(company = "公司", start = "", end = "", extension = "xlsx") {
+function customsStatementExportFilename(company = "客户", start = "", end = "", extension = "xlsx") {
   return `${exportFilenamePart(company)}_报关对账_${start || "全部"}_${end || "全部"}.${extension}`;
 }
 
@@ -18375,7 +20249,7 @@ async function exportCustomsStatementByFormat(format = "excel", row = activeStat
   closeStatementExportMenu();
   const company = String(row.company || "").trim();
   if (!company) {
-    notify("当前公司信息不完整，无法导出报关对账单");
+    notify("当前客户信息不完整，无法导出报关对账单");
     return;
   }
   const rows = customsStatementRowsForCompany(company);
@@ -18942,8 +20816,8 @@ function exportVehicleDriver() {
       : visibleDrivers.value;
     exportCsv(
       `司机${selectedDriverIds.value.length ? "已选" : "筛选"}导出-${todayInputValue()}.csv`,
-      ["类型", "司机", "电话", "身份证号", "驾驶证", "生日", "入职日期", "离职日期", "证件到期", "状态", "备注"],
-      rows.map((item) => [item.type || "香港司机", item.name, item.phone, item.idNo, item.license, item.birthday, item.hireDate, item.leaveDate, item.expireAt, item.status, item.note])
+      ["类型", "司机", "电话", "身份证号", "驾驶证", "生日", "入职日期", "离职日期", "入职状态", "证件到期", "状态", "备注"],
+      rows.map((item) => [item.type || "香港司机", item.name, item.phone, item.idNo, item.license, item.birthday, item.hireDate, item.leaveDate, driverEmploymentStatus(item), item.expireAt, item.status, item.note])
     );
   }
   notify(`已导出${activeVehicleTab.value}`);
@@ -19045,7 +20919,7 @@ async function deleteSelectedVehicleDriver() {
       const deletedIds = new Set(targets.map((item) => item.id));
       driverRows.value = driverRows.value.filter((item) => !deletedIds.has(item.id));
       selectedDriverIds.value = [];
-      selectedDriverId.value = driverRows.value[0]?.id || null;
+      selectedDriverId.value = activeDriverRows.value[0]?.id || null;
       notify("司机已移入回收状态");
     }
   } catch (error) {
@@ -20182,7 +22056,7 @@ function defaultTemplateColumnWidth(key = "") {
     || 86;
 }
 
-function defaultHeaderTextItems(header = "公司名称 / 导出标题\n日期：{{date}}") {
+function defaultHeaderTextItems(header = "客户 / 导出标题\n日期：{{date}}") {
   return [{
     id: `header-text-${Date.now()}`,
     text: header,
@@ -20204,7 +22078,7 @@ function loadTemplateDesigner(content = "") {
     parsed = null;
   }
   templateDesigner.orientation = ["portrait", "landscape", "fluid"].includes(parsed?.orientation) ? parsed.orientation : "portrait";
-  templateDesigner.header = parsed?.header || "公司名称 / 导出标题\n日期：{{date}}";
+  templateDesigner.header = parsed?.header || "客户 / 导出标题\n日期：{{date}}";
   templateDesigner.headerX = Number(parsed?.headerX ?? 18);
   templateDesigner.headerY = Number(parsed?.headerY ?? 18);
   const headerItems = Array.isArray(parsed?.headerTextItems) && parsed.headerTextItems.length
@@ -21583,15 +23457,31 @@ function handleDispatchDriverPickerFocusIn(event) {
   closeDispatchDriverPicker();
 }
 
+function isColumnOrderMenuEventTarget(event) {
+  const target = event?.target;
+  return target instanceof Element && Boolean(target.closest(".order-column-order-wrap, .dispatch-column-order-wrap, .customs-business-column-manager"));
+}
+
+function handleColumnOrderMenuDocumentClick(event) {
+  if (isColumnOrderMenuEventTarget(event)) return;
+  orderColumnOrderMenuOpen.value = false;
+  dispatchColumnOrderMenuOpen.value = false;
+  customsBusinessColumnMenuOpen.value = false;
+}
+
 onMounted(async () => {
   syncRouteFromHash();
+  document.addEventListener("pointerdown", startModalDrag);
   document.addEventListener("click", handleDispatchDriverPickerDocumentClick, true);
   document.addEventListener("focusin", handleDispatchDriverPickerFocusIn, true);
+  document.addEventListener("click", handleColumnOrderMenuDocumentClick, true);
   if (loggedIn.value && canAccessModule("dispatchBoard")) loadDispatchPlansForCurrentFilter();
   window.setInterval(syncRouteFromHash, 1000);
   if (loggedIn.value) {
     await refreshCurrentAccount({ silent: true });
+    ensureRealtimeConnection();
     if (loggedIn.value) {
+      await syncAccountTablePreferencesFromServer().catch((error) => notify(error.message || "表格喜好同步失败"));
       await loadDatabaseData();
       await loadExpiryReminders({ silent: true, showPopup: activeModule.value === "home" });
       if (canAccessModule("dispatchBoard")) loadDispatchPlansForCurrentFilter();
@@ -21600,8 +23490,12 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  closeRealtimeConnection();
+  stopModalDrag();
+  document.removeEventListener("pointerdown", startModalDrag);
   document.removeEventListener("click", handleDispatchDriverPickerDocumentClick, true);
   document.removeEventListener("focusin", handleDispatchDriverPickerFocusIn, true);
+  document.removeEventListener("click", handleColumnOrderMenuDocumentClick, true);
 });
 
 function normalizedDispatchFilterText(value = "") {
@@ -21667,6 +23561,8 @@ function dispatchRowSearchValues(row = {}) {
     order.driver,
     order.hkDriver,
     order.mainlandDriver,
+    row.supplier,
+    order.supplier,
     order.port,
     row.port,
     order.direction,
@@ -21682,7 +23578,7 @@ function dispatchRowSearchValues(row = {}) {
     order.unloading,
     row.unloading,
     dispatchOrderRouteText(order),
-    dispatchVehicleSourceText(row),
+    dispatchSupplierText(row),
     row.status || DISPATCH_PLAN_DEFAULT_STATUS,
     row.note,
     order.remark
@@ -21748,6 +23644,7 @@ function openOrderDetail(order) {
 }
 
 function closeOrderDetail() {
+  stopModalDrag();
   orderDetailNo.value = "";
 }
 
@@ -21758,6 +23655,7 @@ function openDispatchDetail(row) {
 }
 
 function closeDispatchDetail() {
+  stopModalDrag();
   dispatchDetailId.value = "";
 }
 
@@ -21953,7 +23851,7 @@ function orderDetailFeeRows(order = {}) {
                   <tr v-for="row in homeRecentDispatchRows" :key="row.id">
                     <td>{{ row.index + 1 }}</td>
                     <td>{{ row.dispatchNo || '-' }}</td>
-                    <td>{{ row.order.customer || '-' }}</td>
+                    <td>{{ partnerDisplayLabel(row.order.customer || row.customer || '', '客户') || '-' }}</td>
                     <td>{{ row.plate || '待定' }}</td>
                     <td>{{ row.loadTime || '未定' }}</td>
                     <td>{{ row.order.no ? '已绑定订单' : '待确认订单' }}</td>
@@ -21980,7 +23878,7 @@ function orderDetailFeeRows(order = {}) {
                 class="home-customer-row"
                 @click="activePartnerType = '客户'; activeCustomerCategory = customerCategoryValue(customer); selectedCustomerId = customer.id; openModule('customerList')"
               >
-                <strong>{{ customer.name }}</strong>
+                <strong>{{ customerShortDisplay(customer) }}</strong>
                 <span>{{ customer.id }} · {{ customer.city || '-' }} · {{ customer.term || '-' }}</span>
                 <small>最近订单：{{ partnerRecentOrderDate(customer) || '-' }}</small>
               </button>
@@ -22658,7 +24556,7 @@ function orderDetailFeeRows(order = {}) {
               <span>开户银行</span><strong>{{ selectedCustomer?.invoice?.bank || '-' }}</strong>
               <span>银行账号</span><strong>{{ selectedCustomer?.invoice?.account || '-' }}</strong>
               <span>地址电话</span><strong>{{ selectedCustomer?.invoice?.addressPhone || '-' }}</strong>
-              <span>公司地址</span><strong>{{ selectedCustomer?.address || '-' }}</strong>
+              <span>地址</span><strong>{{ selectedCustomer?.address || '-' }}</strong>
               <span v-if="selectedCustomer?.type === '客户'">结算币种</span><strong v-if="selectedCustomer?.type === '客户'">{{ selectedCustomer?.settlementCurrency || '人民币结算' }}</strong>
             </div>
             <div v-else-if="activeCustomerDetailTab === '相关费用'" class="info-grid">
@@ -22688,7 +24586,7 @@ function orderDetailFeeRows(order = {}) {
         </BusinessPage>
       </section>
 
-      <section v-else-if="activeModule === 'orders'" class="work-page order-page">
+      <section v-else-if="activeModule === 'orders'" class="work-page order-page" @click="orderColumnOrderMenuOpen = false">
         <BusinessPage>
         <div class="order-period-row">
           <div class="statement-date-selects order-period-controls">
@@ -22721,6 +24619,9 @@ function orderDetailFeeRows(order = {}) {
               </select>
             </label>
           </div>
+          <div class="order-top-actions">
+            <button class="primary-btn" type="button" :disabled="loading" @click="openOrderModal()"><IconSvg name="plus" />新建订单</button>
+          </div>
         </div>
 	        <div class="toolbar order-page-toolbar">
 	          <div class="order-filter-group">
@@ -22742,7 +24643,7 @@ function orderDetailFeeRows(order = {}) {
 	            </label>
 	            <select v-model="orderCustomerFilter" class="order-customer-filter" title="客户筛选">
 	              <option value="">全部客户</option>
-	              <option v-for="customerName in orderCustomerFilterOptions" :key="customerName" :value="customerName">{{ customerName }}</option>
+	              <option v-for="customerName in orderCustomerFilterOptions" :key="customerName" :value="customerName">{{ partnerDisplayLabel(customerName, '客户') || customerName }}</option>
 	            </select>
 	            <select v-model="orderPlateFilter" class="order-small-filter" title="车牌筛选">
 	              <option value="">全部车牌</option>
@@ -22769,11 +24670,8 @@ function orderDetailFeeRows(order = {}) {
 	            </button>
 	          </div>
 	          <div class="order-action-group">
-	            <button class="primary-btn" :disabled="loading" @click="openOrderModal()"><IconSvg name="plus" />新建订单</button>
 	            <button :class="['ghost-btn', 'small', { 'audit-locked-btn': !currentAccountCanManageOrderAudit }]" :title="currentAccountCanManageOrderAudit ? '批量审核' : orderAuditPermissionMessage()" :disabled="!currentAccountCanManageOrderAudit" @click="auditPendingOrders"><IconSvg name="check" />批量审核</button>
 	            <button :class="['ghost-btn', 'small', { 'audit-locked-btn': !currentAccountCanManageOrderAudit }]" :title="currentAccountCanManageOrderAudit ? '取消审核' : orderAuditPermissionMessage()" :disabled="!currentAccountCanManageOrderAudit" @click="cancelSelectedAudits"><IconSvg name="refresh" />取消审核</button>
-		            <button class="ghost-btn small" type="button" @click="resetOrderColumnOrder"><IconSvg name="list" />恢复列序</button>
-		            <button class="ghost-btn small" type="button" @click="resetOrderColumnWidths"><IconSvg name="refresh" />恢复列宽</button>
                 <label class="data-table-density-select order-density-select">行密度
                   <select :value="dataTableDensity" @change="setDataTableDensity($event.target.value)">
                     <option v-for="item in dataTableDensityOptions" :key="item.key" :value="item.key">{{ item.label }}</option>
@@ -22781,8 +24679,7 @@ function orderDetailFeeRows(order = {}) {
                 </label>
                 <details class="data-table-column-menu order-column-menu">
                   <summary class="ghost-btn small">
-                    <IconSvg name="columns" />列
-                    <span>{{ visibleOrderColumns.length }}/{{ orderColumns.length }}</span>
+                    <span>列 {{ visibleOrderColumns.length }}/{{ orderColumns.length }}</span>
                   </summary>
                   <div class="data-table-column-popover">
                     <label
@@ -22800,6 +24697,22 @@ function orderDetailFeeRows(order = {}) {
                     </label>
                   </div>
                 </details>
+                <span class="column-manager-wrap order-column-order-wrap" @click.stop>
+                  <button class="ghost-btn small" type="button" @click="orderColumnOrderMenuOpen = !orderColumnOrderMenuOpen"><IconSvg name="list" />列顺序</button>
+                  <div v-if="orderColumnOrderMenuOpen" class="column-manager-menu order-column-order-menu" @click.stop>
+                    <div
+                      v-for="menuColumn in orderColumns.filter((item) => !item.locked && !isOrderRightStickyColumn(item))"
+                      :key="menuColumn.key"
+                      class="column-manager-row"
+                    >
+                      <span>{{ menuColumn.label }}</span>
+                      <button class="icon-btn icon-only" type="button" title="左移" :disabled="isOrderLeftStickyColumn(menuColumn)" @click.stop.prevent="moveOrderColumn(menuColumn, -1)"><IconSvg name="chevronLeft" /></button>
+                      <button class="icon-btn icon-only" type="button" title="右移" :disabled="isOrderLeftStickyColumn(menuColumn)" @click.stop.prevent="moveOrderColumn(menuColumn, 1)"><IconSvg name="chevronRight" /></button>
+                      <button class="icon-btn icon-only" type="button" title="恢复默认列序" @click.stop.prevent="resetOrderColumnOrder"><IconSvg name="refresh" /></button>
+                    </div>
+                  </div>
+                </span>
+                <button class="ghost-btn small" type="button" @click="resetOrderColumnWidths"><IconSvg name="refresh" />恢复列宽</button>
 	            <button class="ghost-btn order-icon-btn" type="button" :title="selectedOrderNos.length ? `查看已选 ${selectedOrderNos.length} 条` : '查看当前筛选列表'" aria-label="查看订单列表" @click="openOrderListDetail">
 	              <IconSvg name="eye" /><span class="sr-only">查看</span>
 	            </button>
@@ -22818,42 +24731,24 @@ function orderDetailFeeRows(order = {}) {
                   <th
                     v-for="(column, index) in visibleOrderColumns"
                     :key="column.key"
-                    :class="['resizable-th', { sortable: !['select', 'actions'].includes(column.key), sorted: tableSortDirection('orders', column.key), 'sticky-managed-column': isOrderColumnFrozen(column), 'sticky-order-right-column': isOrderRightStickyColumn(column), 'order-full-cell': isOrderFullDisplayColumn(column), 'order-driver-cell': column.key === 'driver' }]"
+                    :class="['resizable-th', { sortable: !['select', 'sequence', 'actions'].includes(column.key), sorted: tableSortDirection('orders', column.key), 'sticky-managed-column': isOrderColumnFrozen(column), 'sticky-order-right-column': isOrderRightStickyColumn(column), 'order-full-cell': isOrderFullDisplayColumn(column), 'order-sequence-column': column.key === 'sequence', 'order-driver-cell': column.key === 'driver' }]"
                     :style="orderStickyColumnStyle(column, index)"
                     @click="toggleTableSort('orders', column)"
                   >
                     <input v-if="column.key === 'select'" type="checkbox" :checked="filteredOrders.length > 0 && selectedOrderNos.length === filteredOrders.length" @click.stop @change="selectedOrderNos = $event.target.checked ? filteredOrders.map((item) => item.no) : []" />
+                    <span v-else-if="column.key === 'sequence'" class="order-sequence-head-label">{{ column.label }}</span>
                     <span v-else-if="column.key === 'actions'" class="column-manager-wrap" @click.stop>
-                      <button class="table-op icon-only column-manager-trigger" type="button" title="管理列表" aria-label="管理列表" @click="orderColumnMenuOpen = !orderColumnMenuOpen"><IconSvg name="list" /></button>
-                      <div v-if="orderColumnMenuOpen" class="column-manager-menu" @click.stop>
+                      <button class="table-op icon-only column-manager-trigger" type="button" title="列顺序" aria-label="列顺序" @click="orderColumnOrderMenuOpen = !orderColumnOrderMenuOpen"><IconSvg name="list" /></button>
+                      <div v-if="orderColumnOrderMenuOpen" class="column-manager-menu order-column-order-menu" @click.stop>
                         <div
                           v-for="menuColumn in orderColumns.filter((item) => !item.locked && !isOrderRightStickyColumn(item))"
                           :key="menuColumn.key"
                           class="column-manager-row"
-                          :draggable="!isOrderLeftStickyColumn(menuColumn)"
-                          @dragstart="isOrderLeftStickyColumn(menuColumn) ? $event.preventDefault() : startOrderColumnDrag(menuColumn, $event)"
-                          @dragover.prevent
-                          @dragenter.prevent="!isOrderLeftStickyColumn(menuColumn) && dropOrderColumn(menuColumn)"
-                          @drop.prevent="!isOrderLeftStickyColumn(menuColumn) && dropOrderColumn(menuColumn)"
                         >
-                          <span class="column-manager-drag"><IconSvg name="list" /></span>
-                          <button
-                            class="column-manager-check"
-                            :class="{ checked: isOrderColumnVisible(menuColumn.key) }"
-                            type="button"
-                            title="显示/隐藏"
-                            @click.stop.prevent="toggleOrderColumnVisible(menuColumn)"
-                          ><IconSvg v-if="isOrderColumnVisible(menuColumn.key)" name="check" /></button>
                           <span>{{ menuColumn.label }}</span>
-                          <button
-                            :class="['icon-btn', 'icon-only', { active: isOrderColumnLocked(menuColumn) }]"
-                            type="button"
-                            :title="isOrderLeftStickyColumn(menuColumn) ? '固定列' : isOrderColumnLocked(menuColumn) ? '取消冻结' : '冻结列'"
-                            :disabled="isOrderLeftStickyColumn(menuColumn)"
-                            @click.stop.prevent="toggleOrderColumnLock(menuColumn)"
-                          ><IconSvg name="lock" /></button>
-                          <button class="icon-btn icon-only" type="button" title="上移" :disabled="isOrderLeftStickyColumn(menuColumn)" @click.stop.prevent="moveOrderColumn(menuColumn, -1)"><IconSvg name="chevronUp" /></button>
-                          <button class="icon-btn icon-only" type="button" title="下移" :disabled="isOrderLeftStickyColumn(menuColumn)" @click.stop.prevent="moveOrderColumn(menuColumn, 1)"><IconSvg name="chevronDown" /></button>
+                          <button class="icon-btn icon-only" type="button" title="左移" :disabled="isOrderLeftStickyColumn(menuColumn)" @click.stop.prevent="moveOrderColumn(menuColumn, -1)"><IconSvg name="chevronLeft" /></button>
+                          <button class="icon-btn icon-only" type="button" title="右移" :disabled="isOrderLeftStickyColumn(menuColumn)" @click.stop.prevent="moveOrderColumn(menuColumn, 1)"><IconSvg name="chevronRight" /></button>
+                          <button class="icon-btn icon-only" type="button" title="恢复默认列序" @click.stop.prevent="resetOrderColumnOrder"><IconSvg name="refresh" /></button>
                         </div>
                       </div>
                     </span>
@@ -22867,7 +24762,7 @@ function orderDetailFeeRows(order = {}) {
               </thead>
               <tbody>
                 <tr
-                  v-for="order in filteredOrders"
+                  v-for="(order, orderIndex) in filteredOrders"
                   :key="order.no"
                   :class="{ selected: selectedOrderRowNo === order.no }"
                   @click="selectedOrderRowNo = selectedOrderRowNo === order.no ? '' : order.no"
@@ -22876,7 +24771,7 @@ function orderDetailFeeRows(order = {}) {
                   <td
                     v-for="(column, index) in visibleOrderColumns"
                     :key="column.key"
-                    :class="{ 'row-actions': column.key === 'actions', 'sticky-managed-column': isOrderColumnFrozen(column), 'sticky-order-right-column': isOrderRightStickyColumn(column), 'order-full-cell': isOrderFullDisplayColumn(column), 'order-driver-cell': column.key === 'driver' }"
+                    :class="{ 'row-actions': column.key === 'actions', 'sticky-managed-column': isOrderColumnFrozen(column), 'sticky-order-right-column': isOrderRightStickyColumn(column), 'order-full-cell': isOrderFullDisplayColumn(column), 'order-sequence-column': column.key === 'sequence', 'order-driver-cell': column.key === 'driver' }"
                     :style="orderStickyColumnStyle(column, index)"
                     :title="orderTableCellTitle(order, column.key)"
                     @click="column.key === 'actions' && $event.stopPropagation()"
@@ -22900,8 +24795,8 @@ function orderDetailFeeRows(order = {}) {
                         <button v-if="canDeleteOrder(order)" class="icon-btn icon-only danger" type="button" title="删除订单" aria-label="删除订单" @click.stop="deleteOrder(order)" @dblclick.stop><IconSvg name="trash" /></button>
                       </span>
                     </template>
-                    <button v-else-if="column.key === 'no'" class="table-link-btn" type="button" @click.stop="openOrderDetail(order)">{{ orderCellText(order, column.key) }}</button>
-                    <template v-else>{{ orderCellText(order, column.key) }}</template>
+                    <button v-else-if="column.key === 'no'" class="table-link-btn" type="button" @click.stop="openOrderDetail(order)">{{ orderCellText(order, column.key, orderIndex) }}</button>
+                    <template v-else>{{ orderCellText(order, column.key, orderIndex) }}</template>
                   </td>
                 </tr>
               </tbody>
@@ -22916,7 +24811,7 @@ function orderDetailFeeRows(order = {}) {
         </BusinessPage>
       </section>
 
-      <section v-else-if="activeModule === 'dispatchBoard'" class="work-page dispatch-page">
+      <section v-else-if="activeModule === 'dispatchBoard'" class="work-page dispatch-page" @click="dispatchColumnOrderMenuOpen = false">
         <VehicleDriverPage>
         <div class="toolbar dispatch-toolbar">
 	          <div class="statement-date-selects period-filter-controls dispatch-period-controls">
@@ -22981,7 +24876,7 @@ function orderDetailFeeRows(order = {}) {
 	              <span>客户</span>
 	              <select v-model="dispatchCustomerFilter">
 	                <option value="">全部客户</option>
-	                <option v-for="customer in dispatchCustomerFilterOptions" :key="customer" :value="customer">{{ customer }}</option>
+	                <option v-for="customer in dispatchCustomerFilterOptions" :key="customer" :value="customer">{{ partnerDisplayLabel(customer, '客户') || customer }}</option>
 	              </select>
 	            </label>
 	            <label class="dispatch-filter-field">
@@ -23050,8 +24945,7 @@ function orderDetailFeeRows(order = {}) {
                 </label>
                 <details class="data-table-column-menu dispatch-column-menu">
                   <summary class="ghost-btn small">
-                    <IconSvg name="columns" />列
-                    <span>{{ visibleDispatchTableColumns.length }}/{{ dispatchTableColumns.length }}</span>
+                    <span>列 {{ visibleDispatchTableColumns.length }}/{{ dispatchTableColumns.length }}</span>
                   </summary>
                   <div class="data-table-column-popover">
                     <label v-for="column in dispatchTableColumns" :key="column.key" :class="{ disabled: column.locked }">
@@ -23065,6 +24959,22 @@ function orderDetailFeeRows(order = {}) {
                     </label>
                   </div>
                 </details>
+                <span class="column-manager-wrap dispatch-column-order-wrap" @click.stop>
+                  <button class="ghost-btn small" type="button" @click="dispatchColumnOrderMenuOpen = !dispatchColumnOrderMenuOpen"><IconSvg name="list" />列顺序</button>
+                  <div v-if="dispatchColumnOrderMenuOpen" class="column-manager-menu dispatch-column-order-menu" @click.stop>
+                    <div
+                      v-for="menuColumn in dispatchTableColumns.filter((item) => !item.locked)"
+                      :key="menuColumn.key"
+                      class="column-manager-row"
+                    >
+                      <span>{{ menuColumn.label }}</span>
+                      <button class="icon-btn icon-only" type="button" title="左移" :disabled="menuColumn.locked" @click.stop.prevent="moveDataTableColumnByOffset(dispatchTableColumns, 'dispatch_board', menuColumn, -1)"><IconSvg name="chevronLeft" /></button>
+                      <button class="icon-btn icon-only" type="button" title="右移" :disabled="menuColumn.locked" @click.stop.prevent="moveDataTableColumnByOffset(dispatchTableColumns, 'dispatch_board', menuColumn, 1)"><IconSvg name="chevronRight" /></button>
+                      <button class="icon-btn icon-only" type="button" title="恢复默认列序" @click.stop.prevent="resetDataTableColumnOrder(dispatchTableColumns, 'dispatch_board')"><IconSvg name="refresh" /></button>
+                    </div>
+                  </div>
+                </span>
+                <button class="ghost-btn small" type="button" @click="resetDataTableColumnWidths('dispatch_board', dispatchTableColumns, dispatchTableColumnWidths)"><IconSvg name="refresh" />恢复列宽</button>
                 <button class="ghost-btn small" type="button" @click="saveDispatchPlan">
                   <IconSvg name="save" />保存
                 </button>
@@ -23097,26 +25007,21 @@ function orderDetailFeeRows(order = {}) {
                           <span>{{ column.label }}</span>
                         </label>
                       </template>
-                      <span v-else-if="column.key === 'actions'" class="column-manager-wrap" @click.stop>
-                        <button class="table-op icon-only column-manager-trigger" type="button" title="管理列表" aria-label="管理列表" @click="dispatchColumnMenuOpen = !dispatchColumnMenuOpen"><IconSvg name="list" /></button>
-                        <div v-if="dispatchColumnMenuOpen" class="column-manager-menu" @click.stop>
-                          <button
+                    <span v-else-if="column.key === 'actions'" class="column-manager-wrap" @click.stop>
+                        <button class="table-op icon-only column-manager-trigger" type="button" title="列顺序" aria-label="列顺序" @click="dispatchColumnOrderMenuOpen = !dispatchColumnOrderMenuOpen"><IconSvg name="list" /></button>
+                        <div v-if="dispatchColumnOrderMenuOpen" class="column-manager-menu dispatch-column-order-menu" @click.stop>
+                          <div
                             v-for="menuColumn in dispatchTableColumns.filter((item) => !item.locked)"
                             :key="menuColumn.key"
-                            type="button"
-                            draggable="true"
-                            @click.stop.prevent="toggleDispatchColumnVisible(menuColumn)"
-                            @dragstart="startDispatchColumnDrag(menuColumn, $event)"
-                            @dragover.prevent
-                            @dragenter.prevent="dropDispatchColumn(menuColumn)"
-                            @drop.prevent="dropDispatchColumn(menuColumn)"
+                            class="column-manager-row"
                           >
-                            <span class="column-manager-drag"><IconSvg name="list" /></span>
-                            <span class="column-manager-check" :class="{ checked: isDispatchColumnVisible(menuColumn.key) }"><IconSvg v-if="isDispatchColumnVisible(menuColumn.key)" name="check" /></span>
                             <span>{{ menuColumn.label }}</span>
-                          </button>
+                            <button class="icon-btn icon-only" type="button" title="左移" :disabled="menuColumn.locked" @click.stop.prevent="moveDataTableColumnByOffset(dispatchTableColumns, 'dispatch_board', menuColumn, -1)"><IconSvg name="chevronLeft" /></button>
+                            <button class="icon-btn icon-only" type="button" title="右移" :disabled="menuColumn.locked" @click.stop.prevent="moveDataTableColumnByOffset(dispatchTableColumns, 'dispatch_board', menuColumn, 1)"><IconSvg name="chevronRight" /></button>
+                            <button class="icon-btn icon-only" type="button" title="恢复默认列序" @click.stop.prevent="resetDataTableColumnOrder(dispatchTableColumns, 'dispatch_board')"><IconSvg name="refresh" /></button>
+                          </div>
                         </div>
-                      </span>
+                    </span>
                       <button v-else class="table-sort-trigger" type="button">
                         <span>{{ column.label }}</span>
                         <span class="sort-mark">{{ tableSortDirection('dispatchBoard', column.key) === 'asc' ? '↑' : tableSortDirection('dispatchBoard', column.key) === 'desc' ? '↓' : '' }}</span>
@@ -23137,12 +25042,12 @@ function orderDetailFeeRows(order = {}) {
                         'dispatch-no-cell': column.key === 'dispatchNo',
                         'dispatch-customer-cell': column.key === 'customer',
                         'dispatch-driver-cell': column.key === 'driver',
+                        'dispatch-supplier-cell': column.key === 'supplier',
                         'dispatch-route-cell': column.key === 'route',
-                        'dispatch-source-cell': column.key === 'vehicleSource',
                         'row-actions dispatch-row-actions': column.key === 'actions'
                       }"
                       :style="dispatchStickyColumnStyle(column, index)"
-                      :title="column.key === 'customer' ? row.order.customer : column.key === 'route' ? `${row.order.loading || ''} → ${row.order.unloading || ''}` : column.key === 'vehicleSource' ? dispatchVehicleSourceText(row) : ''"
+                      :title="column.key === 'customer' ? row.order.customer : column.key === 'route' ? dispatchOrderRouteText(row.order) : column.key === 'supplier' ? dispatchSupplierText(row) : ''"
                     >
                       <template v-if="column.key === 'sequence'">
                         <label class="dispatch-select-label">
@@ -23153,9 +25058,28 @@ function orderDetailFeeRows(order = {}) {
                       <template v-else-if="column.key === 'loadTime'">
                         <div class="dispatch-load-time-field">
                           <span class="dispatch-load-date">{{ row.order.date || row.date || dispatchDate }}</span>
-                          <select v-model="dispatchPlanRows[row.index].loadTime" class="dispatch-time-input" title="装车时间" @click.stop @change="handleDispatchRowLoadTimeChange(row)">
-                            <option value="">未定</option>
-                            <option v-for="time in DISPATCH_LOAD_TIME_OPTIONS" :key="time" :value="time">{{ time }}</option>
+                          <input
+                            class="dispatch-time-input dispatch-time-hour-input"
+                            title="装车小时"
+                            :value="String(row.loadTime || '').split(':')[0] || ''"
+                            inputmode="numeric"
+                            pattern="[0-9]*"
+                            maxlength="2"
+                            placeholder="时"
+                            @click.stop
+                            @input="setDispatchRowLoadTimePart(row, 'hour', $event.target.value)"
+                            @blur="commitDispatchRowLoadHourInput(row)"
+                          />
+                          <span class="dispatch-time-colon">:</span>
+                          <select
+                            class="dispatch-time-input dispatch-time-minute-input"
+                            title="装车分钟"
+                            :value="dispatchLoadTimePart(row.loadTime, 'minute')"
+                            :disabled="!dispatchLoadTimePart(row.loadTime, 'hour')"
+                            @click.stop
+                            @change="setDispatchRowLoadTimePart(row, 'minute', $event.target.value)"
+                          >
+                            <option v-for="minute in DISPATCH_LOAD_MINUTE_OPTIONS" :key="minute" :value="minute">{{ minute }}分</option>
                           </select>
                         </div>
                       </template>
@@ -23166,9 +25090,9 @@ function orderDetailFeeRows(order = {}) {
 	                        <small v-else>未绑定订单</small>
 	                      </template>
 	                      <template v-else-if="column.key === 'createdByName'">{{ row.createdByName || row.createdByUsername || "-" }}</template>
-	                      <template v-else-if="column.key === 'customer'">{{ row.order.customer || "-" }}</template>
+	                      <template v-else-if="column.key === 'customer'">{{ partnerDisplayLabel(row.order.customer || row.customer || '', '客户') || "-" }}</template>
 	                      <template v-else-if="column.key === 'businessType'">{{ row.order.businessType || row.businessType || "-" }}</template>
-	                      <template v-else-if="column.key === 'plate'">
+                      <template v-else-if="column.key === 'plate'">
                         <input v-model.trim="dispatchPlanRows[row.index].plate" class="dispatch-plate-input" list="dispatchVehiclePlates" placeholder="车牌" @click.stop @input="handleDispatchPlateInput(row)" />
                       </template>
                       <template v-else-if="column.key === 'driver'">
@@ -23218,13 +25142,13 @@ function orderDetailFeeRows(order = {}) {
                         </span>
                         <template v-else>{{ dispatchDriverText(row) }}</template>
                       </template>
+                      <template v-else-if="column.key === 'supplier'">{{ dispatchSupplierText(row) }}</template>
                       <template v-else-if="column.key === 'port'">{{ row.order.port || "-" }}</template>
                       <template v-else-if="column.key === 'direction'">{{ row.order.direction || "-" }}</template>
                       <template v-else-if="column.key === 'tonnage'">{{ row.order.tonnage || "-" }}</template>
                       <template v-else-if="column.key === 'quantity'">{{ row.order.quantity || "-" }}</template>
                       <template v-else-if="column.key === 'weight'">{{ row.order.weight || "-" }}</template>
                       <template v-else-if="column.key === 'route'">{{ dispatchOrderRouteText(row.order) }}</template>
-                      <template v-else-if="column.key === 'vehicleSource'">{{ dispatchVehicleSourceText(row) }}</template>
                       <template v-else-if="column.key === 'status'">
                         <select v-model="dispatchPlanRows[row.index].status" :class="['dispatch-status-select', dispatchStatusClass(dispatchPlanRows[row.index].status)]" :disabled="isDispatchStatusSelectDisabled(row)" @click.stop @change="handleDispatchStatusChange(row)">
                           <option v-if="!dispatchStatusOptionsForRow(row).includes(dispatchStatusValueForRow(row))" :value="dispatchStatusValueForRow(row)" hidden>{{ dispatchStatusValueForRow(row) }}</option>
@@ -23279,7 +25203,10 @@ function orderDetailFeeRows(order = {}) {
             <button class="ghost-btn" type="button" :title="selectedVehicleDriverCount ? `查看已选 ${selectedVehicleDriverCount} 项` : `查看当前${activeVehicleTab}`" @click="openVehicleDriverListDetail">
               <IconSvg name="eye" />查看
             </button>
-            <button class="ghost-btn" @click="deleteSelectedVehicleDriver"><IconSvg name="trash" />删除管理</button>
+            <button class="ghost-btn" @click="deleteSelectedVehicleDriver"><IconSvg name="trash" />删除{{ activeVehicleTab === '车辆管理' ? '车辆' : '司机' }}</button>
+            <button v-if="activeVehicleTab === '司机管理'" class="ghost-btn" type="button" @click="openFormerDriverList">
+              <IconSvg name="users" />离职司机
+            </button>
             <button class="ghost-btn" @click="exportVehicleDriver"><IconSvg name="download" />导出</button>
             <button class="primary-btn" @click="activeVehicleTab === '车辆管理' ? openVehicleModal() : openDriverModal()">
               <IconSvg name="plus" />新增{{ activeVehicleTab === '车辆管理' ? '车辆' : '司机' }}
@@ -23343,6 +25270,7 @@ function orderDetailFeeRows(order = {}) {
                     { key: 'name', label: '司机' },
                     { key: 'phone', label: '电话' },
                     { key: 'license', label: '驾驶证' },
+                    { key: 'employmentStatus', label: '入职状态' },
                     { key: 'expireAt', label: '证件到期' },
                     { key: 'status', label: '状态' }
                   ]" :key="column.key" :class="['sortable', { sorted: tableSortDirection('drivers', column.key) }]" @click="toggleTableSort('drivers', column)">
@@ -23366,6 +25294,7 @@ function orderDetailFeeRows(order = {}) {
                   <td>{{ item.name }}</td>
                   <td>{{ item.phone }}</td>
                   <td>{{ item.license }}</td>
+                  <td>{{ driverEmploymentStatus(item) }}</td>
                   <td>{{ item.expireAt }}</td>
                   <td>{{ item.status }}</td>
                   <td><button class="icon-btn" @click.stop="openDriverModal(item)"><IconSvg name="edit" />编辑</button></td>
@@ -23522,6 +25451,7 @@ function orderDetailFeeRows(order = {}) {
                 <span>生日</span><strong>{{ selectedDriver?.birthday }}</strong>
                 <span>入职日期</span><strong>{{ selectedDriver?.hireDate }}</strong>
                 <span>离职日期</span><strong>{{ selectedDriver?.leaveDate }}</strong>
+                <span>入职状态</span><strong>{{ selectedDriver ? driverEmploymentStatus(selectedDriver) : '-' }}</strong>
                 <span>证件到期</span><strong>{{ selectedDriver?.expireAt }}</strong>
                 <span>状态</span><strong>{{ selectedDriver?.status }}</strong>
                 <span>备注</span><strong>{{ selectedDriver?.note }}</strong>
@@ -24152,17 +26082,17 @@ function orderDetailFeeRows(order = {}) {
           </div>
         </div>
         <div class="finance-filter-bar">
-          <div class="statement-date-selects">
+          <div class="statement-date-selects period-filter-controls">
             <div class="segmented statement-mode-tabs">
               <button
-                v-for="mode in STATEMENT_PERIOD_MODES"
+                v-for="mode in STATEMENT_RECONCILIATION_PERIOD_MODES"
                 :key="mode.key"
                 type="button"
                 :class="{ active: statementPeriodMode === mode.key }"
                 @click="setStatementPeriodMode(mode.key)"
               >{{ mode.label }}</button>
             </div>
-            <label v-if="statementPeriodMode !== 'all'">年份
+            <label v-if="!['all', 'range'].includes(statementPeriodMode)">年份
               <select v-model="statementSelectedYear">
                 <option v-for="year in statementYearOptions" :key="year" :value="year">{{ year }}年</option>
               </select>
@@ -24171,6 +26101,20 @@ function orderDetailFeeRows(order = {}) {
               <select v-model="statementSelectedMonth">
                 <option v-for="item in statementMonthOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
               </select>
+            </label>
+            <label v-if="statementPeriodMode === 'range'">开始日期
+              <input
+                type="date"
+                :value="periodFilterRangeStart('statement')"
+                @change="setPeriodFilterRangeStart('statement', $event.target.value)"
+              />
+            </label>
+            <label v-if="statementPeriodMode === 'range'">结束日期
+              <input
+                type="date"
+                :value="periodFilterRangeEnd('statement')"
+                @change="setPeriodFilterRangeEnd('statement', $event.target.value)"
+              />
             </label>
           </div>
           <span class="finance-period-chip">当前范围：{{ statementMonthRangeLabel() }}</span>
@@ -24194,7 +26138,7 @@ function orderDetailFeeRows(order = {}) {
               <tbody>
                 <tr v-for="(row, index) in statementCustomerRows" :key="row.customer">
                   <td>{{ index + 1 }}</td>
-                  <td>{{ row.customer }}</td>
+                  <td>{{ partnerDisplayLabel(row.customer || '', '客户') || row.customer }}</td>
                   <td><span class="statement-settlement-chip" :class="{ hkd: statementCustomerSettlementCurrency(row) === '港币' }">{{ statementCustomerSettlementCurrency(row) }}</span></td>
                   <td>
                     <input
@@ -24317,17 +26261,17 @@ function orderDetailFeeRows(order = {}) {
           </div>
         </div>
         <div class="finance-filter-bar">
-          <div class="statement-date-selects">
+          <div class="statement-date-selects period-filter-controls">
             <div class="segmented statement-mode-tabs">
               <button
-                v-for="mode in STATEMENT_PERIOD_MODES"
+                v-for="mode in STATEMENT_RECONCILIATION_PERIOD_MODES"
                 :key="mode.key"
                 type="button"
                 :class="{ active: statementPeriodMode === mode.key }"
                 @click="setStatementPeriodMode(mode.key)"
               >{{ mode.label }}</button>
             </div>
-            <label v-if="statementPeriodMode !== 'all'">年份
+            <label v-if="!['all', 'range'].includes(statementPeriodMode)">年份
               <select v-model="statementSelectedYear">
                 <option v-for="year in statementYearOptions" :key="year" :value="year">{{ year }}年</option>
               </select>
@@ -24336,6 +26280,20 @@ function orderDetailFeeRows(order = {}) {
               <select v-model="statementSelectedMonth">
                 <option v-for="item in statementMonthOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
               </select>
+            </label>
+            <label v-if="statementPeriodMode === 'range'">开始日期
+              <input
+                type="date"
+                :value="periodFilterRangeStart('statement')"
+                @change="setPeriodFilterRangeStart('statement', $event.target.value)"
+              />
+            </label>
+            <label v-if="statementPeriodMode === 'range'">结束日期
+              <input
+                type="date"
+                :value="periodFilterRangeEnd('statement')"
+                @change="setPeriodFilterRangeEnd('statement', $event.target.value)"
+              />
             </label>
             <label class="monthly-exchange-rate-field">当月汇率
               <input
@@ -24494,7 +26452,7 @@ function orderDetailFeeRows(order = {}) {
             <input
               v-model.trim="customsStatementCompanySearch"
               type="search"
-              placeholder="搜索公司名称"
+              placeholder="搜索客户"
             />
             <button
               v-if="customsStatementCompanySearch"
@@ -24508,7 +26466,7 @@ function orderDetailFeeRows(order = {}) {
           </label>
         </div>
         <div class="finance-summary-grid">
-          <div class="finance-summary-card"><span>公司数</span><strong>{{ customsStatementSummary.companyCount }}</strong></div>
+          <div class="finance-summary-card"><span>客户数</span><strong>{{ customsStatementSummary.companyCount }}</strong></div>
           <div class="finance-summary-card"><span>报关记录</span><strong>{{ customsStatementSummary.recordCount }}</strong></div>
           <div class="finance-summary-card"><span>报关票数</span><strong>{{ customsStatementSummary.declarationCount }}</strong></div>
           <div class="finance-summary-card"><span>应收合计</span><strong>RMB {{ money(customsStatementSummary.total) }}</strong></div>
@@ -24518,15 +26476,15 @@ function orderDetailFeeRows(order = {}) {
             <div class="table-card-head">
               <div>
                 <strong>报关账单列表</strong>
-                <span>{{ customsStatementRangeLabel() }} · 显示 {{ filteredCustomsStatementRows.length }} / {{ customsStatementRows.length }} 家公司</span>
+                <span>{{ customsStatementRangeLabel() }} · 显示 {{ filteredCustomsStatementRows.length }} / {{ customsStatementRows.length }} 个客户</span>
               </div>
             </div>
             <table class="data-table compact statement-customs-table">
-              <thead><tr><th>排名</th><th>公司</th><th>份数</th><th>报关票数</th><th>应收人民币</th><th>操作</th><th>状态</th></tr></thead>
+              <thead><tr><th>排名</th><th>客户</th><th>份数</th><th>报关票数</th><th>应收人民币</th><th>操作</th><th>状态</th></tr></thead>
               <tbody>
                 <tr v-for="(row, index) in filteredCustomsStatementRows" :key="row.company">
                   <td>{{ index + 1 }}</td>
-                  <td>{{ row.company }}</td>
+                  <td>{{ partnerDisplayLabel(row.company || '', '客户') || row.company }}</td>
                   <td>{{ row.count }}</td>
                   <td>{{ row.declarationCount }}</td>
                   <td>RMB {{ money(row.total) }}</td>
@@ -24551,7 +26509,7 @@ function orderDetailFeeRows(order = {}) {
                     <span v-else class="statement-status-text">未导出</span>
                   </td>
                 </tr>
-                <tr v-if="filteredCustomsStatementRows.length === 0"><td colspan="7">{{ customsStatementCompanySearch ? '暂无匹配的报关对账公司' : '暂无报关对账数据' }}</td></tr>
+                <tr v-if="filteredCustomsStatementRows.length === 0"><td colspan="7">{{ customsStatementCompanySearch ? '暂无匹配的报关对账客户' : '暂无报关对账数据' }}</td></tr>
               </tbody>
             </table>
           </div>
@@ -24705,8 +26663,8 @@ function orderDetailFeeRows(order = {}) {
               <thead><tr><th>客户</th><th>订单</th><th>收入</th><th>利润</th><th>毛利率</th></tr></thead>
               <tbody>
                 <tr v-for="row in bossCustomerProfitDisplayRows" :key="row.customer">
-                  <td>{{ row.customer }}</td>
-                  <td>{{ row.orderCount }}</td>
+                  <td>{{ partnerDisplayLabel(row.customer || '', '客户') || row.customer }}</td>
+                  <td>{{ row.orderCountText }}</td>
                   <td>{{ row.revenue }}</td>
                   <td><strong>{{ row.profit }}</strong></td>
                   <td>{{ row.margin }}</td>
@@ -24768,23 +26726,24 @@ function orderDetailFeeRows(order = {}) {
                   <div class="boss-dashboard-detail-section-head">
                     <div>
                       <strong>按月构成</strong>
-                      <span>净利润 = 运输利润 + 报关利润 + 其他收入 - 公司级支出</span>
+                      <span>净利润 = 运输利润 + 报关利润 + 其他业务利润 + 其他收入 - 公司级支出</span>
                     </div>
                   </div>
                   <div class="boss-dashboard-detail-table-wrap">
                     <table class="data-table compact boss-dashboard-month-table">
-                      <thead><tr><th>月份</th><th>运输利润</th><th>报关利润</th><th>其他收入</th><th>公司级支出</th><th>净利润</th><th>净利润 RMB</th></tr></thead>
+                      <thead><tr><th>月份</th><th>运输利润</th><th>报关利润</th><th>其他业务利润</th><th>其他收入</th><th>公司级支出</th><th>净利润</th><th>净利润 RMB</th></tr></thead>
                       <tbody>
                         <tr v-for="row in bossCompanyProfitDisplayRows" :key="row.period">
                           <td>{{ row.period }}</td>
                           <td>{{ row.transportProfitRMB }}</td>
                           <td>{{ row.customsProfitRMB }}</td>
+                          <td>{{ row.otherBusinessProfit }}</td>
                           <td>{{ row.otherIncome }}</td>
                           <td>{{ row.expenses }}</td>
                           <td>{{ row.netProfit }}</td>
                           <td><strong>{{ row.netProfitRMBDisplay }}</strong></td>
                         </tr>
-                        <tr v-if="bossCompanyProfitDisplayRows.length === 0"><td colspan="7">暂无利润构成数据</td></tr>
+                        <tr v-if="bossCompanyProfitDisplayRows.length === 0"><td colspan="8">暂无利润构成数据</td></tr>
                       </tbody>
                     </table>
                   </div>
@@ -24804,7 +26763,7 @@ function orderDetailFeeRows(order = {}) {
                           <tr v-for="row in bossDashboardTransportRevenueRows" :key="row.no">
                             <td>{{ row.no }}</td>
                             <td>{{ row.date }}</td>
-                            <td>{{ row.customer }}</td>
+                            <td>{{ partnerDisplayLabel(row.customer || '', '客户') || row.customer }}</td>
                             <td>{{ row.businessType }}</td>
                             <td>{{ row.plate }}</td>
                             <td>{{ row.route }}</td>
@@ -24957,12 +26916,12 @@ function orderDetailFeeRows(order = {}) {
                   </div>
                   <div class="boss-dashboard-detail-table-wrap">
                     <table class="data-table compact">
-                      <thead><tr><th>日期</th><th>单号</th><th>公司</th><th>进出口</th><th>报关费</th><th>续页费</th><th>核注费</th><th>其他报关费用</th><th>合计</th></tr></thead>
+                      <thead><tr><th>日期</th><th>单号</th><th>客户</th><th>进出口</th><th>报关费</th><th>续页费</th><th>核注费</th><th>其他报关费用</th><th>合计</th></tr></thead>
                       <tbody>
                         <tr v-for="row in bossDashboardCustomsRevenueRows" :key="row.id">
                           <td>{{ row.date }}</td>
                           <td>{{ row.no }}</td>
-                          <td>{{ row.company }}</td>
+                    <td>{{ partnerDisplayLabel(row.company || '', '客户') || row.company }}</td>
                           <td>{{ row.direction }}</td>
                           <td>{{ row.customsFee }}</td>
                           <td>{{ row.pageFee }}</td>
@@ -24971,6 +26930,31 @@ function orderDetailFeeRows(order = {}) {
                           <td><strong>{{ row.total }}</strong></td>
                         </tr>
                         <tr v-if="bossDashboardCustomsRevenueRows.length === 0"><td colspan="9">暂无报关利润</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+                <div v-if="bossDashboardDetailType !== 'unreceived'" class="boss-dashboard-detail-section">
+                  <div class="boss-dashboard-detail-section-head">
+                    <div>
+                      <strong>其他业务利润明细</strong>
+                      <span>来自其他业务板块，收入减成本后按 RMB 计入公司利润</span>
+                    </div>
+                  </div>
+                  <div class="boss-dashboard-detail-table-wrap">
+                    <table class="data-table compact">
+                      <thead><tr><th>日期</th><th>标题</th><th>客户</th><th>收入合计</th><th>成本合计</th><th>利润</th><th>自定义类目</th></tr></thead>
+                      <tbody>
+                        <tr v-for="row in bossDashboardOtherBusinessRows" :key="row.id">
+                          <td>{{ row.date }}</td>
+                          <td>{{ row.title }}</td>
+                    <td>{{ partnerDisplayLabel(row.customer || '', '客户') || row.customer }}</td>
+                          <td>{{ row.income }}</td>
+                          <td>{{ row.cost }}</td>
+                          <td><strong>{{ row.profit }}</strong></td>
+                          <td>{{ row.customFields }}</td>
+                        </tr>
+                        <tr v-if="bossDashboardOtherBusinessRows.length === 0"><td colspan="7">暂无其他业务利润</td></tr>
                       </tbody>
                     </table>
                   </div>
@@ -25028,6 +27012,7 @@ function orderDetailFeeRows(order = {}) {
         <div class="finance-summary-grid">
           <div class="finance-summary-card"><span>运输利润（RMB）</span><strong>{{ bossCompanyProfitSummary.transportProfitRMB }}</strong></div>
           <div class="finance-summary-card"><span>报关利润（RMB）</span><strong>{{ bossCompanyProfitSummary.customsProfitRMB }}</strong></div>
+          <div class="finance-summary-card"><span>其他业务利润（RMB）</span><strong>{{ bossCompanyProfitSummary.otherBusinessProfitRMB }}</strong></div>
           <div class="finance-summary-card"><span>其他收入（RMB）</span><strong>{{ bossCompanyProfitSummary.otherIncomeRMB }}</strong></div>
           <div class="finance-summary-card"><span>公司级支出（RMB）</span><strong>{{ bossCompanyProfitSummary.expensesRMB }}</strong></div>
           <div class="finance-summary-card"><span>净利润（RMB）</span><strong>{{ bossCompanyProfitSummary.netProfitRMB }}</strong></div>
@@ -25035,7 +27020,7 @@ function orderDetailFeeRows(order = {}) {
         </div>
         <div class="table-card finance-table-card">
           <table class="data-table compact boss-data-table">
-            <thead><tr><th>月份</th><th>运输收入（RMB）</th><th>运输成本（RMB）</th><th>运输利润（RMB）</th><th>报关利润（RMB）</th><th>其他收入（RMB）</th><th>公司级支出（RMB）</th><th>净利润</th><th>净利润（RMB）</th><th>利润率</th></tr></thead>
+            <thead><tr><th>月份</th><th>运输收入（RMB）</th><th>运输成本（RMB）</th><th>运输利润（RMB）</th><th>报关利润（RMB）</th><th>其他业务收入（RMB）</th><th>其他业务成本（RMB）</th><th>其他业务利润（RMB）</th><th>其他收入（RMB）</th><th>公司级支出（RMB）</th><th>净利润</th><th>净利润（RMB）</th><th>利润率</th></tr></thead>
             <tbody>
               <tr v-for="row in bossCompanyProfitDisplayRows" :key="row.period">
                 <td>{{ row.period }}</td>
@@ -25043,13 +27028,16 @@ function orderDetailFeeRows(order = {}) {
                 <td>{{ row.vehicleCostRMB }}</td>
                 <td>{{ row.transportProfitRMB }}</td>
                 <td>{{ row.customsProfitRMB }}</td>
+                <td>{{ row.otherBusinessIncome }}</td>
+                <td>{{ row.otherBusinessCost }}</td>
+                <td>{{ row.otherBusinessProfit }}</td>
                 <td>{{ row.otherIncome }}</td>
                 <td>{{ row.expenses }}</td>
                 <td><strong>{{ row.netProfit }}</strong></td>
                 <td><strong>{{ row.netProfitRMBDisplay }}</strong></td>
                 <td>{{ row.margin }}</td>
               </tr>
-              <tr v-if="bossCompanyProfitDisplayRows.length === 0"><td colspan="10">暂无公司利润数据</td></tr>
+              <tr v-if="bossCompanyProfitDisplayRows.length === 0"><td colspan="13">暂无公司利润数据</td></tr>
             </tbody>
           </table>
         </div>
@@ -25403,7 +27391,7 @@ function orderDetailFeeRows(order = {}) {
         </BossCenterPage>
       </section>
 
-      <section v-else-if="activeModule === 'customsBusiness'" class="work-page finance-page customs-business-page">
+      <section v-else-if="activeModule === 'customsBusiness'" class="work-page finance-page customs-business-page" @click="customsBusinessColumnMenuOpen = false">
         <BusinessPage>
         <div class="finance-filter-bar customs-business-filter-bar customs-business-period-bar">
           <div class="statement-date-selects period-filter-controls">
@@ -25444,7 +27432,7 @@ function orderDetailFeeRows(order = {}) {
             <input
               v-model.trim="customsBusinessSearchKeyword"
               type="search"
-              placeholder="搜索公司 / 客户名称 / 报关单号 / 六联单号 / 备注"
+              placeholder="搜索客户 / 报关单号 / 六联单号 / 备注"
             />
             <button
               v-if="customsBusinessSearchKeyword"
@@ -25456,8 +27444,8 @@ function orderDetailFeeRows(order = {}) {
               x
             </button>
           </label>
-          <select v-model="customsBusinessCompanyFilter" class="customs-business-select-filter" title="公司或客户名称筛选">
-            <option value="">全部公司/客户</option>
+          <select v-model="customsBusinessCompanyFilter" class="customs-business-select-filter" title="客户筛选">
+            <option value="">全部客户</option>
             <option v-for="name in customsBusinessCompanyFilterOptions" :key="name" :value="name">{{ name }}</option>
           </select>
           <select v-model="customsBusinessDirectionFilter" class="customs-business-select-filter small" title="进出口筛选">
@@ -25474,15 +27462,7 @@ function orderDetailFeeRows(order = {}) {
                 v-for="column in orderedCustomsBusinessColumns.filter((item) => item.key !== 'actions')"
                 :key="column.key"
                 class="column-manager-row customs-business-column-row"
-                draggable="true"
-                @dragstart="startCustomsBusinessColumnDrag(column, $event)"
-                @dragend="endCustomsBusinessColumnDrag"
-                @dragover.prevent
-                @dragenter.prevent="dropCustomsBusinessColumn(column)"
-                @drop.prevent="dropCustomsBusinessColumn(column)"
               >
-                <span class="column-manager-drag"><IconSvg name="list" /></span>
-                <span class="column-manager-check checked"><IconSvg name="check" /></span>
                 <span>{{ column.label }}</span>
                 <button class="icon-btn icon-only" type="button" title="向左移动一列" @click.stop.prevent="moveCustomsBusinessColumn(column, -1)"><IconSvg name="chevronLeft" /></button>
                 <button class="icon-btn icon-only" type="button" title="向右移动一列" @click.stop.prevent="moveCustomsBusinessColumn(column, 1)"><IconSvg name="chevronRight" /></button>
@@ -25535,6 +27515,124 @@ function orderDetailFeeRows(order = {}) {
                 </td>
               </tr>
               <tr v-if="filteredCustomsBusinessRows.length === 0"><td :colspan="orderedCustomsBusinessColumns.length">暂无匹配的报关业务</td></tr>
+            </tbody>
+          </table>
+        </div>
+        </BusinessPage>
+      </section>
+
+      <section v-else-if="activeModule === 'otherBusiness'" class="work-page finance-page customs-business-page other-business-page" @click="otherBusinessColumnMenuOpen = false">
+        <BusinessPage>
+        <div class="finance-filter-bar customs-business-filter-bar customs-business-period-bar">
+          <div class="statement-date-selects period-filter-controls">
+            <div class="segmented statement-mode-tabs">
+              <button
+                v-for="mode in OTHER_BUSINESS_PERIOD_FILTER_MODES"
+                :key="mode.key"
+                type="button"
+                :class="{ active: periodFilterMode('otherBusiness') === mode.key }"
+                @click="setPeriodFilterMode('otherBusiness', mode.key)"
+              >{{ mode.label }}</button>
+            </div>
+            <label v-if="['month', 'year'].includes(periodFilterMode('otherBusiness'))">年份
+              <select :value="periodFilterYear('otherBusiness')" @change="setPeriodFilterYear('otherBusiness', $event.target.value)">
+                <option v-for="year in periodYearOptions('otherBusiness')" :key="year" :value="year">{{ year }}年</option>
+              </select>
+            </label>
+            <label v-if="periodFilterMode('otherBusiness') === 'month'">月份
+              <select :value="periodFilterMonth('otherBusiness')" @change="setPeriodFilterMonth('otherBusiness', $event.target.value)">
+                <option v-for="item in PERIOD_MONTH_OPTIONS" :key="item.value" :value="item.value">{{ item.label }}</option>
+              </select>
+            </label>
+          </div>
+          <div class="customs-business-top-actions">
+            <button class="primary-btn" type="button" @click="openOtherBusinessModal"><IconSvg name="plus" />新增其他业务</button>
+          </div>
+        </div>
+        <div class="customs-business-search-row">
+          <label class="customs-business-search-field">
+            <IconSvg name="search" />
+            <input
+              v-model.trim="otherBusinessSearchKeyword"
+              type="search"
+              placeholder="搜索标题 / 客户 / 自定义类目 / 备注"
+            />
+            <button
+              v-if="otherBusinessSearchKeyword"
+              type="button"
+              class="customs-business-search-clear"
+              aria-label="清空搜索"
+              @click="otherBusinessSearchKeyword = ''"
+            >
+              x
+            </button>
+          </label>
+          <select v-model="otherBusinessCustomerFilter" class="customs-business-select-filter" title="客户筛选">
+            <option value="">全部客户</option>
+            <option v-for="name in otherBusinessCustomerFilterOptions" :key="name" :value="name">{{ name }}</option>
+          </select>
+          <button class="ghost-btn small" type="button" :disabled="!otherBusinessFiltersActive" @click="clearOtherBusinessFilters">
+            <IconSvg name="refresh" />清空筛选
+          </button>
+          <span class="column-manager-wrap customs-business-column-manager" @click.stop>
+            <button class="ghost-btn small" type="button" title="调整列表列顺序" aria-label="调整列表列顺序" @click="otherBusinessColumnMenuOpen = !otherBusinessColumnMenuOpen"><IconSvg name="list" />列顺序</button>
+            <div v-if="otherBusinessColumnMenuOpen" class="column-manager-menu customs-business-column-menu" @click.stop>
+              <div
+                v-for="column in orderedOtherBusinessColumns.filter((item) => item.key !== 'actions')"
+                :key="column.key"
+                class="column-manager-row customs-business-column-row"
+              >
+                <span>{{ column.label }}</span>
+                <button class="icon-btn icon-only" type="button" title="向左移动一列" @click.stop.prevent="moveOtherBusinessColumn(column, -1)"><IconSvg name="chevronLeft" /></button>
+                <button class="icon-btn icon-only" type="button" title="向右移动一列" @click.stop.prevent="moveOtherBusinessColumn(column, 1)"><IconSvg name="chevronRight" /></button>
+                <button class="icon-btn icon-only" type="button" title="恢复默认列序" @click.stop.prevent="resetOtherBusinessColumnOrder"><IconSvg name="refresh" /></button>
+              </div>
+            </div>
+          </span>
+        </div>
+        <div class="finance-summary-grid">
+          <div class="finance-summary-card"><span>筛选记录</span><strong>{{ otherBusinessSummary.count }}</strong></div>
+          <div class="finance-summary-card"><span>收入合计</span><strong>RMB {{ money(otherBusinessSummary.income) }}</strong></div>
+          <div class="finance-summary-card"><span>成本合计</span><strong>RMB {{ money(otherBusinessSummary.cost) }}</strong></div>
+          <div class="finance-summary-card"><span>利润合计</span><strong>RMB {{ money(otherBusinessSummary.profit) }}</strong></div>
+        </div>
+        <div class="table-card finance-table-card">
+          <table class="data-table compact boss-data-table customs-business-table other-business-table" :style="{ minWidth: otherBusinessTableMinWidth }">
+            <colgroup>
+              <col v-for="column in orderedOtherBusinessColumns" :key="column.key" :style="otherBusinessColumnStyle(column)" />
+            </colgroup>
+            <thead>
+              <tr>
+                <th
+                  v-for="column in orderedOtherBusinessColumns"
+                  :key="column.key"
+                  :class="{ 'customs-business-actions-col': column.key === 'actions', 'customs-business-amount-col': column.amount }"
+                  :draggable="column.key !== 'actions'"
+                  :title="column.key !== 'actions' ? '拖动左右调整列顺序' : ''"
+                  @dragstart="startOtherBusinessColumnDrag(column, $event)"
+                  @dragend="endOtherBusinessColumnDrag"
+                  @dragover.prevent
+                  @dragenter.prevent="dropOtherBusinessColumn(column)"
+                  @drop.prevent="dropOtherBusinessColumn(column)"
+                >{{ column.label }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in filteredOtherBusinessRows" :key="row.id">
+                <td
+                  v-for="column in orderedOtherBusinessColumns"
+                  :key="`${row.id}-${column.key}`"
+                  :class="[{ 'customs-business-actions-col': column.key === 'actions', 'customs-business-amount-col': column.amount, 'customs-business-text-col': ['title', 'customer', 'remark'].includes(column.key) || column.custom }, column.key === 'actions' ? 'row-actions' : '']"
+                >
+                  <template v-if="column.key === 'actions'">
+                    <button class="icon-btn icon-only" type="button" title="编辑其他业务" aria-label="编辑其他业务" @click="openEditOtherBusinessModal(row)"><IconSvg name="edit" /></button>
+                    <button class="icon-btn icon-only danger" type="button" title="删除其他业务" aria-label="删除其他业务" @click="deleteOtherBusiness(row)"><IconSvg name="trash" /></button>
+                  </template>
+                  <strong v-else-if="column.key === 'profit'">{{ otherBusinessCellText(row, column) }}</strong>
+                  <template v-else>{{ otherBusinessCellText(row, column) }}</template>
+                </td>
+              </tr>
+              <tr v-if="filteredOtherBusinessRows.length === 0"><td :colspan="orderedOtherBusinessColumns.length">暂无匹配的其他业务</td></tr>
             </tbody>
           </table>
         </div>
@@ -25719,7 +27817,7 @@ function orderDetailFeeRows(order = {}) {
                     class="freight-customer-template-row"
                     @dblclick="openCustomerFreightQuoteTemplate(customer)"
                   >
-                    <td><strong>{{ customer.name }}</strong></td>
+                    <td><strong>{{ customerShortDisplay(customer) }}</strong></td>
                     <td>{{ customer.contact || customer.mobile || '-' }}</td>
                     <td>{{ customer.city || customer.province || '-' }}</td>
                     <td>{{ freightRateCountForCustomer(customer) }} 条</td>
@@ -26581,11 +28679,12 @@ function orderDetailFeeRows(order = {}) {
                     <th
                       v-for="(column, index) in orderListDetailColumns"
                       :key="column.key"
-                      :class="['resizable-th', { sortable: column.key !== 'actions', sorted: tableSortDirection('orders', column.key), 'sticky-managed-column': isOrderColumnFrozen(column), 'sticky-order-right-column': isOrderRightStickyColumn(column), 'order-full-cell': isOrderFullDisplayColumn(column), 'order-driver-cell': column.key === 'driver' }]"
+                      :class="['resizable-th', { sortable: !['sequence', 'actions'].includes(column.key), sorted: tableSortDirection('orders', column.key), 'sticky-managed-column': isOrderColumnFrozen(column), 'sticky-order-right-column': isOrderRightStickyColumn(column), 'order-full-cell': isOrderFullDisplayColumn(column), 'order-sequence-column': column.key === 'sequence', 'order-driver-cell': column.key === 'driver' }]"
                       :style="orderStickyColumnStyle(column, index)"
                       @click="toggleTableSort('orders', column)"
                     >
-                      <span v-if="column.key === 'actions'" class="table-sort-trigger">{{ column.label }}</span>
+                      <span v-if="column.key === 'sequence'" class="order-sequence-head-label">{{ column.label }}</span>
+                      <span v-else-if="column.key === 'actions'" class="table-sort-trigger">{{ column.label }}</span>
                       <button v-else class="table-sort-trigger" type="button">
                         <span>{{ column.label }}</span>
                         <span class="sort-mark">{{ tableSortDirection('orders', column.key) === 'asc' ? '↑' : tableSortDirection('orders', column.key) === 'desc' ? '↓' : '' }}</span>
@@ -26595,11 +28694,11 @@ function orderDetailFeeRows(order = {}) {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="order in orderListDetailRows" :key="order.no" @dblclick="openOrderDetail(order)">
+                  <tr v-for="(order, orderIndex) in orderListDetailRows" :key="order.no" @dblclick="openOrderDetail(order)">
                     <td
                       v-for="(column, index) in orderListDetailColumns"
                       :key="column.key"
-                      :class="{ 'row-actions': column.key === 'actions', 'sticky-managed-column': isOrderColumnFrozen(column), 'sticky-order-right-column': isOrderRightStickyColumn(column), 'order-full-cell': isOrderFullDisplayColumn(column), 'order-driver-cell': column.key === 'driver' }"
+                      :class="{ 'row-actions': column.key === 'actions', 'sticky-managed-column': isOrderColumnFrozen(column), 'sticky-order-right-column': isOrderRightStickyColumn(column), 'order-full-cell': isOrderFullDisplayColumn(column), 'order-sequence-column': column.key === 'sequence', 'order-driver-cell': column.key === 'driver' }"
                       :style="orderStickyColumnStyle(column, index)"
                       :title="orderTableCellTitle(order, column.key)"
                       @click="column.key === 'actions' && $event.stopPropagation()"
@@ -26612,8 +28711,8 @@ function orderDetailFeeRows(order = {}) {
                         <button class="icon-btn" type="button" :title="orderEditButtonTitle(order)" @click.stop="openOrderModal(null, order)"><IconSvg :name="orderEditButtonIcon(order)" />{{ orderEditButtonLabel(order) }}</button>
                         </span>
                       </template>
-                      <button v-else-if="column.key === 'no'" class="table-link-btn" type="button" @click.stop="openOrderDetail(order)">{{ orderCellText(order, column.key) }}</button>
-                      <template v-else>{{ orderCellText(order, column.key) || '-' }}</template>
+                      <button v-else-if="column.key === 'no'" class="table-link-btn" type="button" @click.stop="openOrderDetail(order)">{{ orderCellText(order, column.key, orderIndex) }}</button>
+                      <template v-else>{{ orderCellText(order, column.key, orderIndex) || '-' }}</template>
                     </td>
                   </tr>
                   <tr v-if="orderListDetailRows.length === 0"><td :colspan="orderListDetailColumns.length">暂无订单</td></tr>
@@ -26886,12 +28985,59 @@ function orderDetailFeeRows(order = {}) {
         </section>
       </div>
 
+      <div v-if="formerDriverListOpen" class="modal-backdrop full-detail-backdrop" @click.self="closeFormerDriverList">
+        <section class="modal-card full-detail-modal former-driver-modal">
+          <div class="modal-head">
+            <div>
+              <h2>离职司机</h2>
+              <p class="modal-subtitle">共 {{ formerDriverRows.length }} 位离职司机</p>
+            </div>
+            <div class="modal-detail-actions">
+              <button type="button" class="icon-btn" @click="closeFormerDriverList"><IconSvg name="close" />关闭</button>
+            </div>
+          </div>
+          <div class="modal-body full-detail-body">
+            <div class="nested-table-scroll order-list-detail-scroll">
+              <table class="data-table compact order-list-detail-table former-driver-table">
+                <colgroup>
+                  <col v-for="column in visibleDriverListDetailColumns" :key="column.key" :style="formerDriverColumnStyle(column)" />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th
+                      v-for="column in visibleDriverListDetailColumns"
+                      :key="column.key"
+                      class="resizable-th"
+                      :class="{ 'former-driver-actions-head': column.key === 'actions' }"
+                    >
+                      <span>{{ column.label }}</span>
+                      <span class="column-resize-handle" title="拖动调整列宽" @click.stop @pointerdown="startDataTableColumnResize('driver_list_detail', driverListDetailColumnWidths, column, $event)"></span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+	                  <tr v-for="item in formerDriverRows" :key="item.id" @dblclick="selectedDriverId = item.id; closeFormerDriverList()">
+	                    <td v-for="column in visibleDriverListDetailColumns" :key="column.key" :class="{ 'row-actions': column.key === 'actions', 'former-driver-actions-cell': column.key === 'actions' }">
+	                      <template v-if="column.key === 'actions'">
+	                        <button class="icon-btn" type="button" @click="closeFormerDriverList(); openDriverModal(item)"><IconSvg name="edit" />编辑</button>
+	                      </template>
+	                      <template v-else>{{ driverListDetailCellText(item, column.key) }}</template>
+	                    </td>
+                  </tr>
+                  <tr v-if="formerDriverRows.length === 0"><td :colspan="visibleDriverListDetailColumns.length">暂无离职司机</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </div>
+
       <div v-if="activeDispatchDetail" class="modal-backdrop full-detail-backdrop" @click.self="closeDispatchDetail">
         <section class="modal-card full-detail-modal">
           <div class="modal-head">
             <div>
               <h2>{{ activeDispatchDetail.dispatchNo || '-' }} · 排车明细</h2>
-              <p class="modal-subtitle">{{ activeDispatchDetail.order.customer || activeDispatchDetail.customer || '-' }} · {{ activeDispatchDetail.order.date || activeDispatchDetail.date || dispatchDate }} · {{ activeDispatchDetail.status || '-' }}</p>
+              <p class="modal-subtitle">{{ partnerDisplayLabel(activeDispatchDetail.order.customer || activeDispatchDetail.customer || '', '客户') || '-' }} · {{ activeDispatchDetail.order.date || activeDispatchDetail.date || dispatchDate }} · {{ activeDispatchDetail.status || '-' }}</p>
             </div>
             <div class="modal-detail-actions">
               <button class="ghost-btn small" type="button" @click="openEditDispatchPlanRow(activeDispatchDetail)"><IconSvg name="edit" />编辑</button>
@@ -26914,19 +29060,19 @@ function orderDetailFeeRows(order = {}) {
               <section class="detail-section">
                 <h3>车辆司机</h3>
                 <dl class="detail-dl">
-                  <dt>车辆来源</dt><dd>{{ dispatchVehicleSourceText(activeDispatchDetail) }}</dd>
+                  <dt>供应商</dt><dd>{{ dispatchSupplierText(activeDispatchDetail) }}</dd>
                   <dt>车牌</dt><dd>{{ activeDispatchDetail.plate || '-' }}</dd>
                   <dt>司机</dt><dd>{{ activeDispatchDetail.driver || '-' }}</dd>
                   <dt>运输模式</dt><dd>{{ normalizeTransportMode(activeDispatchDetail.transportMode || activeDispatchDetail.order.transportMode || '') || '-' }}</dd>
                   <dt>香港司机</dt><dd>{{ activeDispatchDetail.hkDriver || activeDispatchDetail.driver || activeDispatchDetail.order.hkDriver || activeDispatchDetail.order.driver || '-' }}</dd>
                   <dt>大陆骑师</dt><dd>{{ activeDispatchDetail.mainlandDriver || activeDispatchDetail.order.mainlandDriver || '-' }}</dd>
-                  <dt>外派供应商</dt><dd>{{ activeDispatchDetail.supplier || activeDispatchDetail.order.supplier || '-' }}</dd>
+                  <dt>外派供应商</dt><dd>{{ supplierDisplayLabel(activeDispatchDetail.supplier || activeDispatchDetail.order.supplier) || '-' }}</dd>
                 </dl>
               </section>
               <section class="detail-section detail-section-wide">
                 <h3>运输订单</h3>
                 <dl class="detail-dl detail-dl-wide">
-                  <dt>客户</dt><dd>{{ activeDispatchDetail.order.customer || activeDispatchDetail.customer || '-' }}</dd>
+                  <dt>客户</dt><dd>{{ partnerDisplayLabel(activeDispatchDetail.order.customer || activeDispatchDetail.customer || '', '客户') || '-' }}</dd>
                   <dt>口岸/方向</dt><dd>{{ [activeDispatchDetail.order.port, activeDispatchDetail.order.direction].filter(Boolean).join(' / ') || '-' }}</dd>
                   <dt>吨位/件数/重量</dt><dd>{{ [activeDispatchDetail.order.tonnage, activeDispatchDetail.order.quantity, activeDispatchDetail.order.weight].filter(Boolean).join(' / ') || '-' }}</dd>
                   <dt>装卸路线</dt><dd>{{ dispatchOrderRouteText(activeDispatchDetail.order) }}</dd>
@@ -27399,11 +29545,12 @@ function orderDetailFeeRows(order = {}) {
               </div>
             </div>
             <div class="form-grid customer-form-grid">
-              <label class="span-2">公司名称<input v-model.trim="customerForm.name" placeholder="请输入公司名称" /></label>
-              <label class="span-2">税号<input v-model.trim="customerForm.invoiceTax" placeholder="纳税人识别号" /></label>
+              <label class="span-2">名称<input v-model.trim="customerForm.name" placeholder="请输入名称" /></label>
+              <label>简称<input v-model.trim="customerForm.shortName" placeholder="用于列表展示" /></label>
+              <label>税号<input v-model.trim="customerForm.invoiceTax" placeholder="纳税人识别号" /></label>
               <label>开户行<input v-model.trim="customerForm.invoiceBank" placeholder="开户银行" /></label>
               <label>银行账号<input v-model.trim="customerForm.invoiceAccount" placeholder="银行账号" /></label>
-              <label class="span-2">地址<input v-model.trim="customerForm.address" placeholder="公司详细地址" /></label>
+              <label class="span-2">地址<input v-model.trim="customerForm.address" placeholder="详细地址" /></label>
               <label>电话<input v-model.trim="customerForm.invoiceAddressPhone" placeholder="开票电话 / 联系电话" /></label>
               <label>省份
                 <select v-model="customerForm.province" @change="handleCustomerProvinceChange">
@@ -27456,7 +29603,7 @@ function orderDetailFeeRows(order = {}) {
                 <textarea
                   v-model.trim="customerForm.invoicePasteText"
                   rows="4"
-                  placeholder="粘贴开票资料文本，例如：公司名称、税号、开户行、账号、地址电话"
+                  placeholder="粘贴开票资料文本，例如：客户名称、税号、开户行、账号、地址电话"
                   @input="applyCustomerInvoicePaste"
                   @paste="setTimeout(applyCustomerInvoicePaste, 0)"
                 ></textarea>
@@ -27509,17 +29656,20 @@ function orderDetailFeeRows(order = {}) {
             <datalist id="dispatchPlateOptions">
               <option v-for="vehicle in vehicleRows" :key="vehicle.plate" :value="vehicle.plate">{{ vehicle.type }}</option>
             </datalist>
+	            <datalist id="dispatch-location-city-options">
+	              <option v-for="city in addressBookCityOptions" :key="city" :value="city">{{ city }}</option>
+	            </datalist>
             <div class="dispatch-date-picker-row">
               <label>排车日期<input v-model="dispatchForm.date" type="date" /></label>
             </div>
             <div class="form-grid dispatch-form-grid">
-              <label>经营单位
+              <label>客户
                 <span class="searchable-select dispatch-searchable-select" @click.stop>
                   <input
                     v-model.trim="dispatchCustomerKeyword"
                     placeholder="搜索客户编号 / 名称 / 联系人"
                     @focus="dispatchCustomerPickerOpen = true"
-                    @input="dispatchForm.customer = dispatchCustomerKeyword; dispatchForm.customerId = ''; dispatchCustomerPickerOpen = true"
+                    @input="handleDispatchCustomerInput"
                   />
                   <div v-if="dispatchCustomerPickerOpen" class="searchable-select-dropdown dispatch-customer-dropdown">
                     <button
@@ -27529,10 +29679,9 @@ function orderDetailFeeRows(order = {}) {
                       :class="{ active: customer.name === dispatchForm.customer }"
                       @click="selectDispatchCustomer(customer)"
                     >
-                      <strong>{{ customer.name }}</strong>
-                      <span>{{ customer.type }} · {{ customer.id }}</span>
+                      <strong>{{ customerOptionPrimaryDisplay(customer) }}</strong>
                     </button>
-                    <p v-if="dispatchCustomerOptions.length === 0">没有匹配经营单位</p>
+                    <p v-if="dispatchCustomerOptions.length === 0">没有匹配客户</p>
                   </div>
                 </span>
               </label>
@@ -27559,48 +29708,114 @@ function orderDetailFeeRows(order = {}) {
               <label>重量<input v-model.trim="dispatchForm.weight" placeholder="例如：1200kg" /></label>
               <label class="dispatch-load-time-picker-field">装车时间
                 <span class="dispatch-load-time-picker">
-                  <select
-                    :value="dispatchLoadTimePart(dispatchForm.loadTime, 'hour')"
+                  <input
+                    class="dispatch-load-time-hour-manual"
+                    :value="dispatchLoadHourDraft"
+                    inputmode="numeric"
+                    pattern="[0-9]*"
+                    maxlength="2"
+                    placeholder="时"
                     title="装车小时"
-                    @change="setDispatchFormLoadTimePart('hour', $event.target.value)"
-                  >
-                    <option value="">未定</option>
-                    <option v-for="hour in DISPATCH_LOAD_HOUR_OPTIONS" :key="hour" :value="hour">{{ hour }}时</option>
-                  </select>
+                    @input="setDispatchFormLoadHourInput($event.target.value)"
+                    @blur="commitDispatchFormLoadHourInput"
+                  />
+                  <span class="dispatch-load-time-colon">:</span>
                   <select
                     :value="dispatchLoadTimePart(dispatchForm.loadTime, 'minute')"
-                    :disabled="!dispatchLoadTimePart(dispatchForm.loadTime, 'hour')"
+                    :disabled="!dispatchLoadHourDraft"
                     title="装车分钟"
                     @change="setDispatchFormLoadTimePart('minute', $event.target.value)"
                   >
                     <option v-for="minute in DISPATCH_LOAD_MINUTE_OPTIONS" :key="minute" :value="minute">{{ minute }}分</option>
                   </select>
-                  <button class="ghost-btn small dispatch-load-time-clear" type="button" :disabled="!dispatchForm.loadTime" @click="clearDispatchFormLoadTime">未定</button>
                 </span>
               </label>
               <label class="span-2">备注<input v-model.trim="dispatchForm.note" placeholder="备注" /></label>
-              <label v-if="dispatchForm.vehicleSource === '外派车辆'">外派供应商<select v-model="dispatchForm.supplier"><option value=""></option><option v-for="customer in customerRows.filter((item) => item.type === '供应商')" :key="customer.id" :value="customer.name">{{ customer.name }}</option></select></label>
+              <label v-if="dispatchForm.vehicleSource === '外派车辆'">外派供应商<select v-model="dispatchForm.supplier"><option value=""></option><option v-for="customer in customerRows.filter((item) => item.type === '供应商')" :key="customer.id" :value="customer.name">{{ customerShortDisplay(customer) }}</option></select></label>
               <div class="dispatch-location-pair">
-                <label class="dispatch-location-field">
-                  <span class="dispatch-location-label">
-                    <span>装货地</span>
-                    <span :class="['dispatch-location-count', { 'is-empty': dispatchLocationEntryCount('loading') === 0 }]">
-                      {{ dispatchLocationEntryCount('loading') ? `共 ${dispatchLocationEntryCount('loading')} 个地址` : '未选择地址' }}
-                    </span>
-                  </span>
-                  <span class="location-input-row dispatch-location-row" @click.stop>
+	                <label class="dispatch-location-field" :class="{ 'is-disabled': !dispatchCustomerSelected }">
+	                  <span class="dispatch-location-label">
+	                    <span>装货地</span>
+	                    <span :class="['dispatch-location-count', { 'is-empty': dispatchLocationEntryCount('loading') === 0 }]">
+	                      {{ !dispatchCustomerSelected ? '请先选择客户' : (dispatchLocationEntryCount('loading') ? `共 ${dispatchLocationEntryCount('loading')} 个地址` : '未选择地址') }}
+	                    </span>
+	                  </span>
+	                  <span class="location-input-row dispatch-location-row" @click.stop>
                     <span class="dispatch-address-stack">
-                      <span
-                        v-for="(address, index) in dispatchLocationEntries('loading')"
-                        :key="`dispatch-loading-address-${index}`"
-                        :class="['dispatch-address-item', { 'is-empty': !address }]"
-                      >
-                        <span class="dispatch-address-index">{{ index + 1 }}</span>
-                        <input
-                          :value="address"
-                          :placeholder="index === 0 ? '例如：深圳 / 南山区' : '继续填写第 ' + (index + 1) + ' 个地址'"
-                          @input="updateDispatchLocationEntry('loading', index, $event.target.value)"
-                        />
+	                      <span
+	                        v-for="(address, index) in dispatchLocationEntries('loading')"
+	                        :key="`dispatch-loading-address-${index}`"
+	                        :class="['dispatch-address-item', { 'is-empty': !address }]"
+	                      >
+	                        <span class="dispatch-address-index">{{ index + 1 }}</span>
+	                        <input
+	                          class="dispatch-address-city-input"
+	                          list="dispatch-location-city-options"
+	                          :value="dispatchLocationDraftValue('loading', index, 'city')"
+	                          placeholder="市"
+	                          :disabled="!dispatchCustomerSelected"
+	                          @input="handleDispatchLocationTextInput('loading', index, 'city', $event)"
+	                          @change="commitDispatchLocationDraftPart('loading', index, 'city')"
+	                          @compositionstart="handleDispatchLocationTextCompositionStart('loading', index, 'city')"
+	                          @compositionend="handleDispatchLocationTextCompositionEnd('loading', index, 'city', $event)"
+	                          @blur="commitDispatchLocationDraftPart('loading', index, 'city')"
+	                        />
+	                        <span class="searchable-select dispatch-location-district-search" :class="{ 'is-open': dispatchLocationDistrictSearchKey('loading', index), 'is-disabled': !dispatchCustomerSelected || !dispatchLocationHasCity('loading', index) }" @click.stop>
+	                          <input
+	                            :value="dispatchLocationDistrictSearchKey('loading', index) ? dispatchLocationDistrictPicker.keyword : dispatchLocationDraftValue('loading', index, 'district')"
+	                            type="search"
+	                            autocomplete="off"
+	                            :placeholder="dispatchLocationHasCity('loading', index) ? '区' : '请先选择市'"
+	                            :disabled="!dispatchCustomerSelected || !dispatchLocationHasCity('loading', index)"
+	                            @focus="openDispatchLocationDistrictPicker('loading', index)"
+	                            @input="handleDispatchLocationTextInput('loading', index, 'district', $event)"
+	                            @change="commitDispatchLocationDraftPart('loading', index, 'district')"
+	                            @compositionstart="handleDispatchLocationTextCompositionStart('loading', index, 'district')"
+	                            @compositionend="handleDispatchLocationTextCompositionEnd('loading', index, 'district', $event)"
+	                            @blur="closeDispatchLocationDistrictPicker('loading', index)"
+	                            @keydown.enter.prevent="confirmFirstDispatchLocationDistrictOption('loading', index)"
+	                            @keydown.esc.prevent="closeDispatchLocationDistrictPicker('loading', index)"
+	                          />
+	                          <button
+	                            type="button"
+	                            class="customs-business-company-toggle"
+	                            :disabled="!dispatchCustomerSelected || !dispatchLocationHasCity('loading', index)"
+	                            :title="dispatchLocationDistrictSearchKey('loading', index) ? '收起区列表' : '展开区列表'"
+	                            :aria-label="dispatchLocationDistrictSearchKey('loading', index) ? '收起区列表' : '展开区列表'"
+	                            @click.stop="dispatchLocationDistrictSearchKey('loading', index) ? closeDispatchLocationDistrictPicker('loading', index) : openDispatchLocationDistrictPicker('loading', index)"
+	                          ><IconSvg :name="dispatchLocationDistrictSearchKey('loading', index) ? 'chevronUp' : 'chevronDown'" /></button>
+	                          <button
+	                            v-if="dispatchLocationDistrictValue('loading', index)"
+	                            type="button"
+	                            class="customs-business-company-clear"
+	                            title="清空区"
+	                            aria-label="清空区"
+	                            @click.stop="clearDispatchLocationDistrict('loading', index)"
+	                          ><IconSvg name="close" /></button>
+	                          <div v-if="dispatchLocationDistrictSearchKey('loading', index) && dispatchLocationHasCity('loading', index)" class="searchable-select-dropdown dispatch-location-district-dropdown">
+	                            <button
+	                              v-for="district in dispatchFilteredDistrictOptions('loading', index)"
+	                              :key="district"
+	                              type="button"
+	                              :class="{ active: district === dispatchLocationDistrictValue('loading', index) }"
+	                              @mousedown.prevent="selectDispatchLocationDistrict('loading', index, district)"
+	                            >
+	                              <strong>{{ district }}</strong>
+	                            </button>
+	                            <p v-if="dispatchFilteredDistrictOptions('loading', index).length === 0" @mousedown.prevent="closeDispatchLocationDistrictPicker('loading', index)">暂无匹配片区</p>
+	                          </div>
+	                        </span>
+	                        <input
+	                          class="dispatch-address-detail-input"
+	                          :value="dispatchLocationDraftValue('loading', index, 'detail')"
+	                          :placeholder="index === 0 ? '详细地址，例如：美泰物流园A栋一楼' : '继续填写第 ' + (index + 1) + ' 个地址'"
+	                          :disabled="!dispatchCustomerSelected"
+	                          @input="handleDispatchLocationTextInput('loading', index, 'detail', $event)"
+	                          @change="commitDispatchLocationDraftPart('loading', index, 'detail')"
+	                          @compositionstart="handleDispatchLocationTextCompositionStart('loading', index, 'detail')"
+	                          @compositionend="handleDispatchLocationTextCompositionEnd('loading', index, 'detail', $event)"
+	                          @blur="commitDispatchLocationDraftPart('loading', index, 'detail')"
+	                        />
                         <button
                           v-if="dispatchLocationEntries('loading').length > 1"
                           class="dispatch-address-remove icon-only"
@@ -27613,29 +29828,92 @@ function orderDetailFeeRows(order = {}) {
                         </button>
                       </span>
                     </span>
-                    <button class="table-op icon-only address-book-trigger" type="button" title="从联系人地址中选择" aria-label="从联系人地址中选择" @click.stop="openDispatchLocationPicker('loading')"><IconSvg name="contacts" /></button>
-                  </span>
-                </label>
-                <label class="dispatch-location-field">
-                  <span class="dispatch-location-label">
-                    <span>卸货地</span>
-                    <span :class="['dispatch-location-count', { 'is-empty': dispatchLocationEntryCount('unloading') === 0 }]">
-                      {{ dispatchLocationEntryCount('unloading') ? `共 ${dispatchLocationEntryCount('unloading')} 个地址` : '未选择地址' }}
-                    </span>
-                  </span>
+	                    <button class="table-op icon-only address-book-trigger" type="button" :disabled="!dispatchCustomerSelected" title="从联系人地址中选择" aria-label="从联系人地址中选择" @click.stop="openDispatchLocationPicker('loading')"><IconSvg name="contacts" /></button>
+	                  </span>
+	                </label>
+	                <label class="dispatch-location-field" :class="{ 'is-disabled': !dispatchCustomerSelected }">
+	                  <span class="dispatch-location-label">
+	                    <span>卸货地</span>
+	                    <span :class="['dispatch-location-count', { 'is-empty': dispatchLocationEntryCount('unloading') === 0 }]">
+	                      {{ !dispatchCustomerSelected ? '请先选择客户' : (dispatchLocationEntryCount('unloading') ? `共 ${dispatchLocationEntryCount('unloading')} 个地址` : '未选择地址') }}
+	                    </span>
+	                  </span>
                   <span class="location-input-row dispatch-location-row" @click.stop>
                     <span class="dispatch-address-stack">
-                      <span
-                        v-for="(address, index) in dispatchLocationEntries('unloading')"
-                        :key="`dispatch-unloading-address-${index}`"
-                        :class="['dispatch-address-item', { 'is-empty': !address }]"
-                      >
-                        <span class="dispatch-address-index">{{ index + 1 }}</span>
-                        <input
-                          :value="address"
-                          :placeholder="index === 0 ? '例如：香港 / 沙田区' : '继续填写第 ' + (index + 1) + ' 个地址'"
-                          @input="updateDispatchLocationEntry('unloading', index, $event.target.value)"
-                        />
+	                      <span
+	                        v-for="(address, index) in dispatchLocationEntries('unloading')"
+	                        :key="`dispatch-unloading-address-${index}`"
+	                        :class="['dispatch-address-item', { 'is-empty': !address }]"
+	                      >
+	                        <span class="dispatch-address-index">{{ index + 1 }}</span>
+	                        <input
+	                          class="dispatch-address-city-input"
+	                          list="dispatch-location-city-options"
+	                          :value="dispatchLocationDraftValue('unloading', index, 'city')"
+	                          placeholder="市"
+	                          :disabled="!dispatchCustomerSelected"
+	                          @input="handleDispatchLocationTextInput('unloading', index, 'city', $event)"
+	                          @change="commitDispatchLocationDraftPart('unloading', index, 'city')"
+	                          @compositionstart="handleDispatchLocationTextCompositionStart('unloading', index, 'city')"
+	                          @compositionend="handleDispatchLocationTextCompositionEnd('unloading', index, 'city', $event)"
+	                          @blur="commitDispatchLocationDraftPart('unloading', index, 'city')"
+	                        />
+	                        <span class="searchable-select dispatch-location-district-search" :class="{ 'is-open': dispatchLocationDistrictSearchKey('unloading', index), 'is-disabled': !dispatchCustomerSelected || !dispatchLocationHasCity('unloading', index) }" @click.stop>
+	                          <input
+	                            :value="dispatchLocationDistrictSearchKey('unloading', index) ? dispatchLocationDistrictPicker.keyword : dispatchLocationDraftValue('unloading', index, 'district')"
+	                            type="search"
+	                            autocomplete="off"
+	                            :placeholder="dispatchLocationHasCity('unloading', index) ? '区' : '请先选择市'"
+	                            :disabled="!dispatchCustomerSelected || !dispatchLocationHasCity('unloading', index)"
+	                            @focus="openDispatchLocationDistrictPicker('unloading', index)"
+	                            @input="handleDispatchLocationTextInput('unloading', index, 'district', $event)"
+	                            @change="commitDispatchLocationDraftPart('unloading', index, 'district')"
+	                            @compositionstart="handleDispatchLocationTextCompositionStart('unloading', index, 'district')"
+	                            @compositionend="handleDispatchLocationTextCompositionEnd('unloading', index, 'district', $event)"
+	                            @blur="closeDispatchLocationDistrictPicker('unloading', index)"
+	                            @keydown.enter.prevent="confirmFirstDispatchLocationDistrictOption('unloading', index)"
+	                            @keydown.esc.prevent="closeDispatchLocationDistrictPicker('unloading', index)"
+	                          />
+	                          <button
+	                            type="button"
+	                            class="customs-business-company-toggle"
+	                            :disabled="!dispatchCustomerSelected || !dispatchLocationHasCity('unloading', index)"
+	                            :title="dispatchLocationDistrictSearchKey('unloading', index) ? '收起区列表' : '展开区列表'"
+	                            :aria-label="dispatchLocationDistrictSearchKey('unloading', index) ? '收起区列表' : '展开区列表'"
+	                            @click.stop="dispatchLocationDistrictSearchKey('unloading', index) ? closeDispatchLocationDistrictPicker('unloading', index) : openDispatchLocationDistrictPicker('unloading', index)"
+	                          ><IconSvg :name="dispatchLocationDistrictSearchKey('unloading', index) ? 'chevronUp' : 'chevronDown'" /></button>
+	                          <button
+	                            v-if="dispatchLocationDistrictValue('unloading', index)"
+	                            type="button"
+	                            class="customs-business-company-clear"
+	                            title="清空区"
+	                            aria-label="清空区"
+	                            @click.stop="clearDispatchLocationDistrict('unloading', index)"
+	                          ><IconSvg name="close" /></button>
+	                          <div v-if="dispatchLocationDistrictSearchKey('unloading', index) && dispatchLocationHasCity('unloading', index)" class="searchable-select-dropdown dispatch-location-district-dropdown">
+	                            <button
+	                              v-for="district in dispatchFilteredDistrictOptions('unloading', index)"
+	                              :key="district"
+	                              type="button"
+	                              :class="{ active: district === dispatchLocationDistrictValue('unloading', index) }"
+	                              @mousedown.prevent="selectDispatchLocationDistrict('unloading', index, district)"
+	                            >
+	                              <strong>{{ district }}</strong>
+	                            </button>
+	                            <p v-if="dispatchFilteredDistrictOptions('unloading', index).length === 0" @mousedown.prevent="closeDispatchLocationDistrictPicker('unloading', index)">暂无匹配片区</p>
+	                          </div>
+	                        </span>
+	                        <input
+	                          class="dispatch-address-detail-input"
+	                          :value="dispatchLocationDraftValue('unloading', index, 'detail')"
+	                          :placeholder="index === 0 ? '详细地址，例如：赤鱲角駿運路' : '继续填写第 ' + (index + 1) + ' 个地址'"
+	                          :disabled="!dispatchCustomerSelected"
+	                          @input="handleDispatchLocationTextInput('unloading', index, 'detail', $event)"
+	                          @change="commitDispatchLocationDraftPart('unloading', index, 'detail')"
+	                          @compositionstart="handleDispatchLocationTextCompositionStart('unloading', index, 'detail')"
+	                          @compositionend="handleDispatchLocationTextCompositionEnd('unloading', index, 'detail', $event)"
+	                          @blur="commitDispatchLocationDraftPart('unloading', index, 'detail')"
+	                        />
                         <button
                           v-if="dispatchLocationEntries('unloading').length > 1"
                           class="dispatch-address-remove icon-only"
@@ -27648,7 +29926,7 @@ function orderDetailFeeRows(order = {}) {
                         </button>
                       </span>
                     </span>
-                    <button class="table-op icon-only address-book-trigger" type="button" title="从联系人地址中选择" aria-label="从联系人地址中选择" @click.stop="openDispatchLocationPicker('unloading')"><IconSvg name="contacts" /></button>
+	                    <button class="table-op icon-only address-book-trigger" type="button" :disabled="!dispatchCustomerSelected" title="从联系人地址中选择" aria-label="从联系人地址中选择" @click.stop="openDispatchLocationPicker('unloading')"><IconSvg name="contacts" /></button>
                   </span>
                 </label>
               </div>
@@ -27682,49 +29960,59 @@ function orderDetailFeeRows(order = {}) {
                   <button class="primary-btn small" type="button" @click="startNewAddressBookEntry"><IconSvg name="plus" />新建地址</button>
                 </div>
                 <div v-if="addressBookFormOpen" class="address-book-form">
-                  <label>片区
-                    <span class="address-book-area-tree route-tree-wrap" @click.stop>
-                      <button :class="['route-tree-trigger', { 'is-empty': !addressBookForm.area, active: addressBookAreaTree.open }]" type="button" @click="toggleAddressBookAreaTree">
-                        <span>{{ addressBookForm.area || '点击选择片区' }}</span>
-                        <IconSvg name="chevronDown" />
-                      </button>
-                      <div v-if="addressBookAreaTree.open" class="route-tree-dropdown address-book-area-dropdown">
-                        <div class="route-tree-panel">
-                          <div class="route-tree-list">
-                            <template v-for="level1 in addressBookAreaLevel1Options" :key="level1">
-                              <button class="route-tree-node" :class="{ checked: addressBookAreaTree.level1 === level1 }" type="button" @click="selectAddressBookAreaLevel(1, level1)">
-                                <span class="tree-check" :class="{ checked: addressBookAreaTree.level1 === level1 }"><IconSvg v-if="addressBookAreaTree.level1 === level1" name="check" /></span>
-                                <span>{{ level1 }}</span>
-                              </button>
-                              <div v-if="addressBookAreaTree.level1 === level1" class="route-tree-children">
-                                <button v-for="level2 in addressBookAreaLevel2Options" :key="level2" class="route-tree-node level-2" :class="{ checked: addressBookAreaTree.level2 === level2 }" type="button" @click="selectAddressBookAreaLevel(2, level2)">
-                                  <span class="tree-check" :class="{ checked: addressBookAreaTree.level2 === level2 }"><IconSvg v-if="addressBookAreaTree.level2 === level2" name="check" /></span>
-                                  <span>{{ level2 }}</span>
-                                </button>
-                                <div v-if="addressBookAreaTree.level2" class="route-tree-children">
-                                  <button v-for="level3 in addressBookAreaLevel3Options" :key="level3" class="route-tree-node level-3" :class="{ checked: addressBookAreaTree.level3 === level3 }" type="button" @click="selectAddressBookAreaLevel(3, level3)">
-                                    <span class="tree-check" :class="{ checked: addressBookAreaTree.level3 === level3 }"><IconSvg v-if="addressBookAreaTree.level3 === level3" name="check" /></span>
-                                    <span>{{ level3 }}</span>
-                                  </button>
-                                </div>
-                              </div>
-                            </template>
-                            <p v-if="addressBookAreaLevel1Options.length === 0" class="route-tree-empty">暂无运费模板目录</p>
-                          </div>
-                          <div class="route-tree-actions">
-                            <span>{{ addressBookAreaTreeValue || '未选择' }}</span>
-                            <button class="primary-btn route-tree-confirm" type="button" @click="confirmAddressBookAreaSelection">确认选择</button>
-                          </div>
-                        </div>
+                  <label class="address-book-city-field">市<input v-model.trim="addressBookForm.city" list="address-book-city-options" placeholder="选择一级片区" @change="handleAddressBookCityChange" /></label>
+                  <label class="address-book-district-field">区
+                    <span class="searchable-select address-book-district-search" :class="{ 'is-open': addressBookDistrictPickerOpen, 'is-disabled': !addressBookForm.city }" @click.stop>
+                      <input
+                        :value="addressBookDistrictPickerOpen ? addressBookDistrictSearch : (addressBookForm.district || '')"
+                        type="search"
+                        autocomplete="off"
+                        :placeholder="addressBookForm.city ? '选择二级片区' : '请先选择市'"
+                        :disabled="!addressBookForm.city"
+                        @focus="openAddressBookDistrictPicker"
+                        @input="handleAddressBookDistrictInput"
+                        @blur="closeAddressBookDistrictPicker"
+                        @keydown.enter.prevent="confirmFirstAddressBookDistrictOption"
+                        @keydown.esc.prevent="closeAddressBookDistrictPicker"
+                      />
+                      <button
+                        type="button"
+                        class="customs-business-company-toggle"
+                        :disabled="!addressBookForm.city"
+                        :title="addressBookDistrictPickerOpen ? '收起区列表' : '展开区列表'"
+                        :aria-label="addressBookDistrictPickerOpen ? '收起区列表' : '展开区列表'"
+                        @click.stop="toggleAddressBookDistrictPicker"
+                      ><IconSvg :name="addressBookDistrictPickerOpen ? 'chevronUp' : 'chevronDown'" /></button>
+                      <button
+                        v-if="addressBookForm.city && addressBookForm.district"
+                        type="button"
+                        class="customs-business-company-clear"
+                        title="清空区"
+                        aria-label="清空区"
+                        @click.stop="clearAddressBookDistrict"
+                      ><IconSvg name="close" /></button>
+                      <div v-if="addressBookDistrictPickerOpen && addressBookForm.city" class="searchable-select-dropdown address-book-district-dropdown">
+                        <button
+                          v-for="district in addressBookFilteredDistrictOptions"
+                          :key="district"
+                          type="button"
+                          :class="{ active: district === addressBookForm.district }"
+                          @mousedown.prevent="selectAddressBookDistrict(district)"
+                        >
+                          <strong>{{ district }}</strong>
+                        </button>
+                        <p v-if="addressBookFilteredDistrictOptions.length === 0" @mousedown.prevent="closeAddressBookDistrictPicker">暂无匹配片区</p>
                       </div>
                     </span>
                   </label>
-                  <label>联系人<input v-model.trim="addressBookForm.contact" placeholder="联系人" /></label>
-                  <label>电话<input v-model.trim="addressBookForm.phone" placeholder="电话 / 手机" /></label>
-                  <label>详细地址<input v-model.trim="addressBookForm.address" placeholder="详细地址" /></label>
-                  <label>备注<input v-model.trim="addressBookForm.note" placeholder="楼栋、门牌、仓库名" /></label>
-                  <button class="primary-btn" type="button" @click="saveAddressBookEntry"><IconSvg name="save" />{{ editingAddressBookId ? '保存修改' : '保存到联系人' }}</button>
-                  <button class="ghost-btn" type="button" @click="resetAddressBookForm">清空</button>
+                  <datalist id="address-book-city-options">
+                    <option v-for="city in addressBookCityOptions" :key="city" :value="city">{{ city }}</option>
+                  </datalist>
+                  <label class="address-book-address-field">详细地址<input v-model.trim="addressBookForm.address" placeholder="详细地址" /></label>
+                  <label class="address-book-contact-field">联系人<input v-model.trim="addressBookForm.contact" placeholder="联系人" /></label>
+                  <label class="address-book-phone-field">电话<input v-model.trim="addressBookForm.phone" placeholder="电话 / 手机" /></label>
+                  <label class="address-book-note-field">备注<input v-model.trim="addressBookForm.note" placeholder="楼栋、门牌、仓库名" /></label>
+                  <button class="primary-btn address-book-save-btn" type="button" @click="saveAddressBookEntry"><IconSvg name="save" />{{ editingAddressBookId ? '保存修改' : '保存到联系人' }}</button>
                 </div>
               </div>
               <div class="table-wrap address-picker-table-wrap">
@@ -27739,10 +30027,10 @@ function orderDetailFeeRows(order = {}) {
                           @change="toggleAllAddressBookSelection($event.target.checked)"
                         />
                       </th>
-                      <th>片区</th>
+                      <th>市/区</th>
+                      <th>详细地址</th>
                       <th>联系人</th>
                       <th>电话</th>
-                      <th>详细地址</th>
                       <th>备注</th>
                       <th>操作</th>
                     </tr>
@@ -27760,9 +30048,9 @@ function orderDetailFeeRows(order = {}) {
                         />
                       </td>
                       <td>{{ option.area || '-' }}</td>
+                      <td class="address-picker-value">{{ option.address || option.value }}</td>
                       <td>{{ option.contact || '-' }}</td>
                       <td>{{ option.phone || '-' }}</td>
-                      <td class="address-picker-value">{{ option.address || option.value }}</td>
                       <td>{{ option.note || '-' }}</td>
                       <td class="row-actions">
                         <button v-if="option.source === '联系人'" class="icon-btn icon-only" type="button" title="编辑地址" aria-label="编辑地址" @click="editAddressBookEntry(option)"><IconSvg name="edit" /></button>
@@ -27770,7 +30058,7 @@ function orderDetailFeeRows(order = {}) {
                       </td>
                     </tr>
                     <tr v-if="addressBookListOptions.length === 0">
-                      <td colspan="7">暂无地址，请先选择经营单位，或在上方新建地址。</td>
+                      <td colspan="7">暂无地址，请先选择客户，或在上方新建地址。</td>
                     </tr>
                   </tbody>
                 </table>
@@ -27779,7 +30067,7 @@ function orderDetailFeeRows(order = {}) {
                 <button type="button" class="ghost-btn" @click="closeLocationPicker">取消</button>
                 <button class="primary-btn" type="button" :disabled="selectedAddressBookIds.length === 0" @click="applySelectedAddressBookEntries"><IconSvg name="check" />确定</button>
               </div>
-              <p class="address-picker-hint">地址来自当前经营单位的联系人；新建地址会同步到该客户联系人资料。</p>
+              <p class="address-picker-hint">地址来自当前客户的联系人；新建地址会同步到该客户联系人资料。</p>
             </div>
           </section>
         </div>
@@ -27802,13 +30090,13 @@ function orderDetailFeeRows(order = {}) {
                   <tr>
                     <th>序号</th>
                     <th>原排车单</th>
-                    <th>经营单位</th>
+                    <th>客户</th>
                     <th>车牌</th>
                     <th>装车时间</th>
                     <th>口岸</th>
                     <th>吨位</th>
                     <th>件数/板数</th>
-                    <th>装卸</th>
+                    <th>装 / 卸</th>
                     <th>排车状态</th>
                     <th>备注</th>
                   </tr>
@@ -27820,7 +30108,7 @@ function orderDetailFeeRows(order = {}) {
                       <strong>{{ row.sourceDispatchNo || '-' }}</strong>
                       <small>{{ row.sourceOrderNo || '-' }}</small>
                     </td>
-                    <td>{{ row.customer || '-' }}</td>
+                    <td>{{ partnerDisplayLabel(row.customer || '', '客户') || '-' }}</td>
                     <td><input v-model.trim="row.plate" list="dispatchDuplicatePlateOptions" placeholder="车牌" /></td>
                     <td>
                       <select v-model="row.loadTime" @change="handleDispatchDuplicateLoadTimeChange(row)">
@@ -27854,7 +30142,7 @@ function orderDetailFeeRows(order = {}) {
       <OrderModal
         :open="orderModalOpen"
         :editing="Boolean(editingOrderNo)"
-        :customer="orderForm.customer"
+        :customer="orderModalCustomerTitle"
         :order-no="orderModalTitleNo"
         :loading="loading"
         :title="orderAuditMode ? '审核订单' : orderViewMode ? '查看订单' : ''"
@@ -27868,13 +30156,13 @@ function orderDetailFeeRows(order = {}) {
           <div class="modal-body order-modal-review-body" :class="{ 'is-readonly': orderReadOnlyMode }">
             <fieldset class="order-modal-readonly-fieldset" :disabled="orderReadOnlyMode">
             <div class="form-grid order-compact-grid order-layout-grid">
-              <label class="order-compact-field hidden-order-customer">经营单位
+              <label class="order-compact-field hidden-order-customer">客户
                 <span class="searchable-select" @click.stop>
                   <input
                     v-model.trim="orderCustomerKeyword"
-                    placeholder="输入经营单位 / 编号搜索"
+                    placeholder="搜索并选择客户"
                     @focus="openOrderCustomerPicker"
-                    @input="orderCustomerPickerOpen = true"
+                    @input="handleOrderCustomerInput"
                   />
                   <div v-if="orderCustomerPickerOpen" class="searchable-select-dropdown">
                     <button
@@ -27884,10 +30172,9 @@ function orderDetailFeeRows(order = {}) {
                       :class="{ active: customer.id === orderForm.customerId }"
                       @click="selectOrderCustomer(customer)"
                     >
-                      <strong>{{ customer.name }}</strong>
-                      <span>{{ customer.id }}</span>
+                      <strong>{{ customerOptionPrimaryDisplay(customer) }}</strong>
                     </button>
-                    <p v-if="orderCustomerOptions.length === 0">没有匹配经营单位</p>
+                    <p v-if="orderCustomerOptions.length === 0">没有匹配客户</p>
                   </div>
                 </span>
               </label>
@@ -27913,19 +30200,19 @@ function orderDetailFeeRows(order = {}) {
               <label v-if="orderHasTransportFields && orderUsesOwnVehicle && !orderUsesRelayDrivers" class="order-compact-field">香港司机
                 <select v-model="orderForm.driver">
                   <option value=""></option>
-                  <option v-for="driver in hongKongDriverOptions.length ? hongKongDriverOptions : driverRows" :key="driver.id" :value="driver.name">{{ driver.name }}</option>
+                  <option v-for="driver in hongKongDriverOptions.length ? hongKongDriverOptions : activeDriverRows" :key="driver.id" :value="driver.name">{{ driver.name }}</option>
                 </select>
               </label>
               <label v-if="orderHasTransportFields && orderUsesRelayDrivers" class="order-compact-field">香港司机
                 <select v-model="orderForm.hkDriver">
                   <option value=""></option>
-                  <option v-for="driver in hongKongDriverOptions.length ? hongKongDriverOptions : driverRows" :key="driver.id" :value="driver.name">{{ driver.name }}</option>
+                  <option v-for="driver in hongKongDriverOptions.length ? hongKongDriverOptions : activeDriverRows" :key="driver.id" :value="driver.name">{{ driver.name }}</option>
                 </select>
               </label>
               <label v-if="orderHasTransportFields && orderUsesRelayDrivers && !orderUsesDomesticTransfer" class="order-compact-field">大陆骑师
                 <select v-model="orderForm.mainlandDriver">
                   <option value=""></option>
-                  <option v-for="driver in mainlandDriverOptions.length ? mainlandDriverOptions : driverRows" :key="driver.id" :value="driver.name">{{ driver.name }}</option>
+                  <option v-for="driver in mainlandDriverOptions.length ? mainlandDriverOptions : activeDriverRows" :key="driver.id" :value="driver.name">{{ driver.name }}</option>
                 </select>
               </label>
               <label v-if="orderHasTransportFields && orderUsesDomesticTransfer" class="order-compact-field">国内车牌号
@@ -27949,8 +30236,8 @@ function orderDetailFeeRows(order = {}) {
                         :class="{ active: supplier.name === orderForm.supplier }"
                         @click="selectOrderSupplier(supplier)"
                       >
-                        <strong>{{ supplier.name }}</strong>
-                        <span>{{ supplier.id }}</span>
+                        <strong>{{ customerShortDisplay(supplier) }}</strong>
+                        <span>{{ supplier.name }} · {{ supplier.id }}</span>
                       </button>
                       <p v-if="orderSupplierOptions.length === 0">没有匹配外派供应商</p>
                     </div>
@@ -28331,50 +30618,63 @@ function orderDetailFeeRows(order = {}) {
                   <button class="ghost-btn danger small" type="button" @click="deleteSelectedAddressBookEntries"><IconSvg name="trash" />批量删除</button>
                   <button class="primary-btn small" type="button" @click="startNewAddressBookEntry"><IconSvg name="plus" />新建地址</button>
                 </div>
+                <datalist id="dispatch-location-city-options">
+                  <option v-for="city in locationCityOptions" :key="city" :value="city">{{ city }}</option>
+                </datalist>
                 <div v-if="addressBookFormOpen" class="address-book-form">
-                  <label>片区
-                    <span class="address-book-area-tree route-tree-wrap" @click.stop>
-                      <button :class="['route-tree-trigger', { 'is-empty': !addressBookForm.area, active: addressBookAreaTree.open }]" type="button" @click="toggleAddressBookAreaTree">
-                        <span>{{ addressBookForm.area || '点击选择片区' }}</span>
-                        <IconSvg name="chevronDown" />
-                      </button>
-                      <div v-if="addressBookAreaTree.open" class="route-tree-dropdown address-book-area-dropdown">
-                        <div class="route-tree-panel">
-                          <div class="route-tree-list">
-                            <template v-for="level1 in addressBookAreaLevel1Options" :key="level1">
-                              <button class="route-tree-node" :class="{ checked: addressBookAreaTree.level1 === level1 }" type="button" @click="selectAddressBookAreaLevel(1, level1)">
-                                <span class="tree-check" :class="{ checked: addressBookAreaTree.level1 === level1 }"><IconSvg v-if="addressBookAreaTree.level1 === level1" name="check" /></span>
-                                <span>{{ level1 }}</span>
-                              </button>
-                              <div v-if="addressBookAreaTree.level1 === level1" class="route-tree-children">
-                                <button v-for="level2 in addressBookAreaLevel2Options" :key="level2" class="route-tree-node level-2" :class="{ checked: addressBookAreaTree.level2 === level2 }" type="button" @click="selectAddressBookAreaLevel(2, level2)">
-                                  <span class="tree-check" :class="{ checked: addressBookAreaTree.level2 === level2 }"><IconSvg v-if="addressBookAreaTree.level2 === level2" name="check" /></span>
-                                  <span>{{ level2 }}</span>
-                                </button>
-                                <div v-if="addressBookAreaTree.level2" class="route-tree-children">
-                                  <button v-for="level3 in addressBookAreaLevel3Options" :key="level3" class="route-tree-node level-3" :class="{ checked: addressBookAreaTree.level3 === level3 }" type="button" @click="selectAddressBookAreaLevel(3, level3)">
-                                    <span class="tree-check" :class="{ checked: addressBookAreaTree.level3 === level3 }"><IconSvg v-if="addressBookAreaTree.level3 === level3" name="check" /></span>
-                                    <span>{{ level3 }}</span>
-                                  </button>
-                                </div>
-                              </div>
-                            </template>
-                            <p v-if="addressBookAreaLevel1Options.length === 0" class="route-tree-empty">暂无运费模板目录</p>
-                          </div>
-                          <div class="route-tree-actions">
-                            <span>{{ addressBookAreaTreeValue || '未选择' }}</span>
-                            <button class="primary-btn route-tree-confirm" type="button" @click="confirmAddressBookAreaSelection">确认选择</button>
-                          </div>
-                        </div>
+                  <label class="address-book-city-field">市<input v-model.trim="addressBookForm.city" list="address-book-city-options" placeholder="选择一级片区" @change="handleAddressBookCityChange" /></label>
+                  <label class="address-book-district-field">区
+                    <span class="searchable-select address-book-district-search" :class="{ 'is-open': addressBookDistrictPickerOpen, 'is-disabled': !addressBookForm.city }" @click.stop>
+                      <input
+                        :value="addressBookDistrictPickerOpen ? addressBookDistrictSearch : (addressBookForm.district || '')"
+                        type="search"
+                        autocomplete="off"
+                        :placeholder="addressBookForm.city ? '选择二级片区' : '请先选择市'"
+                        :disabled="!addressBookForm.city"
+                        @focus="openAddressBookDistrictPicker"
+                        @input="handleAddressBookDistrictInput"
+                        @blur="closeAddressBookDistrictPicker"
+                        @keydown.enter.prevent="confirmFirstAddressBookDistrictOption"
+                        @keydown.esc.prevent="closeAddressBookDistrictPicker"
+                      />
+                      <button
+                        type="button"
+                        class="customs-business-company-toggle"
+                        :disabled="!addressBookForm.city"
+                        :title="addressBookDistrictPickerOpen ? '收起区列表' : '展开区列表'"
+                        :aria-label="addressBookDistrictPickerOpen ? '收起区列表' : '展开区列表'"
+                        @click.stop="toggleAddressBookDistrictPicker"
+                      ><IconSvg :name="addressBookDistrictPickerOpen ? 'chevronUp' : 'chevronDown'" /></button>
+                      <button
+                        v-if="addressBookForm.city && addressBookForm.district"
+                        type="button"
+                        class="customs-business-company-clear"
+                        title="清空区"
+                        aria-label="清空区"
+                        @click.stop="clearAddressBookDistrict"
+                      ><IconSvg name="close" /></button>
+                      <div v-if="addressBookDistrictPickerOpen && addressBookForm.city" class="searchable-select-dropdown address-book-district-dropdown">
+                        <button
+                          v-for="district in addressBookFilteredDistrictOptions"
+                          :key="district"
+                          type="button"
+                          :class="{ active: district === addressBookForm.district }"
+                          @mousedown.prevent="selectAddressBookDistrict(district)"
+                        >
+                          <strong>{{ district }}</strong>
+                        </button>
+                        <p v-if="addressBookFilteredDistrictOptions.length === 0" @mousedown.prevent="closeAddressBookDistrictPicker">暂无匹配片区</p>
                       </div>
                     </span>
                   </label>
-                  <label>联系人<input v-model.trim="addressBookForm.contact" placeholder="联系人" /></label>
-                  <label>电话<input v-model.trim="addressBookForm.phone" placeholder="电话 / 手机" /></label>
-                  <label>详细地址<input v-model.trim="addressBookForm.address" placeholder="详细地址" /></label>
-                  <label>备注<input v-model.trim="addressBookForm.note" placeholder="楼栋、门牌、仓库名" /></label>
-                  <button class="primary-btn" type="button" @click="saveAddressBookEntry"><IconSvg name="save" />{{ editingAddressBookId ? '保存修改' : '保存到联系人' }}</button>
-                  <button class="ghost-btn" type="button" @click="resetAddressBookForm">清空</button>
+                  <datalist id="address-book-city-options">
+                    <option v-for="city in addressBookCityOptions" :key="city" :value="city">{{ city }}</option>
+                  </datalist>
+                  <label class="address-book-address-field">详细地址<input v-model.trim="addressBookForm.address" placeholder="详细地址" /></label>
+                  <label class="address-book-contact-field">联系人<input v-model.trim="addressBookForm.contact" placeholder="联系人" /></label>
+                  <label class="address-book-phone-field">电话<input v-model.trim="addressBookForm.phone" placeholder="电话 / 手机" /></label>
+                  <label class="address-book-note-field">备注<input v-model.trim="addressBookForm.note" placeholder="楼栋、门牌、仓库名" /></label>
+                  <button class="primary-btn address-book-save-btn" type="button" @click="saveAddressBookEntry"><IconSvg name="save" />{{ editingAddressBookId ? '保存修改' : '保存到联系人' }}</button>
                 </div>
               </div>
               <div v-if="locationPicker.mode !== 'addressBook'" class="address-picker-current">
@@ -28394,10 +30694,10 @@ function orderDetailFeeRows(order = {}) {
                           @change="toggleAllAddressBookSelection($event.target.checked)"
                         />
                       </th>
-                      <th>片区</th>
+                      <th>市/区</th>
+                      <th>详细地址</th>
                       <th>联系人</th>
                       <th>电话</th>
-                      <th>详细地址</th>
                       <th>备注</th>
                       <th>操作</th>
                     </tr>
@@ -28415,13 +30715,13 @@ function orderDetailFeeRows(order = {}) {
                         />
                       </td>
                       <td>{{ option.area || '-' }}</td>
+                      <td class="address-picker-value">
+                        {{ option.address || option.value }}
+                      </td>
                       <td>
                         {{ option.contact || '-' }}
                       </td>
                       <td>{{ option.phone || '-' }}</td>
-                      <td class="address-picker-value">
-                        {{ option.address || option.value }}
-                      </td>
                       <td>{{ option.note || '-' }}</td>
                       <td class="row-actions">
                         <button class="icon-btn icon-only" type="button" title="使用地址" aria-label="使用地址" @click="applyAddressBookEntry(option)"><IconSvg name="check" /></button>
@@ -28723,6 +31023,11 @@ function orderDetailFeeRows(order = {}) {
               <label>生日<input v-model="driverForm.birthday" type="date" /></label>
               <label>入职日期<input v-model="driverForm.hireDate" type="date" /></label>
               <label>离职日期<input v-model="driverForm.leaveDate" type="date" /></label>
+              <label>入职状态
+                <select v-model="driverForm.employmentStatus">
+                  <option v-for="status in DRIVER_EMPLOYMENT_STATUS_OPTIONS" :key="status">{{ status }}</option>
+                </select>
+              </label>
               <label>证件到期<input v-model="driverForm.expireAt" type="date" /></label>
               <label>状态<select v-model="driverForm.status"><option>正常</option><option>30天内到期</option><option>资料待补</option></select></label>
               <label class="span-2">备注<input v-model.trim="driverForm.note" /></label>
@@ -28811,7 +31116,7 @@ function orderDetailFeeRows(order = {}) {
                   <span class="upload-status-dot" aria-hidden="true"></span>
                   <span>{{ vehicleExpenseReceiptUploadStatus }}</span>
                 </div>
-                <p class="hint">支持图片或 PDF，可一次选择多张；选择后立即上传。</p>
+                <p class="hint">优先支持 Excel 和 PDF，也支持图片，可一次选择多张；选择后立即上传。</p>
                 <div v-if="vehicleExpenseReceiptRows.length" class="vehicle-expense-receipt-list">
                   <span
                     v-for="file in vehicleExpenseReceiptRows"
@@ -28858,11 +31163,25 @@ function orderDetailFeeRows(order = {}) {
               >订单</button>
               <button
                 type="button"
+                :class="{ active: activeRecycleTab === 'dispatchPlans' }"
+                role="tab"
+                :aria-selected="activeRecycleTab === 'dispatchPlans'"
+                @click="setRecycleTab('dispatchPlans')"
+              >排车单</button>
+              <button
+                type="button"
                 :class="{ active: activeRecycleTab === 'customsBusiness' }"
                 role="tab"
                 :aria-selected="activeRecycleTab === 'customsBusiness'"
                 @click="setRecycleTab('customsBusiness')"
               >报关业务</button>
+              <button
+                type="button"
+                :class="{ active: activeRecycleTab === 'otherBusiness' }"
+                role="tab"
+                :aria-selected="activeRecycleTab === 'otherBusiness'"
+                @click="setRecycleTab('otherBusiness')"
+              >其他业务</button>
             </div>
 
             <div v-if="activeRecycleTab === 'orders'" class="recycle-section">
@@ -28891,6 +31210,34 @@ function orderDetailFeeRows(order = {}) {
               </table>
             </div>
 
+            <div v-if="recycleScope === 'all' && activeRecycleTab === 'dispatchPlans'" class="recycle-section">
+              <table class="data-table compact">
+                <thead>
+                  <tr>
+                    <th>排车单号</th>
+                    <th>订单号</th>
+                    <th>客户</th>
+                    <th>日期</th>
+                    <th>删除时间</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in dispatchRecycleRows" :key="row.id">
+                    <td>{{ row.dispatchNo || '-' }}</td>
+                    <td>{{ row.orderNo || '-' }}</td>
+                    <td>{{ partnerDisplayLabel(row.customer || row.row?.customer || '', '客户') || '-' }}</td>
+                    <td>{{ row.date || row.planDate || '-' }}</td>
+                    <td>{{ row.deletedAt || '-' }}</td>
+                    <td><button class="icon-btn success" type="button" @click="restoreDispatchRecycleRow(row)"><IconSvg name="restore" />恢复</button></td>
+                  </tr>
+                  <tr v-if="dispatchRecycleRows.length === 0">
+                    <td colspan="6">暂无排车单回收站数据</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
             <div v-if="recycleScope === 'all' && activeRecycleTab === 'customsBusiness'" class="recycle-section">
               <table class="data-table compact">
                 <thead>
@@ -28898,7 +31245,7 @@ function orderDetailFeeRows(order = {}) {
                     <th>日期</th>
                     <th>报关单号</th>
                     <th>六联单号</th>
-                    <th>公司</th>
+                    <th>客户</th>
                     <th>进出口</th>
                     <th>删除时间</th>
                     <th>操作</th>
@@ -28909,13 +31256,45 @@ function orderDetailFeeRows(order = {}) {
                     <td>{{ row.date }}</td>
                     <td>{{ row.declarationNo }}</td>
                     <td>{{ row.sixSheetNo }}</td>
-                    <td>{{ row.company }}</td>
+                    <td>{{ partnerDisplayLabel(row.company || '', '客户') || row.company }}</td>
                     <td>{{ row.direction }}</td>
                     <td>{{ row.deletedAt }}</td>
                     <td><button class="icon-btn success" type="button" @click="restoreCustomsBusiness(row)"><IconSvg name="restore" />恢复</button></td>
                   </tr>
                   <tr v-if="customsBusinessRecycleRows.length === 0">
                     <td colspan="7">暂无报关业务回收站数据</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div v-if="recycleScope === 'all' && activeRecycleTab === 'otherBusiness'" class="recycle-section">
+              <table class="data-table compact">
+                <thead>
+                  <tr>
+                    <th>日期</th>
+                    <th>标题</th>
+                    <th>客户</th>
+                    <th>收入合计</th>
+                    <th>成本合计</th>
+                    <th>利润</th>
+                    <th>删除时间</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in otherBusinessRecycleRows" :key="row.id">
+                    <td>{{ row.date }}</td>
+                    <td>{{ row.title }}</td>
+                          <td>{{ partnerDisplayLabel(row.customer || '', '客户') || row.customer }}</td>
+                    <td>RMB {{ money(row.totalIncome) }}</td>
+                    <td>RMB {{ money(row.totalCost) }}</td>
+                    <td><strong>RMB {{ money(row.profit) }}</strong></td>
+                    <td>{{ row.deletedAt }}</td>
+                    <td><button class="icon-btn success" type="button" @click="restoreOtherBusiness(row)"><IconSvg name="restore" />恢复</button></td>
+                  </tr>
+                  <tr v-if="otherBusinessRecycleRows.length === 0">
+                    <td colspan="8">暂无其他业务回收站数据</td>
                   </tr>
                 </tbody>
               </table>
@@ -28937,14 +31316,14 @@ function orderDetailFeeRows(order = {}) {
 	          <label>日期<input v-model="customsBusinessForm.date" type="date" /></label>
 	          <label>报关单号<input v-model.trim="customsBusinessForm.declarationNo" /></label>
 	          <label>六联单号<input v-model.trim="customsBusinessForm.sixSheetNo" /></label>
-	          <label class="span-2 customs-business-company-field">公司
+	          <label class="span-2 customs-business-company-field">客户
 	            <span class="searchable-select customs-business-company-combobox" @click.stop>
 	              <IconSvg class="customs-business-company-search-icon" name="search" />
 	              <input
 	                :value="customsBusinessCompanySearch"
 	                class="customs-business-company-input"
 	                type="search"
-	                placeholder="搜索并选择报关客户"
+	                placeholder="搜索并选择客户"
 	                autocomplete="off"
 	                @focus="openCustomsBusinessCompanyPicker"
 	                @input="handleCustomsBusinessCompanyInput"
@@ -28955,15 +31334,15 @@ function orderDetailFeeRows(order = {}) {
 	                v-if="customsBusinessCompanySearch"
 	                class="customs-business-company-clear"
 	                type="button"
-	                title="清空公司"
-	                aria-label="清空公司"
+	                title="清空客户"
+	                aria-label="清空客户"
 	                @click="clearCustomsBusinessCompany"
 	              ><IconSvg name="close" /></button>
 	              <button
 	                class="customs-business-company-toggle"
 	                type="button"
-	                title="展开公司列表"
-	                aria-label="展开公司列表"
+	                title="展开客户列表"
+	                aria-label="展开客户列表"
 	                @click="customsBusinessCompanyPickerOpen ? closeCustomsBusinessCompanyPicker() : openCustomsBusinessCompanyPicker()"
 	              ><IconSvg name="chevronDown" /></button>
 	              <div v-if="customsBusinessCompanyPickerOpen" class="searchable-select-dropdown customs-business-company-dropdown">
@@ -28974,27 +31353,23 @@ function orderDetailFeeRows(order = {}) {
 	                  :class="{ active: String(customer.name || '').trim() === customsBusinessForm.company }"
 	                  @click="selectCustomsBusinessCompany(customer)"
 	                >
-	                  <strong>{{ customer.name }}</strong>
-	                  <span>
-	                    <IconSvg v-if="String(customer.name || '').trim() === customsBusinessForm.company" name="check" />
-	                    {{ customer.id }}
-	                  </span>
+	                  <strong>{{ customerOptionPrimaryDisplay(customer) }}</strong>
 	                </button>
-	                <p v-if="customsBusinessFilteredCustomerOptions.length === 0">{{ customsBusinessCustomerOptions.length ? '暂无匹配公司' : '暂无报关客户' }}</p>
+	                <p v-if="customsBusinessFilteredCustomerOptions.length === 0">{{ customsBusinessCustomerOptions.length ? '暂无匹配客户' : '暂无客户' }}</p>
 	              </div>
 	            </span>
 	          </label>
 	          <label>进出口<select v-model="customsBusinessForm.direction"><option value=""></option><option>进口</option><option>出口</option><option>金二进口</option><option>金二出口</option></select></label>
-	          <label>品名项数<input v-model.number="customsBusinessForm.itemCount" type="number" min="0" step="1" /></label>
+	          <label>品名项数<input v-model.number="customsBusinessForm.itemCount" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'itemCount', $event)" /></label>
 	          <label>续页<input :value="customsBusinessForm.pageCount" type="number" min="0" step="1" readonly /></label>
 	          <label>续页费<input :value="money(customsBusinessForm.pageFee)" readonly /></label>
 	          <label>主页费用<input :value="customsBusinessHomeFeeDisplay" readonly /></label>
-	          <label>报关费<input v-model.number="customsBusinessForm.customsFee" type="number" min="0" step="0.01" /></label>
-	          <label>舱单费<input v-model.number="customsBusinessForm.manifestFee" type="number" min="0" step="0.01" /></label>
-	          <label>报检费<input v-model.number="customsBusinessForm.inspectionFee" type="number" min="0" step="0.01" /></label>
-	          <label>查验费<input v-model.number="customsBusinessForm.checkFee" type="number" min="0" step="0.01" /></label>
-	          <label>核注费<input v-model.number="customsBusinessForm.verificationFee" type="number" min="0" step="0.01" /></label>
-	          <label>其他费用<input v-model.number="customsBusinessForm.otherFee" type="number" min="0" step="0.01" /></label>
+	          <label>报关费<input v-model.number="customsBusinessForm.customsFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'customsFee', $event)" /></label>
+	          <label>舱单费<input v-model.number="customsBusinessForm.manifestFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'manifestFee', $event)" /></label>
+	          <label>报检费<input v-model.number="customsBusinessForm.inspectionFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'inspectionFee', $event)" /></label>
+	          <label>查验费<input v-model.number="customsBusinessForm.checkFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'checkFee', $event)" /></label>
+	          <label>核注费<input v-model.number="customsBusinessForm.verificationFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'verificationFee', $event)" /></label>
+	          <label>其他费用<input v-model.number="customsBusinessForm.otherFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'otherFee', $event)" /></label>
 	          <div class="span-4 customs-business-custom-fields">
 	            <div class="customs-business-custom-head">
 	              <span>自定义类目</span>
@@ -29003,7 +31378,7 @@ function orderDetailFeeRows(order = {}) {
 	            <div v-if="customsBusinessForm.customFields.length" class="customs-business-custom-list">
 	              <div v-for="(field, index) in customsBusinessForm.customFields" :key="index" class="customs-business-custom-row">
 	                <label>类目名称<input v-model.trim="field.name" placeholder="类目名称" /></label>
-	                <label>金额<input v-model.number="field.value" type="number" min="0" step="0.01" /></label>
+	                <label>金额<input v-model.number="field.value" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(field, 'value', $event)" /></label>
 	                <button class="icon-btn icon-only danger" type="button" title="删除类目" aria-label="删除类目" @click="removeCustomsBusinessCustomField(index)">
 	                  <IconSvg name="trash" />
 	                </button>
@@ -29016,6 +31391,112 @@ function orderDetailFeeRows(order = {}) {
 	        <div class="modal-actions">
 	          <button type="button" class="ghost-btn" @click="closeCustomsBusinessModal">取消</button>
 	          <button type="submit" class="primary-btn" :disabled="customsBusinessSaving"><IconSvg name="save" />{{ customsBusinessSaving ? '保存中' : (copyingCustomsBusinessId ? '新增报关单' : (editingCustomsBusinessId ? '保存修改' : '保存报关业务')) }}</button>
+	        </div>
+	      </form>
+	    </div>
+
+	    <div v-if="otherBusinessModalOpen" class="modal-backdrop">
+	      <form class="modal-card compact-modal customs-business-modal other-business-modal" @click="closeOtherBusinessCustomerPicker" @submit.prevent="saveOtherBusiness">
+	        <div class="modal-head">
+	          <h2>
+	            {{ editingOtherBusinessId ? '编辑其他业务' : '新增其他业务' }}
+	            <span class="order-title-meta">{{ otherBusinessForm.date }}</span>
+	          </h2>
+	          <button type="button" class="icon-btn" @click="closeOtherBusinessModal"><IconSvg name="close" />关闭</button>
+	        </div>
+	        <div class="form-grid customs-business-form-grid other-business-form-grid">
+	          <label>日期<input v-model="otherBusinessForm.date" type="date" /></label>
+	          <label class="span-3 other-business-title-field">标题<input v-model.trim="otherBusinessForm.title" placeholder="业务标题" /></label>
+	          <label class="span-2 customs-business-company-field">客户
+	            <span class="searchable-select customs-business-company-combobox" @click.stop>
+	              <IconSvg class="customs-business-company-search-icon" name="search" />
+	              <input
+	                :value="otherBusinessCustomerSearch"
+	                class="customs-business-company-input"
+	                type="search"
+	                placeholder="搜索并选择客户"
+	                autocomplete="off"
+	                @focus="openOtherBusinessCustomerPicker"
+	                @input="handleOtherBusinessCustomerInput"
+	                @keydown.enter.prevent="confirmFirstOtherBusinessCustomerOption"
+	                @keydown.esc.prevent="closeOtherBusinessCustomerPicker"
+	              />
+	              <button
+	                v-if="otherBusinessCustomerSearch"
+	                class="customs-business-company-clear"
+	                type="button"
+	                title="清空客户"
+	                aria-label="清空客户"
+	                @click="clearOtherBusinessCustomer"
+	              ><IconSvg name="close" /></button>
+	              <button
+	                class="customs-business-company-toggle"
+	                type="button"
+	                title="展开客户列表"
+	                aria-label="展开客户列表"
+	                @click="otherBusinessCustomerPickerOpen ? closeOtherBusinessCustomerPicker() : openOtherBusinessCustomerPicker()"
+	              ><IconSvg name="chevronDown" /></button>
+	              <div v-if="otherBusinessCustomerPickerOpen" class="searchable-select-dropdown customs-business-company-dropdown">
+	                <button
+	                  v-for="customer in otherBusinessFilteredCustomerOptions"
+	                  :key="customer.id"
+	                  type="button"
+	                  :class="{ active: String(customer.name || '').trim() === otherBusinessForm.customer }"
+	                  @click="selectOtherBusinessCustomer(customer)"
+	                >
+	                  <strong>{{ customerOptionPrimaryDisplay(customer) }}</strong>
+	                </button>
+	                <p v-if="otherBusinessFilteredCustomerOptions.length === 0">{{ otherBusinessCustomerOptions.length ? '暂无匹配客户' : '暂无客户' }}</p>
+	              </div>
+	            </span>
+	          </label>
+	          <label>成本<input v-model.number="otherBusinessForm.cost" type="number" min="0" step="0.01" inputmode="decimal" @input="normalizeOtherBusinessAmountInput(otherBusinessForm, 'cost', $event)" /></label>
+	          <label>收入<input v-model.number="otherBusinessForm.income" type="number" min="0" step="0.01" inputmode="decimal" @input="normalizeOtherBusinessAmountInput(otherBusinessForm, 'income', $event)" /></label>
+	          <div class="span-4 other-business-file-section">
+	            <div class="customs-business-custom-head">
+	              <span>相关文件</span>
+	            </div>
+	            <AttachmentPanel
+	              :files="otherBusinessAttachmentRows"
+	              :can-upload="true"
+	              :uploading="otherBusinessAttachmentUploading"
+	              :accept="FILE_UPLOAD_ACCEPT"
+	              upload-label="上传相关文件"
+	              empty-text="暂无相关文件"
+	              hint="优先支持 Excel 和 PDF，也支持图片，上传后会展示在这里。"
+	              :readonly="false"
+	              :format-size="fileSizeText"
+	              @open-upload="openOtherBusinessFileUploadPanel"
+	              @preview="openStoredFile($event, 'preview')"
+	              @download="openStoredFile($event, 'download')"
+	              @delete="deleteFile($event, otherBusinessAttachmentRows)"
+	            />
+	          </div>
+	          <div class="span-4 customs-business-custom-fields other-business-custom-fields">
+	            <div class="customs-business-custom-head">
+	              <span>自定义类目</span>
+	              <button class="ghost-btn small" type="button" @click="addOtherBusinessCustomField"><IconSvg name="plus" />新增类目</button>
+	            </div>
+	            <div v-if="otherBusinessForm.customFields.length" class="customs-business-custom-list">
+	              <div v-for="(field, index) in otherBusinessForm.customFields" :key="index" class="customs-business-custom-row other-business-custom-row">
+	                <label>类目名称<input v-model.trim="field.name" placeholder="类目名称" /></label>
+	                <label>收入<input v-model.number="field.income" type="number" min="0" step="0.01" inputmode="decimal" @input="normalizeOtherBusinessAmountInput(field, 'income', $event)" /></label>
+	                <label>成本<input v-model.number="field.cost" type="number" min="0" step="0.01" inputmode="decimal" @input="normalizeOtherBusinessAmountInput(field, 'cost', $event)" /></label>
+	                <label>利润<input :value="money(otherBusinessCustomFieldProfit(field))" readonly /></label>
+	                <button class="icon-btn icon-only danger" type="button" title="删除类目" aria-label="删除类目" @click="removeOtherBusinessCustomField(index)">
+	                  <IconSvg name="trash" />
+	                </button>
+	              </div>
+	            </div>
+	          </div>
+	          <label>收入合计<input :value="money(otherBusinessFormTotals.totalIncome)" readonly /></label>
+	          <label>成本合计<input :value="money(otherBusinessFormTotals.totalCost)" readonly /></label>
+	          <label>利润<input :value="money(otherBusinessFormTotals.profit)" readonly /></label>
+	          <label class="span-4">备注<textarea v-model.trim="otherBusinessForm.remark" rows="3" /></label>
+	        </div>
+	        <div class="modal-actions">
+	          <button type="button" class="ghost-btn" @click="closeOtherBusinessModal">取消</button>
+	          <button type="submit" class="primary-btn" :disabled="otherBusinessSaving"><IconSvg name="save" />{{ otherBusinessSaving ? '保存中' : (editingOtherBusinessId ? '保存修改' : '保存其他业务') }}</button>
 	        </div>
 	      </form>
 	    </div>

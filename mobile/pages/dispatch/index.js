@@ -1,7 +1,6 @@
 const api = require("../../utils/api");
 const { DISPATCH_DATE_KEY, setDispatchFormContext } = require("../../utils/context");
 const { addDaysToInputDate, formatDateLabel, todayInputValue } = require("../../utils/date");
-const { clearSession } = require("../../utils/session");
 const { dispatchCopyQuery, dispatchSharePath, enableShareMenu, shareImageUrl } = require("../../utils/share");
 const {
   buildDispatchWarnings,
@@ -42,6 +41,14 @@ function emptyTextForStatus(status) {
   if (status === "all") return "当前条件下暂无排车单";
   if (status === "已签收") return "当前条件下暂无已签收订单";
   return `当前条件下暂无${status}排车单`;
+}
+
+function realtimeEventAffectsDispatch(event) {
+  const modules = new Set(Array.isArray(event && event.affectedModules) ? event.affectedModules.map(String) : []);
+  if (modules.has("dispatchBoard") || modules.has("orders") || modules.has("customers") || modules.has("vehicleDriver") || modules.has("reminders") || modules.has("freight")) {
+    return true;
+  }
+  return ["dispatch_plan", "order", "customer", "customer_contact", "address_book", "vehicle", "vehicle_expense", "driver", "freight_rate"].indexOf(String(event && event.entityType || "")) >= 0;
 }
 
 function compactOrderForDispatchForm(order) {
@@ -170,6 +177,7 @@ Page({
     this.setData({
       accountLabel: account.displayName || account.username || account.role || ""
     });
+    this.attachRealtime();
     await this.loadBoard();
   },
 
@@ -178,12 +186,56 @@ Page({
     wx.stopPullDownRefresh();
   },
 
+  onHide() {
+    this.detachRealtime();
+  },
+
+  onUnload() {
+    this.detachRealtime();
+  },
+
+  attachRealtime() {
+    if (this.realtimeUnsubscribe) return;
+    this.realtimeUnsubscribe = getApp().registerRealtimeListener((event) => {
+      this.onRealtimeChange(event);
+    });
+  },
+
+  detachRealtime() {
+    if (this.realtimeReloadTimer) {
+      clearTimeout(this.realtimeReloadTimer);
+      this.realtimeReloadTimer = null;
+    }
+    if (this.realtimeUnsubscribe) {
+      this.realtimeUnsubscribe();
+      this.realtimeUnsubscribe = null;
+    }
+  },
+
+  onRealtimeChange(event) {
+    if (!realtimeEventAffectsDispatch(event)) return;
+    this.scheduleRealtimeReload();
+  },
+
+  scheduleRealtimeReload(delay) {
+    if (this.realtimeReloadTimer) clearTimeout(this.realtimeReloadTimer);
+    this.realtimeReloadTimer = setTimeout(async () => {
+      this.realtimeReloadTimer = null;
+      if (this.data.saving) {
+        this.scheduleRealtimeReload(800);
+        return;
+      }
+      await this.loadBoard({ silent: true });
+    }, Number(delay || 500));
+  },
+
   async loadBoard(options) {
     const silent = options && options.silent;
     const date = this.data.dispatchDate;
+    const selectedBeforeReload = new Set(this.data.selectedDispatchIds || []);
     this.expiryReminderRows = null;
     if (!silent) this.setData({ loading: true });
-    wx.showNavigationBarLoading();
+    if (!silent) wx.showNavigationBarLoading();
     try {
       const [plan, orders, vehicles, drivers, expiryReminders] = await Promise.all([
         api.getDispatchPlan(date),
@@ -196,20 +248,27 @@ Page({
         ? expiryReminders.rows
         : null;
       const rows = sortDispatchRows(plan && plan.rows ? plan.rows : [], orders, date);
+      const nextSelectedIds = silent
+        ? rows.filter((row) => selectedBeforeReload.has(row.id)).map((row) => row.id)
+        : [];
       this.setData({
         drivers,
         loading: false,
         orders,
         rawRows: rows,
-        selectedDispatchIds: [],
+        selectedDispatchIds: nextSelectedIds,
         vehicles
       });
       this.refreshDerivedData();
     } catch (error) {
       this.setData({ loading: false });
-      wx.showToast({ title: error.message || "读取排车表失败", icon: "none" });
+      if (silent) {
+        console.warn("Realtime dispatch refresh failed", error);
+      } else {
+        wx.showToast({ title: error.message || "读取排车表失败", icon: "none" });
+      }
     } finally {
-      wx.hideNavigationBarLoading();
+      if (!silent) wx.hideNavigationBarLoading();
     }
   },
 
@@ -732,8 +791,7 @@ Page({
       content: "确认退出当前账号？",
       success: (result) => {
         if (!result.confirm) return;
-        clearSession();
-        getApp().setAccount(null);
+        getApp().clearAccount();
         wx.reLaunch({ url: "/pages/login/index" });
       }
     });

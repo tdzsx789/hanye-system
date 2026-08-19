@@ -34,6 +34,53 @@ function uniqueTextList(values) {
   return result;
 }
 
+function customerShortDisplay(customer) {
+  if (!customer) return "";
+  return String(customer.shortName || customer.short_name || customer.name || "").trim();
+}
+
+function customerOptionPrimaryDisplay(customer) {
+  return customerShortDisplay(customer);
+}
+
+function customerOptionSecondaryDisplay(customer) {
+  return "";
+}
+
+function customerSearchText(customer) {
+  return [
+    customer && customer.id,
+    customer && customer.name,
+    customerShortDisplay(customer),
+    customer && customer.contact,
+    customer && customer.mobile
+  ].join(" ").toLowerCase();
+}
+
+function customerMatchesInput(customer, text) {
+  const target = String(text || "").trim();
+  if (!target || !customer) return false;
+  return String(customer.name || "").trim() === target
+    || String(customer.shortName || customer.short_name || "").trim() === target
+    || String(customer.id || "").trim() === target;
+}
+
+function findCustomerByIdOrText(customers, customerId, customerText) {
+  const rows = (Array.isArray(customers) ? customers : []).filter((item) => item.type === "客户");
+  const id = String(customerId || "").trim();
+  const text = String(customerText || "").trim();
+  return rows.find((item) => id && String(item.id) === id)
+    || rows.find((item) => customerMatchesInput(item, text))
+    || null;
+}
+
+function decorateCustomerSuggestion(customer) {
+  return Object.assign({}, customer, {
+    displayName: customerOptionPrimaryDisplay(customer),
+    secondaryText: customerOptionSecondaryDisplay(customer)
+  });
+}
+
 const LOCATION_ENTRY_KEYS = {
   loading: "loadingEntries",
   unloading: "unloadingEntries"
@@ -302,6 +349,12 @@ function buildAddressBookAreaCatalog(rows = []) {
   };
 }
 
+function realtimeEventAffectsFormReferences(event) {
+  const modules = new Set(Array.isArray(event && event.affectedModules) ? event.affectedModules.map(String) : []);
+  if (modules.has("customers") || modules.has("vehicleDriver") || modules.has("freight")) return true;
+  return ["customer", "customer_contact", "address_book", "vehicle", "driver", "freight_rate"].indexOf(String(event && event.entityType || "")) >= 0;
+}
+
 Page({
   data: {
     addressBookForm: createBlankAddressBookForm(),
@@ -390,6 +443,7 @@ Page({
 
   onShow() {
     enableShareMenu();
+    this.attachRealtime();
   },
 
   onShareAppMessage() {
@@ -417,11 +471,44 @@ Page({
   },
 
   onUnload() {
+    this.detachRealtime();
     clearDispatchFormContext();
   },
 
-  async loadReferences() {
-    this.setData({ loadingRefs: true });
+  onHide() {
+    this.detachRealtime();
+  },
+
+  attachRealtime() {
+    if (this.realtimeUnsubscribe) return;
+    this.realtimeUnsubscribe = getApp().registerRealtimeListener((event) => {
+      this.onRealtimeChange(event);
+    });
+  },
+
+  detachRealtime() {
+    if (this.realtimeReloadTimer) {
+      clearTimeout(this.realtimeReloadTimer);
+      this.realtimeReloadTimer = null;
+    }
+    if (this.realtimeUnsubscribe) {
+      this.realtimeUnsubscribe();
+      this.realtimeUnsubscribe = null;
+    }
+  },
+
+  onRealtimeChange(event) {
+    if (!realtimeEventAffectsFormReferences(event)) return;
+    if (this.realtimeReloadTimer) clearTimeout(this.realtimeReloadTimer);
+    this.realtimeReloadTimer = setTimeout(() => {
+      this.realtimeReloadTimer = null;
+      this.loadReferences({ silent: true });
+    }, 500);
+  },
+
+  async loadReferences(options) {
+    const silent = options && options.silent;
+    if (!silent) this.setData({ loadingRefs: true });
     try {
       const [customers, vehicles, drivers, freightRates] = await Promise.all([
         api.listCustomers(),
@@ -433,6 +520,11 @@ Page({
         (Array.isArray(freightRates) ? freightRates : []).filter((item) => !String(item.customerId || item.customer_id || "").trim() && !String(item.customerName || item.customer_name || "").trim())
       );
       const form = normalizeDispatchFormForDisplay(Object.assign({}, this.data.form));
+      const matchedCustomer = findCustomerByIdOrText(customers, form.customerId, form.customer);
+      if (matchedCustomer) {
+        form.customerId = matchedCustomer.id;
+        form.customer = customerOptionPrimaryDisplay(matchedCustomer);
+      }
       const locationPatch = locationEntriesPatchFromForm(form);
       this.setData({
         customers,
@@ -454,10 +546,14 @@ Page({
       this.syncAddressBookAreaPicker();
       this.refreshCustomerSuggestions();
     } catch (error) {
-      this.setData({ loadingRefs: false });
-      wx.showToast({ title: error.message || "读取基础资料失败", icon: "none" });
+      if (!silent) this.setData({ loadingRefs: false });
+      if (silent) {
+        console.warn("Realtime reference refresh failed", error);
+      } else {
+        wx.showToast({ title: error.message || "读取基础资料失败", icon: "none" });
+      }
     } finally {
-      wx.hideLoading();
+      if (!silent) wx.hideLoading();
     }
   },
 
@@ -467,9 +563,10 @@ Page({
       .filter((item) => item.type === "客户")
       .filter((item) => {
         if (!keyword) return true;
-        return [item.id, item.name, item.contact, item.mobile].join(" ").toLowerCase().indexOf(keyword) >= 0;
+        return customerSearchText(item).indexOf(keyword) >= 0;
       })
-      .slice(0, 8);
+      .slice(0, 8)
+      .map((item) => decorateCustomerSuggestion(item));
     this.setData({ customerSuggestions: rows });
   },
 
@@ -507,7 +604,7 @@ Page({
     const customer = (this.data.customers || []).find((item) => String(item.id) === String(id));
     if (!customer) return;
     this.setData({
-      "form.customer": customer.name,
+      "form.customer": customerOptionPrimaryDisplay(customer),
       "form.customerId": customer.id,
       customerPickerOpen: false
     });
@@ -595,10 +692,7 @@ Page({
   findMatchedCustomer() {
     const customerId = String(this.data.form.customerId || "").trim();
     const customerName = String(this.data.form.customer || "").trim();
-    const customers = (this.data.customers || []).filter((item) => item.type === "客户");
-    return customers.find((item) => customerId && String(item.id) === customerId)
-      || customers.find((item) => item.name === customerName)
-      || null;
+    return findCustomerByIdOrText(this.data.customers || [], customerId, customerName);
   },
 
   async openLocationPicker(event) {

@@ -5,6 +5,7 @@ export * as ordersApi from "./orders.js";
 export * as filesApi from "./files.js";
 export * as customersApi from "./customers.js";
 export * as customsBusinessApi from "./customsBusiness.js";
+export * as otherBusinessApi from "./otherBusiness.js";
 export * as dispatchApi from "./dispatch.js";
 export * as financeApi from "./finance.js";
 export * as masterDataApi from "./masterData.js";

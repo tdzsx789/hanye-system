@@ -12,9 +12,9 @@ export const CUSTOMER_ORDER_COLUMN_ORDER_KEY = "hanye_customer_order_column_orde
 export const ORDER_COLUMN_ORDER_KEY = "hanye_order_column_order";
 export const CUSTOMER_ORDER_COLUMN_LOCKED_KEY = "hanye_customer_order_column_locked";
 export const ORDER_COLUMN_LOCKED_KEY = "hanye_order_column_locked";
-export const ORDER_LEFT_STICKY_KEYS = ["date", "no"];
+export const ORDER_LEFT_STICKY_KEYS = ["sequence", "date", "plate"];
 export const ORDER_RIGHT_STICKY_KEYS = ["status", "actions"];
-export const DISPATCH_LEFT_STICKY_KEYS = ["sequence", "loadTime", "dispatchNo"];
+export const DISPATCH_LEFT_STICKY_KEYS = ["sequence", "loadTime", "plate"];
 
 export function createCustomerOrderColumns() {
   return withDefaultIndex([
@@ -44,12 +44,13 @@ export function createCustomerOrderColumns() {
 export function createOrderColumns() {
   return withDefaultIndex([
     { key: "select", label: "选择", width: 32, min: 30, locked: true },
+    { key: "sequence", label: "序号", width: 66, min: 62, locked: true, leftPinned: true },
     { key: "date", label: "日期", width: 112, min: 104, leftPinned: true },
-    { key: "no", label: "订单号", width: 128, min: 104, leftPinned: true },
+    { key: "no", label: "订单号", width: 128, min: 104 },
     { key: "dispatchNo", label: "排车单号", width: 118, min: 88 },
     { key: "createdByName", label: "创建者", width: 82, min: 64 },
     { key: "customer", label: "客户", width: 220, min: 140 },
-    { key: "plate", label: "车牌", width: 118, min: 108 },
+    { key: "plate", label: "车牌", width: 118, min: 108, leftPinned: true },
     { key: "driver", label: "司机", width: 132, min: 96 },
     { key: "supplier", label: "供应商", width: 144, min: 96 },
     { key: "businessType", label: "业务类型", width: 70, min: 52 },
@@ -114,21 +115,21 @@ export function createFinanceWageTableColumns() {
 export function createDispatchTableColumns() {
   return withDefaultIndex([
     { key: "sequence", label: "序号", width: 72, min: 58, locked: true },
-    { key: "loadTime", label: "装车日期/时间", width: 188, min: 176, locked: true },
-    { key: "dispatchNo", label: "排车单号", width: 112, min: 88, locked: true },
+    { key: "loadTime", label: "装车日期/时间", width: 230, min: 220, locked: true },
+    { key: "plate", label: "车牌", width: 128, min: 118, locked: true },
+    { key: "dispatchNo", label: "排车单号", width: 112, min: 88 },
     { key: "createdByName", label: "创建者", width: 86, min: 64 },
-    { key: "customer", label: "经营单位", width: 180, min: 110 },
+    { key: "customer", label: "客户", width: 180, min: 110 },
     { key: "businessType", label: "业务类型", width: 78, min: 58 },
-    { key: "plate", label: "车牌", width: 128, min: 118 },
     { key: "driver", label: "司机", width: 132, min: 100 },
+    { key: "supplier", label: "供应商", width: 116, min: 86 },
     { key: "status", label: "排车状态", width: 104, min: 84 },
     { key: "port", label: "口岸", width: 86, min: 68 },
     { key: "direction", label: "进出口", width: 64, min: 52 },
     { key: "tonnage", label: "吨位", width: 58, min: 46 },
     { key: "quantity", label: "件数/板数", width: 82, min: 64 },
     { key: "weight", label: "重量", width: 76, min: 58 },
-    { key: "route", label: "装卸", width: 250, min: 140 },
-    { key: "vehicleSource", label: "车辆来源", width: 116, min: 86 },
+    { key: "route", label: "装 / 卸", width: 250, min: 140 },
     { key: "note", label: "备注", width: 120, min: 86 },
     { key: "actions", label: "操作", width: 184, min: 144, locked: true }
   ]);
@@ -181,6 +182,7 @@ export function createDriverListDetailColumns() {
     { key: "birthday", label: "生日", width: 100, min: 76 },
     { key: "hireDate", label: "入职日期", width: 104, min: 82 },
     { key: "leaveDate", label: "离职日期", width: 104, min: 82 },
+    { key: "employmentStatus", label: "入职状态", width: 92, min: 76 },
     { key: "expireAt", label: "证件到期", width: 104, min: 82 },
     { key: "status", label: "状态", width: 86, min: 68 },
     { key: "note", label: "备注", width: 180, min: 100 },

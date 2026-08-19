@@ -238,7 +238,7 @@ onBeforeUnmount(removeDocumentPasteListener);
             </button>
           </div>
         </div>
-        <p v-else class="upload-panel-empty">支持图片和 PDF，文件不能超过系统限制。</p>
+        <p v-else class="upload-panel-empty">优先支持 Excel 和 PDF，也支持图片，文件不能超过系统限制。</p>
       </div>
       <div class="modal-actions">
         <button class="ghost-btn" type="button" :disabled="uploading" @click="requestClose">取消</button>

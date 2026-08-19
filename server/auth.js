@@ -30,6 +30,7 @@ const ALL_MODULES = [
   "dispatchBoard",
   "orders",
   "customsBusiness",
+  "otherBusiness",
   "vehicleDriver",
   ...VEHICLE_EXPENSE_MODULES,
   "financeWages",
@@ -46,7 +47,7 @@ const ALL_MODULES = [
   "accounts"
 ];
 
-const BUSINESS_MODULES = ["home", "customers", "dispatchBoard", "orders", "customsBusiness"];
+const BUSINESS_MODULES = ["home", "customers", "dispatchBoard", "orders", "customsBusiness", "otherBusiness"];
 const VEHICLE_DRIVER_MODULES = ["vehicleDriver", ...VEHICLE_EXPENSE_MODULES];
 const FINANCE_WAGE_MODULES = ["financeWages"];
 const FINANCE_MODULES = ["financeCosts", "financeSupplierStatements", "financeCustomsStatements", "financeCostCenter", "financeDaily"];
@@ -64,6 +65,7 @@ const MODULE_LABELS = {
   customers: "客户/供应商",
   orders: "订单管理",
   customsBusiness: "报关业务",
+  otherBusiness: "其他业务",
   vehicleDriver: "车辆司机",
   vehicleFuelExpenses: "加油费管理",
   vehicleRepairExpenses: "维修费管理",

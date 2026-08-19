@@ -41,7 +41,10 @@ export async function apiFetch(path, options = {}) {
     if (response.status === 401) {
       apiClientContext.onUnauthorized();
     }
-    throw new Error(error.message || "接口请求失败");
+    const err = new Error(error.message || "接口请求失败");
+    err.status = response.status;
+    err.payload = error;
+    throw err;
   }
   return response.json();
 }

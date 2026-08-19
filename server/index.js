@@ -5,6 +5,7 @@ import OSS from "ali-oss";
 import { AsyncLocalStorage } from "node:async_hooks";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import zlib from "node:zlib";
 import {
   ACCOUNT_ROLES,
@@ -17,7 +18,8 @@ import {
   verifyPassword
 } from "./auth.js";
 import PDFDocument from "pdfkit";
-import { db, databaseInfo, withAdvisoryLock, writeAudit as writeAuditRecord } from "./db.js";
+import { afterCommit, db, databaseInfo, withAdvisoryLock, writeAudit as writeAuditRecord } from "./db.js";
+import { createRealtimeHub, realtimeEventFromAudit } from "./realtime.js";
 
 const app = express();
 const port = Number(process.env.PORT || 5174);
@@ -40,7 +42,21 @@ const SAFE_FILE_TYPES = [
   { extensions: [".heic"], mimes: ["image/heic", "image/heif"] },
   { extensions: [".heif"], mimes: ["image/heif", "image/heic"] },
   { extensions: [".svg"], mimes: ["image/svg+xml"] },
-  { extensions: [".pdf"], mimes: ["application/pdf"] }
+  { extensions: [".pdf"], mimes: ["application/pdf"] },
+  {
+    extensions: [".xls"],
+    mimes: ["application/vnd.ms-excel", "application/octet-stream", "application/xls", ""]
+  },
+  {
+    extensions: [".xlsx"],
+    mimes: [
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "application/octet-stream",
+      "application/zip",
+      ""
+    ]
+  },
+  { extensions: [".csv"], mimes: ["text/csv", "application/csv", "application/octet-stream", ""] }
 ];
 const PREVIEW_MIMES = new Set(SAFE_FILE_TYPES.flatMap((item) => item.mimes));
 const AUTH_TOKEN_TTL_SECONDS = Number(process.env.AUTH_TOKEN_TTL_SECONDS || 7 * 24 * 60 * 60);
@@ -71,13 +87,19 @@ const ossClient = OSS_ENABLED ? new OSS({
 }) : null;
 const fileStorageProvider = ossClient ? "oss" : "oss-unconfigured";
 const auditActorContext = new AsyncLocalStorage();
+let realtimeHub = null;
 
 function auditActorFromAccount(account = {}) {
   return String(account.name || account.displayName || account.username || "").trim() || "admin";
 }
 
 async function writeAudit(action, entityType, entityId, detail = "") {
-  await writeAuditRecord(action, entityType, entityId, detail, auditActorContext.getStore() || "admin");
+  const actor = auditActorContext.getStore() || "admin";
+  await writeAuditRecord(action, entityType, entityId, detail, actor);
+  const event = realtimeEventFromAudit({ action, entityType, entityId, detail, actor });
+  if (event) {
+    afterCommit(() => realtimeHub?.broadcast(event));
+  }
 }
 
 if (OSS_CONFIG_REQUESTED && !OSS_ENABLED) {
@@ -167,6 +189,13 @@ function booleanFlag(value, fallback = false) {
 }
 
 const ADMIN_ONLY_DELETE_ORDER_STATUSES = new Set(["待确认", "通关中"]);
+const ORDER_STATUS_TO_DISPATCH_STATUS = {
+  "预排": "预排",
+  "正常": "预排",
+  "通关中": "通关中",
+  "已签收": "已签收",
+  "费用待确认": "异常滞留"
+};
 
 function requestHasAdminOrderDeletePermission(req) {
   return normalizeAccountRole(req.account?.role) === "管理员";
@@ -255,6 +284,7 @@ function mapCustomer(row) {
     type: row.type,
     customerCategory,
     name: row.name,
+    shortName: row.short_name || "",
     province: row.province || "广东省",
     city: row.city,
     address: row.address || "",
@@ -293,6 +323,7 @@ function normalizeCustomerPayload(body, id = "") {
     return Number.isFinite(number) ? number : fallback;
   };
   const name = String(body.name || "").trim();
+  const shortName = String(body.shortName || body.short_name || "").trim();
   const address = String(body.address || invoice.address || "").trim();
   const taxNo = String(body.taxNo || invoice.taxNo || "").trim();
   const type = body.type === "供应商" ? "供应商" : "客户";
@@ -303,6 +334,7 @@ function normalizeCustomerPayload(body, id = "") {
     type,
     customerCategory,
     name,
+    shortName,
     province: String(body.province || "广东省").trim(),
     city: String(body.city || "深圳市").trim(),
     address,
@@ -554,7 +586,8 @@ function fileTypeRule(filename, mime) {
   const extension = fileExtension(filename);
   const normalizedMime = normalizeMime(mime);
   return SAFE_FILE_TYPES.find((rule) =>
-    rule.extensions.includes(extension) && rule.mimes.includes(normalizedMime)
+    rule.extensions.includes(extension)
+    && (rule.mimes.includes(normalizedMime) || normalizedMime === "application/octet-stream" || normalizedMime === "")
   ) || null;
 }
 
@@ -582,7 +615,7 @@ function validateStoredFilePayload(item) {
   const filename = sanitizeFilename(item.filename);
   const mime = normalizeMime(item.mime);
   const rule = fileTypeRule(filename, mime);
-  if (!rule) return { error: "不支持的文件类型，请上传图片或 PDF 文件" };
+  if (!rule) return { error: "不支持的文件类型，请上传图片、PDF 或 Excel 文件" };
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(item.contentBase64) || item.contentBase64.length % 4 !== 0) {
     return { error: "文件内容格式不正确" };
   }
@@ -2363,6 +2396,7 @@ function mapDriver(row) {
     birthday: row.birthday,
     hireDate: row.hire_date,
     leaveDate: row.leave_date,
+    employmentStatus: row.employment_status || "在职",
     expireAt: row.expire_at,
     status: row.status,
     defaultWage: row.default_wage,
@@ -2716,6 +2750,25 @@ function mapCustomsBusiness(row) {
   };
 }
 
+function mapOtherBusiness(row) {
+  return {
+    id: row.id,
+    date: row.business_date || "",
+    title: row.title || "",
+    customer: row.customer || "",
+    cost: Number(row.cost || 0),
+    income: Number(row.income || 0),
+    customFields: normalizeOtherBusinessCustomFields(row.custom_fields),
+    totalCost: Number(row.total_cost || 0),
+    totalIncome: Number(row.total_income || 0),
+    profit: Number(row.profit || 0),
+    remark: row.remark || "",
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || "",
+    deletedAt: row.deleted_at || ""
+  };
+}
+
 function normalizeCustomsBusinessDate(value) {
   const text = String(value || "").trim();
   return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : todayInputValue();
@@ -3018,7 +3071,7 @@ const CUSTOMS_STATEMENT_EXPORT_COLUMNS = [
   { key: "date", label: "日期", width: 12, pdfWidth: 52 },
   { key: "declarationNo", label: "报关单号", width: 18, pdfWidth: 70 },
   { key: "sixSheetNo", label: "六联单号", width: 16, pdfWidth: 60 },
-  { key: "company", label: "公司", width: 28, pdfWidth: 110 },
+  { key: "company", label: "客户", width: 28, pdfWidth: 110 },
   { key: "direction", label: "进出口", width: 10, pdfWidth: 42 },
   { key: "itemCount", label: "品名项数", width: 10, pdfWidth: 34, amount: true },
   { key: "pageCount", label: "续页", width: 8, pdfWidth: 30, amount: true },
@@ -3038,10 +3091,10 @@ const CUSTOMS_STATEMENT_EXPORT_COLUMN_MAP = new Map(
 );
 
 function customsStatementSafeCompany(value = "") {
-  return String(value || "").trim() || "未填写公司";
+  return String(value || "").trim() || "未填写客户";
 }
 
-function customsStatementFilename(company = "公司", start = "", end = "", extension = "xlsx") {
+function customsStatementFilename(company = "客户", start = "", end = "", extension = "xlsx") {
   return `${exportFilenamePart(company)}_报关对账_${start || "全部"}_${end || "全部"}.${extension}`;
 }
 
@@ -3190,7 +3243,7 @@ async function renderCustomsStatementXlsxBuffer(rows = [], context = {}) {
 
   worksheet.mergeCells(2, 1, 2, mergeEndColumn);
   const metaCell = worksheet.getCell(2, 1);
-  metaCell.value = `公司：${context.company || ""}    范围：${context.rangeLabel || "全部"}    记录：${rows.length} 条`;
+  metaCell.value = `客户：${context.company || ""}    范围：${context.rangeLabel || "全部"}    记录：${rows.length} 条`;
   metaCell.font = { name: "Microsoft YaHei", size: 9, color: { argb: "FF64748B" } };
   metaCell.alignment = { vertical: "middle", horizontal: "center", wrapText: false };
   worksheet.getRow(2).height = 22;
@@ -3307,7 +3360,7 @@ function renderCustomsStatementPdf(res, rows = [], context = {}, filename = "") 
     doc.fillColor("#64748b").fontSize(8);
     customsPdfText(
       doc,
-      `公司：${context.company || ""}    范围：${context.rangeLabel || "全部"}    记录：${rows.length} 条`,
+      `客户：${context.company || ""}    范围：${context.rangeLabel || "全部"}    记录：${rows.length} 条`,
       tableLeft,
       y,
       { width: tableWidth, align: "center" }
@@ -3366,34 +3419,73 @@ function numberField(value) {
   return Number.isFinite(number) ? number : 0;
 }
 
+function integerField(value) {
+  const number = numberField(value);
+  if (number < 0) return 0;
+  return Math.round(number);
+}
+
+function moneyNumberField(value) {
+  const number = numberField(value);
+  if (number < 0) return 0;
+  return Number(number.toFixed(2));
+}
+
+function signedMoneyNumberField(value) {
+  const number = numberField(value);
+  return Number(number.toFixed(2));
+}
+
 function normalizeCustomsBusinessCustomFields(value = []) {
   const source = Array.isArray(value) ? value : parseJsonArrayText(value);
   const fieldsByName = new Map();
   source.forEach((field) => {
     const name = String(field?.name ?? field?.label ?? field?.key ?? "").trim();
     if (!name) return;
-    const amount = numberField(field?.value ?? field?.amount ?? field?.fee);
+    const amount = integerField(field?.value ?? field?.amount ?? field?.fee);
     fieldsByName.set(name, {
       name,
-      value: numberField((fieldsByName.get(name)?.value || 0) + amount)
+      value: integerField((fieldsByName.get(name)?.value || 0) + amount)
     });
   });
   return Array.from(fieldsByName.values()).slice(0, 40);
 }
 
+function normalizeOtherBusinessCustomFields(value = []) {
+  const source = Array.isArray(value) ? value : parseJsonArrayText(value);
+  const fieldsByName = new Map();
+  source.forEach((field) => {
+    const name = String(field?.name ?? field?.label ?? field?.key ?? "").trim();
+    if (!name) return;
+    const existing = fieldsByName.get(name) || { name, income: 0, cost: 0 };
+    existing.income = moneyNumberField(existing.income + moneyNumberField(field?.income ?? field?.revenue ?? field?.amount ?? field?.value));
+    existing.cost = moneyNumberField(existing.cost + moneyNumberField(field?.cost ?? field?.expense));
+    existing.profit = signedMoneyNumberField(existing.income - existing.cost);
+    fieldsByName.set(name, existing);
+  });
+  return Array.from(fieldsByName.values()).slice(0, 40);
+}
+
 function customsBusinessCustomFieldsTotal(fields = []) {
-  return normalizeCustomsBusinessCustomFields(fields).reduce((sum, field) => sum + numberField(field.value), 0);
+  return normalizeCustomsBusinessCustomFields(fields).reduce((sum, field) => sum + integerField(field.value), 0);
+}
+
+function otherBusinessCustomFieldsBreakdown(fields = []) {
+  return normalizeOtherBusinessCustomFields(fields).reduce((sum, field) => ({
+    income: sum.income + moneyNumberField(field.income),
+    cost: sum.cost + moneyNumberField(field.cost)
+  }), { income: 0, cost: 0 });
 }
 
 function normalizeCustomsBusinessPayload(body = {}) {
-  const homeFee = numberField(body.homeFee ?? body.home_fee);
-  const customsFee = numberField(body.customsFee ?? body.customs_fee);
-  const pageFee = numberField(body.pageFee ?? body.page_fee);
-  const manifestFee = numberField(body.manifestFee ?? body.manifest_fee);
-  const inspectionFee = numberField(body.inspectionFee ?? body.inspection_fee);
-  const checkFee = numberField(body.checkFee ?? body.check_fee);
-  const verificationFee = numberField(body.verificationFee ?? body.verification_fee);
-  const otherFee = numberField(body.otherFee ?? body.other_fee);
+  const homeFee = integerField(body.homeFee ?? body.home_fee);
+  const customsFee = integerField(body.customsFee ?? body.customs_fee);
+  const pageFee = integerField(body.pageFee ?? body.page_fee);
+  const manifestFee = integerField(body.manifestFee ?? body.manifest_fee);
+  const inspectionFee = integerField(body.inspectionFee ?? body.inspection_fee);
+  const checkFee = integerField(body.checkFee ?? body.check_fee);
+  const verificationFee = integerField(body.verificationFee ?? body.verification_fee);
+  const otherFee = integerField(body.otherFee ?? body.other_fee);
   const customFields = normalizeCustomsBusinessCustomFields(body.customFields ?? body.custom_fields);
   const computedTotal = homeFee + customsFee + pageFee + manifestFee + inspectionFee + checkFee + verificationFee
     + customsBusinessCustomFieldsTotal(customFields);
@@ -3403,8 +3495,8 @@ function normalizeCustomsBusinessPayload(body = {}) {
     sixSheetNo: String(body.sixSheetNo ?? body.six_sheet_no ?? "").trim(),
     company: String(body.company ?? "").trim(),
     direction: String(body.direction ?? "").trim(),
-    itemCount: numberField(body.itemCount ?? body.item_count),
-    pageCount: numberField(body.pageCount ?? body.page_count),
+    itemCount: integerField(body.itemCount ?? body.item_count),
+    pageCount: integerField(body.pageCount ?? body.page_count),
     homeFee,
     customsFee,
     pageFee,
@@ -3416,6 +3508,28 @@ function normalizeCustomsBusinessPayload(body = {}) {
     customFields,
     customFieldsJson: JSON.stringify(customFields),
     total: computedTotal,
+    remark: String(body.remark ?? "").trim()
+  };
+}
+
+function normalizeOtherBusinessPayload(body = {}) {
+  const cost = moneyNumberField(body.cost ?? body.baseCost ?? body.base_cost);
+  const income = moneyNumberField(body.income ?? body.revenue);
+  const customFields = normalizeOtherBusinessCustomFields(body.customFields ?? body.custom_fields);
+  const customBreakdown = otherBusinessCustomFieldsBreakdown(customFields);
+  const totalCost = moneyNumberField(cost + customBreakdown.cost);
+  const totalIncome = moneyNumberField(income + customBreakdown.income);
+  return {
+    date: normalizeCustomsBusinessDate(body.date ?? body.businessDate ?? body.business_date),
+    title: String(body.title ?? "").trim(),
+    customer: String(body.customer ?? body.company ?? "").trim(),
+    cost,
+    income,
+    customFields,
+    customFieldsJson: JSON.stringify(customFields),
+    totalCost,
+    totalIncome,
+    profit: signedMoneyNumberField(totalIncome - totalCost),
     remark: String(body.remark ?? "").trim()
   };
 }
@@ -3464,6 +3578,15 @@ function mapMasterData(row) {
   };
 }
 
+function parseJsonObjectText(value = "", fallback = {}) {
+  try {
+    const parsed = JSON.parse(String(value || "{}"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 function mapAccount(row) {
   const role = normalizeAccountRole(row.role);
   return {
@@ -3480,6 +3603,7 @@ function mapAccount(row) {
     note: row.note || "",
     permissions: accountPermissionsForRole(role),
     allowedModules: allowedModulesForRole(role),
+    tablePreferences: parseJsonObjectText(row.table_preferences, {}),
     createdAt: row.created_at
   };
 }
@@ -3590,7 +3714,12 @@ async function nextDispatchNo(date = todayInputValue()) {
 }
 
 app.get("/api/health", async (_req, res) => {
-  res.json({ ok: true, database: databaseInfo, fileStorage: fileStorageProvider });
+  res.json({
+    ok: true,
+    database: databaseInfo,
+    fileStorage: fileStorageProvider,
+    realtimeClients: realtimeHub?.getClientCount?.() || 0
+  });
 });
 
 app.post("/api/auth/login", async (req, res) => {
@@ -3662,6 +3791,15 @@ async function authenticateApiRequest(req, res, next) {
   next();
 }
 
+async function authenticateRealtimeToken(token = "") {
+  const payload = verifyAuthToken(token);
+  if (!payload) return null;
+  const row = await db.prepare("SELECT * FROM app_accounts WHERE id = ? AND lower(username) = lower(?) AND deleted_at IS NULL").get(Number(payload.sub), payload.username);
+  if (!row || row.status !== "启用") return null;
+  if (normalizeAccountRole(row.role) === "司机") return null;
+  return mapAccount(row);
+}
+
 function requiredModuleForRequest(req) {
   const path = req.path;
   if (path.startsWith("/accounts")) return "accounts";
@@ -3670,6 +3808,7 @@ function requiredModuleForRequest(req) {
   if (path.startsWith("/customer-contacts")) return "customers";
   if (path.startsWith("/orders")) return "orders";
   if (path.startsWith("/customs-businesses")) return "customsBusiness";
+  if (path.startsWith("/other-businesses")) return "otherBusiness";
   if (path.startsWith("/dispatch-plans")) return "dispatchBoard";
   if (path.startsWith("/reminders")) return "vehicleDriver";
   if (path.startsWith("/vehicle-expenses")) return "vehicleDriver";
@@ -3720,6 +3859,17 @@ function authorizeApiRequest(req, res, next) {
     next();
     return;
   }
+  if (req.path.startsWith("/other-businesses")) {
+    const canAccessOtherBusiness = req.method === "GET"
+      ? canAccessModule(req.account?.role, "otherBusiness") || COMPANY_EXPENSE_MODULES.some((moduleId) => canAccessModule(req.account?.role, moduleId))
+      : canAccessModule(req.account?.role, "otherBusiness");
+    if (!canAccessOtherBusiness) {
+      res.status(403).json({ message: "当前账号无权访问该功能" });
+      return;
+    }
+    next();
+    return;
+  }
   const moduleId = requiredModuleForRequest(req);
   if (moduleId && !canAccessModule(req.account?.role, moduleId)) {
     res.status(403).json({ message: "当前账号无权访问该功能" });
@@ -3734,6 +3884,29 @@ app.use("/api", authenticateApiRequest, (req, res, next) => {
 
 app.get("/api/auth/me", async (req, res) => {
   res.json({ account: req.account, roles: ACCOUNT_ROLES });
+});
+
+app.get("/api/auth/table-preferences", async (req, res) => {
+  const row = await db.prepare("SELECT table_preferences FROM app_accounts WHERE id = ? AND deleted_at IS NULL").get(req.account.id);
+  res.json(parseJsonObjectText(row?.table_preferences, {}));
+});
+
+app.patch("/api/auth/table-preferences", async (req, res) => {
+  const preferences = req.body && typeof req.body === "object" && !Array.isArray(req.body)
+    ? req.body
+    : {};
+  const text = JSON.stringify(preferences).slice(0, 20000);
+  const result = await db.prepare(`
+    UPDATE app_accounts
+    SET table_preferences = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND deleted_at IS NULL
+  `).run(text, req.account.id);
+  if (result.changes === 0) {
+    res.status(404).json({ message: "账号不存在或已删除" });
+    return;
+  }
+  res.json(parseJsonObjectText(text, {}));
 });
 
 app.get("/api/reminders/expiry", async (req, res) => {
@@ -3889,7 +4062,7 @@ app.post("/api/customs-businesses/export/pdf", async (req, res) => {
 app.post("/api/customs-businesses", async (req, res) => {
   const item = normalizeCustomsBusinessPayload(req.body || {});
   if (!item.company) {
-    res.status(400).json({ message: "请填写公司名称" });
+    res.status(400).json({ message: "请选择客户" });
     return;
   }
   if (!item.declarationNo && !item.sixSheetNo) {
@@ -3919,7 +4092,7 @@ app.put("/api/customs-businesses/:id", async (req, res) => {
 
   const item = normalizeCustomsBusinessPayload(req.body || {});
   if (!item.company) {
-    res.status(400).json({ message: "请填写公司名称" });
+    res.status(400).json({ message: "请选择客户" });
     return;
   }
   if (!item.declarationNo && !item.sixSheetNo) {
@@ -3986,6 +4159,121 @@ app.post("/api/customs-businesses/:id/restore", async (req, res) => {
   await writeAudit("restore", "customs_business", String(id), "从回收站恢复");
   const row = await db.prepare("SELECT * FROM customs_businesses WHERE id = ?").get(id);
   res.json(mapCustomsBusiness(row));
+});
+
+app.get("/api/other-businesses", async (req, res) => {
+  const { start, end } = customsBusinessPeriodBounds(req.query);
+  const dateWhere = start && end ? "AND business_date >= ? AND business_date < ?" : "";
+  const params = start && end ? [start, end] : [];
+  const rows = await db.prepare(`
+    SELECT * FROM other_businesses
+    WHERE deleted_at IS NULL
+      ${dateWhere}
+    ORDER BY business_date DESC, id DESC
+  `).all(...params);
+  res.json(rows.map(mapOtherBusiness));
+});
+
+app.get("/api/other-businesses/recycle", async (_req, res) => {
+  const rows = await db.prepare(`
+    SELECT * FROM other_businesses
+    WHERE deleted_at IS NOT NULL
+    ORDER BY deleted_at DESC, business_date DESC, id DESC
+  `).all();
+  res.json(rows.map(mapOtherBusiness));
+});
+
+app.post("/api/other-businesses", async (req, res) => {
+  const item = normalizeOtherBusinessPayload(req.body || {});
+  if (!item.title) {
+    res.status(400).json({ message: "请填写标题" });
+    return;
+  }
+  if (!item.customer) {
+    res.status(400).json({ message: "请选择或填写客户" });
+    return;
+  }
+  const result = await db.prepare(`
+    INSERT INTO other_businesses
+      (business_date, title, customer, cost, income, custom_fields, total_cost, total_income, profit, remark)
+    VALUES
+      (@date, @title, @customer, @cost, @income, @customFieldsJson, @totalCost, @totalIncome, @profit, @remark)
+  `).run(item);
+  await writeAudit("create", "other_business", String(result.lastInsertId), `${item.date}/${item.customer}/${item.title}`);
+  const row = await db.prepare("SELECT * FROM other_businesses WHERE id = ?").get(result.lastInsertId);
+  res.status(201).json(mapOtherBusiness(row));
+});
+
+app.put("/api/other-businesses/:id", async (req, res) => {
+  const id = Number(req.params.id || 0);
+  const current = await db.prepare("SELECT * FROM other_businesses WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!current) {
+    res.status(404).json({ message: "其他业务不存在或已删除" });
+    return;
+  }
+
+  const item = normalizeOtherBusinessPayload(req.body || {});
+  if (!item.title) {
+    res.status(400).json({ message: "请填写标题" });
+    return;
+  }
+  if (!item.customer) {
+    res.status(400).json({ message: "请选择或填写客户" });
+    return;
+  }
+
+  await db.prepare(`
+    UPDATE other_businesses
+    SET business_date = @date,
+        title = @title,
+        customer = @customer,
+        cost = @cost,
+        income = @income,
+        custom_fields = @customFieldsJson,
+        total_cost = @totalCost,
+        total_income = @totalIncome,
+        profit = @profit,
+        remark = @remark,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = @id AND deleted_at IS NULL
+  `).run({ ...item, id });
+  await writeAudit("update", "other_business", String(id), `${item.date}/${item.customer}/${item.title}`);
+  const row = await db.prepare("SELECT * FROM other_businesses WHERE id = ?").get(id);
+  res.json(mapOtherBusiness(row));
+});
+
+app.delete("/api/other-businesses/:id", async (req, res) => {
+  const id = Number(req.params.id || 0);
+  const row = await db.prepare("SELECT * FROM other_businesses WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!row) {
+    res.status(404).json({ message: "其他业务不存在或已删除" });
+    return;
+  }
+  await db.prepare(`
+    UPDATE other_businesses
+    SET deleted_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND deleted_at IS NULL
+  `).run(id);
+  await writeAudit("delete", "other_business", String(id), `${row.business_date}/${row.customer}/${row.title}`);
+  res.json({ ok: true });
+});
+
+app.post("/api/other-businesses/:id/restore", async (req, res) => {
+  const id = Number(req.params.id || 0);
+  const result = await db.prepare(`
+    UPDATE other_businesses
+    SET deleted_at = NULL,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND deleted_at IS NOT NULL
+  `).run(id);
+  if (result.changes === 0) {
+    res.status(404).json({ message: "回收站内找不到该其他业务" });
+    return;
+  }
+  await writeAudit("restore", "other_business", String(id), "从回收站恢复");
+  const row = await db.prepare("SELECT * FROM other_businesses WHERE id = ?").get(id);
+  res.json(mapOtherBusiness(row));
 });
 
 app.get("/api/files", async (req, res) => {
@@ -4089,6 +4377,31 @@ app.post("/api/files", async (req, res) => {
   res.status(201).json(mapFile(row));
 });
 
+app.patch("/api/files/:id/move", async (req, res) => {
+  const id = Number(req.params.id || 0);
+  const entityType = String(req.body?.entityType || "").trim();
+  const entityId = String(req.body?.entityId || "").trim();
+  if (!id || !entityType || !entityId) {
+    res.status(400).json({ message: "文件转移参数无效" });
+    return;
+  }
+  const existing = await db.prepare("SELECT * FROM files WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!existing) {
+    res.status(404).json({ message: "文件不存在" });
+    return;
+  }
+  await db.prepare(`
+    UPDATE files
+    SET entity_type = ?,
+        entity_id = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND deleted_at IS NULL
+  `).run(entityType, entityId, id);
+  await writeAudit("update", "file", String(id), `${existing.entity_type}/${existing.entity_id} -> ${entityType}/${entityId}`);
+  const row = await db.prepare("SELECT * FROM files WHERE id = ?").get(id);
+  res.json(mapFile(row));
+});
+
 async function sendStoredFile(req, res, disposition) {
   const id = Number(req.params.id || 0);
   const row = await db.prepare("SELECT * FROM files WHERE id = ? AND deleted_at IS NULL").get(id);
@@ -4174,7 +4487,7 @@ app.patch("/api/customers/:id", async (req, res) => {
   const item = normalizeCustomerPayload(req.body, id);
 
   if (!item.name) {
-    res.status(400).json({ message: "公司名称不能为空" });
+    res.status(400).json({ message: "名称不能为空" });
     return;
   }
 
@@ -4183,6 +4496,7 @@ app.patch("/api/customers/:id", async (req, res) => {
     SET type = @type,
         customer_category = @customerCategory,
         name = @name,
+        short_name = @shortName,
         province = @province,
         city = @city,
         address = @address,
@@ -4220,19 +4534,19 @@ app.post("/api/customers", async (req, res) => {
   const item = normalizeCustomerPayload(req.body, req.body.id || (await nextCustomerId(req.body.type)));
 
   if (!item.name) {
-    res.status(400).json({ message: "公司名称不能为空" });
+    res.status(400).json({ message: "名称不能为空" });
     return;
   }
 
   await db.prepare(`
     INSERT INTO customers
-      (id, type, customer_category, name, province, city, address, term, settlement_currency, receivable_rmb, receivable_hkd, recent_order, created_at,
+      (id, type, customer_category, name, short_name, province, city, address, term, settlement_currency, receivable_rmb, receivable_hkd, recent_order, created_at,
        tax_no, contact, mobile, driver_wage_adjust_hkd, default_template_id,
        invoice_title, invoice_tax_no, invoice_bank, invoice_account, invoice_address_phone,
        customs_home_item_count, customs_page_item_count, customs_import_home_fee, customs_export_home_fee,
        customs_import_page_fee, customs_export_page_fee)
     VALUES
-      (@id, @type, @customerCategory, @name, @province, @city, @address, @term, @settlementCurrency, @receivableRMB, @receivableHKD, @recentOrder, @createdAt,
+      (@id, @type, @customerCategory, @name, @shortName, @province, @city, @address, @term, @settlementCurrency, @receivableRMB, @receivableHKD, @recentOrder, @createdAt,
        @taxNo, @contact, @mobile, @driverWageAdjustHKD, @defaultTemplateId,
        @invoiceTitle, @invoiceTaxNo, @invoiceBank, @invoiceAccount, @invoiceAddressPhone,
        @customsHomeItemCount, @customsPageItemCount, @customsImportHomeFee, @customsExportHomeFee,
@@ -4356,12 +4670,33 @@ function parseDispatchPlanRowsJson(rowsJson = "[]") {
   }
 }
 
+function parseDispatchPlanRowJson(rowJson = "{}") {
+  try {
+    const parsed = JSON.parse(rowJson || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 function dispatchRowLookupKeys(row = {}) {
+  const id = String(row?.id || "").trim();
+  const dispatchNo = String(row?.dispatchNo || row?.dispatch_no || "").trim();
+  const orderNo = String(row?.orderNo || row?.order_no || "").trim();
   return [
-    row.id && `id:${row.id}`,
-    row.dispatchNo && `dispatch:${row.dispatchNo}`,
-    row.orderNo && `order:${row.orderNo}`
+    id && `id:${id}`,
+    dispatchNo && `dispatch:${dispatchNo}`,
+    orderNo && `order:${orderNo}`
   ].filter(Boolean);
+}
+
+function dispatchRowReferenceSet(row = {}) {
+  return new Set(dispatchRowLookupKeys(row));
+}
+
+function dispatchRowMatchesRef(row = {}, ref = {}) {
+  const refKeys = dispatchRowReferenceSet(ref);
+  return refKeys.size > 0 && dispatchRowLookupKeys(row).some((key) => refKeys.has(key));
 }
 
 function dispatchRowLookup(rows = []) {
@@ -4382,8 +4717,380 @@ function findExistingDispatchRow(row = {}, lookup = new Map()) {
   return null;
 }
 
+function findDispatchRowIndex(row = {}, rows = []) {
+  const keys = dispatchRowReferenceSet(row);
+  if (!keys.size) return -1;
+  return rows.findIndex((item) =>
+    dispatchRowMatchesRef(item, row)
+  );
+}
+
 function dispatchRowText(row = {}, key = "") {
   return String(row?.[key] ?? "").trim();
+}
+
+function dispatchRowHasReference(row = {}) {
+  return dispatchRowLookupKeys(row).length > 0;
+}
+
+function normalizeDispatchPlanRow(row = {}, existingRow = null, requestCreator = {}) {
+  const item = row && typeof row === "object" ? row : {};
+  const creator = dispatchRowCreatorFields(item, existingRow, requestCreator);
+  return {
+    id: String(item.id || ""),
+    dispatchNo: String(item.dispatchNo || ""),
+    orderNo: String(item.orderNo || ""),
+    customer: String(item.customer || ""),
+    plate: String(item.plate || ""),
+    port: String(item.port || ""),
+    needsWeighing: booleanFlag(item.needsWeighing ?? item.needs_weighing, false),
+    direction: String(item.direction || ""),
+    tonnage: String(item.tonnage || ""),
+    quantity: item.quantity ?? "",
+    weight: String(item.weight || ""),
+    loading: String(item.loading || ""),
+    unloading: String(item.unloading || ""),
+    loadTime: String(item.loadTime || item.load_time || ""),
+    vehicleSource: String(item.vehicleSource || item.vehicle_source || ""),
+    supplier: String(item.supplier || ""),
+    transportMode: String(item.transportMode || item.transport_mode || ""),
+    driver: String(item.driver || ""),
+    hkDriver: String(item.hkDriver || item.hk_driver || ""),
+    mainlandDriver: String(item.mainlandDriver || item.mainland_driver || ""),
+    status: String(item.status || ""),
+    previousStatus: String(item.previousStatus || item.previous_status || ""),
+    createdByAccountId: creator.createdByAccountId,
+    createdByUsername: creator.createdByUsername,
+    createdByName: creator.createdByName,
+    note: String(item.note || "")
+  };
+}
+
+function dispatchExportNestedRow(row = {}) {
+  return row && typeof row === "object" && !Array.isArray(row) ? row : {};
+}
+
+function dispatchExportText(...values) {
+  for (const value of values) {
+    const text = String(value ?? "").trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+function dispatchExportOptionalText(...values) {
+  for (const value of values) {
+    const text = String(value ?? "").trim();
+    if (text && !["-", "—", "－"].includes(text)) return text;
+  }
+  return "";
+}
+
+function dispatchExportShortCustomer(row = {}, customerShortNames = new Map()) {
+  const order = dispatchExportNestedRow(row.order);
+  const customerId = dispatchExportText(order.customerId, row.customerId);
+  const customerName = dispatchExportText(order.customer, row.customer);
+  const candidate = dispatchExportText(
+    order.customerShortName,
+    order.shortName,
+    row.customerShortName,
+    row.shortName,
+    customerId ? customerShortNames.get(customerId) : "",
+    customerName ? customerShortNames.get(customerName) : ""
+  );
+  return candidate || customerName;
+}
+
+function dispatchExportShortSupplier(row = {}, supplierShortNames = new Map()) {
+  const order = dispatchExportNestedRow(row.order);
+  const supplierId = dispatchExportText(order.supplierId, row.supplierId);
+  const supplierName = dispatchExportOptionalText(order.supplier, row.supplier);
+  const candidate = dispatchExportText(
+    order.supplierShortName,
+    row.supplierShortName,
+    supplierId ? supplierShortNames.get(supplierId) : "",
+    supplierName ? supplierShortNames.get(supplierName) : ""
+  );
+  return candidate || supplierName;
+}
+
+function dispatchExportFirstLocation(value = "") {
+  return String(value || "")
+    .replace(/\r/g, "\n")
+    .split(/[\n；;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)[0] || "";
+}
+
+function dispatchExportShortLocation(value = "") {
+  const text = dispatchExportFirstLocation(value);
+  if (!text) return "";
+  const slashParts = text.split(/\s*\/\s*/).map((item) => item.trim()).filter(Boolean);
+  if (slashParts.length >= 2) return slashParts.slice(0, 2).join("");
+  if (slashParts.length === 1) return slashParts[0];
+  const matched = text.match(/((?:[\u4e00-\u9fa5A-Za-z0-9]+?[市区县镇乡街道])|香港|九龙|新界|元朗|屯门|沙田|粉岭|葵涌|荃湾|观塘|湾仔|赤鱲角|大埔|将军澳)/g);
+  if (matched?.length) return matched.slice(0, 2).join("");
+  return text.length > 8 ? text.slice(0, 8) : text;
+}
+
+function dispatchExportRoute(row = {}) {
+  const order = dispatchExportNestedRow(row.order);
+  const loading = dispatchExportShortLocation(dispatchExportText(order.loading, row.loading));
+  const unloading = dispatchExportShortLocation(dispatchExportText(order.unloading, row.unloading));
+  return [loading, unloading].filter(Boolean).join("/") || "";
+}
+
+function dispatchExportDateValue(value = "", fallback = "") {
+  const text = dispatchExportText(value, fallback);
+  const matched = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (matched) return new Date(Number(matched[1]), Number(matched[2]) - 1, Number(matched[3]), 12, 0, 0);
+  return parseInputDate(text) || text;
+}
+
+function dispatchExportTimeValue(value = "") {
+  const matched = String(value || "").trim().match(/(\d{1,2}):(\d{2})(?::\d{2})?/);
+  if (!matched) return String(value || "");
+  return `${String(Number(matched[1])).padStart(2, "0")}:${matched[2]}`;
+}
+
+function dispatchExportWorkbookTitle(rows = [], fallbackDate = todayInputValue()) {
+  const first = rows[0] || {};
+  const order = dispatchExportNestedRow(first.order);
+  const dateText = dispatchExportText(order.date, first.date, fallbackDate);
+  const date = parseInputDate(dateText);
+  if (!date) return `${dateText || fallbackDate}汉业公司跟单表`;
+  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日汉业公司跟单表`;
+}
+
+function dispatchExportRowsForWorkbook(rows = [], fallbackDate = "", customerShortNames = new Map(), supplierShortNames = new Map()) {
+  return rows.map((row, index) => {
+    const order = dispatchExportNestedRow(row.order);
+    const vehicleSource = dispatchExportText(order.vehicleSource, row.vehicleSource);
+    const supplier = dispatchExportText(order.supplier, row.supplier);
+    const hkDriver = dispatchExportText(row.hkDriver, order.hkDriver, row.driver, order.driver);
+    const mainlandDriver = dispatchExportText(row.mainlandDriver, order.mainlandDriver);
+    const supplierDisplay = dispatchExportOptionalText(order.supplier, row.supplier);
+    return [
+      index + 1,
+      dispatchExportDateValue(dispatchExportText(row.date, order.date, fallbackDate), fallbackDate),
+      dispatchExportShortCustomer(row, customerShortNames),
+      dispatchExportText(row.plate, order.plate),
+      dispatchExportRoute(row),
+      dispatchExportText(order.tonnage, row.tonnage),
+      dispatchExportText(order.quantity, row.quantity),
+      hkDriver,
+      mainlandDriver,
+      dispatchExportText(order.port, row.port),
+      dispatchExportText(order.direction, row.direction),
+      dispatchExportTimeValue(dispatchExportText(row.loadTime, order.loadTime, order.loadingTime)),
+      dispatchExportShortSupplier(row, supplierShortNames),
+      supplierDisplay ? "外派" : "",
+      dispatchExportText(row.note, order.remark)
+    ];
+  });
+}
+
+async function renderDispatchPlanXlsxBuffer(rows = [], title = "", fallbackDate = "") {
+  const customerShortNameRows = await db.prepare(`
+    SELECT id, name, short_name
+    FROM customers
+    WHERE deleted_at IS NULL AND type = '客户'
+  `).all();
+  const customerShortNames = new Map();
+  customerShortNameRows.forEach((row) => {
+    const shortName = String(row.short_name || "").trim();
+    const name = String(row.name || "").trim();
+    if (shortName && name) {
+      customerShortNames.set(name, shortName);
+      customerShortNames.set(String(row.id || "").trim(), shortName);
+    }
+  });
+  const supplierShortNameRows = await db.prepare(`
+    SELECT id, name, short_name
+    FROM customers
+    WHERE deleted_at IS NULL AND type = '供应商'
+  `).all();
+  const supplierShortNames = new Map();
+  supplierShortNameRows.forEach((row) => {
+    const shortName = String(row.short_name || "").trim();
+    const name = String(row.name || "").trim();
+    if (shortName && name) {
+      supplierShortNames.set(name, shortName);
+      supplierShortNames.set(String(row.id || "").trim(), shortName);
+    }
+  });
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = "汉业管理系统";
+  workbook.created = new Date();
+  const worksheet = workbook.addWorksheet("排车表");
+  const headers = ["序号", "日期", "客户", "车牌", "装/卸", "吨位", "计重", "HK司机", "大陆司机", "口岸", "进/出", "订车时间", "供应商", "外派", "备注"];
+  const columnWidths = [6.5, 12, 21, 15.5, 36.5, 8.5, 18, 12.5, 10.5, 13.5, 9, 10.5, 16, 10.5, 39];
+  columnWidths.forEach((width, index) => {
+    worksheet.getColumn(index + 1).width = width;
+  });
+  worksheet.pageSetup = {
+    paperSize: 9,
+    orientation: "landscape",
+    fitToPage: true,
+    fitToWidth: 1,
+    fitToHeight: 0,
+    horizontalCentered: true,
+    margins: { left: 0.2, right: 0.2, top: 0.3, bottom: 0.3, header: 0.1, footer: 0.1 }
+  };
+  worksheet.mergeCells("A1:K1");
+  const titleCell = worksheet.getCell("A1");
+  titleCell.value = title || dispatchExportWorkbookTitle(rows);
+  titleCell.font = { name: "SimSun", size: 18 };
+  titleCell.alignment = { horizontal: "center", vertical: "middle" };
+  titleCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFFFFF" } };
+  titleCell.border = { bottom: { style: "medium", color: { argb: "FF000000" } } };
+  worksheet.getRow(1).height = 22.5;
+
+  const thickBorder = {
+    top: { style: "medium", color: { argb: "FF000000" } },
+    left: { style: "medium", color: { argb: "FF000000" } },
+    bottom: { style: "medium", color: { argb: "FF000000" } },
+    right: { style: "medium", color: { argb: "FF000000" } }
+  };
+  headers.forEach((header, index) => {
+    const column = index + 1;
+    worksheet.mergeCells(2, column, 3, column);
+    const cell = worksheet.getCell(2, column);
+    cell.value = header;
+    cell.font = { name: "SimSun", size: 14 };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFFF00" } };
+    cell.alignment = { horizontal: "center", vertical: "middle", wrapText: column !== 1 };
+    cell.border = thickBorder;
+    worksheet.getCell(3, column).border = thickBorder;
+  });
+  worksheet.getRow(2).height = 18;
+  worksheet.getRow(3).height = 18;
+
+  const bodyRows = dispatchExportRowsForWorkbook(rows, fallbackDate, customerShortNames, supplierShortNames);
+  bodyRows.forEach((values, rowIndex) => {
+    const excelRow = worksheet.getRow(rowIndex + 4);
+    excelRow.values = values;
+    const routeLines = String(values[4] || "").split(/\r?\n/).length;
+    const noteLines = String(values[14] || "").split(/\r?\n/).length;
+    excelRow.height = Math.max(22, Math.min(90, Math.max(routeLines, noteLines) * 18));
+    excelRow.eachCell({ includeEmpty: true }, (cell, columnNumber) => {
+      cell.font = { name: "SimSun", size: 14 };
+      cell.alignment = {
+        horizontal: columnNumber === 15 ? "left" : "center",
+        vertical: "middle",
+        wrapText: columnNumber === 5 || columnNumber === 15
+      };
+      cell.border = thickBorder;
+      if (columnNumber === 2 && cell.value instanceof Date) cell.numFmt = "m/d";
+      if (columnNumber === 12 && cell.value instanceof Date) cell.numFmt = "h:mm";
+    });
+  });
+
+  worksheet.views = [{ state: "frozen", ySplit: 3 }];
+  return Buffer.from(await workbook.xlsx.writeBuffer());
+}
+
+function dispatchRowsEquivalent(left = {}, right = {}) {
+  const keys = [
+    "id",
+    "dispatchNo",
+    "orderNo",
+    "customer",
+    "plate",
+    "port",
+    "needsWeighing",
+    "direction",
+    "tonnage",
+    "quantity",
+    "weight",
+    "loading",
+    "unloading",
+    "loadTime",
+    "vehicleSource",
+    "supplier",
+    "transportMode",
+    "driver",
+    "hkDriver",
+    "mainlandDriver",
+    "status",
+    "previousStatus",
+    "note"
+  ];
+  return keys.every((key) => {
+    if (key === "needsWeighing") {
+      return booleanFlag(left?.[key], false) === booleanFlag(right?.[key], false);
+    }
+    return String(left?.[key] ?? "") === String(right?.[key] ?? "");
+  });
+}
+
+function createDispatchPlanConflictError(message, detail = "") {
+  const error = new Error(message);
+  error.statusCode = 409;
+  error.detail = detail;
+  return error;
+}
+
+function mergeDispatchPlanRows(existingRows = [], incomingRows = [], baseRows = []) {
+  const mergedRows = [];
+  const baseLookup = dispatchRowLookup(baseRows);
+  const hasBaseRows = baseRows.length > 0;
+  const seenExistingKeys = new Set();
+  const stats = {
+    added: 0,
+    updated: 0,
+    unchanged: 0,
+    staleSkipped: 0,
+    conflict: 0
+  };
+
+  for (const row of incomingRows) {
+    const existingRow = findExistingDispatchRow(row, dispatchRowLookup(existingRows));
+    const baseRow = findExistingDispatchRow(row, baseLookup);
+    const rowKeys = dispatchRowLookupKeys(row);
+    rowKeys.forEach((key) => seenExistingKeys.add(key));
+
+    if (existingRow) {
+      if (hasBaseRows && baseRow && dispatchRowsEquivalent(row, baseRow) && !dispatchRowsEquivalent(existingRow, row)) {
+        mergedRows.push(existingRow);
+        stats.staleSkipped += 1;
+        continue;
+      }
+      if (hasBaseRows && baseRow && !dispatchRowsEquivalent(row, baseRow) && !dispatchRowsEquivalent(existingRow, baseRow) && !dispatchRowsEquivalent(existingRow, row)) {
+        stats.conflict += 1;
+        continue;
+      }
+      if (hasBaseRows && !baseRow && !dispatchRowsEquivalent(existingRow, row)) {
+        stats.conflict += 1;
+        continue;
+      }
+      if (dispatchRowsEquivalent(existingRow, row)) {
+        mergedRows.push(existingRow);
+        stats.unchanged += 1;
+      } else {
+        mergedRows.push(row);
+        stats.updated += 1;
+      }
+      continue;
+    }
+
+    if (hasBaseRows && baseRow) {
+      stats.conflict += 1;
+      continue;
+    }
+    mergedRows.push(row);
+    stats.added += 1;
+  }
+
+  const protectedRows = existingRows.filter((row) =>
+    !dispatchRowLookupKeys(row).some((key) => seenExistingKeys.has(key))
+  );
+  stats.protected = protectedRows.length;
+  return { rows: [...mergedRows, ...protectedRows], stats };
+}
+
+async function lockDispatchPlanDate(date) {
+  await db.prepare("SELECT pg_advisory_xact_lock(524458, hashtext(?))").get(`dispatch_plan:${date}`);
 }
 
 function dispatchRowOrderSyncKey(row = {}) {
@@ -4423,7 +5130,206 @@ function mapDispatchPlanRecord(row = {}) {
     createdByAccountId: row.created_by_account_id || null,
     createdByUsername: row.created_by_username || "",
     createdByName: row.created_by_display_name || row.created_by_username || "",
-    updatedAt: row.updated_at || ""
+    updatedAt: row.updated_at || "",
+    version: row.updated_at || ""
+  };
+}
+
+function normalizeDispatchRecycleRow(row = {}, planDate = todayInputValue()) {
+  const item = row && typeof row === "object" ? row : {};
+  const creator = creatorFieldsFromRecord(item);
+  return {
+    id: String(item.id || item.dispatchNo || item.dispatch_no || `dispatch-restored-${Date.now()}`),
+    dispatchNo: String(item.dispatchNo || item.dispatch_no || ""),
+    orderNo: String(item.orderNo || item.order_no || ""),
+    customer: String(item.customer || ""),
+    plate: String(item.plate || ""),
+    port: String(item.port || ""),
+    needsWeighing: booleanFlag(item.needsWeighing ?? item.needs_weighing, false),
+    direction: String(item.direction || ""),
+    tonnage: String(item.tonnage || ""),
+    quantity: item.quantity ?? "",
+    weight: String(item.weight || ""),
+    loading: String(item.loading || ""),
+    unloading: String(item.unloading || ""),
+    loadTime: String(item.loadTime || item.load_time || ""),
+    vehicleSource: String(item.vehicleSource || item.vehicle_source || ""),
+    supplier: String(item.supplier || ""),
+    transportMode: String(item.transportMode || item.transport_mode || ""),
+    driver: String(item.driver || ""),
+    hkDriver: String(item.hkDriver || item.hk_driver || ""),
+    mainlandDriver: String(item.mainlandDriver || item.mainland_driver || ""),
+    status: String(item.status || ""),
+    previousStatus: String(item.previousStatus || item.previous_status || ""),
+    createdByAccountId: creator.createdByAccountId,
+    createdByUsername: creator.createdByUsername,
+    createdByName: creator.createdByName,
+    note: String(item.note || ""),
+    date: String(item.date || planDate || "")
+  };
+}
+
+function mapDispatchRecycleRecord(row = {}) {
+  const planDate = row.plan_date || "";
+  const payload = normalizeDispatchRecycleRow(parseDispatchPlanRowJson(row.row_json), planDate);
+  return {
+    id: row.id,
+    date: planDate,
+    planDate,
+    dispatchNo: row.dispatch_no || payload.dispatchNo || "",
+    orderNo: row.order_no || payload.orderNo || "",
+    customer: row.customer || payload.customer || "",
+    row: payload,
+    deletedAt: row.deleted_at || "",
+    restoredAt: row.restored_at || ""
+  };
+}
+
+function dispatchRowMatchesRefs(row = {}, orderNo = "", dispatchNo = "") {
+  const rowOrderNo = dispatchRowText(row, "orderNo");
+  const rowDispatchNo = dispatchRowText(row, "dispatchNo");
+  return Boolean((orderNo && rowOrderNo === orderNo) || (dispatchNo && rowDispatchNo === dispatchNo));
+}
+
+async function recycleDispatchPlanRows(planDate, rows = []) {
+  const validRows = rows
+    .map((row) => normalizeDispatchRecycleRow(row, planDate))
+    .filter((row) => dispatchRowText(row, "dispatchNo") || dispatchRowText(row, "orderNo"));
+  if (!validRows.length) return 0;
+
+  const insert = await db.prepare(`
+    INSERT INTO dispatch_plan_recycle
+      (plan_date, dispatch_no, order_no, customer, row_json, deleted_at)
+    VALUES
+      (@planDate, @dispatchNo, @orderNo, @customer, @rowJson, CURRENT_TIMESTAMP)
+  `);
+  for (const row of validRows) {
+    await insert.run({
+      planDate,
+      dispatchNo: row.dispatchNo,
+      orderNo: row.orderNo,
+      customer: row.customer,
+      rowJson: JSON.stringify(row)
+    });
+  }
+  return validRows.length;
+}
+
+async function restoreDispatchRecycleRecord(recycleId) {
+  const recycleRow = await db.prepare("SELECT * FROM dispatch_plan_recycle WHERE id = ? AND restored_at IS NULL").get(recycleId);
+  if (!recycleRow) return null;
+
+  const planDate = recycleRow.plan_date;
+  await lockDispatchPlanDate(planDate);
+  const restoredRow = normalizeDispatchRecycleRow(parseDispatchPlanRowJson(recycleRow.row_json), planDate);
+  const plan = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(planDate);
+  const existingRows = parseDispatchPlanRowsJson(plan?.rows_json);
+  const alreadyExists = existingRows.some((row) =>
+    dispatchRowMatchesRefs(row, restoredRow.orderNo, restoredRow.dispatchNo)
+  );
+  const nextRows = alreadyExists ? existingRows : [...existingRows, restoredRow];
+  const rowsJson = JSON.stringify(nextRows);
+  if (plan) {
+    await db.prepare(`
+      UPDATE dispatch_plans
+      SET rows_json = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE plan_date = ?
+    `).run(rowsJson, planDate);
+  } else {
+    const creator = creatorFieldsFromRecord(restoredRow);
+    await db.prepare(`
+      INSERT INTO dispatch_plans
+        (plan_date, rows_json, created_by_account_id, created_by_username, created_by_display_name, updated_at)
+      VALUES
+        (@planDate, @rowsJson, @createdByAccountId, @createdByUsername, @createdByName, CURRENT_TIMESTAMP)
+    `).run({
+      planDate,
+      rowsJson,
+      createdByAccountId: creator.createdByAccountId,
+      createdByUsername: creator.createdByUsername,
+      createdByName: creator.createdByName
+    });
+  }
+
+  await db.prepare("UPDATE dispatch_plan_recycle SET restored_at = CURRENT_TIMESTAMP WHERE id = ?").run(recycleId);
+  const updatedRecycleRow = await db.prepare("SELECT * FROM dispatch_plan_recycle WHERE id = ?").get(recycleId);
+  return mapDispatchRecycleRecord(updatedRecycleRow);
+}
+
+async function restoreDispatchPlanRowsLinkedToOrder(orderRow = {}) {
+  const orderNo = String(orderRow.no || "").trim();
+  const dispatchNo = String(orderRow.dispatch_no || orderRow.dispatchNo || "").trim();
+  if (!orderNo && !dispatchNo) return [];
+
+  const rows = await db.prepare(`
+    SELECT * FROM dispatch_plan_recycle
+    WHERE restored_at IS NULL
+      AND (
+        (@orderNo <> '' AND order_no = @orderNo)
+        OR (@dispatchNo <> '' AND dispatch_no = @dispatchNo)
+      )
+    ORDER BY deleted_at DESC, id DESC
+  `).all({ orderNo, dispatchNo });
+
+  const restored = [];
+  for (const row of rows) {
+    const item = await restoreDispatchRecycleRecord(row.id);
+    if (item) restored.push(item);
+  }
+  if (restored.length === 0 && dispatchNo) {
+    const restoredOrder = orderRow.deleted_at
+      ? { ...orderRow, deleted_at: null }
+      : await db.prepare("SELECT * FROM orders WHERE no = ?").get(orderNo);
+    const synthetic = dispatchRecycleRowFromOrder(restoredOrder);
+    await recycleDispatchPlanRows(synthetic.date, [synthetic]);
+    const latest = await db.prepare(`
+      SELECT id FROM dispatch_plan_recycle
+      WHERE restored_at IS NULL
+        AND order_no = @orderNo
+        AND dispatch_no = @dispatchNo
+      ORDER BY id DESC
+      LIMIT 1
+    `).get({ orderNo, dispatchNo });
+    if (latest) {
+      const item = await restoreDispatchRecycleRecord(latest.id);
+      if (item) restored.push(item);
+    }
+  }
+  return restored;
+}
+
+function dispatchRecycleRowFromOrder(order = {}) {
+  const mapped = mapOrder(order);
+  const creator = creatorFieldsFromRecord(order);
+  const dispatchStatus = ORDER_STATUS_TO_DISPATCH_STATUS[mapped.status] || "预排";
+  return {
+    id: `dispatch-restored-${mapped.no || mapped.dispatchNo || Date.now()}`,
+    dispatchNo: mapped.dispatchNo,
+    orderNo: mapped.no,
+    customer: mapped.customer || "",
+    plate: mapped.plate || "",
+    port: mapped.port || "",
+    needsWeighing: false,
+    direction: mapped.direction || "",
+    tonnage: mapped.tonnage || "",
+    quantity: mapped.quantity || "",
+    weight: mapped.weight || "",
+    loading: mapped.loading || "",
+    unloading: mapped.unloading || "",
+    loadTime: "",
+    vehicleSource: mapped.vehicleSource || "",
+    supplier: mapped.supplier || "",
+    transportMode: mapped.transportMode || "",
+    driver: mapped.transportMode === "单司机" ? (mapped.driver || mapped.hkDriver || "") : "",
+    hkDriver: mapped.hkDriver || "",
+    mainlandDriver: mapped.mainlandDriver || "",
+    status: dispatchStatus,
+    previousStatus: "",
+    createdByAccountId: creator.createdByAccountId,
+    createdByUsername: creator.createdByUsername,
+    createdByName: creator.createdByName,
+    note: mapped.remark || "",
+    date: mapped.date || todayInputValue()
   };
 }
 
@@ -4498,14 +5404,13 @@ async function removeDispatchPlanRowsLinkedToOrder(orderRow = {}) {
   const plans = await db.prepare("SELECT plan_date, rows_json FROM dispatch_plans").all();
   let removed = 0;
   for (const plan of plans) {
+    await lockDispatchPlanDate(plan.plan_date);
     const rows = parseDispatchPlanRowsJson(plan.rows_json);
-    const nextRows = rows.filter((row) => {
-      const rowOrderNo = dispatchRowText(row, "orderNo");
-      const rowDispatchNo = dispatchRowText(row, "dispatchNo");
-      return !(orderNo && rowOrderNo === orderNo) && !(dispatchNo && rowDispatchNo === dispatchNo);
-    });
+    const rowsToRecycle = rows.filter((row) => dispatchRowMatchesRefs(row, orderNo, dispatchNo));
+    const nextRows = rows.filter((row) => !dispatchRowMatchesRefs(row, orderNo, dispatchNo));
     if (nextRows.length === rows.length) continue;
     removed += rows.length - nextRows.length;
+    await recycleDispatchPlanRows(plan.plan_date, rowsToRecycle);
     await db.prepare(`
       UPDATE dispatch_plans
       SET rows_json = ?, updated_at = CURRENT_TIMESTAMP
@@ -4527,6 +5432,170 @@ app.get("/api/dispatch-plans", async (req, res) => {
   res.json(records.map(mapDispatchPlanRecord));
 });
 
+app.get("/api/dispatch-plans/recycle", async (_req, res) => {
+  const rows = await db.prepare(`
+    SELECT * FROM dispatch_plan_recycle
+    WHERE restored_at IS NULL
+    ORDER BY deleted_at DESC, plan_date DESC, id DESC
+  `).all();
+  res.json(rows.map(mapDispatchRecycleRecord));
+});
+
+app.post("/api/dispatch-plans/recycle", async (req, res) => {
+  const planDate = String(req.body?.date || req.body?.planDate || "").trim();
+  const row = req.body?.row && typeof req.body.row === "object" ? req.body.row : null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(planDate) || !row) {
+    res.status(400).json({ message: "排车单回收数据无效" });
+    return;
+  }
+  if (!dispatchRowHasReference(row)) {
+    res.status(400).json({ message: "排车单缺少排车单号或订单号，无法进入回收站" });
+    return;
+  }
+
+  const result = await db.transaction(async () => {
+    await lockDispatchPlanDate(planDate);
+    const plan = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(planDate);
+    const rows = parseDispatchPlanRowsJson(plan?.rows_json);
+    const matchedRows = rows.filter((item) => dispatchRowMatchesRef(item, row));
+    const rowsToRecycle = matchedRows.length ? matchedRows : [row];
+    await recycleDispatchPlanRows(planDate, rowsToRecycle);
+    if (matchedRows.length && plan) {
+      const nextRows = rows.filter((item) => !dispatchRowMatchesRef(item, row));
+      await db.prepare(`
+        UPDATE dispatch_plans
+        SET rows_json = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE plan_date = ?
+      `).run(JSON.stringify(nextRows), planDate);
+    }
+    const latest = await db.prepare(`
+      SELECT * FROM dispatch_plan_recycle
+      WHERE plan_date = @planDate
+        AND restored_at IS NULL
+        AND (
+          (@orderNo <> '' AND order_no = @orderNo)
+          OR (@dispatchNo <> '' AND dispatch_no = @dispatchNo)
+        )
+      ORDER BY id DESC
+      LIMIT 1
+    `).get({
+      planDate,
+      orderNo: String(row.orderNo || row.order_no || "").trim(),
+      dispatchNo: String(row.dispatchNo || row.dispatch_no || "").trim()
+    });
+    return { latest, removed: matchedRows.length };
+  })();
+
+  await writeAudit(
+    "delete",
+    "dispatch_plan",
+    row.dispatchNo || row.orderNo || planDate,
+    result.removed ? "移入回收站并删除排车行" : "移入回收站"
+  );
+  res.status(201).json(mapDispatchRecycleRecord(result.latest));
+});
+
+app.delete("/api/dispatch-plans/:date/rows", async (req, res) => {
+  const date = String(req.params.date || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    res.status(400).json({ message: "排车日期无效" });
+    return;
+  }
+
+  const refs = Array.isArray(req.body?.refs) ? req.body.refs : [req.body?.row || req.body || {}];
+  const normalizedRefs = refs
+    .map((ref) => ({
+      id: String(ref?.id || "").trim(),
+      dispatchNo: String(ref?.dispatchNo || ref?.dispatch_no || "").trim(),
+      orderNo: String(ref?.orderNo || ref?.order_no || "").trim()
+    }))
+    .filter(dispatchRowHasReference);
+  if (!normalizedRefs.length) {
+    res.status(400).json({ message: "缺少要删除的排车单号或订单号" });
+    return;
+  }
+
+  const result = await db.transaction(async () => {
+    await lockDispatchPlanDate(date);
+    const plan = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
+    const rows = parseDispatchPlanRowsJson(plan?.rows_json);
+    const rowsToRecycle = rows.filter((row) => normalizedRefs.some((ref) =>
+      dispatchRowMatchesRef(row, ref)
+    ));
+    if (!rowsToRecycle.length) {
+      return { removed: 0, saved: plan ? mapDispatchPlanRecord(plan) : { date, rows: [], updatedAt: "" } };
+    }
+    await recycleDispatchPlanRows(date, rowsToRecycle);
+    const nextRows = rows.filter((row) => !rowsToRecycle.includes(row));
+    const rowsJson = JSON.stringify(nextRows);
+    if (plan) {
+      await db.prepare(`
+        UPDATE dispatch_plans
+        SET rows_json = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE plan_date = ?
+      `).run(rowsJson, date);
+    } else {
+      await db.prepare(`
+        INSERT INTO dispatch_plans (plan_date, rows_json, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+      `).run(date, rowsJson);
+    }
+    const saved = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
+    return { removed: rowsToRecycle.length, saved: mapDispatchPlanRecord(saved) };
+  })();
+
+  if (result.removed === 0) {
+    res.status(404).json({ message: "找不到要删除的排车单" });
+    return;
+  }
+  await writeAudit("delete", "dispatch_plan", date, `显式删除 ${result.removed} 条`);
+  res.json({ ok: true, removed: result.removed, plan: result.saved });
+});
+
+app.post("/api/dispatch-plans/export/xlsx", async (req, res) => {
+  const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+  if (!rows.length) {
+    res.status(400).type("text/plain").send("没有可导出的排车数据");
+    return;
+  }
+  try {
+    const title = String(req.body?.title || "").trim() || dispatchExportWorkbookTitle(rows, String(req.body?.date || ""));
+    const buffer = await renderDispatchPlanXlsxBuffer(rows, title, String(req.body?.date || ""));
+    const date = exportFilenamePart(String(req.body?.date || rows[0]?.order?.date || rows[0]?.date || todayInputValue()).replaceAll("-", ""));
+    const scope = String(req.body?.scope || "全部").trim() || "全部";
+    const filename = `排车表_${date}_${scope}${rows.length}单.xlsx`;
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+    res.send(buffer);
+  } catch (error) {
+    console.error(error);
+    res.status(500).type("text/plain").send("排车表 Excel 导出失败");
+  }
+});
+
+app.post("/api/dispatch-plans/recycle/:id/restore", async (req, res) => {
+  const id = Number(req.params.id || 0);
+  const recycleRow = await db.prepare("SELECT * FROM dispatch_plan_recycle WHERE id = ? AND restored_at IS NULL").get(id);
+  if (!recycleRow) {
+    res.status(404).json({ message: "回收站内找不到该排车单" });
+    return;
+  }
+  const restoredRecord = await db.transaction(async () => {
+    let restoredOrder = null;
+    if (recycleRow.order_no) {
+      const updateOrder = await db.prepare("UPDATE orders SET deleted_at = NULL WHERE no = ? AND deleted_at IS NOT NULL").run(recycleRow.order_no);
+      if (updateOrder.changes > 0) {
+        const order = await db.prepare("SELECT * FROM orders WHERE no = ?").get(recycleRow.order_no);
+        restoredOrder = (await hydrateOrderFees([mapOrder(order)]))[0];
+      }
+    }
+    const restoredDispatch = await restoreDispatchRecycleRecord(id);
+    return { dispatch: restoredDispatch, order: restoredOrder };
+  })();
+  await writeAudit("restore", "dispatch_plan", recycleRow.dispatch_no || String(id), "从回收站恢复");
+  res.json(restoredRecord);
+});
+
 app.get("/api/dispatch-plans/:date", async (req, res) => {
   const date = String(req.params.date || "").trim();
   const row = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
@@ -4544,50 +5613,38 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
     return;
   }
   const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
-  const existingPlan = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
-  const existingRowsLookup = dispatchRowLookup(parseDispatchPlanRowsJson(existingPlan?.rows_json));
+  const baseRows = Array.isArray(req.body.baseRows) ? req.body.baseRows : [];
   const requestCreator = creatorFieldsFromAccount(req.account);
-  const rowsNeedingOrderSync = [];
-  const cleanRows = rows.map((row) => {
-    const item = row && typeof row === "object" ? row : {};
-    const existingRow = findExistingDispatchRow(item, existingRowsLookup);
-    const creator = dispatchRowCreatorFields(item, existingRow, requestCreator);
-    const cleanRow = {
-      id: String(item.id || ""),
-      dispatchNo: String(item.dispatchNo || ""),
-      orderNo: String(item.orderNo || ""),
-      customer: String(item.customer || ""),
-      plate: String(item.plate || ""),
-      port: String(item.port || ""),
-      needsWeighing: booleanFlag(item.needsWeighing ?? item.needs_weighing, false),
-      direction: String(item.direction || ""),
-      tonnage: String(item.tonnage || ""),
-      quantity: item.quantity ?? "",
-      weight: String(item.weight || ""),
-      loading: String(item.loading || ""),
-      unloading: String(item.unloading || ""),
-      loadTime: String(item.loadTime || ""),
-      vehicleSource: String(item.vehicleSource || ""),
-      supplier: String(item.supplier || ""),
-      transportMode: String(item.transportMode || ""),
-      driver: String(item.driver || ""),
-      hkDriver: String(item.hkDriver || ""),
-      mainlandDriver: String(item.mainlandDriver || ""),
-      status: String(item.status || ""),
-      previousStatus: String(item.previousStatus || ""),
-      createdByAccountId: creator.createdByAccountId,
-      createdByUsername: creator.createdByUsername,
-      createdByName: creator.createdByName,
-      note: String(item.note || "")
-    };
-    if (dispatchRowNeedsOrderSync(cleanRow, existingRow)) rowsNeedingOrderSync.push(cleanRow);
-    return cleanRow;
-  });
-  const rowsJson = JSON.stringify(cleanRows);
-  const planCreator = existingPlan && creatorFieldsHaveValue(creatorFieldsFromRecord(existingPlan))
-    ? creatorFieldsFromRecord(existingPlan)
-    : requestCreator;
-  const transaction = db.transaction(async () => {
+  const result = await db.transaction(async () => {
+    await lockDispatchPlanDate(date);
+    const existingPlan = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
+    const existingRows = parseDispatchPlanRowsJson(existingPlan?.rows_json);
+    if (existingRows.length > 0 && baseRows.length === 0) {
+      throw createDispatchPlanConflictError("排车计划已更新，请刷新后再保存", "缺少基线快照");
+    }
+    const existingRowsLookup = dispatchRowLookup(existingRows);
+    const rowsNeedingOrderSync = [];
+    const cleanRows = rows
+      .map((row) => {
+        const existingRow = findExistingDispatchRow(row, existingRowsLookup);
+        const cleanRow = normalizeDispatchPlanRow(row, existingRow, requestCreator);
+        if (dispatchRowHasReference(cleanRow) && dispatchRowNeedsOrderSync(cleanRow, existingRow)) {
+          rowsNeedingOrderSync.push(cleanRow);
+        }
+        return cleanRow;
+      })
+      .filter(dispatchRowHasReference);
+    const cleanBaseRows = baseRows
+      .map((row) => normalizeDispatchPlanRow(row, findExistingDispatchRow(row, existingRowsLookup), requestCreator))
+      .filter(dispatchRowHasReference);
+    const merged = mergeDispatchPlanRows(existingRows, cleanRows, cleanBaseRows);
+    if (merged.stats.conflict > 0) {
+      throw createDispatchPlanConflictError("排车计划已更新，请刷新后再保存", `冲突 ${merged.stats.conflict} 条`);
+    }
+    const rowsJson = JSON.stringify(merged.rows);
+    const planCreator = existingPlan && creatorFieldsHaveValue(creatorFieldsFromRecord(existingPlan))
+      ? creatorFieldsFromRecord(existingPlan)
+      : requestCreator;
     await db.prepare(`
       INSERT INTO dispatch_plans
         (plan_date, rows_json, created_by_account_id, created_by_username, created_by_display_name, updated_at)
@@ -4604,11 +5661,16 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
       createdByName: planCreator.createdByName
     });
     await syncDispatchPlanRowsToOrders(date, rowsNeedingOrderSync);
-  });
-  await transaction();
-  await writeAudit("update", "dispatch_plan", date, `保存 ${cleanRows.length} 条`);
-  const saved = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
-  res.json(mapDispatchPlanRecord(saved));
+    const saved = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
+    return { saved, incomingCount: cleanRows.length, savedCount: merged.rows.length, stats: merged.stats };
+  })();
+  await writeAudit(
+    "update",
+    "dispatch_plan",
+    date,
+    `合并保存 ${result.incomingCount} 条，当前 ${result.savedCount} 条，保护 ${result.stats.protected} 条${result.stats.staleSkipped ? `，跳过旧快照 ${result.stats.staleSkipped} 条` : ""}`
+  );
+  res.json(mapDispatchPlanRecord(result.saved));
 });
 
 app.get("/api/orders/recycle", async (_req, res) => {
@@ -5021,14 +6083,25 @@ app.delete("/api/orders/:no", async (req, res) => {
 
 app.post("/api/orders/:no/restore", async (req, res) => {
   const no = String(req.params.no || "").trim();
-  const result = await db.prepare("UPDATE orders SET deleted_at = NULL WHERE no = ? AND deleted_at IS NOT NULL").run(no);
-  if (result.changes === 0) {
+  const deletedOrder = await db.prepare("SELECT * FROM orders WHERE no = ? AND deleted_at IS NOT NULL").get(no);
+  if (!deletedOrder) {
     res.status(404).json({ message: "回收站内找不到该订单" });
     return;
   }
+  const restoredDispatchRows = [];
+  const transaction = db.transaction(async () => {
+    await db.prepare("UPDATE orders SET deleted_at = NULL WHERE no = ? AND deleted_at IS NOT NULL").run(no);
+    restoredDispatchRows.push(...await restoreDispatchPlanRowsLinkedToOrder(deletedOrder));
+  });
+  await transaction();
   await writeAudit("restore", "order", no, "从回收站恢复");
   const restored = await db.prepare("SELECT * FROM orders WHERE no = ?").get(no);
-  res.json((await hydrateOrderFees([mapOrder(restored)]))[0]);
+  const restoredOrder = (await hydrateOrderFees([mapOrder(restored)]))[0];
+  res.json({
+    order: restoredOrder,
+    dispatchRows: restoredDispatchRows,
+    ...restoredOrder
+  });
 });
 
 app.get("/api/vehicles", async (_req, res) => {
@@ -5314,6 +6387,9 @@ app.post("/api/drivers", async (req, res) => {
     birthday: String(req.body.birthday || "").trim(),
     hireDate: String(req.body.hireDate || "").trim(),
     leaveDate: String(req.body.leaveDate || "").trim(),
+    employmentStatus: ["在职", "离职"].includes(String(req.body.employmentStatus || "").trim())
+      ? String(req.body.employmentStatus || "").trim()
+      : "在职",
     expireAt: String(req.body.expireAt || "").trim(),
     status: String(req.body.status || "正常").trim(),
     defaultWage: Number(req.body.defaultWage || 0),
@@ -5329,8 +6405,8 @@ app.post("/api/drivers", async (req, res) => {
     return;
   }
   const result = await db.prepare(`
-    INSERT INTO drivers (type, name, phone, id_no, license, birthday, hire_date, leave_date, expire_at, status, default_wage, note)
-    VALUES (@type, @name, @phone, @idNo, @license, @birthday, @hireDate, @leaveDate, @expireAt, @status, @defaultWage, @note)
+    INSERT INTO drivers (type, name, phone, id_no, license, birthday, hire_date, leave_date, employment_status, expire_at, status, default_wage, note)
+    VALUES (@type, @name, @phone, @idNo, @license, @birthday, @hireDate, @leaveDate, @employmentStatus, @expireAt, @status, @defaultWage, @note)
   `).run(item);
   await writeAudit("create", "driver", String(result.lastInsertId), item.name);
   res.status(201).json(mapDriver(await db.prepare("SELECT * FROM drivers WHERE id = ?").get(result.lastInsertId)));
@@ -5353,6 +6429,9 @@ app.patch("/api/drivers/:id", async (req, res) => {
     birthday: String(req.body.birthday ?? current.birthday ?? "").trim(),
     hireDate: String(req.body.hireDate ?? current.hire_date ?? "").trim(),
     leaveDate: String(req.body.leaveDate ?? current.leave_date ?? "").trim(),
+    employmentStatus: ["在职", "离职"].includes(String(req.body.employmentStatus ?? current.employment_status ?? "在职").trim())
+      ? String(req.body.employmentStatus ?? current.employment_status ?? "在职").trim()
+      : "在职",
     expireAt: String(req.body.expireAt ?? current.expire_at ?? "").trim(),
     status: String(req.body.status ?? current.status ?? "正常").trim(),
     defaultWage: Number(req.body.defaultWage ?? current.default_wage ?? 0),
@@ -5367,7 +6446,7 @@ app.patch("/api/drivers/:id", async (req, res) => {
       UPDATE drivers
       SET type = @type, name = @name, phone = @phone, id_no = @idNo, license = @license,
           birthday = @birthday, hire_date = @hireDate, leave_date = @leaveDate, expire_at = @expireAt,
-          status = @status, default_wage = @defaultWage, note = @note
+          employment_status = @employmentStatus, status = @status, default_wage = @defaultWage, note = @note
       WHERE id = @id AND deleted_at IS NULL
     `).run(item);
     if (result.changes === 0) {
@@ -6827,7 +7906,13 @@ try {
   process.exit(1);
 }
 
-app.listen(port, () => {
+const server = http.createServer(app);
+realtimeHub = createRealtimeHub({
+  server,
+  authenticate: authenticateRealtimeToken
+});
+
+server.listen(port, () => {
   console.log(`Hanye API listening on http://127.0.0.1:${port}`);
   console.log(`PostgreSQL database: ${databaseInfo}`);
 });

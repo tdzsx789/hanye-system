@@ -13,6 +13,13 @@ export function uploadFile(payload) {
   });
 }
 
+export function moveFileById(id, payload) {
+  return apiFetch(`/files/${id}/move`, {
+    method: "PATCH",
+    body: JSON.stringify(payload)
+  });
+}
+
 export function deleteFileById(id) {
   return apiFetch(`/files/${id}`, { method: "DELETE" });
 }

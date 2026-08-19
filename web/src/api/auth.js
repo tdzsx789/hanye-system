@@ -17,3 +17,14 @@ export function updateProfile(payload) {
     body: JSON.stringify(payload)
   });
 }
+
+export function getTablePreferences() {
+  return apiFetch("/auth/table-preferences");
+}
+
+export function updateTablePreferences(payload) {
+  return apiFetch("/auth/table-preferences", {
+    method: "PATCH",
+    body: JSON.stringify(payload)
+  });
+}

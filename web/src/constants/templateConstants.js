@@ -123,9 +123,9 @@ export const TEMPLATE_VARIABLES = [
     { label: "当前页", value: "{{page}}" },
     { label: "总页数", value: "{{pages}}" }
   ] },
-  { group: "人员/公司", items: [
+  { group: "人员/客户", items: [
     { label: "制表人", value: "{{user}}" },
-    { label: "公司名称", value: "{{company}}" }
+    { label: "客户", value: "{{company}}" }
   ] },
   { group: "订单", items: [
     { label: "订单号", value: "{{orderNo}}" },

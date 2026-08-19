@@ -33,6 +33,21 @@ const pool = new Pool({
 
 const transactionClient = new AsyncLocalStorage();
 
+function transactionStoreClient(store) {
+  if (!store) return null;
+  return store.client || store;
+}
+
+function runAfterCommitCallbacks(callbacks = []) {
+  callbacks.forEach((callback) => {
+    Promise.resolve()
+      .then(callback)
+      .catch((error) => {
+        console.error("afterCommit callback failed", error);
+      });
+  });
+}
+
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -102,6 +117,7 @@ function compileSql(sql, args = []) {
 const idReturningTables = new Set([
   "audit_logs",
   "order_fees",
+  "dispatch_plan_recycle",
   "drivers",
   "fee_items",
   "freight_rates",
@@ -111,6 +127,7 @@ const idReturningTables = new Set([
   "app_accounts",
   "files",
   "customs_businesses",
+  "other_businesses",
   "driver_wage_rules",
   "driver_adjustments",
   "address_book",
@@ -133,7 +150,7 @@ function withReturningId(sql) {
 
 async function query(sql, args = []) {
   const compiled = compileSql(sql, args);
-  const client = transactionClient.getStore() || pool;
+  const client = transactionStoreClient(transactionClient.getStore()) || pool;
   return client.query(compiled.text, compiled.values);
 }
 
@@ -174,13 +191,15 @@ export const db = {
   transaction(callback) {
     return async (...args) => {
       const client = await pool.connect();
+      const context = { client, afterCommit: [] };
       try {
         await client.query("BEGIN");
         let result;
-        await transactionClient.run(client, async () => {
+        await transactionClient.run(context, async () => {
           result = await callback(...args);
         });
         await client.query("COMMIT");
+        runAfterCommitCallbacks(context.afterCommit);
         return result;
       } catch (error) {
         await client.query("ROLLBACK");
@@ -192,14 +211,30 @@ export const db = {
   }
 };
 
+export function afterCommit(callback) {
+  if (typeof callback !== "function") return;
+  const context = transactionClient.getStore();
+  if (context && Array.isArray(context.afterCommit)) {
+    context.afterCommit.push(callback);
+    return;
+  }
+  Promise.resolve()
+    .then(callback)
+    .catch((error) => {
+      console.error("afterCommit callback failed", error);
+    });
+}
+
 export async function withAdvisoryLock(lockId, callback) {
   const client = await pool.connect();
+  const context = { client, afterCommit: [] };
   try {
     await client.query("SELECT pg_advisory_lock($1)", [Number(lockId)]);
     let result;
-    await transactionClient.run(client, async () => {
+    await transactionClient.run(context, async () => {
       result = await callback();
     });
+    runAfterCommitCallbacks(context.afterCommit);
     return result;
   } finally {
     await client.query("SELECT pg_advisory_unlock($1)", [Number(lockId)]).catch(() => {});
@@ -252,12 +287,58 @@ async function addColumn(table, definition) {
 }
 
 async function ensureTextColumn(table, column, defaultValue = "''") {
+  if (!(await hasColumn(table, column))) {
+    await db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT NOT NULL DEFAULT ${defaultValue}`);
+    return;
+  }
   if ((await columnDataType(table, column)) === "text") return;
   await db.exec(`
     ALTER TABLE ${table} ALTER COLUMN ${column} DROP DEFAULT;
     ALTER TABLE ${table} ALTER COLUMN ${column} TYPE TEXT USING COALESCE(${column}::text, '');
     ALTER TABLE ${table} ALTER COLUMN ${column} SET DEFAULT ${defaultValue};
   `);
+}
+
+function defaultPartnerShortName(name = "") {
+  let text = String(name || "")
+    .replace(/\s+/g, "")
+    .replace(/[（(]\s*(深圳市?|广州市?|东莞市?|惠州市?|佛山市?|中山市?|珠海市?|江门市?|汕头市?|上海市?|北京市?|天津市?|重庆市?|香港|澳门|香港特别行政区|澳门特别行政区)\s*[）)]/gu, "")
+    .replace(/[【】\[\]{}]/g, "")
+    .trim();
+  if (!text) return "";
+
+  text = text
+    .replace(/^(中华人民共和国|中国)/, "")
+    .replace(/^(香港特别行政区|澳门特别行政区)/, "")
+    .replace(/^(广东省|福建省|浙江省|江苏省|山东省|湖南省|湖北省|江西省|广西壮族自治区|广西省|海南省|四川省|重庆市|上海市|北京市|天津市)/, "")
+    .replace(/^(深圳市?|广州市?|东莞市?|惠州市?|佛山市?|中山市?|珠海市?|江门市?|汕头市?|上海市?|北京市?|天津市?|重庆市?|香港|澳门)/u, "");
+
+  text = text
+    .replace(/(有限责任公司|股份有限公司|集团有限公司|控股有限公司|实业有限公司|科技有限公司|技术有限公司|贸易有限公司|物流有限公司|供应链管理有限公司|供应链有限公司|国际货运代理有限公司|货运代理有限公司|货物运输有限公司|运输有限公司|报关有限公司|代理有限公司|有限公司|公司)$/u, "")
+    .replace(/(有限责任公司|股份有限公司|有限公司|公司)$/u, "");
+
+  return text || String(name || "").trim();
+}
+
+async function backfillCustomerShortNames() {
+  const rows = await db.prepare(`
+    SELECT id, name, short_name
+    FROM customers
+    WHERE deleted_at IS NULL
+      AND (
+        COALESCE(short_name, '') = ''
+        OR short_name = name
+      )
+  `).all();
+
+  for (const row of rows) {
+    const shortName = defaultPartnerShortName(row.name);
+    if (!shortName || shortName === row.short_name) continue;
+    await db.prepare("UPDATE customers SET short_name = @shortName WHERE id = @id").run({
+      id: row.id,
+      shortName
+    });
+  }
 }
 
 async function dropColumnIfExists(table, column) {
@@ -273,6 +354,7 @@ async function initializeSchema() {
       type TEXT NOT NULL CHECK (type IN ('客户', '供应商')),
       customer_category TEXT NOT NULL DEFAULT '运输客户',
       name TEXT NOT NULL,
+      short_name TEXT NOT NULL DEFAULT '',
       province TEXT NOT NULL DEFAULT '',
       city TEXT NOT NULL DEFAULT '',
       address TEXT NOT NULL DEFAULT '',
@@ -374,6 +456,17 @@ async function initializeSchema() {
       updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)
     );
 
+    CREATE TABLE IF NOT EXISTS dispatch_plan_recycle (
+      id BIGSERIAL PRIMARY KEY,
+      plan_date TEXT NOT NULL,
+      dispatch_no TEXT NOT NULL DEFAULT '',
+      order_no TEXT NOT NULL DEFAULT '',
+      customer TEXT NOT NULL DEFAULT '',
+      row_json TEXT NOT NULL DEFAULT '{}',
+      deleted_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      restored_at TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS vehicles (
       plate TEXT PRIMARY KEY,
       brand TEXT NOT NULL DEFAULT '',
@@ -423,6 +516,7 @@ async function initializeSchema() {
       birthday TEXT NOT NULL DEFAULT '',
       hire_date TEXT NOT NULL DEFAULT '',
       leave_date TEXT NOT NULL DEFAULT '',
+      employment_status TEXT NOT NULL DEFAULT '在职',
       expire_at TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT '正常',
       default_wage DOUBLE PRECISION NOT NULL DEFAULT 0,
@@ -503,6 +597,7 @@ async function initializeSchema() {
       email TEXT NOT NULL DEFAULT '',
       note TEXT NOT NULL DEFAULT '',
       permissions TEXT NOT NULL DEFAULT '[]',
+      table_preferences TEXT NOT NULL DEFAULT '{}',
       created_at TEXT NOT NULL DEFAULT (CURRENT_DATE::text),
       updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
       last_login_at TEXT,
@@ -553,6 +648,23 @@ async function initializeSchema() {
       other_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
       custom_fields TEXT NOT NULL DEFAULT '[]',
       total DOUBLE PRECISION NOT NULL DEFAULT 0,
+      remark TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      deleted_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS other_businesses (
+      id BIGSERIAL PRIMARY KEY,
+      business_date TEXT NOT NULL DEFAULT '',
+      title TEXT NOT NULL DEFAULT '',
+      customer TEXT NOT NULL DEFAULT '',
+      cost DOUBLE PRECISION NOT NULL DEFAULT 0,
+      income DOUBLE PRECISION NOT NULL DEFAULT 0,
+      custom_fields TEXT NOT NULL DEFAULT '[]',
+      total_cost DOUBLE PRECISION NOT NULL DEFAULT 0,
+      total_income DOUBLE PRECISION NOT NULL DEFAULT 0,
+      profit DOUBLE PRECISION NOT NULL DEFAULT 0,
       remark TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
       updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
@@ -706,11 +818,14 @@ async function initializeSchema() {
     CREATE INDEX IF NOT EXISTS idx_orders_customer_id ON orders(customer_id);
     CREATE INDEX IF NOT EXISTS idx_orders_deleted_order_date ON orders(deleted_at, order_date);
     CREATE INDEX IF NOT EXISTS idx_order_fees_order_no ON order_fees(order_no);
+    CREATE INDEX IF NOT EXISTS idx_dispatch_plan_recycle_restored_deleted ON dispatch_plan_recycle(restored_at, deleted_at);
+    CREATE INDEX IF NOT EXISTS idx_dispatch_plan_recycle_refs ON dispatch_plan_recycle(order_no, dispatch_no);
     CREATE INDEX IF NOT EXISTS idx_vehicle_expenses_type_date ON vehicle_expenses(expense_type, deleted_at, expense_date);
     CREATE INDEX IF NOT EXISTS idx_vehicle_expenses_plate_date ON vehicle_expenses(plate, deleted_at, expense_date);
     CREATE INDEX IF NOT EXISTS idx_vehicle_expenses_year ON vehicle_expenses(expense_year, deleted_at);
     CREATE INDEX IF NOT EXISTS idx_files_entity ON files(entity_type, entity_id);
     CREATE INDEX IF NOT EXISTS idx_customs_businesses_date ON customs_businesses(deleted_at, business_date);
+    CREATE INDEX IF NOT EXISTS idx_other_businesses_date ON other_businesses(deleted_at, business_date);
     CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
     CREATE INDEX IF NOT EXISTS idx_driver_route_adjust_deleted ON driver_route_adjust_rules(deleted_at, id);
     CREATE INDEX IF NOT EXISTS idx_statement_downloads_deleted ON statement_downloads(deleted_at, downloaded_at);
@@ -763,7 +878,8 @@ async function initializeSchema() {
       "id_no TEXT NOT NULL DEFAULT ''",
       "birthday TEXT NOT NULL DEFAULT ''",
       "hire_date TEXT NOT NULL DEFAULT ''",
-      "leave_date TEXT NOT NULL DEFAULT ''"
+      "leave_date TEXT NOT NULL DEFAULT ''",
+      "employment_status TEXT NOT NULL DEFAULT '在职'"
     ],
     address_book: ["area TEXT NOT NULL DEFAULT ''"],
     customer_contacts: [
@@ -777,6 +893,7 @@ async function initializeSchema() {
       "phone TEXT NOT NULL DEFAULT ''",
       "email TEXT NOT NULL DEFAULT ''",
       "note TEXT NOT NULL DEFAULT ''",
+      "table_preferences TEXT NOT NULL DEFAULT '{}'",
       "updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)",
       "last_login_at TEXT"
     ],
@@ -837,6 +954,14 @@ async function initializeSchema() {
       "verification_fee DOUBLE PRECISION NOT NULL DEFAULT 0",
       "deleted_at TEXT"
     ],
+    other_businesses: [
+      "custom_fields TEXT NOT NULL DEFAULT '[]'",
+      "total_cost DOUBLE PRECISION NOT NULL DEFAULT 0",
+      "total_income DOUBLE PRECISION NOT NULL DEFAULT 0",
+      "profit DOUBLE PRECISION NOT NULL DEFAULT 0",
+      "remark TEXT NOT NULL DEFAULT ''",
+      "deleted_at TEXT"
+    ],
     vehicle_expenses: [
       "fuel_station TEXT NOT NULL DEFAULT ''",
       "fuel_liters DOUBLE PRECISION NOT NULL DEFAULT 0",
@@ -858,6 +983,8 @@ async function initializeSchema() {
   await addColumn("audit_logs", "actor TEXT NOT NULL DEFAULT 'admin'");
 
   await ensureTextColumn("orders", "quantity");
+  await ensureTextColumn("customers", "short_name");
+  await backfillCustomerShortNames();
 
   await db.exec(`
     ALTER TABLE order_fees ALTER COLUMN quantity SET DEFAULT 1;
@@ -1002,6 +1129,12 @@ async function initializeSchema() {
     SET type = '大陆骑师'
     WHERE (type IS NULL OR type = '' OR type = '香港司机')
       AND (note LIKE '%大陆%' OR note LIKE '%国内%' OR note LIKE '%骑师%')
+  `).run();
+
+  await db.prepare(`
+    UPDATE drivers
+    SET employment_status = '在职'
+    WHERE employment_status IS NULL OR TRIM(employment_status) = ''
   `).run();
 
   await db.prepare(`
@@ -1729,11 +1862,11 @@ function demoDispatchPlanRows(date) {
 async function seedCustomer(item) {
   await db.prepare(`
     INSERT INTO customers
-      (id, type, name, province, city, address, term, tax_no, contact, mobile, driver_wage_adjust_hkd,
+      (id, type, name, short_name, province, city, address, term, tax_no, contact, mobile, driver_wage_adjust_hkd,
        default_template_id, receivable_rmb, receivable_hkd, recent_order, invoice_title, invoice_tax_no,
        invoice_bank, invoice_account, invoice_address_phone, created_at)
     SELECT
-      @id, @type, @name, @province, @city, @address, @term, @taxNo, @contact, @mobile, @driverWageAdjustHKD,
+      @id, @type, @name, COALESCE(@shortName, ''), @province, @city, @address, @term, @taxNo, @contact, @mobile, @driverWageAdjustHKD,
       @defaultTemplateId, @receivableRMB, @receivableHKD, @recentOrder, @invoiceTitle, @invoiceTaxNo,
       @invoiceBank, @invoiceAccount, @invoiceAddressPhone, @createdAt
     WHERE NOT EXISTS (
@@ -1788,11 +1921,11 @@ async function seedVehicle(item) {
 async function seedDriver(item) {
   await db.prepare(`
     INSERT INTO drivers
-      (type, name, phone, id_no, license, birthday, hire_date, leave_date, expire_at, status, default_wage, note)
+      (type, name, phone, id_no, license, birthday, hire_date, leave_date, employment_status, expire_at, status, default_wage, note)
     VALUES
-      (@type, @name, @phone, @idNo, @license, @birthday, @hireDate, @leaveDate, @expireAt, @status, @defaultWage, @note)
+      (@type, @name, @phone, @idNo, @license, @birthday, @hireDate, @leaveDate, @employmentStatus, @expireAt, @status, @defaultWage, @note)
     ON CONFLICT (name) DO NOTHING
-  `).run(item);
+  `).run({ ...item, employmentStatus: item.employmentStatus || "在职" });
 }
 
 async function seedFeeItem(item) {

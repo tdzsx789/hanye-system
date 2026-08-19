@@ -30,7 +30,9 @@ export const ROUTE_ALIASES = {
   bossSupplierProfit: "bossSupplierProfit",
   bossCustomsProfit: "customsBusiness",
   customs: "customsBusiness",
-  customsBusiness: "customsBusiness"
+  customsBusiness: "customsBusiness",
+  other: "otherBusiness",
+  otherBusiness: "otherBusiness"
 };
 
 export const ACCOUNT_ROLES = ["司机", "跟单员", "财务", "管理员"];
@@ -50,7 +52,7 @@ export const BOSS_CENTER_MODULES = [
 ];
 export const FINANCE_WAGE_MODULES = ["financeWages"];
 export const FINANCE_CENTER_MODULES = ["financeCosts", "financeSupplierStatements", "financeCustomsStatements", "financeCostCenter", "financeDaily"];
-export const BUSINESS_MODULES = ["home", "customers", "dispatchBoard", "orders", "customsBusiness"];
+export const BUSINESS_MODULES = ["home", "customers", "dispatchBoard", "orders", "customsBusiness", "otherBusiness"];
 export const SYSTEM_CONFIG_MODULES = ["freight", "templates", "master", "security", "accounts"];
 export const ROLE_ALLOWED_MODULES = {
   管理员: [
@@ -79,6 +81,7 @@ export const MODULES = [
   { id: "dispatchBoard", label: "排车表", group: "业务" },
   { id: "orders", label: "订单管理", group: "业务" },
   { id: "customsBusiness", label: "报关业务", group: "业务" },
+  { id: "otherBusiness", label: "其他业务", group: "业务" },
   { id: "vehicleManage", label: "车辆管理", group: "车辆司机" },
   { id: "driverManage", label: "司机管理", group: "车辆司机" },
   { id: "vehicleFuelExpenses", label: "加油费管理", group: "车辆司机" },
@@ -137,6 +140,7 @@ export const AUDIT_ENTITY_LABELS = {
   customer: "客户",
   customer_contact: "客户联系人",
   customs_business: "报关业务",
+  other_business: "其他业务",
   dispatch_plan: "排车计划",
   driver: "司机",
   driver_adjustment: "司机预支/报销",
@@ -163,6 +167,8 @@ export const AUDIT_RECORD_PREFIXES = {
   address_history: "地址标识",
   customer: "客户编号",
   customer_contact: "联系人ID",
+  customs_business: "报关业务ID",
+  other_business: "其他业务ID",
   dispatch_plan: "排车日期",
   driver: "司机ID",
   driver_adjustment: "预支/报销ID",
@@ -253,8 +259,8 @@ export const DISPATCH_LOAD_TIME_OPTIONS = Array.from({ length: 96 }, (_, index) 
   return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
 });
 
-export const FILE_UPLOAD_ACCEPT = "image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.tif,.tiff,.avif,.heic,.heif,.svg,.pdf,application/pdf";
-export const SAFE_UPLOAD_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif", "heic", "heif", "svg", "pdf"]);
+export const FILE_UPLOAD_ACCEPT = "image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.tif,.tiff,.avif,.heic,.heif,.svg,.pdf,.xls,.xlsx,.csv,application/pdf,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,application/csv";
+export const SAFE_UPLOAD_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif", "heic", "heif", "svg", "pdf", "xls", "xlsx", "csv"]);
 export const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
 export const UPLOAD_MIME_BY_EXTENSION = {
   jpg: "image/jpeg",
@@ -269,5 +275,8 @@ export const UPLOAD_MIME_BY_EXTENSION = {
   heic: "image/heic",
   heif: "image/heif",
   svg: "image/svg+xml",
-  pdf: "application/pdf"
+  pdf: "application/pdf",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  csv: "text/csv"
 };

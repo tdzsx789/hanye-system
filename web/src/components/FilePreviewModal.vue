@@ -39,17 +39,19 @@ const isImage = computed(() => String(props.file?.mime || "").startsWith("image/
         <IconSvg name="download" />下载
       </button>
     </template>
-    <img
-      v-if="isImage"
-      class="file-preview-image"
-      :src="previewUrl"
-      :alt="file?.filename"
-    />
-    <iframe
-      v-else
-      class="file-preview-frame"
-      :src="previewUrl"
-      :title="file?.filename"
-    />
+    <div class="file-preview-stage" :class="{ 'is-image': isImage, 'is-frame': !isImage }">
+      <img
+        v-if="isImage"
+        class="file-preview-image"
+        :src="previewUrl"
+        :alt="file?.filename"
+      />
+      <iframe
+        v-else
+        class="file-preview-frame"
+        :src="previewUrl"
+        :title="file?.filename"
+      />
+    </div>
   </BaseModal>
 </template>

@@ -166,13 +166,13 @@
   display: block;
 }
 
-.suggestion-item text:first-child {
+.suggestion-primary {
   color: #172033;
   font-size: 26rpx;
   font-weight: 800;
 }
 
-.suggestion-item text:last-child {
+.suggestion-secondary {
   margin-top: 4rpx;
   color: #7b8798;
   font-size: 22rpx;

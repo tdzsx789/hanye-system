@@ -49,7 +49,7 @@ const emit = defineEmits(["close", "submit", "panelClick"]);
       <div class="modal-head">
         <h2>
           {{ title || (editing ? '编辑订单' : '新建订单') }}
-          <span class="order-title-meta">经营单位：{{ customer || "-" }}</span>
+          <span class="order-title-meta">客户：{{ customer || "-" }}</span>
           <span class="order-title-meta">订单号：{{ orderNo }}</span>
         </h2>
         <button type="button" class="icon-btn" @click="emit('close')"><IconSvg name="close" />关闭</button>

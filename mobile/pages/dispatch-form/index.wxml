@@ -22,12 +22,12 @@
         </picker>
       </view>
       <view class="field-row customer-field">
-        <text class="field-label">经营单位</text>
+        <text class="field-label">客户</text>
         <input placeholder="搜索并选择客户" placeholder-class="placeholder" value="{{form.customer}}" data-field="customer" bindfocus="onCustomerFocus" bindinput="onFieldInput" />
         <view wx:if="{{customerPickerOpen}}" class="suggestion-box">
           <view wx:for="{{customerSuggestions}}" wx:key="id" class="suggestion-item" data-id="{{item.id}}" bindtap="selectCustomer">
-            <text>{{item.name}}</text>
-            <text>{{item.id}}</text>
+            <text class="suggestion-primary">{{item.displayName || item.name}}</text>
+            <text wx:if="{{item.secondaryText}}" class="suggestion-secondary">{{item.secondaryText}}</text>
           </view>
           <view wx:if="{{!customerSuggestions.length}}" class="suggestion-empty">没有匹配客户，请先在 PC 端维护客户资料</view>
           <button class="quiet-btn suggestion-close" bindtap="closeCustomerPicker">收起</button>
@@ -208,7 +208,7 @@
         <button class="quiet-btn sheet-close" bindtap="closeLocationPicker">关闭</button>
       </view>
 
-      <view wx:if="{{!addressBookCustomerReady}}" class="address-picker-note">先选经营单位，再读取和保存联系人地址。</view>
+      <view wx:if="{{!addressBookCustomerReady}}" class="address-picker-note">先选客户，再读取和保存联系人地址。</view>
 
       <view class="location-toolbar">
         <input class="location-search" placeholder="联系人 / 电话 / 地址 / 备注" placeholder-class="placeholder" value="{{addressBookKeyword}}" bindinput="onAddressBookKeywordInput" />
@@ -260,14 +260,14 @@
       </view>
 
       <view class="address-list-head">
-        <text>{{addressBookVisibleRows.length ? '左侧勾选地址后点确定' : (addressBookCustomerReady ? '暂无地址，请先新建地址' : '请先选择经营单位，再查看或新建联系人地址')}}</text>
+        <text>{{addressBookVisibleRows.length ? '左侧勾选地址后点确定' : (addressBookCustomerReady ? '暂无地址，请先新建地址' : '请先选择客户，再查看或新建联系人地址')}}</text>
         <text>{{addressBookSelectedIds.length}} 项</text>
       </view>
 
       <view wx:if="{{addressBookLoading}}" class="address-empty">正在读取联系人地址...</view>
       <view wx:elif="{{addressBookKeyword && !addressBookVisibleRows.length}}" class="address-empty">没有匹配地址，请清空搜索或新建地址。</view>
       <view wx:elif="{{!addressBookVisibleRows.length && addressBookCustomerReady}}" class="address-empty">暂无地址，请先新建地址。</view>
-      <view wx:elif="{{!addressBookVisibleRows.length}}" class="address-empty">请先选择经营单位后再查看或新建联系人地址。</view>
+      <view wx:elif="{{!addressBookVisibleRows.length}}" class="address-empty">请先选择客户后再查看或新建联系人地址。</view>
       <scroll-view wx:else scroll-y class="address-list">
         <view wx:for="{{addressBookVisibleRows}}" wx:key="id" class="address-card {{item.selected ? 'selected' : ''}}" data-id="{{item.id}}" bindtap="toggleAddressBookSelection">
           <view class="address-card-check {{item.selected ? 'checked' : ''}}">
