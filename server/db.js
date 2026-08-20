@@ -569,6 +569,7 @@ async function initializeSchema() {
       customer TEXT NOT NULL,
       business_type TEXT NOT NULL DEFAULT '运输',
       port TEXT NOT NULL DEFAULT '',
+      needs_weighing BOOLEAN NOT NULL DEFAULT false,
       direction TEXT NOT NULL DEFAULT '',
       tonnage TEXT NOT NULL DEFAULT '',
       currency TEXT NOT NULL DEFAULT '',
@@ -1023,6 +1024,7 @@ async function initializeSchema() {
       "mainland_driver TEXT NOT NULL DEFAULT ''",
       "transport_mode TEXT NOT NULL DEFAULT ''",
       "remark TEXT NOT NULL DEFAULT ''",
+      "needs_weighing BOOLEAN NOT NULL DEFAULT false",
       "trip_no_enabled INTEGER NOT NULL DEFAULT 0",
       "trip_no TEXT NOT NULL DEFAULT ''",
       "six_sheet_enabled INTEGER NOT NULL DEFAULT 0",
@@ -2010,6 +2012,40 @@ function demoExportTemplateContent() {
   });
 }
 
+function kenfaExportTemplateContent() {
+  return JSON.stringify({
+    type: "kenfa-export-template",
+    exportKind: "kenfa",
+    generator: "server-code"
+  });
+}
+
+async function ensureProtectedTemplates() {
+  await db.prepare(`
+    UPDATE templates
+    SET deleted_at = NULL,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE name IN ('通用模板', '肯发专用')
+      AND deleted_at IS NOT NULL
+  `).run();
+
+  await db.prepare(`
+    INSERT INTO templates (name, format, description, content, updated_at)
+    SELECT '通用模板', '通用', '系统保留模板：用于订单导出、客户对账和司机对账。', @content, CURRENT_TIMESTAMP
+    WHERE NOT EXISTS (
+      SELECT 1 FROM templates WHERE name = '通用模板'
+    )
+  `).run({ content: demoExportTemplateContent() });
+
+  await db.prepare(`
+    INSERT INTO templates (name, format, description, content, updated_at)
+    SELECT '肯发专用', 'Excel', '系统专用模板：按日期生成每日 INVOICE，并在总表汇总含税金额。', @content, CURRENT_TIMESTAMP
+    WHERE NOT EXISTS (
+      SELECT 1 FROM templates WHERE name = '肯发专用'
+    )
+  `).run({ content: kenfaExportTemplateContent() });
+}
+
 function demoDispatchPlanRows(date) {
   const rows = DEMO_ORDERS
     .filter((order) => order.date === date)
@@ -2148,14 +2184,19 @@ async function seedOrder(item) {
   await db.prepare(`
     INSERT INTO orders
       (no, dispatch_no, customer_id, customer, business_type, port, direction, tonnage, currency, quantity,
-       weight, vehicle_source, supplier, plate, driver, hk_driver, mainland_driver, transport_mode, loading, unloading,
+       needs_weighing, weight, vehicle_source, supplier, plate, driver, hk_driver, mainland_driver, transport_mode, loading, unloading,
        order_date, receivable_hkd, receivable_rmb, status, remark, trip_no_enabled, trip_no, six_sheet_enabled, six_sheet_no)
     VALUES
       (@no, @dispatchNo, @customerId, @customer, @businessType, @port, @direction, @tonnage, @currency, @quantity,
-       @weight, @vehicleSource, @supplier, @plate, @driver, @hkDriver, @mainlandDriver, @transportMode, @loading, @unloading,
+       @needsWeighing, @weight, @vehicleSource, @supplier, @plate, @driver, @hkDriver, @mainlandDriver, @transportMode, @loading, @unloading,
        @date, @receivableHKD, @receivableRMB, @status, @remark, @tripNoEnabled, @tripNo, @sixSheetEnabled, @sixSheetNo)
     ON CONFLICT (no) DO NOTHING
-  `).run({ ...item, customerId: customer.id, customer: customer.name });
+  `).run({
+    ...item,
+    customerId: customer.id,
+    customer: customer.name,
+    needsWeighing: item.needsWeighing ? 1 : 0
+  });
 }
 
 async function seedOrderFees(orderNo, fees, sourceOrder = null) {
@@ -2394,6 +2435,7 @@ try {
   await initClient.query("SELECT pg_advisory_lock(524458)");
   await transactionClient.run(initClient, async () => {
     await initializeSchema();
+    await ensureProtectedTemplates();
   });
 } finally {
   await initClient.query("SELECT pg_advisory_unlock(524458)");

@@ -2,23 +2,32 @@
   <view class="form-head">
     <view>
       <text class="form-title">{{title}}</text>
-      <text class="form-subtitle">排车单号：{{form.dispatchNo || '保存时生成'}}</text>
+      <text class="form-subtitle">{{subtitle}}</text>
     </view>
-    <text class="status-chip {{form.status === '已签收' ? 'status-signed' : form.status === '通关中' ? 'status-crossing' : form.status === '异常滞留' ? 'status-exception' : form.status === '已派车' ? 'status-dispatched' : 'status-planned'}}">{{form.status || '预排'}}</text>
+    <text class="status-chip {{form.status === '已审核' ? 'status-audited' : form.status === '已签收' ? 'status-signed' : form.status === '通关中' ? 'status-crossing' : form.status === '异常滞留' || form.status === '费用待确认' || form.status === '缺票据' ? 'status-exception' : form.status === '正常' || form.status === '已派车' ? 'status-dispatched' : 'status-planned'}}">{{form.status || '预排'}}</text>
   </view>
 
   <view wx:if="{{loadingRefs}}" class="panel loading-panel">
     <view class="loading-spinner"></view>
-    <text>正在读取客户、车辆和司机资料...</text>
+    <view class="loading-copy">
+      <text class="loading-title">正在载入排车单资料</text>
+      <text class="loading-subtitle">正在读取客户、车辆、司机和地址资料，请稍候</text>
+    </view>
   </view>
 
   <block wx:else>
     <view class="panel form-panel">
       <view class="section-title">基础信息</view>
       <view class="field-row">
-        <text class="field-label">排车日期</text>
+        <text class="field-label">{{isOrderEditMode ? '订单日期' : '排车日期'}}</text>
         <picker mode="date" value="{{form.date}}" bindchange="onFormDateChange">
           <view class="picker-box">{{form.date || '请选择日期'}}</view>
+        </picker>
+      </view>
+      <view wx:if="{{isOrderEditMode}}" class="field-row">
+        <text class="field-label">状态</text>
+        <picker range="{{orderStatusOptions}}" data-field="status" data-options-key="orderStatusOptions" bindchange="onPickerChange">
+          <view class="picker-box">{{form.status || '请选择状态'}}</view>
         </picker>
       </view>
       <view class="field-row customer-field">
@@ -110,8 +119,45 @@
         </view>
       </view>
       <view class="field-row">
+        <view class="switch-field" bindtap="toggleNeedsWeighing">
+          <view class="switch-copy">
+            <text class="field-label switch-label">是否过磅</text>
+            <text class="switch-hint">{{form.needsWeighing ? '派车信息显示过磅' : '派车信息显示不用过磅'}}</text>
+          </view>
+          <switch checked="{{form.needsWeighing}}" color="#1769e0" bindchange="onNeedsWeighingChange" catchtap="noop" />
+        </view>
+      </view>
+      <view class="field-row">
         <text class="field-label">备注</text>
-        <input placeholder="排车备注" placeholder-class="placeholder" value="{{form.note}}" data-field="note" bindinput="onFieldInput" />
+        <input placeholder="{{isOrderEditMode ? '订单备注' : '排车备注'}}" placeholder-class="placeholder" value="{{form.note}}" data-field="note" bindinput="onFieldInput" />
+      </view>
+      <view wx:if="{{isOrderEditMode}}" class="two-col">
+        <view class="field-row">
+          <view class="switch-field" data-field="tripNoEnabled" bindtap="toggleBooleanField">
+            <view class="switch-copy">
+              <text class="field-label switch-label">车次号</text>
+              <text class="switch-hint">{{form.tripNoEnabled ? '已启用' : '未启用'}}</text>
+            </view>
+            <switch checked="{{form.tripNoEnabled}}" color="#1769e0" data-field="tripNoEnabled" bindchange="onBooleanFieldChange" catchtap="noop" />
+          </view>
+        </view>
+        <view class="field-row">
+          <view class="switch-field" data-field="sixSheetEnabled" bindtap="toggleBooleanField">
+            <view class="switch-copy">
+              <text class="field-label switch-label">六联单号</text>
+              <text class="switch-hint">{{form.sixSheetEnabled ? '已启用' : '未启用'}}</text>
+            </view>
+            <switch checked="{{form.sixSheetEnabled}}" color="#1769e0" data-field="sixSheetEnabled" bindchange="onBooleanFieldChange" catchtap="noop" />
+          </view>
+        </view>
+      </view>
+      <view wx:if="{{isOrderEditMode && form.tripNoEnabled}}" class="field-row">
+        <text class="field-label">车次号</text>
+        <input placeholder="请输入车次号" placeholder-class="placeholder" value="{{form.tripNo}}" data-field="tripNo" bindinput="onFieldInput" />
+      </view>
+      <view wx:if="{{isOrderEditMode && form.sixSheetEnabled}}" class="field-row">
+        <text class="field-label">六联单号</text>
+        <input placeholder="请输入六联单号" placeholder-class="placeholder" value="{{form.sixSheetNo}}" data-field="sixSheetNo" bindinput="onFieldInput" />
       </view>
     </view>
 
@@ -169,14 +215,39 @@
         </view>
         <text class="location-count {{loadingEntryCount ? '' : 'empty'}}">{{loadingEntryCount ? '共 ' + loadingEntryCount + ' 个地址' : '未选择地址'}}</text>
       </view>
-      <view wx:if="{{loadingEntryCount}}" class="location-list">
-        <view wx:for="{{loadingEntries}}" wx:key="id" class="location-item">
-          <text class="location-index">{{index + 1}}</text>
-          <text class="location-text">{{item.value}}</text>
+      <view class="location-edit-list">
+        <view wx:for="{{loadingEntries}}" wx:for-item="entry" wx:for-index="entryIndex" wx:key="id" class="location-edit-item">
+          <text class="location-index">{{entryIndex + 1}}</text>
+          <view class="location-edit-fields">
+            <view class="location-edit-field">
+              <input placeholder="市" placeholder-class="placeholder" value="{{entry.city}}" data-target="loading" data-index="{{entryIndex}}" data-part="city" bindfocus="onLocationPartFocus" bindinput="onLocationPartInput" bindblur="scheduleCloseLocationSuggestion" />
+              <view wx:if="{{locationSuggestionTarget == 'loading' && locationSuggestionIndex == entryIndex && locationSuggestionPart == 'city'}}" class="mini-suggestion-box">
+                <view wx:if="{{locationSuggestionOptions.length}}">
+                  <view wx:for="{{locationSuggestionOptions}}" wx:for-item="option" wx:key="*this" class="mini-suggestion-item" data-target="loading" data-index="{{entryIndex}}" data-part="city" data-value="{{option}}" bindtap="selectLocationSuggestion">{{option}}</view>
+                </view>
+                <view wx:else class="mini-suggestion-empty">暂无匹配，可直接输入</view>
+              </view>
+            </view>
+            <view class="location-edit-field">
+              <input placeholder="区" placeholder-class="placeholder" value="{{entry.district}}" data-target="loading" data-index="{{entryIndex}}" data-part="district" bindfocus="onLocationPartFocus" bindinput="onLocationPartInput" bindblur="scheduleCloseLocationSuggestion" />
+              <view wx:if="{{locationSuggestionTarget == 'loading' && locationSuggestionIndex == entryIndex && locationSuggestionPart == 'district'}}" class="mini-suggestion-box">
+                <view wx:if="{{locationSuggestionOptions.length}}">
+                  <view wx:for="{{locationSuggestionOptions}}" wx:for-item="option" wx:key="*this" class="mini-suggestion-item" data-target="loading" data-index="{{entryIndex}}" data-part="district" data-value="{{option}}" bindtap="selectLocationSuggestion">{{option}}</view>
+                </view>
+                <view wx:else class="mini-suggestion-empty">暂无匹配，可直接输入</view>
+              </view>
+            </view>
+            <input class="location-detail-input" placeholder="详细地址" placeholder-class="placeholder" value="{{entry.detail}}" data-target="loading" data-index="{{entryIndex}}" data-part="detail" bindfocus="clearLocationSuggestion" bindinput="onLocationPartInput" />
+          </view>
+          <view wx:if="{{loadingEntries.length > 1 && entryIndex > 0}}" class="location-remove-btn" data-target="loading" data-index="{{entryIndex}}" bindtap="removeLocationEntry">
+            <text class="location-remove-icon">×</text>
+          </view>
         </view>
       </view>
-      <view wx:else class="location-empty-inline">未选择地址</view>
-      <button class="ghost-btn location-button" data-target="loading" bindtap="openLocationPicker">选择装货地</button>
+      <view class="location-button-row">
+        <view class="location-action-btn" data-target="loading" bindtap="addLocationEntry">新增装货地</view>
+        <view class="location-action-btn" data-target="loading" bindtap="openLocationPicker">选择联系人地址</view>
+      </view>
     </view>
 
     <view class="panel form-panel location-panel">
@@ -187,14 +258,97 @@
         </view>
         <text class="location-count {{unloadingEntryCount ? '' : 'empty'}}">{{unloadingEntryCount ? '共 ' + unloadingEntryCount + ' 个地址' : '未选择地址'}}</text>
       </view>
-      <view wx:if="{{unloadingEntryCount}}" class="location-list">
-        <view wx:for="{{unloadingEntries}}" wx:key="id" class="location-item">
-          <text class="location-index">{{index + 1}}</text>
-          <text class="location-text">{{item.value}}</text>
+      <view class="location-edit-list">
+        <view wx:for="{{unloadingEntries}}" wx:for-item="entry" wx:for-index="entryIndex" wx:key="id" class="location-edit-item">
+          <text class="location-index">{{entryIndex + 1}}</text>
+          <view class="location-edit-fields">
+            <view class="location-edit-field">
+              <input placeholder="市" placeholder-class="placeholder" value="{{entry.city}}" data-target="unloading" data-index="{{entryIndex}}" data-part="city" bindfocus="onLocationPartFocus" bindinput="onLocationPartInput" bindblur="scheduleCloseLocationSuggestion" />
+              <view wx:if="{{locationSuggestionTarget == 'unloading' && locationSuggestionIndex == entryIndex && locationSuggestionPart == 'city'}}" class="mini-suggestion-box">
+                <view wx:if="{{locationSuggestionOptions.length}}">
+                  <view wx:for="{{locationSuggestionOptions}}" wx:for-item="option" wx:key="*this" class="mini-suggestion-item" data-target="unloading" data-index="{{entryIndex}}" data-part="city" data-value="{{option}}" bindtap="selectLocationSuggestion">{{option}}</view>
+                </view>
+                <view wx:else class="mini-suggestion-empty">暂无匹配，可直接输入</view>
+              </view>
+            </view>
+            <view class="location-edit-field">
+              <input placeholder="区" placeholder-class="placeholder" value="{{entry.district}}" data-target="unloading" data-index="{{entryIndex}}" data-part="district" bindfocus="onLocationPartFocus" bindinput="onLocationPartInput" bindblur="scheduleCloseLocationSuggestion" />
+              <view wx:if="{{locationSuggestionTarget == 'unloading' && locationSuggestionIndex == entryIndex && locationSuggestionPart == 'district'}}" class="mini-suggestion-box">
+                <view wx:if="{{locationSuggestionOptions.length}}">
+                  <view wx:for="{{locationSuggestionOptions}}" wx:for-item="option" wx:key="*this" class="mini-suggestion-item" data-target="unloading" data-index="{{entryIndex}}" data-part="district" data-value="{{option}}" bindtap="selectLocationSuggestion">{{option}}</view>
+                </view>
+                <view wx:else class="mini-suggestion-empty">暂无匹配，可直接输入</view>
+              </view>
+            </view>
+            <input class="location-detail-input" placeholder="详细地址" placeholder-class="placeholder" value="{{entry.detail}}" data-target="unloading" data-index="{{entryIndex}}" data-part="detail" bindfocus="clearLocationSuggestion" bindinput="onLocationPartInput" />
+          </view>
+          <view wx:if="{{unloadingEntries.length > 1 && entryIndex > 0}}" class="location-remove-btn" data-target="unloading" data-index="{{entryIndex}}" bindtap="removeLocationEntry">
+            <text class="location-remove-icon">×</text>
+          </view>
         </view>
       </view>
-      <view wx:else class="location-empty-inline">未选择地址</view>
-      <button class="ghost-btn location-button" data-target="unloading" bindtap="openLocationPicker">选择卸货地</button>
+      <view class="location-button-row">
+        <view class="location-action-btn" data-target="unloading" bindtap="addLocationEntry">新增卸货地</view>
+        <view class="location-action-btn" data-target="unloading" bindtap="openLocationPicker">选择联系人地址</view>
+      </view>
+    </view>
+
+    <view wx:if="{{isOrderEditMode}}" class="panel form-panel fee-panel">
+      <view class="location-head">
+        <view>
+          <text class="section-title">收费项目</text>
+          <text class="location-hint">和 Web 端订单费用一起保存。</text>
+        </view>
+        <button class="ghost-btn fee-add-btn" bindtap="addOrderFeeRow">新增项目</button>
+      </view>
+      <view wx:for="{{orderFeeRows}}" wx:for-item="fee" wx:for-index="feeIndex" wx:key="*this" class="fee-card">
+        <view class="fee-card-head">
+          <text>项目 {{feeIndex + 1}}</text>
+          <button wx:if="{{orderFeeRows.length > 1}}" class="fee-remove-btn" data-index="{{feeIndex}}" bindtap="removeOrderFeeRow">删除</button>
+        </view>
+        <view class="two-col">
+          <view class="field-row">
+            <text class="field-label">类别</text>
+            <picker range="{{feeCategoryOptions}}" data-index="{{feeIndex}}" data-field="category" data-options-key="feeCategoryOptions" bindchange="onOrderFeePickerChange">
+              <view class="picker-box">{{fee.category || '正常'}}</view>
+            </picker>
+          </view>
+          <view class="field-row">
+            <text class="field-label">币种</text>
+            <picker range="{{currencyOptions}}" data-index="{{feeIndex}}" data-field="currency" data-options-key="currencyOptions" bindchange="onOrderFeePickerChange">
+              <view class="picker-box">{{fee.currency || '港币'}}</view>
+            </picker>
+          </view>
+        </view>
+        <view class="field-row">
+          <text class="field-label">项目名称</text>
+          <input placeholder="例如：中港运费" placeholder-class="placeholder" value="{{fee.name}}" data-index="{{feeIndex}}" data-field="name" bindinput="onOrderFeeInput" />
+        </view>
+        <view class="two-col">
+          <view class="field-row">
+            <text class="field-label">数量</text>
+            <input type="digit" placeholder="1" placeholder-class="placeholder" value="{{fee.quantity}}" data-index="{{feeIndex}}" data-field="quantity" bindinput="onOrderFeeInput" />
+          </view>
+          <view class="field-row">
+            <text class="field-label">单价</text>
+            <input type="digit" placeholder="0" placeholder-class="placeholder" value="{{fee.unitPrice}}" data-index="{{feeIndex}}" data-field="unitPrice" bindinput="onOrderFeeInput" />
+          </view>
+        </view>
+        <view class="two-col">
+          <view class="field-row">
+            <text class="field-label">金额</text>
+            <input type="digit" placeholder="0" placeholder-class="placeholder" value="{{fee.amount}}" data-index="{{feeIndex}}" data-field="amount" bindinput="onOrderFeeInput" />
+          </view>
+          <view class="field-row">
+            <text class="field-label">成本</text>
+            <input type="digit" placeholder="可不填" placeholder-class="placeholder" value="{{fee.cost}}" data-index="{{feeIndex}}" data-field="cost" bindinput="onOrderFeeInput" />
+          </view>
+        </view>
+        <view class="field-row">
+          <text class="field-label">备注</text>
+          <input placeholder="费用备注" placeholder-class="placeholder" value="{{fee.remark}}" data-index="{{feeIndex}}" data-field="remark" bindinput="onOrderFeeInput" />
+        </view>
+      </view>
     </view>
   </block>
 
@@ -218,38 +372,38 @@
       <view wx:if="{{addressBookFormOpen}}" class="address-form">
         <view class="two-col">
           <view class="field-row">
-            <text class="field-label">片区</text>
-            <picker
-              wx:if="{{addressBookAreaLevel1Options.length}}"
-              class="address-area-picker"
-              mode="multiSelector"
-              range="{{addressBookAreaPickerRange}}"
-              value="{{addressBookAreaPickerValue}}"
-              bindcolumnchange="onAddressBookAreaPickerColumnChange"
-              bindchange="onAddressBookAreaPickerChange"
-            >
-              <view class="picker-box picker-box-trigger {{addressBookForm.area ? '' : 'empty'}}">
-                <text class="picker-box-value">{{addressBookForm.area || '请选择市 / 区'}}</text>
-                <text class="picker-box-arrow">⌄</text>
+            <text class="field-label">市</text>
+            <input placeholder="搜索或输入市" placeholder-class="placeholder" value="{{addressBookForm.city}}" data-field="city" bindfocus="onAddressBookLocationFocus" bindinput="onAddressBookFormInput" bindblur="scheduleCloseAddressBookSuggestion" />
+            <view wx:if="{{addressBookSuggestionPart == 'city'}}" class="mini-suggestion-box">
+              <view wx:if="{{addressBookSuggestionOptions.length}}">
+                <view wx:for="{{addressBookSuggestionOptions}}" wx:for-item="option" wx:key="*this" class="mini-suggestion-item" data-field="city" data-value="{{option}}" bindtap="selectAddressBookSuggestion">{{option}}</view>
               </view>
-            </picker>
-            <view wx:else class="picker-box picker-box-trigger disabled">
-              <text class="picker-box-value">暂无可选片区</text>
+              <view wx:else class="mini-suggestion-empty">暂无匹配，可直接输入</view>
             </view>
           </view>
           <view class="field-row">
-            <text class="field-label">联系人</text>
-            <input placeholder="联系人" placeholder-class="placeholder" value="{{addressBookForm.contact}}" data-field="contact" bindinput="onAddressBookFormInput" />
+            <text class="field-label">区</text>
+            <input placeholder="搜索或输入区" placeholder-class="placeholder" value="{{addressBookForm.district}}" data-field="district" bindfocus="onAddressBookLocationFocus" bindinput="onAddressBookFormInput" bindblur="scheduleCloseAddressBookSuggestion" />
+            <view wx:if="{{addressBookSuggestionPart == 'district'}}" class="mini-suggestion-box">
+              <view wx:if="{{addressBookSuggestionOptions.length}}">
+                <view wx:for="{{addressBookSuggestionOptions}}" wx:for-item="option" wx:key="*this" class="mini-suggestion-item" data-field="district" data-value="{{option}}" bindtap="selectAddressBookSuggestion">{{option}}</view>
+              </view>
+              <view wx:else class="mini-suggestion-empty">暂无匹配，可直接输入</view>
+            </view>
           </view>
+        </view>
+        <view class="field-row">
+          <text class="field-label">详细地址</text>
+          <input placeholder="详细地址" placeholder-class="placeholder" value="{{addressBookForm.address}}" data-field="address" bindfocus="clearAddressBookSuggestion" bindinput="onAddressBookFormInput" />
         </view>
         <view class="two-col">
           <view class="field-row">
-            <text class="field-label">电话</text>
-            <input placeholder="电话 / 手机" placeholder-class="placeholder" value="{{addressBookForm.phone}}" data-field="phone" bindinput="onAddressBookFormInput" />
+            <text class="field-label">联系人</text>
+            <input placeholder="联系人" placeholder-class="placeholder" value="{{addressBookForm.contact}}" data-field="contact" bindfocus="clearAddressBookSuggestion" bindinput="onAddressBookFormInput" />
           </view>
           <view class="field-row">
-            <text class="field-label">详细地址</text>
-            <input placeholder="详细地址" placeholder-class="placeholder" value="{{addressBookForm.address}}" data-field="address" bindinput="onAddressBookFormInput" />
+            <text class="field-label">电话</text>
+            <input placeholder="电话 / 手机" placeholder-class="placeholder" value="{{addressBookForm.phone}}" data-field="phone" bindfocus="clearAddressBookSuggestion" bindinput="onAddressBookFormInput" />
           </view>
         </view>
         <view class="field-row">
@@ -293,6 +447,6 @@
 
   <view class="bottom-actions">
     <button class="ghost-btn bottom-btn" bindtap="cancelForm" disabled="{{saving}}">取消</button>
-    <button class="primary-btn bottom-btn" bindtap="submitForm" loading="{{saving}}" disabled="{{loadingRefs || saving}}">保存排车单</button>
+    <button class="primary-btn bottom-btn" bindtap="submitForm" loading="{{saving}}" disabled="{{loadingRefs || saving}}">{{isOrderEditMode ? '保存订单' : '保存排车单'}}</button>
   </view>
 </view>

@@ -18,6 +18,16 @@ function valueText(value) {
   return value === undefined || value === null ? "" : String(value).trim();
 }
 
+function booleanFlag(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  const text = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on", "过磅"].indexOf(text) >= 0) return true;
+  if (["0", "false", "no", "off", "不用过磅"].indexOf(text) >= 0) return false;
+  return fallback;
+}
+
 function normalizeTimestampInputValue(value) {
   const text = valueText(value);
   const matched = text.match(/^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/);
@@ -146,33 +156,44 @@ function sourceClass(source) {
 
 function sanitizeDispatchRow(row) {
   const item = row || {};
+  const status = normalizeDispatchPlanStatus(item.status);
+  const previousStatus = normalizeOptionalDispatchPlanStatus(item.previousStatus || item.previous_status);
   return {
     id: valueText(item.id),
     date: valueText(item.date),
     createdAt: dispatchRowCreatedAt(item, item.date),
-    dispatchNo: valueText(item.dispatchNo),
-    orderNo: valueText(item.orderNo),
+    dispatchNo: valueText(item.dispatchNo || item.dispatch_no),
+    orderNo: valueText(item.orderNo || item.order_no),
+    customerId: valueText(item.customerId || item.customer_id),
     customer: valueText(item.customer),
+    businessType: valueText(item.businessType || item.business_type),
+    currency: valueText(item.currency),
     plate: valueText(item.plate),
     port: valueText(item.port),
+    needsWeighing: booleanFlag(item.needsWeighing ?? item.needs_weighing, false),
     direction: valueText(item.direction),
     tonnage: valueText(item.tonnage),
     quantity: item.quantity === undefined || item.quantity === null ? "" : String(item.quantity).trim(),
     weight: valueText(item.weight),
     loading: valueText(item.loading),
     unloading: valueText(item.unloading),
-    loadTime: valueText(item.loadTime),
-    vehicleSource: valueText(item.vehicleSource),
+    loadTime: valueText(item.loadTime || item.load_time),
+    vehicleSource: valueText(item.vehicleSource || item.vehicle_source),
     supplier: valueText(item.supplier),
-    transportMode: normalizeTransportMode(item.transportMode),
+    transportMode: normalizeTransportMode(item.transportMode || item.transport_mode),
     driver: valueText(item.driver),
-    hkDriver: valueText(item.hkDriver),
-    mainlandDriver: valueText(item.mainlandDriver),
-    status: normalizeDispatchPlanStatus(item.status),
+    hkDriver: valueText(item.hkDriver || item.hk_driver),
+    mainlandDriver: valueText(item.mainlandDriver || item.mainland_driver),
+    status,
+    previousStatus: previousStatus && previousStatus !== status ? previousStatus : "",
     createdByAccountId: Number(item.createdByAccountId || item.created_by_account_id || 0) || null,
     createdByUsername: valueText(item.createdByUsername || item.created_by_username),
     createdByName: valueText(item.createdByName || item.createdByDisplayName || item.created_by_display_name || item.createdByUsername || item.created_by_username),
-    note: valueText(item.note)
+    note: valueText(item.note),
+    tripNoEnabled: booleanFlag(item.tripNoEnabled ?? item.trip_no_enabled, false) ? 1 : 0,
+    tripNo: valueText(item.tripNo || item.trip_no),
+    sixSheetEnabled: booleanFlag(item.sixSheetEnabled ?? item.six_sheet_enabled, false) ? 1 : 0,
+    sixSheetNo: valueText(item.sixSheetNo || item.six_sheet_no)
   };
 }
 
@@ -207,17 +228,30 @@ function rowWithOrder(row, orders, date) {
   return Object.assign({}, row, {
     order: order || {
       no: row.orderNo || "",
+      dispatchNo: row.dispatchNo || "",
+      customerId: row.customerId || "",
       customer: row.customer || "",
+      businessType: row.businessType || "",
+      currency: row.currency || "",
       date: row.date || date,
       port: row.port || "",
+      needsWeighing: booleanFlag(row.needsWeighing, false),
       direction: row.direction || "",
       tonnage: row.tonnage || "",
       quantity: row.quantity || "",
       weight: row.weight || "",
       loading: row.loading || "",
       unloading: row.unloading || "",
+      loadTime: row.loadTime || "",
+      loadingTime: row.loadTime || "",
       vehicleSource: row.vehicleSource || "",
-      supplier: row.supplier || ""
+      supplier: row.supplier || "",
+      status: row.status || "",
+      remark: row.note || "",
+      tripNoEnabled: row.tripNoEnabled ? 1 : 0,
+      tripNo: row.tripNo || "",
+      sixSheetEnabled: row.sixSheetEnabled ? 1 : 0,
+      sixSheetNo: row.sixSheetNo || ""
     }
   });
 }
@@ -338,6 +372,17 @@ function dispatchVehicleSourceText(row) {
   return source || "-";
 }
 
+function dispatchWeighingText(value) {
+  return booleanFlag(value, false) ? "过磅" : "不用过磅";
+}
+
+function dispatchDirectionText(value) {
+  const text = valueText(value);
+  if (text === "进口") return "进口";
+  if (text === "出口") return "出口";
+  return text || "-";
+}
+
 function driverDisplayText(row) {
   const order = row && row.order ? row.order : {};
   const names = uniqueTextList([
@@ -360,14 +405,26 @@ function textMatchesRow(row, keyword) {
     row.port,
     row.direction,
     row.tonnage,
+    row.businessType,
+    row.currency,
     row.loading,
     row.unloading,
+    row.vehicleSource,
     row.supplier,
+    row.driver,
+    row.hkDriver,
+    row.mainlandDriver,
     row.createdByName,
     row.createdByUsername,
     row.note,
     row.order && row.order.no,
-    row.order && row.order.customer
+    row.order && row.order.customer,
+    row.order && row.order.businessType,
+    row.order && row.order.vehicleSource,
+    row.order && row.order.supplier,
+    row.order && row.order.driver,
+    row.order && row.order.hkDriver,
+    row.order && row.order.mainlandDriver
   ].map(valueText).join(" ").toLowerCase();
   return text.indexOf(valueText(keyword).toLowerCase()) >= 0;
 }
@@ -396,23 +453,30 @@ function presentDispatchRows(rows, orders, date, options) {
     });
     const status = dispatchStatusValueForRow(row);
     const source = valueText(order.vehicleSource || row.vehicleSource);
+    const businessType = valueText(order.businessType || row.businessType);
+    const needsWeighing = booleanFlag(row.needsWeighing ?? order.needsWeighing, false);
     return Object.assign({}, row, {
       displayIndex: displayIndex + 1,
       customerText: valueText(order.customer || row.customer) || "-",
+      businessTypeText: businessType || "-",
       dateText: valueText(row.date || date),
       driverText: driverDisplayText(row),
+      highlightTimeText: valueText(row.loadTime) || "未定",
+      highlightPlateText: valueText(row.plate || order.plate) || "-",
       orderNoText: valueText(order.no || row.orderNo) || "-",
       orderStatusText: valueText(order.status),
       creatorText: valueText(row.createdByName || row.createdByUsername),
       routeText: dispatchOrderRouteText(record),
-      sourceText: dispatchVehicleSourceText(row),
+      sourceText: source === "外派车辆" ? "外派车辆" : dispatchVehicleSourceText(row),
       sourceClass: sourceClass(source),
+      supplierHighlightText: source === "外派车辆" ? valueText(order.supplier || row.supplier) : "",
       status,
       previousStatus: normalizeOptionalDispatchPlanStatus(row.previousStatus),
       statusActionDisabled: dispatchStatusLockedForRow(row),
       returnStatus: dispatchReturnStatusForRow(row),
       statusClass: dispatchStatusClass(status),
       timeText: valueText(row.loadTime) || "未定",
+      weighingText: dispatchWeighingText(needsWeighing),
       expanded: expandedIds.indexOf(row.id) >= 0,
       noteText: valueText(row.note || order.remark)
     });
@@ -554,8 +618,12 @@ function dispatchMessageText(rows, orders, date) {
       loading: order.loading || row.loading,
       unloading: order.unloading || row.unloading
     });
+    const rowDate = row.date || date || "-";
+    const time = row.loadTime || order.loadTime || order.loadingTime || "-";
+    const direction = order.direction || row.direction || "";
+    const needsWeighing = row.needsWeighing ?? order.needsWeighing;
     return [
-      `装货时间：${row.date || date || "-"}   ${row.loadTime || "-"}  口岸：${order.port || row.port || "-"}`,
+      `装货时间：${rowDate}   ${time}  ${dispatchWeighingText(needsWeighing)} ${dispatchDirectionText(direction)} 口岸：${order.port || row.port || "-"}`,
       `车牌：${row.plate || order.plate || "-"} 吨位：${order.tonnage || row.tonnage || "-"}    板数：${order.quantity || row.quantity || "-"}`,
       "",
       dispatchLocationBlock("装货地", record, "loading"),
@@ -579,6 +647,7 @@ function createDispatchRowFromOrder(order, date, existingRows) {
     customer: order.customer || "",
     plate: order.plate || "",
     port: order.port || "",
+    needsWeighing: booleanFlag(order.needsWeighing, false),
     direction: order.direction || "",
     tonnage: order.tonnage || "",
     quantity: order.quantity || "",
@@ -612,6 +681,7 @@ function formFromDispatchRow(row, date) {
     currency: order.currency || source.currency || "",
     plate: source.plate || order.plate || "",
     port: order.port || source.port || "",
+    needsWeighing: booleanFlag(source.needsWeighing ?? order.needsWeighing, false),
     direction: order.direction || source.direction || "",
     tonnage: order.tonnage || source.tonnage || "",
     quantity: order.quantity || source.quantity || "",
@@ -631,10 +701,10 @@ function formFromDispatchRow(row, date) {
     createdByUsername: source.createdByUsername || source.created_by_username || "",
     createdByName: source.createdByName || source.createdByDisplayName || source.created_by_display_name || source.createdByUsername || source.created_by_username || "",
     note: source.note || order.remark || "",
-    tripNoEnabled: order.tripNoEnabled ? 1 : 0,
-    tripNo: order.tripNo || "",
-    sixSheetEnabled: order.sixSheetEnabled ? 1 : 0,
-    sixSheetNo: order.sixSheetNo || ""
+    tripNoEnabled: (order.tripNoEnabled || source.tripNoEnabled) ? 1 : 0,
+    tripNo: order.tripNo || source.tripNo || "",
+    sixSheetEnabled: (order.sixSheetEnabled || source.sixSheetEnabled) ? 1 : 0,
+    sixSheetNo: order.sixSheetNo || source.sixSheetNo || ""
   };
 }
 
@@ -647,8 +717,12 @@ function rowFromForm(form, orderNo) {
     dispatchNo: source.dispatchNo,
     orderNo: orderNo || source.orderNo || "",
     customer: source.customer,
+    customerId: source.customerId,
+    businessType: source.businessType || "运输",
+    currency: source.currency || "",
     plate: source.plate,
     port: source.port,
+    needsWeighing: booleanFlag(source.needsWeighing, false),
     direction: source.direction,
     tonnage: source.tonnage,
     quantity: source.quantity,
@@ -667,7 +741,11 @@ function rowFromForm(form, orderNo) {
     createdByAccountId: source.createdByAccountId || source.created_by_account_id || null,
     createdByUsername: source.createdByUsername || source.created_by_username || "",
     createdByName: source.createdByName || source.createdByDisplayName || source.created_by_display_name || source.createdByUsername || source.created_by_username || "",
-    note: source.note
+    note: source.note,
+    tripNoEnabled: source.tripNoEnabled ? 1 : 0,
+    tripNo: source.tripNo || "",
+    sixSheetEnabled: source.sixSheetEnabled ? 1 : 0,
+    sixSheetNo: source.sixSheetNo || ""
   });
 }
 
@@ -679,6 +757,7 @@ function orderPayloadFromForm(form, customer, includeFees) {
     customer: customer.name,
     businessType: source.businessType || "运输",
     port: source.port,
+    needsWeighing: booleanFlag(source.needsWeighing, false),
     direction: source.direction,
     tonnage: source.tonnage,
     currency: source.currency || "",

@@ -391,6 +391,7 @@ function mapOrder(row) {
     customer: row.customer,
     businessType: row.business_type,
     port: row.port,
+    needsWeighing: Boolean(row.needs_weighing),
     direction: row.direction,
     tonnage: row.tonnage,
     currency: row.currency,
@@ -1017,6 +1018,17 @@ async function exportTemplateById(templateId) {
   } catch {
     return null;
   }
+}
+
+async function exportTemplateMetaById(templateId) {
+  const id = Number(templateId || 0);
+  if (!id) return null;
+  return db.prepare("SELECT id, name, content FROM templates WHERE id = ? AND deleted_at IS NULL").get(id);
+}
+
+function isKenfaExportTemplatePayload(value = null) {
+  if (!value || typeof value !== "object") return false;
+  return value.type === "kenfa-export-template" || value.exportKind === "kenfa";
 }
 
 function exportColumnsFromTemplate(template = null) {
@@ -1819,6 +1831,348 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
   if (shouldIncludeReceiptSheet) {
     await addStatementReceiptSheet(workbook, orders);
   }
+  return Buffer.from(await workbook.xlsx.writeBuffer());
+}
+
+const KENFA_LOGO_BASE64 = "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";
+const KENFA_COMPANY_NAME = "深圳市汉业国际货运代理有限公司";
+const KENFA_COMPANY_ADDRESS = "ADD:深圳市南山区招商街道桃花园社区南海大道1115号美年国际广场4栋1205A";
+const KENFA_COMPANY_CONTACT = "联系人:刘先生   TEL:0755-83007202";
+const KENFA_PAYEE_LINES = [
+  "收款账号：",
+  "户名：深圳市汉业国际货运代理有限公司",
+  "账号：760164710106",
+  "开户行：中国银行股份有限公司深圳皇岗支行"
+];
+const KENFA_LOGO_FILE_URL = new URL("./assets/kenfa-logo.png", import.meta.url);
+
+function kenfaAmountToRmb(amount = 0, currency = "人民币", exchange = null) {
+  const value = Number(amount || 0);
+  if (normalizeFeeCurrency(currency) === "HKD" && exchange?.mode === "hkd-to-rmb" && exchange.rate) {
+    return value * Number(exchange.rate || 0);
+  }
+  return value;
+}
+
+function kenfaOrderRmbAmount(order = {}, exchange = null) {
+  const rmb = Number(order.receivableRMB || 0);
+  const hkd = Number(order.receivableHKD || 0);
+  if (exchange?.mode === "hkd-to-rmb" && exchange.rate) return rmb + hkd * Number(exchange.rate || 0);
+  return rmb;
+}
+
+function kenfaInvoiceDate(order = {}) {
+  return textValue(order.date || todayInputValue()).slice(0, 10) || todayInputValue();
+}
+
+function kenfaInvoiceNo(date = "", index = 0) {
+  const compact = date.replaceAll("-", "").slice(2);
+  return index > 0 ? `KF${compact}-${index + 1}` : `KF${compact}`;
+}
+
+function kenfaDestination(order = {}) {
+  return shortLocationValue(order.unloading || order.loading || "");
+}
+
+function kenfaPortOfDeparture(order = {}) {
+  return shortLocationValue(order.loading || order.port || "");
+}
+
+function kenfaCargoOwner(orders = []) {
+  return textValue(orders[0]?.customer || "客户");
+}
+
+function groupedKenfaOrders(orders = []) {
+  const groups = new Map();
+  sortOrdersForExport(orders).forEach((order) => {
+    const date = kenfaInvoiceDate(order);
+    if (!groups.has(date)) groups.set(date, []);
+    groups.get(date).push(order);
+  });
+  return [...groups.entries()].sort(([left], [right]) => left.localeCompare(right));
+}
+
+function kenfaSetCell(cell, value, options = {}) {
+  cell.value = value;
+  cell.font = {
+    name: options.fontName || "Arial",
+    size: Number(options.size || 10),
+    bold: Boolean(options.bold),
+    italic: Boolean(options.italic),
+    color: { argb: options.color ? excelArgb(options.color) : "FF000000" }
+  };
+  cell.alignment = {
+    vertical: "middle",
+    horizontal: options.align || "left",
+    wrapText: options.wrap !== false
+  };
+  if (options.border !== false) {
+    const border = { style: options.borderStyle || "thin", color: { argb: options.borderColor || "FF000000" } };
+    cell.border = { top: border, left: border, bottom: border, right: border };
+  }
+  if (options.fill) {
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: excelArgb(options.fill) } };
+  }
+  if (options.numFmt) cell.numFmt = options.numFmt;
+}
+
+function kenfaThinBorder() {
+  const border = { style: "thin", color: { argb: "FF000000" } };
+  return { top: border, left: border, bottom: border, right: border };
+}
+
+function kenfaBlankMergedCell(worksheet, range, options = {}) {
+  kenfaMerge(worksheet, range);
+  const [start, end] = range.split(":");
+  kenfaSetCell(worksheet.getCell(start), options.value ?? "", options);
+  const matchStart = start.match(/^([A-Z]+)(\d+)$/);
+  const matchEnd = end.match(/^([A-Z]+)(\d+)$/);
+  if (!matchStart || !matchEnd) return;
+  const startCol = worksheet.getColumn(matchStart[1]).number;
+  const endCol = worksheet.getColumn(matchEnd[1]).number;
+  const startRow = Number(matchStart[2]);
+  const endRow = Number(matchEnd[2]);
+  for (let row = startRow; row <= endRow; row += 1) {
+    for (let col = startCol; col <= endCol; col += 1) {
+      worksheet.getCell(row, col).border = options.border === false ? undefined : kenfaThinBorder();
+    }
+  }
+}
+
+function kenfaAddLogo(workbook, worksheet, anchor = {}) {
+  try {
+    const logoBuffer = fs.existsSync(KENFA_LOGO_FILE_URL)
+      ? fs.readFileSync(KENFA_LOGO_FILE_URL)
+      : Buffer.from(KENFA_LOGO_BASE64, "base64");
+    const imageId = workbook.addImage({
+      buffer: logoBuffer,
+      extension: "png"
+    });
+    worksheet.addImage(imageId, {
+      tl: { col: Number(anchor.col ?? 0.4), row: Number(anchor.row ?? 0.6) },
+      ext: { width: Number(anchor.width || 205), height: Number(anchor.height || 74) },
+      editAs: "oneCell"
+    });
+  } catch (error) {
+    console.warn("Kenfa logo render failed", error.message);
+  }
+}
+
+function kenfaFormatDateCn(date = "") {
+  const match = textValue(date).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return textValue(date);
+  return `${match[1]}.${match[2]}.${match[3]}`;
+}
+
+function kenfaFeeLabel(name = "") {
+  const text = textValue(name).trim();
+  const labels = [
+    [/中港|吨车|运费/, "China Hong Kong ton fare                              中港吨车费"],
+    [/香港报关|报关/, "Customs declaration in Hong Kong                                     香港报关"],
+    [/无缝/, "Hong Kong seamless         香港无缝"],
+    [/过磅|称重/, "Weighing fee                   过磅费"],
+    [/停车/, "Factory parking fee            工厂停车费"]
+  ];
+  return labels.find(([pattern]) => pattern.test(text))?.[1] || text || "Service fee";
+}
+
+function kenfaDailyFeeRows(dayOrders = [], exchange = null) {
+  const rows = [];
+  dayOrders.forEach((order) => {
+    const feeRows = Array.isArray(order.fees) ? order.fees.filter(feeHasRecordedValue) : [];
+    feeRows.forEach((fee) => {
+      rows.push({
+        name: kenfaFeeLabel(fee.name),
+        remark: fee.note || (order.no ? `Order: ${order.no}` : ""),
+        amount: Number(kenfaAmountToRmb(fee.amount, fee.currency, exchange).toFixed(2))
+      });
+    });
+    if (!feeRows.length) {
+      rows.push({
+        name: order.businessType || "China Hong Kong ton fare                              中港吨车费",
+        remark: [order.no ? `Order: ${order.no}` : "", order.port || "", order.direction || ""].filter(Boolean).join("  "),
+        amount: Number(kenfaOrderRmbAmount(order, exchange).toFixed(2))
+      });
+    }
+  });
+  return rows.length ? rows : [{ name: "China Hong Kong ton fare                              中港吨车费", remark: "", amount: 0 }];
+}
+
+function kenfaMerge(worksheet, range) {
+  try {
+    worksheet.mergeCells(range);
+  } catch {
+    // Template-like merged cells can overlap when a future edit shifts rows; keep export alive.
+  }
+}
+
+function kenfaApplyDailyLayout(worksheet) {
+  [16.5, 11, 5.33, 11.16, 3.83, 11, 2.5, 7.66, 4.5, 4.16, 27.16, 24].forEach((width, index) => {
+    worksheet.getColumn(index + 1).width = width;
+  });
+  [20, 34.5, 14.25, 15, 34.5, 45.75, 25.75, 60.75, 55.5, 42, 25.75, 42.75, 48, 30.75, 30, 41.25, 28.75, 25.75, 25.75, 23, 25.75].forEach((height, index) => {
+    worksheet.getRow(index + 1).height = height;
+  });
+  worksheet.pageSetup = {
+    paperSize: 9,
+    orientation: "portrait",
+    fitToPage: true,
+    fitToWidth: 1,
+    fitToHeight: 0,
+    margins: { left: 0.35, right: 0.35, top: 0.35, bottom: 0.35, header: 0.1, footer: 0.1 }
+  };
+}
+
+function addKenfaDailySheet(workbook, date, dayOrders, index, exchange = null) {
+  const first = dayOrders[0] || {};
+  const invoiceNo = kenfaInvoiceNo(date, index);
+  const worksheet = workbook.addWorksheet(String(index + 1));
+  kenfaApplyDailyLayout(worksheet);
+  kenfaAddLogo(workbook, worksheet, { col: 0.25, row: 0.4, width: 205, height: 74 });
+  ["A1:E3", "F1:K1", "F2:K2", "F3:K4", "A4:E4"].forEach((range) => kenfaMerge(worksheet, range));
+  kenfaSetCell(worksheet.getCell("F1"), KENFA_COMPANY_NAME, { bold: true, size: 14, align: "left", border: false });
+  kenfaSetCell(worksheet.getCell("F2"), KENFA_COMPANY_ADDRESS, { size: 11, border: false });
+  kenfaSetCell(worksheet.getCell("F3"), KENFA_COMPANY_CONTACT, { size: 11, border: false });
+  kenfaSetCell(worksheet.getCell("A4"), "", { border: false });
+
+  kenfaBlankMergedCell(worksheet, "A5:K5", { value: "INVOICE", bold: true, size: 22, align: "center" });
+  kenfaBlankMergedCell(worksheet, "A6:A6", { value: "Cargo owner        货主：", bold: true, size: 11 });
+  kenfaBlankMergedCell(worksheet, "B6:F6", { value: kenfaCargoOwner(dayOrders), bold: true, size: 11, align: "center" });
+  kenfaBlankMergedCell(worksheet, "G6:I6", { value: "INV No.:", bold: true, size: 11, align: "right" });
+  kenfaBlankMergedCell(worksheet, "J6:K6", { value: invoiceNo, color: "#ff0000", size: 11 });
+  kenfaBlankMergedCell(worksheet, "B7:C7", { value: "" });
+  kenfaBlankMergedCell(worksheet, "E7:G7", { value: "" });
+  kenfaBlankMergedCell(worksheet, "H7:J7", { value: "运输時間:", bold: true, size: 11 });
+  kenfaSetCell(worksheet.getCell("K7"), kenfaFormatDateCn(date), { size: 11 });
+  kenfaSetCell(worksheet.getCell("A8"), "Port of departure            起運港：", { bold: true, size: 11 });
+  kenfaBlankMergedCell(worksheet, "B8:C8", { value: kenfaPortOfDeparture(first), size: 11 });
+  kenfaSetCell(worksheet.getCell("D8"), "Port of destination\n目的港：", { bold: true, size: 11 });
+  kenfaBlankMergedCell(worksheet, "E8:G8", { value: kenfaDestination(first), size: 11 });
+  kenfaBlankMergedCell(worksheet, "H8:J8", { value: "Delivery license plate\n交货车牌：", bold: true, size: 11 });
+  kenfaSetCell(worksheet.getCell("K8"), first.plate || "", { size: 11 });
+  kenfaSetCell(worksheet.getCell("A9"), "number of packages\n件數：", { bold: true, size: 11 });
+  kenfaBlankMergedCell(worksheet, "B9:C9", { value: first.quantity || "", size: 11 });
+  kenfaSetCell(worksheet.getCell("D9"), "number of packages\n重量(KG):", { bold: true, size: 11 });
+  kenfaBlankMergedCell(worksheet, "E9:G9", { value: first.weight || "", size: 11 });
+  kenfaBlankMergedCell(worksheet, "H9:J9", { value: "exchange rate\n汇率：", bold: true, size: 11 });
+  kenfaSetCell(worksheet.getCell("K9"), exchange?.mode === "hkd-to-rmb" ? Number(exchange.rate || 0) : "", { size: 11 });
+  kenfaSetCell(worksheet.getCell("A10"), "model of car          车型：", { bold: true, size: 11 });
+  kenfaBlankMergedCell(worksheet, "B10:C10", { value: first.tonnage || first.transportMode || "", bold: true, size: 11 });
+  kenfaSetCell(worksheet.getCell("D10"), "Number of plates板", { bold: true, size: 11 });
+  kenfaBlankMergedCell(worksheet, "E10:G10", { value: first.quantity || "", size: 11 });
+  kenfaBlankMergedCell(worksheet, "H10:J10", { value: "currency system币制", bold: true, size: 11 });
+  kenfaSetCell(worksheet.getCell("K10"), "人民币/RMB", { size: 11 });
+
+  kenfaBlankMergedCell(worksheet, "A11:B11", { value: "費用名称:", bold: true, align: "center", size: 11 });
+  kenfaBlankMergedCell(worksheet, "C11:J11", { value: "备注：", bold: true, align: "center", size: 11 });
+  kenfaSetCell(worksheet.getCell("K11"), "金额：", { bold: true, size: 11 });
+
+  const firstDetailRow = 12;
+  const feeRows = kenfaDailyFeeRows(dayOrders, exchange).slice(0, 12);
+  feeRows.forEach((fee, rowIndex) => {
+    const rowNumber = firstDetailRow + rowIndex;
+    kenfaBlankMergedCell(worksheet, `A${rowNumber}:B${rowNumber}`, { value: fee.name, size: 11, align: "center" });
+    kenfaBlankMergedCell(worksheet, `C${rowNumber}:J${rowNumber}`, { value: fee.remark, size: 10, align: "center" });
+    kenfaSetCell(worksheet.getCell(`K${rowNumber}`), fee.amount, { size: 11, numFmt: "#,##0.00" });
+    worksheet.getRow(rowNumber).height = [42.75, 48, 30.75, 30, 41.25][rowIndex] || 30;
+  });
+
+  const totalRow = firstDetailRow + Math.max(feeRows.length, 1);
+  kenfaBlankMergedCell(worksheet, `A${totalRow}:J${totalRow}`, { value: "", size: 11 });
+  kenfaSetCell(worksheet.getCell(`K${totalRow}`), { formula: `SUM(K${firstDetailRow}:K${totalRow - 1})` }, { size: 11, numFmt: "#,##0.00" });
+  kenfaBlankMergedCell(worksheet, `I${totalRow + 1}:K${totalRow + 1}`, { value: "制表：  廖木凤", bold: true, align: "center", size: 11, border: false });
+  kenfaBlankMergedCell(worksheet, `A${totalRow + 2}:C${totalRow + 2}`, { value: "備註: ", bold: true, size: 11, border: false });
+  kenfaBlankMergedCell(worksheet, `A${totalRow + 3}:K${totalRow + 3}`, { value: "INVOICE如有問題,煩請於三日內與本公司經辦人聯系更改.", bold: true, size: 11, border: false });
+
+  return {
+    sheetName: worksheet.name,
+    invoiceNo,
+    date,
+    departure: kenfaPortOfDeparture(first),
+    destination: kenfaDestination(first),
+    totalCell: `'${worksheet.name}'!K${totalRow}`
+  };
+}
+
+async function renderKenfaStatementXlsxBuffer(orders, title = "客户对账单", exchangeInput = null) {
+  const exchange = normalizeExportExchange(exchangeInput);
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = "汉业管理系统";
+  workbook.created = new Date();
+  const groups = groupedKenfaOrders(orders);
+  const dailySummaries = groups.map(([date, dayOrders], index) => addKenfaDailySheet(workbook, date, dayOrders, index, exchange));
+  const summary = workbook.addWorksheet("总表");
+  [6.16, 12.5, 15.66, 3.5, 7.66, 18.33, 14.66, 10.66, 20.66, 9, 14.16, 9].forEach((width, index) => {
+    summary.getColumn(index + 1).width = width;
+  });
+  [17, 15, 15, 25.5, 42, 33.75, 17.25, 49.5].forEach((height, index) => {
+    summary.getRow(index + 1).height = height;
+  });
+  summary.pageSetup = {
+    paperSize: 9,
+    orientation: "portrait",
+    fitToPage: true,
+    fitToWidth: 1,
+    fitToHeight: 0,
+    margins: { left: 0.35, right: 0.35, top: 0.35, bottom: 0.35, header: 0.1, footer: 0.1 }
+  };
+  const startDate = groups[0]?.[0] || "";
+  const endDate = groups[groups.length - 1]?.[0] || "";
+  const customer = kenfaCargoOwner(orders);
+  kenfaAddLogo(workbook, summary, { col: 0.35, row: 0.55, width: 205, height: 74 });
+  ["A1:D4", "E1:I1", "E2:I2", "E3:I3", "A5:I5", "B6:G6", "F7:I7"].forEach((range) => kenfaMerge(summary, range));
+  kenfaSetCell(summary.getCell("E1"), KENFA_COMPANY_NAME, { bold: true, size: 14, border: false });
+  kenfaSetCell(summary.getCell("E2"), KENFA_COMPANY_ADDRESS, { bold: true, size: 11, border: false });
+  kenfaSetCell(summary.getCell("E3"), KENFA_COMPANY_CONTACT, { bold: true, size: 11, border: false });
+  const titleMonth = endDate ? `${endDate.slice(0, 4)}年${Number(endDate.slice(5, 7))}月份结书` : "月份结书";
+  kenfaSetCell(summary.getCell("A5"), titleMonth, { bold: true, size: 22, align: "center", border: false });
+  kenfaSetCell(summary.getCell("A6"), "TO：", { bold: true, size: 12, border: false });
+  kenfaSetCell(summary.getCell("B6"), customer, { bold: true, size: 11, align: "center", border: false });
+  kenfaSetCell(summary.getCell("A7"), `statement No 对帐单号：KFJM${(endDate || todayInputValue()).replaceAll("-", "").slice(0, 6)}A`, { bold: true, size: 11, border: false });
+  kenfaSetCell(summary.getCell("F7"), `${startDate || "全部"}-${endDate || "全部"}`, { size: 11, border: false });
+
+  const headerRow = 8;
+  const headers = [
+    "序号",
+    "Invoice date\n发票日期",
+    "Port of departure\n起运地",
+    "Port of destination\n目的地",
+    "",
+    "",
+    "Invoice No\n发票编号",
+    "",
+    "Total amount（RMB）\n总金额(人民币)"
+  ];
+  headers.forEach((value, index) => {
+    kenfaSetCell(summary.getCell(headerRow, index + 1), value, { bold: true, align: "center", size: index === 8 ? 12 : 11 });
+  });
+  kenfaMerge(summary, `D${headerRow}:F${headerRow}`);
+  kenfaMerge(summary, `G${headerRow}:H${headerRow}`);
+  dailySummaries.forEach((item, index) => {
+    const rowNumber = headerRow + 1 + index;
+    summary.getRow(rowNumber).height = 18;
+    kenfaSetCell(summary.getCell(rowNumber, 1), index + 1, { bold: true, align: "center", size: 11 });
+    kenfaSetCell(summary.getCell(rowNumber, 2), item.date, { align: "center", size: 11 });
+    kenfaSetCell(summary.getCell(rowNumber, 3), item.departure, { bold: true, align: "center", size: 11 });
+    kenfaMerge(summary, `D${rowNumber}:F${rowNumber}`);
+    kenfaSetCell(summary.getCell(rowNumber, 4), item.destination, { bold: true, align: "center", size: 11 });
+    kenfaMerge(summary, `G${rowNumber}:H${rowNumber}`);
+    kenfaSetCell(summary.getCell(rowNumber, 7), item.invoiceNo, { bold: true, align: "center", size: 11 });
+    kenfaSetCell(summary.getCell(rowNumber, 9), { formula: item.totalCell }, { align: "right", numFmt: "#,##0.00", size: 11, color: index === 10 ? "#ff0000" : "#000000" });
+  });
+  const totalRow = Math.max(headerRow + 1 + dailySummaries.length, 24);
+  kenfaMerge(summary, `A${totalRow}:H${totalRow}`);
+  kenfaSetCell(summary.getCell(totalRow, 1), "", { bold: true, align: "right" });
+  kenfaSetCell(summary.getCell(totalRow, 9), { formula: `SUM(I${headerRow + 1}:I${totalRow - 1})` }, { bold: true, align: "right", numFmt: "#,##0.00", size: 12 });
+  const vatRow = totalRow + 1;
+  kenfaMerge(summary, `A${vatRow}:H${vatRow}`);
+  kenfaMerge(summary, `G${vatRow}:H${vatRow}`);
+  kenfaSetCell(summary.getCell(vatRow, 7), "含6%增值税价格", { align: "center", size: 11, border: false });
+  kenfaSetCell(summary.getCell(vatRow, 9), { formula: `I${totalRow}*1.06` }, { bold: true, align: "right", numFmt: "#,##0.00", size: 12, border: false });
+  kenfaBlankMergedCell(summary, `A${vatRow + 1}:H${vatRow + 1}`, { value: "1)如费用有不相符之处，请于七天内通知。", size: 11, border: false });
+  KENFA_PAYEE_LINES.forEach((line, index) => {
+    kenfaBlankMergedCell(summary, `B${vatRow + 2 + index}:G${vatRow + 2 + index}`, { value: line, bold: true, size: 11, border: false });
+  });
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 
@@ -3588,6 +3942,10 @@ function mapTemplate(row, options = {}) {
   };
 }
 
+function isProtectedTemplateName(name = "") {
+  return ["通用模板", "肯发专用"].includes(String(name || "").trim());
+}
+
 function mapRule(row) {
   return {
     id: row.id,
@@ -4517,7 +4875,42 @@ async function sendStoredFile(req, res, disposition) {
   res.status(410).json({ message: "该附件尚未迁移到 OSS，请配置 OSS 并重启服务完成迁移" });
 }
 
+async function sendStoredFileContent(req, res) {
+  const id = Number(req.params.id || 0);
+  const row = await db.prepare("SELECT * FROM files WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!row) {
+    res.status(404).json({ message: "文件不存在" });
+    return;
+  }
+  if (row.storage_provider !== "oss" || !row.object_key) {
+    res.status(410).json({ message: "该附件尚未迁移到 OSS，请配置 OSS 并重启服务完成迁移" });
+    return;
+  }
+  if (!ossClient) {
+    res.status(503).json({ message: "OSS 文件存储未配置，暂时无法读取该附件" });
+    return;
+  }
+  try {
+    const result = await ossClient.getStream(row.object_key);
+    res.setHeader("Content-Type", normalizeMime(row.mime));
+    res.setHeader("Content-Disposition", contentDispositionHeader("inline", row.filename));
+    res.setHeader("Cache-Control", "private, max-age=300");
+    await writeAudit("preview", "file", String(id), row.filename);
+    result.stream.on("error", (error) => {
+      console.error("OSS stream failed", error);
+      if (!res.headersSent) res.status(502).json({ message: "OSS 文件读取失败" });
+      else res.destroy(error);
+    });
+    result.stream.pipe(res);
+  } catch (error) {
+    console.error("OSS content fetch failed", error);
+    res.status(502).json({ message: "OSS 文件读取失败" });
+  }
+}
+
 app.get("/api/files/:id/preview", async (req, res) => sendStoredFile(req, res, "inline"));
+
+app.get("/api/files/:id/content", sendStoredFileContent);
 
 app.get("/api/files/:id/download", async (req, res) => sendStoredFile(req, res, "attachment"));
 
@@ -4822,6 +5215,28 @@ function dispatchRowText(row = {}, key = "") {
   return String(row?.[key] ?? "").trim();
 }
 
+function dispatchRowFieldProvided(row = {}, camelKey = "", snakeKey = "") {
+  if (!row || typeof row !== "object") return false;
+  return Object.prototype.hasOwnProperty.call(row, camelKey)
+    || (snakeKey ? Object.prototype.hasOwnProperty.call(row, snakeKey) : false);
+}
+
+function dispatchRowStringField(row = {}, existingRow = null, camelKey = "", snakeKey = "", fallback = "") {
+  if (Object.prototype.hasOwnProperty.call(row, camelKey)) return String(row[camelKey] ?? "");
+  if (snakeKey && Object.prototype.hasOwnProperty.call(row, snakeKey)) return String(row[snakeKey] ?? "");
+  if (existingRow && Object.prototype.hasOwnProperty.call(existingRow, camelKey)) return String(existingRow[camelKey] ?? "");
+  if (existingRow && snakeKey && Object.prototype.hasOwnProperty.call(existingRow, snakeKey)) return String(existingRow[snakeKey] ?? "");
+  return String(fallback ?? "");
+}
+
+function dispatchRowBooleanField(row = {}, existingRow = null, camelKey = "", snakeKey = "", fallback = false) {
+  if (Object.prototype.hasOwnProperty.call(row, camelKey)) return booleanFlag(row[camelKey], fallback);
+  if (snakeKey && Object.prototype.hasOwnProperty.call(row, snakeKey)) return booleanFlag(row[snakeKey], fallback);
+  if (existingRow && Object.prototype.hasOwnProperty.call(existingRow, camelKey)) return booleanFlag(existingRow[camelKey], fallback);
+  if (existingRow && snakeKey && Object.prototype.hasOwnProperty.call(existingRow, snakeKey)) return booleanFlag(existingRow[snakeKey], fallback);
+  return fallback;
+}
+
 function localTimestampInputValue(date = new Date()) {
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
   return local.toISOString().slice(0, 19).replace("T", " ");
@@ -4950,10 +5365,13 @@ function normalizeDispatchPlanRow(row = {}, existingRow = null, requestCreator =
     date: String(fallbackDate || item.date || ""),
     dispatchNo: String(item.dispatchNo || ""),
     orderNo: String(item.orderNo || ""),
+    customerId: dispatchRowStringField(item, existingRow, "customerId", "customer_id"),
     customer: String(item.customer || ""),
+    businessType: dispatchRowStringField(item, existingRow, "businessType", "business_type"),
+    currency: dispatchRowStringField(item, existingRow, "currency"),
     plate: String(item.plate || ""),
     port: String(item.port || ""),
-    needsWeighing: booleanFlag(item.needsWeighing ?? item.needs_weighing, false),
+    needsWeighing: dispatchRowBooleanField(item, existingRow, "needsWeighing", "needs_weighing", false),
     direction: String(item.direction || ""),
     tonnage: String(item.tonnage || ""),
     quantity: item.quantity ?? "",
@@ -4972,7 +5390,11 @@ function normalizeDispatchPlanRow(row = {}, existingRow = null, requestCreator =
     createdByAccountId: creator.createdByAccountId,
     createdByUsername: creator.createdByUsername,
     createdByName: creator.createdByName,
-    note: String(item.note || "")
+    note: String(item.note || ""),
+    tripNoEnabled: dispatchRowBooleanField(item, existingRow, "tripNoEnabled", "trip_no_enabled", false) ? 1 : 0,
+    tripNo: dispatchRowStringField(item, existingRow, "tripNo", "trip_no"),
+    sixSheetEnabled: dispatchRowBooleanField(item, existingRow, "sixSheetEnabled", "six_sheet_enabled", false) ? 1 : 0,
+    sixSheetNo: dispatchRowStringField(item, existingRow, "sixSheetNo", "six_sheet_no")
   };
 }
 
@@ -5314,7 +5736,10 @@ function dispatchRowsEquivalent(left = {}, right = {}) {
     "id",
     "dispatchNo",
     "orderNo",
+    "customerId",
     "customer",
+    "businessType",
+    "currency",
     "plate",
     "port",
     "needsWeighing",
@@ -5333,10 +5758,14 @@ function dispatchRowsEquivalent(left = {}, right = {}) {
     "mainlandDriver",
     "status",
     "previousStatus",
-    "note"
+    "note",
+    "tripNoEnabled",
+    "tripNo",
+    "sixSheetEnabled",
+    "sixSheetNo"
   ];
   return keys.every((key) => {
-    if (key === "needsWeighing") {
+    if (["needsWeighing", "tripNoEnabled", "sixSheetEnabled"].includes(key)) {
       return booleanFlag(left?.[key], false) === booleanFlag(right?.[key], false);
     }
     return String(left?.[key] ?? "") === String(right?.[key] ?? "");
@@ -5488,7 +5917,10 @@ function normalizeDispatchRecycleRow(row = {}, planDate = todayInputValue()) {
     createdAt: dispatchRowCreatedAt(item, planDate),
     dispatchNo: String(item.dispatchNo || item.dispatch_no || ""),
     orderNo: String(item.orderNo || item.order_no || ""),
+    customerId: String(item.customerId || item.customer_id || ""),
     customer: String(item.customer || ""),
+    businessType: String(item.businessType || item.business_type || ""),
+    currency: String(item.currency || ""),
     plate: String(item.plate || ""),
     port: String(item.port || ""),
     needsWeighing: booleanFlag(item.needsWeighing ?? item.needs_weighing, false),
@@ -5511,6 +5943,10 @@ function normalizeDispatchRecycleRow(row = {}, planDate = todayInputValue()) {
     createdByUsername: creator.createdByUsername,
     createdByName: creator.createdByName,
     note: String(item.note || ""),
+    tripNoEnabled: booleanFlag(item.tripNoEnabled ?? item.trip_no_enabled, false) ? 1 : 0,
+    tripNo: String(item.tripNo || item.trip_no || ""),
+    sixSheetEnabled: booleanFlag(item.sixSheetEnabled ?? item.six_sheet_enabled, false) ? 1 : 0,
+    sixSheetNo: String(item.sixSheetNo || item.six_sheet_no || ""),
     date: String(item.date || planDate || "")
   };
 }
@@ -5691,7 +6127,7 @@ function dispatchRecycleRowFromOrder(order = {}) {
     customer: mapped.customer || "",
     plate: mapped.plate || "",
     port: mapped.port || "",
-    needsWeighing: false,
+    needsWeighing: booleanFlag(mapped.needsWeighing, false),
     direction: mapped.direction || "",
     tonnage: mapped.tonnage || "",
     quantity: mapped.quantity || "",
@@ -5733,6 +6169,7 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = []) {
   const updateOrder = await db.prepare(`
     UPDATE orders
     SET dispatch_no = @dispatchNo,
+        needs_weighing = @needsWeighing,
         vehicle_source = @vehicleSource,
         supplier = @supplier,
         plate = @plate,
@@ -5765,6 +6202,7 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = []) {
     await updateOrder.run({
       no: order.no,
       dispatchNo: dispatchNo || order.dispatch_no || "",
+      needsWeighing: booleanFlag(row.needsWeighing ?? order.needs_weighing, false) ? 1 : 0,
       vehicleSource: dispatchRowText(row, "vehicleSource") || order.vehicle_source || "",
       supplier: dispatchRowText(row, "vehicleSource") === "外派车辆" ? dispatchRowText(row, "supplier") : "",
       plate: dispatchRowText(row, "plate"),
@@ -6144,7 +6582,16 @@ app.get("/api/orders/export/excel", async (req, res) => {
 app.post("/api/orders/export/excel", async (req, res) => {
   const orderNos = Array.isArray(req.body.orderNos) ? req.body.orderNos.map(String).filter(Boolean) : [];
   const title = String(req.body.title || "订单导出").trim() || "订单导出";
-  const template = req.body.template && typeof req.body.template === "object" ? req.body.template : await exportTemplateById(req.body.templateId);
+  const templateMeta = await exportTemplateMetaById(req.body.templateId);
+  let template = req.body.template && typeof req.body.template === "object" ? req.body.template : null;
+  if (!template && templateMeta?.content) {
+    try {
+      template = JSON.parse(templateMeta.content);
+    } catch {
+      template = null;
+    }
+  }
+  const visualTemplate = template?.type === "visual-export-template" ? template : null;
   const exchange = normalizeExportExchange(req.body.exchange);
   const orders = await loadExportOrdersFromRequest(req.body, orderNos);
   if (orders.length === 0) {
@@ -6152,9 +6599,14 @@ app.post("/api/orders/export/excel", async (req, res) => {
     return;
   }
   try {
-    const body = await renderOrdersXlsxBuffer(orders, title, template, exchange, {
-      includeReceiptSheet: Boolean(req.body.includeReceiptSheet)
-    });
+    const useKenfaTemplate = req.body.templateKind === "kenfa"
+      || templateMeta?.name === "肯发专用"
+      || isKenfaExportTemplatePayload(template);
+    const body = useKenfaTemplate
+      ? await renderKenfaStatementXlsxBuffer(orders, title, exchange)
+      : await renderOrdersXlsxBuffer(orders, title, visualTemplate, exchange, {
+        includeReceiptSheet: Boolean(req.body.includeReceiptSheet)
+      });
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(orderExportFilename(orders, "xlsx"))}`);
     await writeAudit("export", "order", orderNos.join(",") || "snapshot", `Excel ${orders.length} 条`);
@@ -6244,6 +6696,7 @@ async function readOrderPayload(body, existing = null) {
     customer: String(pickBody(body, "customer", "customer_name", existing?.customer || "") || "").trim(),
     businessType: String(pickBody(body, "businessType", "business_type", existing?.business_type || "运输") || "运输").trim(),
     port: String(pickBody(body, "port", null, existing?.port || "") || "").trim(),
+    needsWeighing: booleanFlag(pickBody(body, "needsWeighing", "needs_weighing", existing?.needs_weighing || false), false) ? 1 : 0,
     direction: String(pickBody(body, "direction", null, existing?.direction || "") || "").trim(),
     tonnage: String(pickBody(body, "tonnage", null, existing?.tonnage || "") || "").trim(),
     currency: String(pickBody(body, "currency", null, existing?.currency || "") || "").trim(),
@@ -6355,12 +6808,12 @@ app.post("/api/orders", async (req, res) => {
     await db.prepare(`
       INSERT INTO orders
         (no, dispatch_no, customer_id, customer, business_type, port, direction, tonnage, currency, quantity,
-         weight, vehicle_source, supplier, plate, driver, hk_driver, mainland_driver, transport_mode, loading, unloading, order_date, receivable_hkd,
+         needs_weighing, weight, vehicle_source, supplier, plate, driver, hk_driver, mainland_driver, transport_mode, loading, unloading, order_date, receivable_hkd,
          receivable_rmb, status, created_by_account_id, created_by_username, created_by_display_name, remark,
          trip_no_enabled, trip_no, six_sheet_enabled, six_sheet_no)
       VALUES
         (@no, @dispatchNo, @customerId, @customer, @businessType, @port, @direction, @tonnage, @currency,
-         @quantity, @weight, @vehicleSource, @supplier, @plate, @driver, @hkDriver, @mainlandDriver, @transportMode, @loading, @unloading, @date,
+         @quantity, @needsWeighing, @weight, @vehicleSource, @supplier, @plate, @driver, @hkDriver, @mainlandDriver, @transportMode, @loading, @unloading, @date,
          @receivableHKD, @receivableRMB, @status, @createdByAccountId, @createdByUsername, @createdByName, @remark, @tripNoEnabled, @tripNo,
          @sixSheetEnabled, @sixSheetNo)
     `).run(item);
@@ -6473,7 +6926,7 @@ app.patch("/api/orders/:no", async (req, res) => {
       UPDATE orders
       SET dispatch_no = @dispatchNo,
           customer_id = @customerId, customer = @customer, business_type = @businessType,
-          port = @port, direction = @direction, tonnage = @tonnage, currency = @currency,
+          port = @port, needs_weighing = @needsWeighing, direction = @direction, tonnage = @tonnage, currency = @currency,
           quantity = @quantity, weight = @weight, vehicle_source = @vehicleSource,
           supplier = @supplier, plate = @plate, driver = @driver, hk_driver = @hkDriver,
           mainland_driver = @mainlandDriver, transport_mode = @transportMode,
@@ -7955,6 +8408,10 @@ app.post("/api/templates", async (req, res) => {
     res.status(400).json({ message: "模板名称不能为空" });
     return;
   }
+  if (isProtectedTemplateName(item.name)) {
+    res.status(400).json({ message: `${item.name}为系统保留模板，不能新建` });
+    return;
+  }
   const duplicate = await db.prepare("SELECT id FROM templates WHERE name = ? AND deleted_at IS NULL").get(item.name);
   if (duplicate) {
     res.status(409).json({ message: "模板名称已存在" });
@@ -7986,6 +8443,10 @@ app.patch("/api/templates/:id", async (req, res) => {
     res.status(400).json({ message: "模板名称不能为空" });
     return;
   }
+  if (isProtectedTemplateName(item.name)) {
+    res.status(400).json({ message: `${item.name}为系统保留模板，不能修改` });
+    return;
+  }
   const duplicate = await db.prepare("SELECT id FROM templates WHERE name = ? AND id != ? AND deleted_at IS NULL").get(item.name, id);
   if (duplicate) {
     res.status(409).json({ message: "模板名称已存在" });
@@ -8007,6 +8468,15 @@ app.patch("/api/templates/:id", async (req, res) => {
 
 app.delete("/api/templates/:id", async (req, res) => {
   const id = Number(req.params.id);
+  const current = await db.prepare("SELECT id, name FROM templates WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!current) {
+    res.status(404).json({ message: "模板不存在或已删除" });
+    return;
+  }
+  if (isProtectedTemplateName(current.name)) {
+    res.status(400).json({ message: `${current.name}为系统保留模板，不能删除` });
+    return;
+  }
   const result = await db.prepare("UPDATE templates SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(id);
   if (result.changes === 0) {
     res.status(404).json({ message: "模板不存在或已删除" });

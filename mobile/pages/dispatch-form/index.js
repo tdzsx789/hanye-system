@@ -20,9 +20,71 @@ const {
 } = require("../../utils/dispatch");
 
 function titleForMode(mode) {
+  if (mode === "order-edit") return "编辑订单";
   if (mode === "edit") return "编辑排车单";
   if (mode === "copy") return "复制排车单";
   return "新建排车单";
+}
+
+function subtitleForMode(mode, form = {}) {
+  if (mode === "order-edit") {
+    return `订单号：${form.orderNo || "保存时生成"} · 排车单号：${form.dispatchNo || "-"}`;
+  }
+  return `排车单号：${form.dispatchNo || "保存时生成"}`;
+}
+
+function isEditMode(mode) {
+  return mode === "edit" || mode === "order-edit";
+}
+
+function isOrderEditMode(mode) {
+  return mode === "order-edit";
+}
+
+function dispatchStatusFromOrderStatus(status) {
+  const text = status === undefined || status === null ? "" : String(status).trim();
+  if (text === "已签收" || text === "已审核") return "已签收";
+  if (text === "费用待确认") return "异常滞留";
+  if (text === "通关中") return "通关中";
+  if (text === "正常" || text === "待确认" || text === "预排") return "预排";
+  return text;
+}
+
+function createOrderFeeRow(fee = {}) {
+  const quantity = Number(fee.quantity);
+  const unitPrice = Number(fee.unitPrice ?? fee.unit_price ?? 0);
+  const amount = Number(fee.amount ?? 0);
+  const costValue = fee.cost === undefined || fee.cost === null || fee.cost === "" ? "" : Number(fee.cost);
+  return {
+    category: String(fee.category || "正常").trim() || "正常",
+    name: String(fee.name || "").trim(),
+    quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
+    unitPrice: Number.isFinite(unitPrice) && unitPrice >= 0 ? unitPrice : 0,
+    currency: String(fee.currency || "港币").trim() || "港币",
+    amount: Number.isFinite(amount) && amount >= 0 ? amount : 0,
+    cost: Number.isFinite(costValue) && costValue >= 0 ? costValue : "",
+    remark: String(fee.remark || "").trim()
+  };
+}
+
+function normalizeOrderFeeRows(fees = []) {
+  const rows = (Array.isArray(fees) ? fees : []).map((fee) => createOrderFeeRow(fee));
+  return rows.length ? rows : [createOrderFeeRow()];
+}
+
+function payloadOrderFeeRows(fees = []) {
+  return normalizeOrderFeeRows(fees)
+    .filter((fee) => fee.name)
+    .map((fee) => ({
+      category: fee.category,
+      name: fee.name,
+      quantity: Number(fee.quantity || 1),
+      unitPrice: Number(fee.unitPrice || 0),
+      currency: fee.currency || "港币",
+      amount: Number(fee.amount || 0),
+      cost: fee.cost === "" ? null : Number(fee.cost || 0),
+      remark: fee.remark || ""
+    }));
 }
 
 function uniqueTextList(values) {
@@ -87,6 +149,9 @@ const LOCATION_ENTRY_KEYS = {
 };
 const LOAD_TIME_HOURS = Array.from({ length: 24 }, (_, index) => String(index).padStart(2, "0"));
 const LOAD_TIME_MINUTES = ["00", "15", "30", "45"];
+const ORDER_BUSINESS_TYPE_OPTIONS = ["运输", "报关", "运输+报关"];
+const FEE_CATEGORY_OPTIONS = ["正常", "代垫", "公司自费"];
+const ORDER_STATUS_OPTIONS = ["待确认", "预排", "正常", "通关中", "已签收", "已审核", "缺票据", "费用待确认"];
 
 let locationEntrySerial = 0;
 
@@ -96,9 +161,18 @@ function nextLocationEntryId() {
 }
 
 function createLocationEntry(value) {
+  const hasStructuredParts = value && typeof value === "object"
+    && (value.city !== undefined || value.district !== undefined || value.detail !== undefined);
+  const parts = hasStructuredParts ? null : splitLocationParts(value && typeof value === "object" ? value.value : value);
+  const city = hasStructuredParts ? String(value.city || "").trim() : parts.city;
+  const district = hasStructuredParts ? String(value.district || "").trim() : parts.district;
+  const detail = hasStructuredParts ? String(value.detail || "").trim() : parts.detail;
   return {
     id: nextLocationEntryId(),
-    value: value === undefined || value === null ? "" : String(value).trim()
+    city,
+    district,
+    detail,
+    value: composeLocationParts(city, district, detail)
   };
 }
 
@@ -118,10 +192,23 @@ function splitLocationEntries(value) {
 
 function normalizeLocationEntries(entries) {
   const normalized = (Array.isArray(entries) ? entries : [])
-    .map((item) => ({
-      id: item && typeof item === "object" && item.id ? item.id : nextLocationEntryId(),
-      value: locationEntryValue(item)
-    }));
+    .map((item) => {
+      if (item && typeof item === "object") {
+        const hasStructuredParts = item.city !== undefined || item.district !== undefined || item.detail !== undefined;
+        const parts = hasStructuredParts ? null : splitLocationParts(item.value);
+        const city = hasStructuredParts ? String(item.city || "").trim() : parts.city;
+        const district = hasStructuredParts ? String(item.district || "").trim() : parts.district;
+        const detail = hasStructuredParts ? String(item.detail || "").trim() : parts.detail;
+        return {
+          id: item.id || nextLocationEntryId(),
+          city,
+          district,
+          detail,
+          value: composeLocationParts(city, district, detail)
+        };
+      }
+      return createLocationEntry(item);
+    });
   return normalized.length ? normalized : [createLocationEntry("")];
 }
 
@@ -171,6 +258,49 @@ function normalizeLocationText(value = "") {
     .toLowerCase();
 }
 
+function splitLocationParts(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return { city: "", district: "", detail: "" };
+  const normalized = text
+    .replace(/[／｜|]+/g, "/")
+    .replace(/\s*\/\s*/g, "/");
+  if (normalized.indexOf("/") >= 0) {
+    const parts = normalized.split("/").map((item) => String(item || "").trim());
+    return {
+      city: parts[0] || "",
+      district: parts[1] || "",
+      detail: parts.slice(2).join(" / ")
+    };
+  }
+  const cityMatch = text.match(/^(.+?(?:市|香港|澳门))/u);
+  const city = cityMatch ? cityMatch[1] : "";
+  const afterCity = city ? text.slice(city.length).trim() : text;
+  const districtMatch = afterCity.match(/^(.+?(?:区|县|镇|乡|街道))/u);
+  const district = districtMatch ? districtMatch[1] : "";
+  const detail = district ? afterCity.slice(district.length).trim() : afterCity;
+  return {
+    city,
+    district,
+    detail: city || district ? detail : text
+  };
+}
+
+function composeLocationParts(city = "", district = "", detail = "") {
+  return [city, district, detail]
+    .map((part) => String(part || "").trim())
+    .filter(Boolean)
+    .join(" / ");
+}
+
+function normalizeLocationPartValue(value = "", part = "") {
+  const text = String(value || "").trim();
+  if (!text || part === "detail") return text;
+  const parsed = splitLocationParts(text);
+  if (part === "city") return parsed.city || text;
+  if (part === "district") return parsed.district || text;
+  return text;
+}
+
 function customerContactLocationValue(contact = {}) {
   return [String(contact.area || "").trim(), String(contact.address || "").trim()]
     .filter(Boolean)
@@ -203,6 +333,8 @@ function normalizeCustomerContactRow(row = {}) {
 function createBlankAddressBookForm() {
   return {
     area: "",
+    city: "",
+    district: "",
     contact: "",
     phone: "",
     address: "",
@@ -310,6 +442,36 @@ function uniqueSortedTextList(values) {
   return uniqueTextList(values).sort((left, right) => left.localeCompare(right, "zh-Hans-CN"));
 }
 
+function areaCatalogCityOptions(catalog = {}, rows = []) {
+  return uniqueSortedTextList([
+    ...(Array.isArray(catalog.level1Options) ? catalog.level1Options : []),
+    ...(Array.isArray(rows) ? rows : []).map((row) => splitLocationParts(row && row.area).city)
+  ]);
+}
+
+function areaCatalogDistrictOptions(catalog = {}, city = "", rows = []) {
+  const targetCity = String(city || "").trim();
+  const allCatalogDistricts = Object.values(catalog.level2OptionsByLevel1 || {}).flat();
+  const cityCatalogDistricts = targetCity && catalog.level2OptionsByLevel1
+    ? (catalog.level2OptionsByLevel1[targetCity] || [])
+    : [];
+  const catalogDistricts = targetCity ? (cityCatalogDistricts.length ? cityCatalogDistricts : allCatalogDistricts) : allCatalogDistricts;
+  const rowDistricts = (Array.isArray(rows) ? rows : [])
+    .map((row) => splitLocationParts(row && row.area))
+    .filter((parts) => !targetCity || parts.city === targetCity)
+    .map((parts) => parts.district);
+  return uniqueSortedTextList([...catalogDistricts, ...rowDistricts]);
+}
+
+function filterLocationOptions(options = [], keyword = "") {
+  const normalizedKeyword = normalizeLocationText(keyword);
+  const rows = Array.isArray(options) ? options : [];
+  if (!normalizedKeyword) return rows.slice(0, 12);
+  return rows
+    .filter((item) => normalizeLocationText(item).indexOf(normalizedKeyword) >= 0)
+    .slice(0, 12);
+}
+
 function splitAreaPickerPath(value) {
   return String(value || "")
     .replace(/\r/g, "\n")
@@ -366,6 +528,9 @@ Page({
     addressBookSelectedIds: [],
     addressBookVisibleRows: [],
     addressBookCustomerReady: false,
+    addressBookCityOptions: [],
+    addressBookSuggestionPart: "",
+    addressBookSuggestionOptions: [],
     addressBookAreaLevel1Options: [],
     addressBookAreaLevel2Options: [],
     addressBookAreaPickerRange: [[], []],
@@ -377,23 +542,32 @@ Page({
     currencyOptions: ["港币", "人民币"],
     directionOptions: DIRECTION_OPTIONS,
     driverOptions: [],
+    feeCategoryOptions: FEE_CATEGORY_OPTIONS,
     form: {},
     hkDriverOptions: [],
     loadingEntries: [createLocationEntry("")],
     loadingEntryCount: 0,
     loadingRefs: true,
+    locationSuggestionTarget: "",
+    locationSuggestionIndex: -1,
+    locationSuggestionPart: "",
+    locationSuggestionOptions: [],
     loadTimePickerRange: [LOAD_TIME_HOURS, LOAD_TIME_MINUTES],
     loadTimePickerValue: [12, 0],
     locationPickerOpen: false,
     locationPickerTarget: "",
     locationPickerTitle: "",
+    isOrderEditMode: false,
     mainlandDriverOptions: [],
     mode: "new",
+    orderFeeRows: [createOrderFeeRow()],
+    orderStatusOptions: ORDER_STATUS_OPTIONS,
     originDate: "",
     plateOptions: [],
     portOptions: PORT_OPTIONS,
     saving: false,
     sourceRow: null,
+    subtitle: "排车单号：保存时生成",
     supplierOptions: [],
     title: "新建排车单",
     tonnageOptions: TONNAGE_OPTIONS,
@@ -428,16 +602,23 @@ Page({
       form.createdByName = "";
       form.createdAt = "";
     }
+    if (mode === "order-edit" && sourceRow && sourceRow.order && sourceRow.order.status) {
+      form.status = sourceRow.order.status;
+    }
     normalizeDispatchFormForDisplay(form);
     const locationPatch = locationEntriesPatchFromForm(form);
     this.setData({
       form,
       ...locationPatch,
+      businessTypeOptions: isOrderEditMode(mode) ? ORDER_BUSINESS_TYPE_OPTIONS : BUSINESS_TYPE_OPTIONS,
+      orderFeeRows: isOrderEditMode(mode) ? normalizeOrderFeeRows(sourceRow && sourceRow.order && sourceRow.order.fees) : [createOrderFeeRow()],
       loadTimePickerValue: loadTimePickerValueFromText(form.loadTime),
       mode,
       originDate: date,
       sourceRow,
-      title: titleForMode(mode)
+      subtitle: subtitleForMode(mode, form),
+      title: titleForMode(mode),
+      isOrderEditMode: isOrderEditMode(mode)
     });
     wx.setNavigationBarTitle({ title: titleForMode(mode) });
     this.loadReferences();
@@ -521,6 +702,7 @@ Page({
       this.addressBookAreaCatalog = buildAddressBookAreaCatalog(
         (Array.isArray(freightRates) ? freightRates : []).filter((item) => !String(item.customerId || item.customer_id || "").trim() && !String(item.customerName || item.customer_name || "").trim())
       );
+      const addressBookCityOptions = areaCatalogCityOptions(this.addressBookAreaCatalog, this.data.addressBookRows || []);
       const form = normalizeDispatchFormForDisplay(Object.assign({}, this.data.form));
       const matchedCustomer = findCustomerByIdOrText(customers, form.customerId, form.customer);
       if (matchedCustomer) {
@@ -529,6 +711,7 @@ Page({
       }
       const locationPatch = locationEntriesPatchFromForm(form);
       this.setData({
+        addressBookCityOptions,
         customers,
         drivers,
         driverOptions: uniqueTextList(drivers.map((item) => item.name)),
@@ -592,6 +775,124 @@ Page({
     });
   },
 
+  locationCityOptions() {
+    return areaCatalogCityOptions(this.addressBookAreaCatalog || buildAddressBookAreaCatalog(), this.data.addressBookRows || []);
+  },
+
+  locationDistrictOptions(city) {
+    return areaCatalogDistrictOptions(this.addressBookAreaCatalog || buildAddressBookAreaCatalog(), city, this.data.addressBookRows || []);
+  },
+
+  refreshLocationSuggestion(target, index, part, keyword) {
+    const entriesKey = LOCATION_ENTRY_KEYS[target];
+    const entries = normalizeLocationEntries(this.data[entriesKey] || []);
+    const entry = entries[Number(index || 0)] || createLocationEntry("");
+    const options = part === "city"
+      ? this.locationCityOptions()
+      : this.locationDistrictOptions(entry.city);
+    this.setData({
+      locationSuggestionTarget: target,
+      locationSuggestionIndex: Number(index || 0),
+      locationSuggestionPart: part,
+      locationSuggestionOptions: filterLocationOptions(options, keyword)
+    });
+  },
+
+  clearLocationSuggestion() {
+    this.setData({
+      locationSuggestionTarget: "",
+      locationSuggestionIndex: -1,
+      locationSuggestionPart: "",
+      locationSuggestionOptions: []
+    });
+  },
+
+  scheduleCloseLocationSuggestion(event) {
+    const target = event.currentTarget.dataset.target;
+    const index = Number(event.currentTarget.dataset.index || 0);
+    const part = event.currentTarget.dataset.part;
+    setTimeout(() => {
+      if (
+        this.data.locationSuggestionTarget === target &&
+        Number(this.data.locationSuggestionIndex) === index &&
+        this.data.locationSuggestionPart === part
+      ) {
+        this.clearLocationSuggestion();
+      }
+    }, 180);
+  },
+
+  updateLocationEntryPart(target, index, part, value) {
+    const entriesKey = LOCATION_ENTRY_KEYS[target];
+    if (!entriesKey) return;
+    const entries = normalizeLocationEntries(this.data[entriesKey] || []);
+    const entryIndex = Number(index || 0);
+    while (entries.length <= entryIndex) entries.push(createLocationEntry(""));
+    const entry = Object.assign({}, entries[entryIndex]);
+    const nextValue = normalizeLocationPartValue(value, part);
+    if (part === "city" && entry.city !== nextValue) {
+      entry.district = "";
+    }
+    entry[part] = nextValue;
+    entry.value = composeLocationParts(entry.city, entry.district, entry.detail);
+    entries[entryIndex] = entry;
+    this.setLocationEntries(target, entries);
+    return entry;
+  },
+
+  onLocationPartFocus(event) {
+    const target = event.currentTarget.dataset.target;
+    const index = Number(event.currentTarget.dataset.index || 0);
+    const part = event.currentTarget.dataset.part;
+    if (part !== "city" && part !== "district") return;
+    const entriesKey = LOCATION_ENTRY_KEYS[target];
+    const entries = normalizeLocationEntries(this.data[entriesKey] || []);
+    const entry = entries[index] || createLocationEntry("");
+    const value = String(entry[part] || "").trim();
+    this.refreshLocationSuggestion(target, index, part, value);
+  },
+
+  onLocationPartInput(event) {
+    const target = event.currentTarget.dataset.target;
+    const index = Number(event.currentTarget.dataset.index || 0);
+    const part = event.currentTarget.dataset.part;
+    const value = event.detail.value;
+    this.updateLocationEntryPart(target, index, part, value);
+    if (part === "city" || part === "district") {
+      this.refreshLocationSuggestion(target, index, part, value);
+    }
+  },
+
+  selectLocationSuggestion(event) {
+    const target = event.currentTarget.dataset.target;
+    const index = Number(event.currentTarget.dataset.index || 0);
+    const part = event.currentTarget.dataset.part;
+    const value = event.currentTarget.dataset.value;
+    this.updateLocationEntryPart(target, index, part, value);
+    this.clearLocationSuggestion();
+  },
+
+  addLocationEntry(event) {
+    const target = event.currentTarget.dataset.target;
+    const entriesKey = LOCATION_ENTRY_KEYS[target];
+    if (!entriesKey) return;
+    this.setLocationEntries(target, [
+      ...normalizeLocationEntries(this.data[entriesKey] || []),
+      createLocationEntry("")
+    ]);
+  },
+
+  removeLocationEntry(event) {
+    const target = event.currentTarget.dataset.target;
+    const index = Number(event.currentTarget.dataset.index || 0);
+    const entriesKey = LOCATION_ENTRY_KEYS[target];
+    if (!entriesKey) return;
+    if (index <= 0) return;
+    const nextEntries = normalizeLocationEntries(this.data[entriesKey] || []).filter((_, entryIndex) => entryIndex !== index);
+    this.setLocationEntries(target, nextEntries.length ? nextEntries : [createLocationEntry("")]);
+    this.clearLocationSuggestion();
+  },
+
   onCustomerFocus() {
     this.setData({ customerPickerOpen: true });
     this.refreshCustomerSuggestions();
@@ -615,6 +916,62 @@ Page({
   async onFormDateChange(event) {
     const date = event.detail.value;
     this.setData({ "form.date": date });
+  },
+
+  onNeedsWeighingChange(event) {
+    this.setData({ "form.needsWeighing": Boolean(event.detail.value) });
+  },
+
+  toggleNeedsWeighing() {
+    this.setData({ "form.needsWeighing": !Boolean(this.data.form && this.data.form.needsWeighing) });
+  },
+
+  onBooleanFieldChange(event) {
+    const field = event.currentTarget.dataset.field;
+    if (!field) return;
+    this.setData({ [`form.${field}`]: Boolean(event.detail.value) });
+  },
+
+  toggleBooleanField(event) {
+    const field = event.currentTarget.dataset.field;
+    if (!field) return;
+    this.setData({ [`form.${field}`]: !Boolean(this.data.form && this.data.form[field]) });
+  },
+
+  onOrderFeeInput(event) {
+    const index = Number(event.currentTarget.dataset.index || 0);
+    const field = event.currentTarget.dataset.field;
+    if (!field) return;
+    const rows = normalizeOrderFeeRows(this.data.orderFeeRows || []);
+    const nextRow = Object.assign({}, rows[index] || createOrderFeeRow(), { [field]: event.detail.value });
+    if (field === "quantity" || field === "unitPrice") {
+      const quantity = Number(field === "quantity" ? event.detail.value : nextRow.quantity);
+      const unitPrice = Number(field === "unitPrice" ? event.detail.value : nextRow.unitPrice);
+      nextRow.amount = Number(((Number.isFinite(quantity) ? quantity : 0) * (Number.isFinite(unitPrice) ? unitPrice : 0)).toFixed(2));
+    }
+    rows[index] = createOrderFeeRow(nextRow);
+    this.setData({ orderFeeRows: rows });
+  },
+
+  onOrderFeePickerChange(event) {
+    const index = Number(event.currentTarget.dataset.index || 0);
+    const field = event.currentTarget.dataset.field;
+    const options = this.data[event.currentTarget.dataset.optionsKey] || [];
+    const value = options[Number(event.detail.value || 0)] || "";
+    if (!field) return;
+    const rows = normalizeOrderFeeRows(this.data.orderFeeRows || []);
+    rows[index] = createOrderFeeRow(Object.assign({}, rows[index] || {}, { [field]: value }));
+    this.setData({ orderFeeRows: rows });
+  },
+
+  addOrderFeeRow() {
+    this.setData({ orderFeeRows: [...normalizeOrderFeeRows(this.data.orderFeeRows || []), createOrderFeeRow()] });
+  },
+
+  removeOrderFeeRow(event) {
+    const index = Number(event.currentTarget.dataset.index || 0);
+    const rows = normalizeOrderFeeRows(this.data.orderFeeRows || []).filter((_, rowIndex) => rowIndex !== index);
+    this.setData({ orderFeeRows: rows.length ? rows : [createOrderFeeRow()] });
   },
 
   handleVehicleSourceChange(value) {
@@ -700,6 +1057,7 @@ Page({
   async openLocationPicker(event) {
     const target = event.currentTarget.dataset.target;
     const customer = this.findMatchedCustomer();
+    this.clearLocationSuggestion();
     this.setData({
       addressBookForm: createBlankAddressBookForm(),
       addressBookFormOpen: false,
@@ -730,6 +1088,7 @@ Page({
     const keyword = String(this.data.addressBookKeyword || "").trim();
     const addressBookSelectedIds = selectedAddressBookIdsForValue(this.data.form[target] || "", rows);
     this.setData({
+      addressBookCityOptions: areaCatalogCityOptions(this.addressBookAreaCatalog || buildAddressBookAreaCatalog(), rows),
       addressBookLoading: false,
       addressBookRows: rows,
       addressBookSelectedIds,
@@ -743,6 +1102,8 @@ Page({
       addressBookLoading: false,
       addressBookSaving: false,
       addressBookKeyword: "",
+      addressBookSuggestionPart: "",
+      addressBookSuggestionOptions: [],
       addressBookCustomerReady: false,
       locationPickerOpen: false,
       locationPickerTarget: "",
@@ -819,7 +1180,9 @@ Page({
     if (this.data.addressBookFormOpen) {
       this.setData({
         addressBookForm: createBlankAddressBookForm(),
-        addressBookFormOpen: false
+        addressBookFormOpen: false,
+        addressBookSuggestionPart: "",
+        addressBookSuggestionOptions: []
       });
       return;
     }
@@ -827,12 +1190,71 @@ Page({
       addressBookForm: createBlankAddressBookForm(),
       addressBookFormOpen: true
     });
-    this.syncAddressBookAreaPicker("");
+    this.refreshAddressBookSuggestion("city", "");
+  },
+
+  refreshAddressBookSuggestion(part, keyword) {
+    const options = part === "city"
+      ? areaCatalogCityOptions(this.addressBookAreaCatalog || buildAddressBookAreaCatalog(), this.data.addressBookRows || [])
+      : areaCatalogDistrictOptions(this.addressBookAreaCatalog || buildAddressBookAreaCatalog(), this.data.addressBookForm.city, this.data.addressBookRows || []);
+    this.setData({
+      addressBookSuggestionPart: part,
+      addressBookSuggestionOptions: filterLocationOptions(options, keyword)
+    });
+  },
+
+  clearAddressBookSuggestion() {
+    this.setData({
+      addressBookSuggestionPart: "",
+      addressBookSuggestionOptions: []
+    });
+  },
+
+  scheduleCloseAddressBookSuggestion(event) {
+    const part = event.currentTarget.dataset.field;
+    setTimeout(() => {
+      if (this.data.addressBookSuggestionPart === part) {
+        this.clearAddressBookSuggestion();
+      }
+    }, 180);
+  },
+
+  onAddressBookLocationFocus(event) {
+    const field = event.currentTarget.dataset.field;
+    if (field !== "city" && field !== "district") return;
+    this.refreshAddressBookSuggestion(field, String(this.data.addressBookForm[field] || "").trim());
   },
 
   onAddressBookFormInput(event) {
     const field = event.currentTarget.dataset.field;
-    this.setData({ [`addressBookForm.${field}`]: event.detail.value });
+    const value = normalizeLocationPartValue(event.detail.value, field);
+    const patch = { [`addressBookForm.${field}`]: value };
+    if (field === "city") {
+      patch["addressBookForm.district"] = "";
+      patch["addressBookForm.area"] = formatAreaPickerPath(value, "");
+    } else if (field === "district") {
+      patch["addressBookForm.area"] = formatAreaPickerPath(this.data.addressBookForm.city, value);
+    }
+    this.setData(patch);
+    if (field === "city" || field === "district") {
+      this.refreshAddressBookSuggestion(field, value);
+    }
+  },
+
+  selectAddressBookSuggestion(event) {
+    const field = event.currentTarget.dataset.field;
+    const value = normalizeLocationPartValue(event.currentTarget.dataset.value, field);
+    const patch = {
+      [`addressBookForm.${field}`]: value
+    };
+    if (field === "city") {
+      patch["addressBookForm.district"] = "";
+      patch["addressBookForm.area"] = formatAreaPickerPath(value, "");
+    } else if (field === "district") {
+      patch["addressBookForm.area"] = formatAreaPickerPath(this.data.addressBookForm.city, value);
+    }
+    this.setData(patch);
+    this.clearAddressBookSuggestion();
   },
 
   setAddressBookSelection(id, checked) {
@@ -865,7 +1287,8 @@ Page({
       wx.showToast({ title: "请选择客户资料中的有效客户", icon: "none" });
       return;
     }
-    const area = String(this.data.addressBookForm.area || "").trim();
+    const area = formatAreaPickerPath(this.data.addressBookForm.city, this.data.addressBookForm.district)
+      || String(this.data.addressBookForm.area || "").trim();
     const address = String(this.data.addressBookForm.address || "").trim();
     const contact = String(this.data.addressBookForm.contact || "").trim();
     if (!contact) {
@@ -947,9 +1370,11 @@ Page({
     const mode = this.data.mode;
     const originDate = this.data.originDate;
     const cleanRow = sanitizeDispatchRow(row);
-    if (mode === "edit" && originDate && originDate !== targetDate) {
+    if (mode === "order-edit" && !(this.data.sourceRow && this.data.sourceRow.hasDispatchRow)) return;
+    if (isEditMode(mode) && originDate && originDate !== targetDate) {
       const targetPlan = await this.loadPlanRows(targetDate);
-      const nextRows = targetPlan.rows.filter((item) => item.id !== cleanRow.id).concat([cleanRow]);
+      const targetRowsWithoutCurrent = targetPlan.rows.filter((item) => item.id !== cleanRow.id);
+      const nextRows = cleanRow.id ? targetRowsWithoutCurrent.concat([cleanRow]) : targetRowsWithoutCurrent;
       await api.saveDispatchPlan(targetDate, sortDispatchRows(nextRows, [], targetDate), {
         baseRows: targetPlan.rows.map(sanitizeDispatchRow),
         updatedAt: targetPlan.updatedAt
@@ -965,13 +1390,13 @@ Page({
     const rows = plan.rows;
     let replaced = false;
     const nextRows = rows.map((item) => {
-      if (mode === "edit" && item.id === cleanRow.id) {
+      if (isEditMode(mode) && item.id === cleanRow.id) {
         replaced = true;
         return cleanRow;
       }
       return item;
     });
-    if (!replaced) nextRows.push(cleanRow);
+    if (!replaced && mode !== "order-edit") nextRows.push(cleanRow);
     await api.saveDispatchPlan(targetDate, sortDispatchRows(nextRows, [], targetDate), {
       baseRows: rows.map(sanitizeDispatchRow),
       updatedAt: plan.updatedAt
@@ -995,10 +1420,14 @@ Page({
       const targetRows = await this.loadPlanRows(form.date);
       form.customerId = customer.id;
       form.customer = customer.name;
-      const shouldCreateOrder = this.data.mode !== "edit" || !form.orderNo;
+      const shouldCreateOrder = !isEditMode(this.data.mode) || !form.orderNo;
       const createdAt = form.createdAt || currentTimestampInputValue();
       form.createdAt = createdAt;
       const payload = orderPayloadFromForm(form, customer, shouldCreateOrder);
+      if (isOrderEditMode(this.data.mode)) {
+        payload.status = form.status || "待确认";
+        payload.fees = payloadOrderFeeRows(this.data.orderFeeRows || []);
+      }
       if (shouldCreateOrder) {
         delete payload.dispatchNo;
         payload.date = form.date;
@@ -1014,20 +1443,24 @@ Page({
         createdByUsername: order.createdByUsername || form.createdByUsername || "",
         createdByName: order.createdByName || form.createdByName || order.createdByUsername || ""
       });
+      if (isOrderEditMode(this.data.mode)) {
+        nextForm.status = dispatchStatusFromOrderStatus(order.status || form.status);
+      }
       const row = rowFromForm(nextForm, nextForm.orderNo);
       row.customer = order.customer || customer.name;
       row.dispatchNo = dispatchNo;
       await this.saveRowToPlan(row, nextForm.date);
       wx.setStorageSync(DISPATCH_DATE_KEY, nextForm.date);
+      const isOrderEdit = isOrderEditMode(this.data.mode);
       wx.showToast({
-        title: this.data.mode === "edit" ? "排车单已更新" : "排车单已创建",
+        title: isOrderEdit ? "订单已更新" : this.data.mode === "edit" ? "排车单已更新" : "排车单已创建",
         icon: "none"
       });
       setTimeout(() => {
         wx.navigateBack({ delta: 1 });
       }, 500);
     } catch (error) {
-      wx.showToast({ title: error.message || "保存排车单失败", icon: "none" });
+      wx.showToast({ title: error.message || (isOrderEditMode(this.data.mode) ? "保存订单失败" : "保存排车单失败"), icon: "none" });
     } finally {
       this.setData({ saving: false });
     }

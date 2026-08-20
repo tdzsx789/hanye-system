@@ -59,6 +59,7 @@ function compactOrderForDispatchForm(order) {
     customer: order.customer || "",
     businessType: order.businessType || "",
     port: order.port || "",
+    needsWeighing: Boolean(order.needsWeighing),
     direction: order.direction || "",
     tonnage: order.tonnage || "",
     currency: order.currency || "",
@@ -79,20 +80,145 @@ function compactOrderForDispatchForm(order) {
     tripNoEnabled: order.tripNoEnabled ? 1 : 0,
     tripNo: order.tripNo || "",
     sixSheetEnabled: order.sixSheetEnabled ? 1 : 0,
-    sixSheetNo: order.sixSheetNo || ""
+    sixSheetNo: order.sixSheetNo || "",
+    fees: Array.isArray(order.fees) ? order.fees : []
   };
+}
+
+function valueText(value) {
+  return value === undefined || value === null ? "" : String(value).trim();
+}
+
+function uniqueTextList(values) {
+  const result = [];
+  (Array.isArray(values) ? values : []).forEach((value) => {
+    const text = valueText(value);
+    if (text && result.indexOf(text) < 0) result.push(text);
+  });
+  return result;
+}
+
+function compactLocationText(value) {
+  const parts = valueText(value)
+    .replace(/\r/g, "\n")
+    .split(/[\n；;\/]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return parts.length ? parts.slice(0, 2).join(" / ") : "";
+}
+
+function routeTextForRecord(record) {
+  return [compactLocationText(record && record.loading), compactLocationText(record && record.unloading)]
+    .filter(Boolean)
+    .join(" -> ") || "-";
+}
+
+function orderStatusClass(status) {
+  const text = valueText(status);
+  if (text === "已审核") return "status-audited";
+  if (text === "已签收") return "status-signed";
+  if (text === "费用待确认" || text === "待确认") return "status-warning";
+  if (text === "缺票据") return "status-exception";
+  if (text === "通关中") return "status-crossing";
+  if (text === "正常") return "status-dispatched";
+  return "status-all";
+}
+
+function customerShortName(customer) {
+  return valueText(customer && (customer.shortName || customer.short_name || customer.name));
+}
+
+function displayNameFromDirectory(customers, id, name, type) {
+  const idText = valueText(id);
+  const nameText = valueText(name);
+  const rows = (Array.isArray(customers) ? customers : []).filter((item) => !type || item.type === type);
+  const matched = rows.find((item) => idText && String(item.id) === idText)
+    || rows.find((item) => valueText(item.name) === nameText || customerShortName(item) === nameText);
+  return customerShortName(matched) || nameText || "-";
+}
+
+function displayNameOrEmptyFromDirectory(customers, id, name, type) {
+  const text = displayNameFromDirectory(customers, id, name, type);
+  return text === "-" ? "" : text;
+}
+
+function orderStatusActionDisabled(order, targetStatus) {
+  const status = valueText(order && order.status);
+  if (status === "已签收") return true;
+  if (targetStatus === "异常滞留" && (status === "异常滞留" || status === "费用待确认")) return true;
+  return false;
+}
+
+function dispatchStatusFromOrder(order) {
+  const status = valueText(order && order.status);
+  if (status === "已签收" || status === "已审核") return "已签收";
+  if (status === "费用待确认") return "异常滞留";
+  if (status === "通关中") return "通关中";
+  return "";
+}
+
+function amountTextForOrder(order) {
+  const hkd = Number(order && order.receivableHKD || 0);
+  const rmb = Number(order && order.receivableRMB || 0);
+  return [
+    hkd ? `HKD ${hkd}` : "",
+    rmb ? `RMB ${rmb}` : ""
+  ].filter(Boolean).join(" / ") || "-";
+}
+
+function orderMatchesKeyword(order, keyword) {
+  const normalizedKeyword = valueText(keyword).toLowerCase();
+  if (!normalizedKeyword) return true;
+  const text = [
+    order.no,
+    order.dispatchNo,
+    order.customerText || order.customer,
+    order.businessType,
+    order.port,
+    order.direction,
+    order.tonnage,
+    order.quantity,
+    order.weight,
+    order.vehicleSource,
+    order.supplierText || order.supplier,
+    order.plate,
+    order.driverText || order.driver,
+    order.hkDriver,
+    order.mainlandDriver,
+    order.transportMode,
+    order.loading,
+    order.unloading,
+    order.status,
+    order.remark
+  ].map(valueText).join(" ").toLowerCase();
+  return text.indexOf(normalizedKeyword) >= 0;
+}
+
+function isDisplayOrder(order, date) {
+  if (!order || order.deletedAt) return false;
+  if (order.businessType === "报关") return false;
+  return valueText(order.date).slice(0, 10) === date;
 }
 
 Page({
   data: {
     accountLabel: "",
     activeStatus: "all",
-    dateLabel: "",
+    activeModule: "dispatch",
     dispatchDate: todayInputValue(),
     displayRows: [],
     emptyText: "当前条件下暂无排车单",
     expandedIds: [],
+    formOpening: false,
+    formOpeningId: "",
+    formOpeningKind: "",
+    formOpeningText: "",
     loading: false,
+    customers: [],
+    currentOrderLabel: "当前订单 0",
+    orderDisplayRows: [],
+    orderEmptyText: "当前日期暂无订单",
+    orderExpandedNos: [],
     orders: [],
     planBaseRows: [],
     planUpdatedAt: "",
@@ -120,8 +246,7 @@ Page({
     if (storedDate !== initialDate) wx.setStorageSync(DISPATCH_DATE_KEY, initialDate);
     this.setData({
       activeStatus: options && options.status ? decodeURIComponent(options.status) : "all",
-      dispatchDate: initialDate,
-      dateLabel: formatDateLabel(initialDate)
+      dispatchDate: initialDate
     });
   },
 
@@ -155,7 +280,6 @@ Page({
     this.setData({
       activeStatus: "all",
       dispatchDate: today,
-      dateLabel: formatDateLabel(today),
       expandedIds: [],
       selectedDispatchIds: [],
       showWarningsPanel: false
@@ -189,10 +313,35 @@ Page({
 
   onHide() {
     this.detachRealtime();
+    if (this.data.formOpening) {
+      this.clearFormOpening();
+    }
   },
 
   onUnload() {
     this.detachRealtime();
+  },
+
+  setFormOpening(kind, id, text) {
+    const formOpeningId = String(id || "");
+    this.setData({
+      formOpening: true,
+      formOpeningId,
+      formOpeningKind: kind || "",
+      formOpeningText: text || "正在打开排车单..."
+    });
+    this.refreshDerivedData();
+  },
+
+  clearFormOpening() {
+    if (!this.data.formOpening && !this.data.formOpeningId) return;
+    this.setData({
+      formOpening: false,
+      formOpeningId: "",
+      formOpeningKind: "",
+      formOpeningText: ""
+    });
+    this.refreshDerivedData();
   },
 
   attachRealtime() {
@@ -238,12 +387,13 @@ Page({
     if (!silent) this.setData({ loading: true });
     if (!silent) wx.showNavigationBarLoading();
     try {
-      const [plan, orders, vehicles, drivers, expiryReminders] = await Promise.all([
+      const [plan, orders, vehicles, drivers, expiryReminders, customers] = await Promise.all([
         api.getDispatchPlan(date),
         api.listOrders(),
         api.listVehicles(),
         api.listDrivers(),
-        api.listExpiryReminders().catch(() => null)
+        api.listExpiryReminders().catch(() => null),
+        api.listCustomers().catch(() => [])
       ]);
       this.expiryReminderRows = Array.isArray(expiryReminders && expiryReminders.rows)
         ? expiryReminders.rows
@@ -253,6 +403,7 @@ Page({
         ? rows.filter((row) => selectedBeforeReload.has(row.id)).map((row) => row.id)
         : [];
       this.setData({
+        customers,
         drivers,
         loading: false,
         orders,
@@ -279,16 +430,23 @@ Page({
     const date = this.data.dispatchDate;
     const rawRows = this.data.rawRows || [];
     const selectedIds = new Set(this.data.selectedDispatchIds || []);
+    const orderExpandedNos = this.data.orderExpandedNos || [];
     const summaryCards = dispatchSummaryCards(rawRows).map((card) => Object.assign({}, card, {
       active: this.data.activeStatus === card.key
     }));
     const activeStatus = this.data.activeStatus || "all";
+    const formOpeningId = String(this.data.formOpeningId || "");
+    const formOpeningKind = String(this.data.formOpeningKind || "");
     const displayRows = orderDisplayDispatchRows(presentDispatchRows(rawRows, this.data.orders, date, {
       expandedIds: this.data.expandedIds,
       keyword: this.data.searchKeyword,
       status: activeStatus
     })).map((row) => Object.assign({}, row, {
-      selected: selectedIds.has(row.id)
+      selected: selectedIds.has(row.id),
+      opening: formOpeningKind === "dispatch" && formOpeningId === String(row.id || ""),
+      supplierHighlightText: row.supplierHighlightText
+        ? displayNameOrEmptyFromDirectory(this.data.customers, "", row.supplierHighlightText, "供应商")
+        : ""
     }));
     const selectedDisplayRows = displayRows.filter((row) => row.selected);
     const serverWarnings = Array.isArray(this.expiryReminderRows)
@@ -300,16 +458,75 @@ Page({
       ? Array.from(new Set(serverWarnings))
       : buildDispatchWarnings(rawRows, this.data.orders, this.data.vehicles, this.data.drivers, date);
     const emptyText = emptyTextForStatus(activeStatus);
+    const currentDateOrders = (this.data.orders || []).filter((order) => isDisplayOrder(order, date));
+    const orderDisplayRows = currentDateOrders
+      .map((order) => {
+        const dispatchRow = rawRows.find((row) =>
+          (order.no && valueText(row.orderNo) === valueText(order.no))
+          || (order.dispatchNo && valueText(row.dispatchNo) === valueText(order.dispatchNo))
+        );
+        const driverText = uniqueTextList([
+          order.driver,
+          order.hkDriver,
+          order.mainlandDriver,
+          dispatchRow && dispatchRow.driver,
+          dispatchRow && dispatchRow.hkDriver,
+          dispatchRow && dispatchRow.mainlandDriver
+        ]).join(" / ") || "-";
+        const status = valueText(order.status) || "-";
+        const source = valueText(order.vehicleSource);
+        const supplierText = displayNameOrEmptyFromDirectory(this.data.customers, "", order.supplier, "供应商");
+        const displayOrder = Object.assign({}, order, {
+          customerText: displayNameFromDirectory(this.data.customers, order.customerId, order.customer, "客户"),
+          supplierText,
+          driverText,
+          highlightTimeText: valueText(order.loadTime || order.loadingTime) || "未定",
+          highlightPlateText: valueText(order.plate) || "-",
+          supplierHighlightText: source === "外派车辆" ? supplierText : "",
+          routeText: routeTextForRecord(order),
+          amountText: amountTextForOrder(order),
+          status,
+          statusClass: orderStatusClass(status),
+          signedDisabled: orderStatusActionDisabled(order, "已签收"),
+          exceptionDisabled: orderStatusActionDisabled(order, "异常滞留"),
+          expanded: orderExpandedNos.indexOf(order.no) >= 0,
+          dispatchRowId: dispatchRow && dispatchRow.id ? dispatchRow.id : "",
+          opening: formOpeningKind === "order" && formOpeningId === String(order.no || "")
+        });
+        return displayOrder;
+      })
+      .filter((order) => orderMatchesKeyword(order, this.data.searchKeyword))
+      .sort((left, right) => {
+        const leftDispatch = valueText(left.dispatchNo);
+        const rightDispatch = valueText(right.dispatchNo);
+        const dispatchCompare = leftDispatch.localeCompare(rightDispatch, "zh-Hans-CN", { numeric: true });
+        if (dispatchCompare !== 0) return dispatchCompare;
+        return valueText(left.no).localeCompare(valueText(right.no), "zh-Hans-CN", { numeric: true });
+      })
+      .map((order, index) => Object.assign({}, order, { displayIndex: index + 1 }));
+    const currentOrderCount = this.data.activeModule === "orders" ? currentDateOrders.length : rawRows.length;
     this.setData({
-      dateLabel: formatDateLabel(date),
+      currentOrderLabel: `当前订单 ${currentOrderCount}`,
       displayRows,
       emptyText,
+      orderDisplayRows,
+      orderEmptyText: this.data.searchKeyword ? "当前条件下暂无订单" : "当前日期暂无订单",
       selectedDispatchCount: selectedDisplayRows.length,
       allVisibleDispatchRowsSelected: displayRows.length > 0 && selectedDisplayRows.length === displayRows.length,
       showWarningsPanel: warnings.length ? this.data.showWarningsPanel : false,
       summaryCards,
       warnings
     });
+  },
+
+  switchModule(event) {
+    const activeModule = event.currentTarget.dataset.module || "dispatch";
+    if (activeModule === this.data.activeModule) return;
+    this.setData({
+      activeModule,
+      selectedDispatchIds: []
+    });
+    this.refreshDerivedData();
   },
 
   async changeDateByOffset(event) {
@@ -332,6 +549,7 @@ Page({
       activeStatus: "all",
       dispatchDate: date,
       expandedIds: [],
+      orderExpandedNos: [],
       selectedDispatchIds: [],
       showWarningsPanel: false
     });
@@ -369,7 +587,7 @@ Page({
   },
 
   toggleDispatchSelection(event) {
-    if (this.data.loading || this.data.saving) return;
+    if (this.data.loading || this.data.saving || this.data.formOpening) return;
     const id = event.currentTarget.dataset.id;
     if (!id) return;
     const selectedIds = new Set(this.data.selectedDispatchIds || []);
@@ -383,7 +601,7 @@ Page({
   },
 
   toggleAllVisibleDispatchSelection() {
-    if (this.data.loading || this.data.saving) return;
+    if (this.data.loading || this.data.saving || this.data.formOpening) return;
     const visibleRows = this.data.displayRows || [];
     if (!visibleRows.length) return;
     const selectedIds = new Set(this.data.selectedDispatchIds || []);
@@ -409,6 +627,20 @@ Page({
     this.refreshDerivedData();
   },
 
+  toggleOrderExpand(event) {
+    const no = event.currentTarget.dataset.no;
+    if (!no) return;
+    const orderExpandedNos = this.data.orderExpandedNos.slice();
+    const index = orderExpandedNos.indexOf(no);
+    if (index >= 0) {
+      orderExpandedNos.splice(index, 1);
+    } else {
+      orderExpandedNos.push(no);
+    }
+    this.setData({ orderExpandedNos });
+    this.refreshDerivedData();
+  },
+
   rowById(id) {
     const displayRow = (this.data.displayRows || []).find((row) => row.id === id);
     if (displayRow) return displayRow;
@@ -425,6 +657,18 @@ Page({
       || null;
   },
 
+  orderByNo(no) {
+    return (this.data.orders || []).find((order) => valueText(order.no) === valueText(no)) || null;
+  },
+
+  dispatchRowForOrder(order) {
+    if (!order) return null;
+    return (this.data.rawRows || []).find((row) =>
+      (order.no && valueText(row.orderNo) === valueText(order.no))
+      || (order.dispatchNo && valueText(row.dispatchNo) === valueText(order.dispatchNo))
+    ) || null;
+  },
+
   dispatchFormRowForContext(row) {
     const order = this.linkedOrderForRow(row) || row.order || null;
     return Object.assign({}, sanitizeDispatchRow(row), {
@@ -432,25 +676,43 @@ Page({
     });
   },
 
-  openDispatchForm(context) {
-    wx.showLoading({
-      title: "正在打开排车单...",
-      mask: true
-    });
+  navigateToDispatchForm(source) {
     try {
-      setDispatchFormContext(context);
+      setDispatchFormContext(source);
     } catch (error) {
-      wx.hideLoading();
+      this.clearFormOpening();
       wx.showToast({ title: "打开排车单失败，请重试", icon: "none" });
       return;
     }
     wx.navigateTo({
       url: "/pages/dispatch-form/index",
+      success: () => {
+        setTimeout(() => this.clearFormOpening(), 300);
+      },
       fail: () => {
-        wx.hideLoading();
+        this.clearFormOpening();
         wx.showToast({ title: "打开排车单失败，请重试", icon: "none" });
       }
     });
+  },
+
+  openDispatchForm(context) {
+    const source = context || {};
+    if (this.data.formOpening) return;
+    const kind = source.openingKind || (source.mode === "new" ? "new" : "dispatch");
+    const id = source.openingId || (source.row && source.row.id) || "";
+    const title = source.mode === "copy"
+      ? "正在复制排车单..."
+      : source.mode === "order-edit"
+        ? "正在打开订单..."
+        : source.mode === "edit"
+        ? "正在打开编辑页..."
+        : "正在打开新建页...";
+    this.setFormOpening(kind, id, title);
+    const startedAt = Date.now();
+    setTimeout(() => {
+      this.navigateToDispatchForm(source);
+    }, Math.max(120 - (Date.now() - startedAt), 0));
   },
 
   openNewDispatch() {
@@ -461,7 +723,7 @@ Page({
   },
 
   openEditDispatch(event) {
-    if (this.data.saving) return;
+    if (this.data.saving || this.data.formOpening) return;
     const dataset = (event.currentTarget && event.currentTarget.dataset) || (event.target && event.target.dataset) || {};
     const row = this.rowById(dataset.id);
     if (!row) {
@@ -470,22 +732,72 @@ Page({
     }
     this.openDispatchForm({
       mode: "edit",
-      date: this.data.dispatchDate,
+      date: row.date || this.data.dispatchDate,
       row: this.dispatchFormRowForContext(row)
     });
   },
 
+  openEditOrder(event) {
+    if (this.data.saving || this.data.formOpening) return;
+    const order = this.orderByNo(event.currentTarget.dataset.no);
+    if (!order) {
+      wx.showToast({ title: "未找到这张订单，请刷新后重试", icon: "none" });
+      return;
+    }
+    const orderDispatchStatus = dispatchStatusFromOrder(order);
+    const existingDispatchRow = this.dispatchRowForOrder(order);
+    const row = Object.assign(
+      {},
+      existingDispatchRow || createDispatchRowFromOrder(order, order.date || this.data.dispatchDate, this.data.rawRows || [])
+    );
+    if (orderDispatchStatus) row.status = orderDispatchStatus;
+    this.openDispatchForm({
+      mode: "order-edit",
+      openingKind: "order",
+      openingId: order.no,
+      date: row.date || order.date || this.data.dispatchDate,
+      row: Object.assign({}, sanitizeDispatchRow(row), {
+        hasDispatchRow: Boolean(existingDispatchRow),
+        order: compactOrderForDispatchForm(order)
+      })
+    });
+  },
+
+  async updateOrderStatusFromCard(event) {
+    if (this.data.saving || this.data.formOpening) return;
+    const no = event.currentTarget.dataset.no;
+    const targetStatus = event.currentTarget.dataset.status;
+    const order = this.orderByNo(no);
+    if (!order || orderStatusActionDisabled(order, targetStatus)) return;
+    const orderStatus = targetStatus === "异常滞留" ? "费用待确认" : targetStatus;
+    if (["已签收", "费用待确认"].indexOf(orderStatus) < 0) return;
+    this.setData({ saving: true });
+    try {
+      const updated = await api.updateOrderStatus(no, orderStatus);
+      const nextOrders = (this.data.orders || []).map((item) => item.no === no ? updated : item);
+      this.setData({ orders: nextOrders });
+      await this.loadBoard({ silent: true });
+      wx.showToast({ title: `订单已标记为${targetStatus}`, icon: "none" });
+    } catch (error) {
+      wx.showToast({ title: error.message || `更新${targetStatus}失败`, icon: "none" });
+    } finally {
+      this.setData({ saving: false });
+    }
+  },
+
   openCopyDispatch(event) {
+    if (this.data.formOpening) return;
     const row = this.rowById(event.currentTarget.dataset.id);
     if (!row) return;
     this.openCopyDispatchByRow(row);
   },
 
   openCopyDispatchByRow(row) {
+    if (this.data.formOpening) return;
     if (!row) return;
     this.openDispatchForm({
       mode: "copy",
-      date: this.data.dispatchDate,
+      date: row.date || this.data.dispatchDate,
       row: this.dispatchFormRowForContext(row)
     });
   },
@@ -599,7 +911,7 @@ Page({
   },
 
   async openStatusActions(event) {
-    if (this.data.saving) return;
+    if (this.data.saving || this.data.formOpening) return;
     const row = this.rowById(event.currentTarget.dataset.id);
     if (!row) return;
     if (row.statusActionDisabled) return;
@@ -664,7 +976,7 @@ Page({
   },
 
   async returnRowStatus(event) {
-    if (this.data.saving) return;
+    if (this.data.saving || this.data.formOpening) return;
     const row = this.rowById(event.currentTarget.dataset.id);
     if (!row) return;
     const previousStatus = dispatchReturnStatusForRow(row);
@@ -752,7 +1064,7 @@ Page({
   },
 
   openMoreActions(event) {
-    if (this.data.saving) return;
+    if (this.data.saving || this.data.formOpening) return;
     const id = event.currentTarget.dataset.id;
     const rows = this.data.rawRows || [];
     const index = rows.findIndex((row) => row.id === id);
@@ -799,6 +1111,7 @@ Page({
   },
 
   copySelectedDispatchRow() {
+    if (this.data.formOpening) return;
     const rows = this.selectedDispatchRows();
     if (!rows.length) {
       wx.showToast({ title: "请先勾选要复制的排车单", icon: "none" });

@@ -4143,8 +4143,9 @@ function fillDispatchFormFromPlanRow(row, fallbackDate = dispatchDate.value || o
   const order = row.order || {};
   const customerName = order.customer || row.customer || "";
   const customer = customerRows.value.find((item) => item.type === "客户" && item.name === customerName);
+  const planDate = row.date || order.date || fallbackDate || dispatchDate.value || offsetDateInputValue(1);
   Object.assign(dispatchForm, {
-    date: fallbackDate || dispatchDate.value || offsetDateInputValue(1),
+    date: planDate,
     customerId: order.customerId || row.customerId || customer?.id || "",
     customer: customerName,
     plate: row.plate || order.plate || "",
@@ -4251,6 +4252,7 @@ function createManualDispatchPlanRow() {
 
 async function saveEditedDispatchPlanRow() {
   commitDispatchFormLoadHourInput();
+  normalizeDispatchLocationFormValuesForSave();
   const targetIndex = dispatchPlanRows.value.findIndex((row) => row.id === editingDispatchRowId.value);
   if (targetIndex < 0) {
     notify("找不到要编辑的排车单");
@@ -4274,7 +4276,8 @@ async function saveEditedDispatchPlanRow() {
   }
 
   const originalRow = dispatchPlanRows.value[targetIndex];
-  const planDate = dispatchForm.date || dispatchDate.value;
+  const originalPlanDate = dispatchPlanDate(originalRow);
+  const planDate = dispatchForm.date || originalPlanDate || dispatchDate.value;
   const isOutsourced = dispatchForm.vehicleSource === "外派车辆";
   const updatedRow = {
     ...originalRow,
@@ -4323,10 +4326,10 @@ async function saveEditedDispatchPlanRow() {
       }
     }
 
-    if (planDate !== dispatchDate.value) {
+    if (planDate !== originalPlanDate) {
       dispatchPlanRows.value.splice(targetIndex, 1);
-      const deleteResult = await dispatchApi.deleteDispatchPlanRows(dispatchDate.value, [dispatchRowRef(originalRow)]);
-      if (deleteResult?.plan) updateDispatchPlanBaseFromRecord(deleteResult.plan, dispatchDate.value);
+      const deleteResult = await dispatchApi.deleteDispatchPlanRows(originalPlanDate, [dispatchRowRef(originalRow)]);
+      if (deleteResult?.plan) updateDispatchPlanBaseFromRecord(deleteResult.plan, originalPlanDate);
       await saveDispatchPlan({ silent: true, throwOnError: true });
       await appendDispatchPlanRowsToDate(planDate, [updatedRow]);
       dispatchDate.value = planDate;
@@ -4347,6 +4350,7 @@ async function saveEditedDispatchPlanRow() {
 
 async function saveManualDispatchPlanRow() {
   commitDispatchFormLoadHourInput();
+  normalizeDispatchLocationFormValuesForSave();
   if (editingDispatchRowId.value) {
     await saveEditedDispatchPlanRow();
     return;
@@ -4541,6 +4545,7 @@ async function saveDuplicateDispatchRows() {
       const createdAt = currentTimestampInputValue();
       const dispatchNo = generateDispatchNo(dispatchDate.value, duplicatedRows);
       const item = await ordersApi.createOrder({
+        dispatchNo,
         customerId: matchedCustomer.id,
         customer: matchedCustomer.name,
         businessType: sourceOrder.businessType || "运输",
@@ -4572,7 +4577,7 @@ async function saveDuplicateDispatchRows() {
         id: `dispatch-copy-${Date.now()}-${duplicatedRows.length}`,
         createdAt,
         date: dispatchDate.value,
-        dispatchNo: item.dispatchNo || dispatchNo,
+        dispatchNo,
         orderNo: item.no,
         customer: item.customer || matchedCustomer.name,
         plate: draft.plate || sourceRow.plate || "",
@@ -13405,8 +13410,30 @@ function isInternalTemplateRow(item) {
   }
 }
 
+function isProtectedTemplateRow(item) {
+  return ["通用模板", "肯发专用"].includes(String(item?.name || "").trim());
+}
+
+function isKenfaTemplateRow(item) {
+  return String(item?.name || "").trim() === "肯发专用";
+}
+
+function protectedTemplateMessage(item) {
+  return isKenfaTemplateRow(item)
+    ? "肯发专用模板由系统代码生成，不能在模板编辑器中修改"
+    : "通用模板为系统保留模板，不能删除";
+}
+
 const exportTemplateRows = computed(() =>
-  templateRows.value.filter((item) => !isInternalTemplateRow(item))
+  templateRows.value
+    .filter((item) => !isInternalTemplateRow(item))
+    .sort((left, right) => {
+      const order = { "通用模板": 0, "肯发专用": 1 };
+      const leftOrder = order[String(left.name || "").trim()] ?? 10;
+      const rightOrder = order[String(right.name || "").trim()] ?? 10;
+      if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+      return String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""));
+    })
 );
 
 const selectedTemplate = computed(() =>
@@ -15498,6 +15525,21 @@ function addressBookOptionValue(option = {}) {
   return String(option.value || option.address || option.pathLabel || "").trim();
 }
 
+function locationCityCandidates() {
+  const provinceCities = Object.values(chinaProvinceCities).flat();
+  const values = new Set([
+    ...provinceCities,
+    ...templateLocationGroups.value.map((group) => group.level1),
+    "香港",
+    "澳门"
+  ]);
+  provinceCities.forEach((city) => {
+    const text = String(city || "").trim();
+    if (text.endsWith("市") && text.length > 1) values.add(text.slice(0, -1));
+  });
+  return [...values].filter(Boolean).sort((left, right) => right.length - left.length);
+}
+
 function splitLocationParts(value = "") {
   const text = String(value || "").trim();
   const parts = text
@@ -15505,16 +15547,16 @@ function splitLocationParts(value = "") {
     .map((part) => part.trim())
     .filter(Boolean);
   if (parts.length <= 1 && text) {
-    const cities = [...Object.values(chinaProvinceCities).flat(), "香港", "澳门"]
-      .sort((left, right) => right.length - left.length);
-    const city = cities.find((item) => text.includes(item)) || "";
-    const afterCity = city ? text.slice(text.indexOf(city) + city.length).trim() : text;
+    const sourceText = parts.length === 1 ? parts[0] : text;
+    const cities = locationCityCandidates();
+    const city = cities.find((item) => sourceText === item || sourceText.startsWith(item)) || "";
+    const afterCity = city ? sourceText.slice(sourceText.indexOf(city) + city.length).trim() : sourceText;
     const district = afterCity.match(/^([\u4e00-\u9fa5A-Za-z0-9]+?(?:区|县|镇|乡|街道))/u)?.[1] || "";
     const detail = district ? afterCity.slice(district.length).trim() : afterCity;
     return {
       city,
       district,
-      detail: city || district ? detail : text
+      detail: city || district ? detail : sourceText
     };
   }
   return {
@@ -15536,11 +15578,24 @@ function splitDispatchLocationParts(value = "") {
   if (!text) return { city: "", district: "", detail: "" };
   if (text.includes("/")) {
     const parts = text.split("/").map((part) => part.trim());
-    return {
+    if (!parts[0] && parts.filter(Boolean).length === 1) {
+      return splitLocationParts(parts.filter(Boolean)[0]);
+    }
+    const parsed = {
       city: parts[0] || "",
       district: parts[1] || "",
       detail: parts.slice(2).join(" / ")
     };
+    if (!parsed.city && parsed.detail) {
+      return splitLocationParts(parsed.detail);
+    }
+    if (parsed.city && !parsed.district && parsed.detail) {
+      const detailParts = splitLocationParts(parsed.detail);
+      if (detailParts.city && normalizeLocationText(detailParts.city) === normalizeLocationText(parsed.city) && !detailParts.district && !detailParts.detail) {
+        parsed.detail = "";
+      }
+    }
+    return parsed;
   }
   return splitLocationParts(text);
 }
@@ -15554,6 +15609,15 @@ function composeDispatchLocationParts(city = "", district = "", detail = "") {
   return values.join(" / ");
 }
 
+function normalizeDispatchLocationPartValue(value = "", part = "") {
+  const text = String(value || "").trim();
+  if (!text || part === "detail") return text;
+  const parsed = splitDispatchLocationParts(text);
+  if (part === "city") return parsed.city || text;
+  if (part === "district") return parsed.district || text;
+  return text;
+}
+
 function splitAddressBookLocationValue(value = "") {
   return String(value || "")
     .replace(/\r/g, "\n")
@@ -15564,7 +15628,7 @@ function splitAddressBookLocationValue(value = "") {
 
 function dispatchLocationEntries(target) {
   const raw = String(dispatchForm[target] || "").replace(/\r/g, "\n");
-  if (!raw.trim()) return [""];
+  if (!raw.trim() && !/[\n；;]/.test(raw)) return [""];
   return raw.split(/[\n；;]/).map((item) => item.trim());
 }
 
@@ -15574,7 +15638,7 @@ function dispatchLocationEntryCount(target) {
 
 function setDispatchLocationEntries(target, entries) {
   const normalized = entries.map((item) => String(item || "").trim());
-  dispatchForm[target] = normalized.some(Boolean) ? normalized.join("\n") : "";
+  dispatchForm[target] = normalized.length > 1 || normalized.some(Boolean) ? normalized.join("\n") : "";
 }
 
 function updateDispatchLocationEntry(target, index, value) {
@@ -15586,7 +15650,7 @@ function updateDispatchLocationEntry(target, index, value) {
 function updateDispatchLocationEntryPart(target, index, part, value) {
   const entries = dispatchLocationEntries(target);
   const current = splitDispatchLocationParts(entries[index] || "");
-  current[part] = String(value || "").trim();
+  current[part] = normalizeDispatchLocationPartValue(value, part);
   entries[index] = composeDispatchLocationParts(current.city, current.district, current.detail);
   setDispatchLocationEntries(target, entries);
 }
@@ -15691,7 +15755,7 @@ function updateDispatchLocationCity(target, index, value) {
   if (isDispatchLocationInputComposing(target, index, "city")) return;
   const entries = dispatchLocationEntries(target);
   const current = splitDispatchLocationParts(entries[index] || "");
-  const nextCity = String(value || "").trim();
+  const nextCity = normalizeDispatchLocationPartValue(value, "city");
   if (current.city !== nextCity) {
     current.district = "";
     if (dispatchLocationDistrictSearchKey(target, index)) {
@@ -15781,14 +15845,29 @@ function invalidDispatchLocationMessage(target) {
   return invalidIndex >= 0 ? `${label}第 ${invalidIndex + 1} 条需要填写市` : "";
 }
 
+function addDispatchLocationEntry(target) {
+  const entries = dispatchLocationEntries(target);
+  setDispatchLocationEntries(target, [...entries, ""]);
+  dispatchLocationDistrictPicker.key = "";
+  dispatchLocationDistrictPicker.keyword = "";
+}
+
+function normalizeDispatchLocationFormValuesForSave() {
+  ["loading", "unloading"].forEach((target) => {
+    const entries = dispatchLocationEntries(target).filter((item) => String(item || "").trim());
+    setDispatchLocationEntries(target, entries.length ? entries : [""]);
+  });
+}
+
 function removeDispatchLocationEntry(target, index) {
   const entries = dispatchLocationEntries(target);
-  if (entries.length <= 1) {
-    dispatchForm[target] = "";
+  if (entries.length <= 1 || index <= 0) {
     return;
   }
   entries.splice(index, 1);
   setDispatchLocationEntries(target, entries);
+  dispatchLocationDistrictPicker.key = "";
+  dispatchLocationDistrictPicker.keyword = "";
 }
 
 function selectedAddressBookOptionsForApply() {
@@ -18977,7 +19056,9 @@ async function exportOrderSnapshotsAsExcel(orders, title = "订单导出", templ
       body: JSON.stringify({
         orders,
         title: `${title}-${templateName}`,
+        templateId: fullTemplateRow?.id || null,
         template,
+        templateKind: isKenfaTemplateRow(fullTemplateRow) ? "kenfa" : "",
         exchange: exchangeOverride || null,
         includeReceiptSheet: Boolean(options.includeReceiptSheet)
       })
@@ -20841,6 +20922,10 @@ async function exportStatementByFormat(format, templateRow = selectedTemplate.va
   }
   saveStatementExportSettings();
   if (templateRow?.id) selectedTemplateId.value = templateRow.id;
+  if (isKenfaTemplateRow(templateRow) && (statementExportType.value !== "customer" || format !== "excel")) {
+    notify("肯发专用模板仅支持客户对账单 Excel 导出");
+    return;
+  }
   const title = `${statementExportTypeLabel()}-${entityName}`;
   const exchange = statementExportExchangePayload();
   if (statementExportType.value === "supplier") {
@@ -21833,6 +21918,7 @@ function applyOrderTemplateFields(order = {}) {
     customer: customer?.name || order.customer || orderForm.customer,
     businessType: order.businessType || order.business_type || orderForm.businessType,
     port: order.port || orderForm.port,
+    needsWeighing: booleanFlag(order.needsWeighing ?? order.needs_weighing ?? orderForm.needsWeighing, false),
     direction: order.direction || orderForm.direction,
     tonnage: order.tonnage || orderForm.tonnage,
     currency: order.currency || orderForm.currency,
@@ -21965,6 +22051,7 @@ async function saveCurrentFeesAsTemplate() {
         customer: orderForm.customer,
         businessType: orderForm.businessType,
         port: orderForm.port,
+        needsWeighing: booleanFlag(orderForm.needsWeighing, false),
         direction: orderForm.direction,
         tonnage: orderForm.tonnage,
         currency: orderForm.currency,
@@ -22395,6 +22482,10 @@ function editTemplate(item = selectedTemplate.value) {
 }
 
 async function openTemplateEditor(item = null) {
+  if (item && isProtectedTemplateRow(item)) {
+    notify(protectedTemplateMessage(item));
+    return;
+  }
   window.clearTimeout(templateAutosaveTimer);
   templateModalOpen.value = true;
   templateEditorLoading.value = Boolean(item?.id && !item.contentLoaded && !item.content);
@@ -22432,6 +22523,10 @@ function nextTemplateCopyName(name) {
 }
 
 async function duplicateTemplate(item) {
+  if (isProtectedTemplateRow(item)) {
+    notify(protectedTemplateMessage(item));
+    return;
+  }
   try {
     const sourceItem = await ensureTemplateContent(item);
     const payload = {
@@ -23087,6 +23182,10 @@ function stopTemplateHeaderDrag() {
 }
 
 async function deleteTemplate(item) {
+  if (isProtectedTemplateRow(item)) {
+    notify(protectedTemplateMessage(item));
+    return;
+  }
   try {
     await templatesApi.deleteTemplate(item.id);
     templateRows.value = templateRows.value.filter((row) => row.id !== item.id);
@@ -26434,7 +26533,7 @@ function orderDetailFeeRows(order = {}) {
                 <div v-for="template in orderExportTemplateOptions()" :key="template.id" class="statement-export-template-row">
                   <span :title="template.name">{{ template.name }}</span>
                   <button type="button" title="导出 Excel" aria-label="导出 Excel" @click="exportStatementByFormat('excel', template)">Excel</button>
-                  <button type="button" title="导出 PDF" aria-label="导出 PDF" @click="exportStatementByFormat('pdf', template)">PDF</button>
+                  <button type="button" :disabled="isKenfaTemplateRow(template)" :title="isKenfaTemplateRow(template) ? '肯发专用模板仅支持 Excel' : '导出 PDF'" aria-label="导出 PDF" @click="exportStatementByFormat('pdf', template)">PDF</button>
                 </div>
               </div>
             </section>
@@ -28388,9 +28487,9 @@ function orderDetailFeeRows(order = {}) {
                   <td>{{ templateFormatLabel(item) }}</td>
                   <td>{{ item.description }}</td>
                   <td class="row-actions">
-                    <button class="icon-btn icon-only" title="编辑" aria-label="编辑" @click.stop="openTemplateEditor(item)"><IconSvg name="edit" /></button>
-                    <button class="icon-btn icon-only" title="复制模板" aria-label="复制模板" @click.stop="duplicateTemplate(item)"><IconSvg name="copy" /></button>
-                    <button class="icon-btn icon-only danger" title="删除" aria-label="删除" @click.stop="deleteTemplate(item)"><IconSvg name="trash" /></button>
+                    <button class="icon-btn icon-only" :disabled="isProtectedTemplateRow(item)" :title="isProtectedTemplateRow(item) ? protectedTemplateMessage(item) : '编辑'" :aria-label="isProtectedTemplateRow(item) ? protectedTemplateMessage(item) : '编辑'" @click.stop="openTemplateEditor(item)"><IconSvg name="edit" /></button>
+                    <button class="icon-btn icon-only" :disabled="isProtectedTemplateRow(item)" :title="isProtectedTemplateRow(item) ? protectedTemplateMessage(item) : '复制模板'" :aria-label="isProtectedTemplateRow(item) ? protectedTemplateMessage(item) : '复制模板'" @click.stop="duplicateTemplate(item)"><IconSvg name="copy" /></button>
+                    <button class="icon-btn icon-only danger" :disabled="isProtectedTemplateRow(item)" :title="isProtectedTemplateRow(item) ? protectedTemplateMessage(item) : '删除'" :aria-label="isProtectedTemplateRow(item) ? protectedTemplateMessage(item) : '删除'" @click.stop="deleteTemplate(item)"><IconSvg name="trash" /></button>
                   </td>
                 </tr>
               </tbody>
@@ -30007,9 +30106,9 @@ function orderDetailFeeRows(order = {}) {
 	                          @compositionstart="handleDispatchLocationTextCompositionStart('loading', index, 'detail')"
 	                          @compositionend="handleDispatchLocationTextCompositionEnd('loading', index, 'detail', $event)"
 	                          @blur="commitDispatchLocationDraftPart('loading', index, 'detail')"
-	                        />
+                        />
                         <button
-                          v-if="dispatchLocationEntries('loading').length > 1"
+                          v-if="dispatchLocationEntries('loading').length > 1 && index > 0"
                           class="dispatch-address-remove icon-only"
                           type="button"
                           title="删除此地址"
@@ -30019,8 +30118,11 @@ function orderDetailFeeRows(order = {}) {
                           <IconSvg name="trash" />
                         </button>
                       </span>
+                      <span class="dispatch-location-actions">
+                        <button class="ghost-btn small" type="button" :disabled="!dispatchCustomerSelected" @click.stop="addDispatchLocationEntry('loading')"><IconSvg name="plus" />新增装货地</button>
+                        <button class="ghost-btn small" type="button" :disabled="!dispatchCustomerSelected" @click.stop="openDispatchLocationPicker('loading')"><IconSvg name="contacts" />选择联系人地址</button>
+                      </span>
                     </span>
-	                    <button class="table-op icon-only address-book-trigger" type="button" :disabled="!dispatchCustomerSelected" title="从联系人地址中选择" aria-label="从联系人地址中选择" @click.stop="openDispatchLocationPicker('loading')"><IconSvg name="contacts" /></button>
 	                  </span>
 	                </label>
 	                <label class="dispatch-location-field" :class="{ 'is-disabled': !dispatchCustomerSelected }">
@@ -30105,9 +30207,9 @@ function orderDetailFeeRows(order = {}) {
 	                          @compositionstart="handleDispatchLocationTextCompositionStart('unloading', index, 'detail')"
 	                          @compositionend="handleDispatchLocationTextCompositionEnd('unloading', index, 'detail', $event)"
 	                          @blur="commitDispatchLocationDraftPart('unloading', index, 'detail')"
-	                        />
+                        />
                         <button
-                          v-if="dispatchLocationEntries('unloading').length > 1"
+                          v-if="dispatchLocationEntries('unloading').length > 1 && index > 0"
                           class="dispatch-address-remove icon-only"
                           type="button"
                           title="删除此地址"
@@ -30117,8 +30219,11 @@ function orderDetailFeeRows(order = {}) {
                           <IconSvg name="trash" />
                         </button>
                       </span>
+                      <span class="dispatch-location-actions">
+                        <button class="ghost-btn small" type="button" :disabled="!dispatchCustomerSelected" @click.stop="addDispatchLocationEntry('unloading')"><IconSvg name="plus" />新增卸货地</button>
+                        <button class="ghost-btn small" type="button" :disabled="!dispatchCustomerSelected" @click.stop="openDispatchLocationPicker('unloading')"><IconSvg name="contacts" />选择联系人地址</button>
+                      </span>
                     </span>
-	                    <button class="table-op icon-only address-book-trigger" type="button" :disabled="!dispatchCustomerSelected" title="从联系人地址中选择" aria-label="从联系人地址中选择" @click.stop="openDispatchLocationPicker('unloading')"><IconSvg name="contacts" /></button>
                   </span>
                 </label>
               </div>
@@ -31889,6 +31994,7 @@ function orderDetailFeeRows(order = {}) {
       :open="filePreviewOpen"
       :file="previewFile"
       :endpoint="fileEndpoint"
+      :request-headers="apiRequestHeaders"
       @download="openStoredFile($event, 'download')"
       @close="closeFilePreview"
     />
