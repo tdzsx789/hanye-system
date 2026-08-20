@@ -52,11 +52,12 @@ const VEHICLE_DRIVER_MODULES = ["vehicleDriver", ...VEHICLE_EXPENSE_MODULES];
 const FINANCE_WAGE_MODULES = ["financeWages"];
 const FINANCE_MODULES = ["financeCosts", "financeSupplierStatements", "financeCustomsStatements", "financeCostCenter", "financeDaily"];
 const SYSTEM_MODULES = ["freight", "templates", "master", "security", "accounts"];
+const SYSTEM_CONFIG_VIEW_MODULES = ["freight", "templates", "master", "security"];
 
 export const ROLE_ALLOWED_MODULES = {
   管理员: ALL_MODULES,
-  财务: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_WAGE_MODULES, ...FINANCE_MODULES],
-  跟单员: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_MODULES],
+  财务: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_WAGE_MODULES, ...FINANCE_MODULES, ...SYSTEM_CONFIG_VIEW_MODULES],
+  跟单员: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_MODULES, ...SYSTEM_CONFIG_VIEW_MODULES],
   司机: [...VEHICLE_DRIVER_MODULES, ...FINANCE_MODULES]
 };
 

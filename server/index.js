@@ -4749,6 +4749,19 @@ function dispatchRowHasReference(row = {}) {
   return dispatchRowLookupKeys(row).length > 0;
 }
 
+function dedupeDispatchPlanRows(rows = []) {
+  const dedupedRows = [];
+  const seenKeys = new Set();
+  for (const row of rows) {
+    const keys = dispatchRowLookupKeys(row);
+    if (!keys.length) continue;
+    if (keys.some((key) => seenKeys.has(key))) continue;
+    dedupedRows.push(row);
+    keys.forEach((key) => seenKeys.add(key));
+  }
+  return dedupedRows;
+}
+
 function normalizeDispatchPlanRow(row = {}, existingRow = null, requestCreator = {}) {
   const item = row && typeof row === "object" ? row : {};
   const creator = dispatchRowCreatorFields(item, existingRow, requestCreator);
@@ -4842,18 +4855,56 @@ function dispatchExportShortLocation(value = "") {
   const text = dispatchExportFirstLocation(value);
   if (!text) return "";
   const slashParts = text.split(/\s*\/\s*/).map((item) => item.trim()).filter(Boolean);
-  if (slashParts.length >= 2) return slashParts.slice(0, 2).join("");
+  if (slashParts.length >= 2) return slashParts.slice(0, 2).join(" / ");
   if (slashParts.length === 1) return slashParts[0];
   const matched = text.match(/((?:[\u4e00-\u9fa5A-Za-z0-9]+?[市区县镇乡街道])|香港|九龙|新界|元朗|屯门|沙田|粉岭|葵涌|荃湾|观塘|湾仔|赤鱲角|大埔|将军澳)/g);
-  if (matched?.length) return matched.slice(0, 2).join("");
+  if (matched?.length) return matched.slice(0, 2).join(" / ");
   return text.length > 8 ? text.slice(0, 8) : text;
 }
 
 function dispatchExportRoute(row = {}) {
-  const order = dispatchExportNestedRow(row.order);
-  const loading = dispatchExportShortLocation(dispatchExportText(order.loading, row.loading));
-  const unloading = dispatchExportShortLocation(dispatchExportText(order.unloading, row.unloading));
-  return [loading, unloading].filter(Boolean).join("/") || "";
+  const route = dispatchExportText(row.route);
+  if (route) return route;
+  const loading = dispatchExportText(row.loading);
+  const unloading = dispatchExportText(row.unloading);
+  return [loading, unloading].filter(Boolean).join(" → ") || "";
+}
+
+function dispatchExportTextWidth(value = "") {
+  return String(value || "")
+    .split(/\r?\n/)
+    .reduce((max, line) => {
+      const width = Array.from(line).reduce((sum, char) => sum + (char.charCodeAt(0) > 255 ? 2 : 1), 0);
+      return Math.max(max, width);
+    }, 0);
+}
+
+function dispatchExportWrappedLineCount(value = "", maxWidth = 34) {
+  const lines = String(value || "").split(/\r?\n/);
+  const wrappedLines = lines.map((line) => Math.max(1, Math.ceil(dispatchExportTextWidth(line) / maxWidth)));
+  return Math.max(1, wrappedLines.reduce((sum, item) => sum + item, 0));
+}
+
+function dispatchExportCellDisplayText(value, columnNumber) {
+  if (value instanceof Date) {
+    if (columnNumber === 2) {
+      return `${value.getMonth() + 1}/${value.getDate()}`;
+    }
+    return `${String(value.getHours()).padStart(2, "0")}:${String(value.getMinutes()).padStart(2, "0")}`;
+  }
+  return String(value ?? "");
+}
+
+function dispatchExportRowHeight(values = [], columnWidths = []) {
+  const baseHeight = 18;
+  const extraLineHeight = 14;
+  const lineCounts = values.map((value, index) => {
+    const width = Number(columnWidths[index] || 0);
+    const effectiveWidth = Math.max(8, Math.floor(width * 1.1));
+    return dispatchExportWrappedLineCount(dispatchExportCellDisplayText(value, index + 1), effectiveWidth);
+  });
+  const maxLines = Math.max(1, ...lineCounts);
+  return Math.min(180, baseHeight + Math.max(0, maxLines - 1) * extraLineHeight);
 }
 
 function dispatchExportDateValue(value = "", fallback = "") {
@@ -4869,8 +4920,63 @@ function dispatchExportTimeValue(value = "") {
   return `${String(Number(matched[1])).padStart(2, "0")}:${matched[2]}`;
 }
 
+function dispatchExportPlateGroup(row = {}) {
+  const order = dispatchExportNestedRow(row.order);
+  return dispatchExportText(row.plate, order.plate);
+}
+
+function dispatchExportComparableDate(row = {}) {
+  const order = dispatchExportNestedRow(row.order);
+  const dateText = dispatchExportText(row.date, order.date);
+  const date = parseInputDate(dateText);
+  return date ? date.getTime() : Number.POSITIVE_INFINITY;
+}
+
+function dispatchExportComparableTime(row = {}) {
+  const order = dispatchExportNestedRow(row.order);
+  const timeText = dispatchExportText(row.loadTime, order.loadTime, order.loadingTime);
+  const matched = String(timeText || "").trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!matched) return Number.POSITIVE_INFINITY;
+  return Number(matched[1]) * 60 + Number(matched[2]);
+}
+
+function dispatchExportVehicleSourceRank(row = {}) {
+  const order = dispatchExportNestedRow(row.order);
+  const vehicleSource = dispatchExportText(order.vehicleSource, row.vehicleSource);
+  if (vehicleSource === "本公司车辆") return 0;
+  if (vehicleSource === "外派车辆") return 1;
+  return 2;
+}
+
+function compareDispatchExportRows(left = {}, right = {}) {
+  const leftPlate = dispatchExportPlateGroup(left);
+  const rightPlate = dispatchExportPlateGroup(right);
+  if (!leftPlate && rightPlate) return 1;
+  if (!rightPlate && leftPlate) return -1;
+  const plateCompare = String(leftPlate || "").localeCompare(String(rightPlate || ""), "zh-Hans-CN", { numeric: true, sensitivity: "base" });
+  if (plateCompare !== 0) return plateCompare;
+
+  const dateCompare = dispatchExportComparableDate(left) - dispatchExportComparableDate(right);
+  if (dateCompare !== 0) return dateCompare;
+
+  const timeCompare = dispatchExportComparableTime(left) - dispatchExportComparableTime(right);
+  if (timeCompare !== 0) return timeCompare;
+
+  const sourceCompare = dispatchExportVehicleSourceRank(left) - dispatchExportVehicleSourceRank(right);
+  if (sourceCompare !== 0) return sourceCompare;
+
+  const noCompare = dispatchExportText(left.dispatchNo, left.order?.dispatchNo).localeCompare(
+    dispatchExportText(right.dispatchNo, right.order?.dispatchNo),
+    "zh-Hans-CN",
+    { numeric: true, sensitivity: "base" }
+  );
+  if (noCompare !== 0) return noCompare;
+
+  return (left.__exportIndex ?? 0) - (right.__exportIndex ?? 0);
+}
+
 function dispatchExportWorkbookTitle(rows = [], fallbackDate = todayInputValue()) {
-  const first = rows[0] || {};
+  const first = rows.find((row) => dispatchExportText(row?.plate, row?.order?.plate) || dispatchExportText(row?.dispatchNo, row?.order?.dispatchNo)) || rows[0] || {};
   const order = dispatchExportNestedRow(first.order);
   const dateText = dispatchExportText(order.date, first.date, fallbackDate);
   const date = parseInputDate(dateText);
@@ -4879,15 +4985,27 @@ function dispatchExportWorkbookTitle(rows = [], fallbackDate = todayInputValue()
 }
 
 function dispatchExportRowsForWorkbook(rows = [], fallbackDate = "", customerShortNames = new Map(), supplierShortNames = new Map()) {
-  return rows.map((row, index) => {
+  const sortedRows = [...rows]
+    .map((row, index) => ({ ...row, __exportIndex: index }))
+    .sort(compareDispatchExportRows);
+  const bodyRows = [];
+  let previousPlate = "";
+  let serialNumber = 0;
+  sortedRows.forEach((row) => {
+    const plate = dispatchExportPlateGroup(row);
+    if (bodyRows.length && plate !== previousPlate) {
+      bodyRows.push(null, null);
+    }
+    previousPlate = plate;
+    serialNumber += 1;
     const order = dispatchExportNestedRow(row.order);
     const vehicleSource = dispatchExportText(order.vehicleSource, row.vehicleSource);
     const supplier = dispatchExportText(order.supplier, row.supplier);
     const hkDriver = dispatchExportText(row.hkDriver, order.hkDriver, row.driver, order.driver);
     const mainlandDriver = dispatchExportText(row.mainlandDriver, order.mainlandDriver);
     const supplierDisplay = dispatchExportOptionalText(order.supplier, row.supplier);
-    return [
-      index + 1,
+    bodyRows.push([
+      serialNumber,
       dispatchExportDateValue(dispatchExportText(row.date, order.date, fallbackDate), fallbackDate),
       dispatchExportShortCustomer(row, customerShortNames),
       dispatchExportText(row.plate, order.plate),
@@ -4902,8 +5020,9 @@ function dispatchExportRowsForWorkbook(rows = [], fallbackDate = "", customerSho
       dispatchExportShortSupplier(row, supplierShortNames),
       supplierDisplay ? "外派" : "",
       dispatchExportText(row.note, order.remark)
-    ];
+    ]);
   });
+  return bodyRows;
 }
 
 async function renderDispatchPlanXlsxBuffer(rows = [], title = "", fallbackDate = "") {
@@ -4985,10 +5104,13 @@ async function renderDispatchPlanXlsxBuffer(rows = [], title = "", fallbackDate 
   const bodyRows = dispatchExportRowsForWorkbook(rows, fallbackDate, customerShortNames, supplierShortNames);
   bodyRows.forEach((values, rowIndex) => {
     const excelRow = worksheet.getRow(rowIndex + 4);
+    if (!values) {
+      excelRow.values = Array(15).fill(null);
+      excelRow.height = 16;
+      return;
+    }
     excelRow.values = values;
-    const routeLines = String(values[4] || "").split(/\r?\n/).length;
-    const noteLines = String(values[14] || "").split(/\r?\n/).length;
-    excelRow.height = Math.max(22, Math.min(90, Math.max(routeLines, noteLines) * 18));
+    excelRow.height = dispatchExportRowHeight(values, columnWidths);
     excelRow.eachCell({ includeEmpty: true }, (cell, columnNumber) => {
       cell.font = { name: "SimSun", size: 14 };
       cell.alignment = {
@@ -5048,9 +5170,12 @@ function createDispatchPlanConflictError(message, detail = "") {
 }
 
 function mergeDispatchPlanRows(existingRows = [], incomingRows = [], baseRows = []) {
+  const normalizedExistingRows = dedupeDispatchPlanRows(existingRows);
+  const normalizedIncomingRows = dedupeDispatchPlanRows(incomingRows);
+  const normalizedBaseRows = dedupeDispatchPlanRows(baseRows);
   const mergedRows = [];
-  const baseLookup = dispatchRowLookup(baseRows);
-  const hasBaseRows = baseRows.length > 0;
+  const baseLookup = dispatchRowLookup(normalizedBaseRows);
+  const hasBaseRows = normalizedBaseRows.length > 0;
   const seenExistingKeys = new Set();
   const stats = {
     added: 0,
@@ -5060,8 +5185,10 @@ function mergeDispatchPlanRows(existingRows = [], incomingRows = [], baseRows = 
     conflict: 0
   };
 
-  for (const row of incomingRows) {
-    const existingRow = findExistingDispatchRow(row, dispatchRowLookup(existingRows));
+  const existingLookup = dispatchRowLookup(normalizedExistingRows);
+
+  for (const row of normalizedIncomingRows) {
+    const existingRow = findExistingDispatchRow(row, existingLookup);
     const baseRow = findExistingDispatchRow(row, baseLookup);
     const rowKeys = dispatchRowLookupKeys(row);
     rowKeys.forEach((key) => seenExistingKeys.add(key));
@@ -5098,11 +5225,12 @@ function mergeDispatchPlanRows(existingRows = [], incomingRows = [], baseRows = 
     stats.added += 1;
   }
 
-  const protectedRows = existingRows.filter((row) =>
+  const protectedRows = normalizedExistingRows.filter((row) =>
     !dispatchRowLookupKeys(row).some((key) => seenExistingKeys.has(key))
   );
+  const rows = dedupeDispatchPlanRows([...mergedRows, ...protectedRows]);
   stats.protected = protectedRows.length;
-  return { rows: [...mergedRows, ...protectedRows], stats };
+  return { rows, stats };
 }
 
 async function lockDispatchPlanDate(date) {
@@ -5142,7 +5270,7 @@ function dispatchRowCreatorFields(row = {}, existingRow = null, requestCreator =
 function mapDispatchPlanRecord(row = {}) {
   return {
     date: row.plan_date,
-    rows: parseDispatchPlanRowsJson(row.rows_json),
+    rows: dedupeDispatchPlanRows(parseDispatchPlanRowsJson(row.rows_json)),
     createdByAccountId: row.created_by_account_id || null,
     createdByUsername: row.created_by_username || "",
     createdByName: row.created_by_display_name || row.created_by_username || "",

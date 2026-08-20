@@ -54,6 +54,7 @@ export const FINANCE_WAGE_MODULES = ["financeWages"];
 export const FINANCE_CENTER_MODULES = ["financeCosts", "financeSupplierStatements", "financeCustomsStatements", "financeCostCenter", "financeDaily"];
 export const BUSINESS_MODULES = ["home", "customers", "dispatchBoard", "orders", "customsBusiness", "otherBusiness"];
 export const SYSTEM_CONFIG_MODULES = ["freight", "templates", "master", "security", "accounts"];
+export const SYSTEM_CONFIG_VIEW_MODULES = ["freight", "templates", "master", "security"];
 export const ROLE_ALLOWED_MODULES = {
   管理员: [
     ...BUSINESS_MODULES,
@@ -63,14 +64,14 @@ export const ROLE_ALLOWED_MODULES = {
     ...BOSS_CENTER_MODULES,
     ...SYSTEM_CONFIG_MODULES
   ],
-  财务: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_WAGE_MODULES, ...FINANCE_CENTER_MODULES],
-  跟单员: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_CENTER_MODULES],
+  财务: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_WAGE_MODULES, ...FINANCE_CENTER_MODULES, ...SYSTEM_CONFIG_VIEW_MODULES],
+  跟单员: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_CENTER_MODULES, ...SYSTEM_CONFIG_VIEW_MODULES],
   司机: [...VEHICLE_DRIVER_MODULES, ...FINANCE_CENTER_MODULES]
 };
 export const ROLE_PERMISSION_LABELS = {
   管理员: "全部权限",
-  财务: "业务、车辆司机、司机工资统计、财务中心",
-  跟单员: "业务、车辆司机、财务中心（不含司机工资统计）",
+  财务: "业务、车辆司机、司机工资统计、财务中心、系统配置（运费模板、模板中心、基础数据、数据安全）",
+  跟单员: "业务、车辆司机、财务中心（不含司机工资统计）、系统配置（运费模板、模板中心、基础数据、数据安全）",
   司机: "车辆司机、财务中心（不含司机工资统计）"
 };
 

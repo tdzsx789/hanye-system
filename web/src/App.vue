@@ -4276,7 +4276,7 @@ async function saveEditedDispatchPlanRow() {
       dispatchDate.value = planDate;
       await loadDispatchPlan(planDate);
     } else {
-      dispatchPlanRows.value.splice(targetIndex, 0, updatedRow);
+      dispatchPlanRows.value.splice(targetIndex, 1, updatedRow);
       await saveDispatchPlan({ silent: true, throwOnError: true });
     }
     selectedDispatchPlanIds.value = [updatedRow.id];
@@ -4791,7 +4791,7 @@ async function copyDispatchPlanText() {
 
 async function exportDispatchPlanRows() {
   const selectedRows = selectedDispatchPlanRows.value;
-  const rows = selectedRows.length ? selectedRows : searchedDispatchPlanRows.value;
+  const rows = selectedRows.length ? selectedRows : dispatchStatusPoolRows.value;
   if (!rows.length) {
     notify("暂无可导出的排车数据");
     return;
@@ -4815,6 +4815,7 @@ async function exportDispatchPlanRows() {
           direction: row.direction,
           tonnage: row.tonnage,
           quantity: row.quantity,
+          route: dispatchOrderRouteText(row),
           loading: row.loading,
           unloading: row.unloading,
           loadTime: row.loadTime,
@@ -15464,6 +15465,9 @@ function splitDispatchLocationParts(value = "") {
 function composeDispatchLocationParts(city = "", district = "", detail = "") {
   const values = [city, district, detail].map((part) => String(part || "").trim());
   if (!values.some(Boolean)) return "";
+  if (values[0] && !values[1] && !values[2]) return values[0];
+  if (values[0] && values[1] && !values[2]) return [values[0], values[1]].join(" / ");
+  if (values[0] && !values[1] && values[2]) return [values[0], "", values[2]].join(" / ");
   return values.join(" / ");
 }
 
@@ -15689,9 +15693,9 @@ function invalidDispatchLocationMessage(target) {
   if (!entries.length) return `请填写${label}`;
   const invalidIndex = entries.findIndex((entry) => {
     const parts = splitDispatchLocationParts(entry);
-    return !parts.city || !parts.district || !parts.detail;
+    return !parts.city;
   });
-  return invalidIndex >= 0 ? `${label}第 ${invalidIndex + 1} 条需要填写市、区和详细地址` : "";
+  return invalidIndex >= 0 ? `${label}第 ${invalidIndex + 1} 条需要填写市` : "";
 }
 
 function removeDispatchLocationEntry(target, index) {
