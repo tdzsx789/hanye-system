@@ -84,10 +84,15 @@ function getDispatchPlan(date) {
   return request(`/dispatch-plans/${encodeURIComponent(date)}`);
 }
 
-function saveDispatchPlan(date, rows) {
+function saveDispatchPlan(date, rows, options) {
+  const source = options || {};
   return request(`/dispatch-plans/${encodeURIComponent(date)}`, {
     method: "PUT",
-    data: { rows: rows || [] }
+    data: {
+      rows: rows || [],
+      baseRows: Array.isArray(source.baseRows) ? source.baseRows : [],
+      updatedAt: source.updatedAt || source.version || ""
+    }
   });
 }
 

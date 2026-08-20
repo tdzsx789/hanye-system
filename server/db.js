@@ -396,18 +396,27 @@ function dispatchRowDispatchNo(row = {}) {
   return String(row?.dispatchNo || row?.dispatch_no || "").trim();
 }
 
-function businessDateFromNo(value = "") {
-  const matched = String(value || "").trim().match(/^(?:HY|PC)(\d{4})(\d{2})(\d{2})/);
-  if (!matched) return "";
-  return normalizeInputDate(`${matched[1]}-${matched[2]}-${matched[3]}`);
-}
-
 function dispatchRowBusinessDate(row = {}, fallbackDate = "") {
   return normalizeInputDate(row?.date)
-    || normalizeInputDate(fallbackDate)
-    || businessDateFromNo(dispatchRowDispatchNo(row))
-    || businessDateFromNo(dispatchRowOrderNo(row))
-    || dispatchRowCreatedTimestamp(row, fallbackDate).slice(0, 10);
+    || normalizeInputDate(fallbackDate);
+}
+
+function dispatchRowStatusRank(row = {}) {
+  const status = String(row?.status || row?.dispatch_status || "").trim();
+  if (status === "已签收" || status === "完成结算") return 60;
+  if (status === "异常滞留") return 55;
+  if (status === "通关中") return 50;
+  if (status === "已派车") return 40;
+  if (status === "预排" || status === "待预排" || status === "已预排" || status === "待派车") return 30;
+  return status ? 20 : 0;
+}
+
+function isPreferredDispatchDateCandidate(candidate, existing) {
+  if (!existing) return true;
+  if (candidate.priority !== existing.priority) return candidate.priority > existing.priority;
+  if (candidate.statusRank !== existing.statusRank) return candidate.statusRank > existing.statusRank;
+  if (candidate.date !== existing.date) return candidate.date > existing.date;
+  return candidate.createdAt > existing.createdAt;
 }
 
 function parseDispatchRowsJson(rowsJson = "[]") {
@@ -433,15 +442,11 @@ function collectDispatchOrderDate(orderDateMap, dispatchDateMap, row = {}, fallb
   const businessDate = dispatchRowBusinessDate(row, fallbackDate);
   const orderNo = dispatchRowOrderNo(row);
   const dispatchNo = dispatchRowDispatchNo(row);
-  const candidate = { date: businessDate, createdAt, priority };
+  const candidate = { date: businessDate, createdAt, priority, statusRank: dispatchRowStatusRank(row) };
   const assign = (map, key) => {
     if (!key || !businessDate) return;
     const existing = map.get(key);
-    if (
-      !existing
-      || candidate.priority > existing.priority
-      || (candidate.priority === existing.priority && candidate.createdAt < existing.createdAt)
-    ) {
+    if (isPreferredDispatchDateCandidate(candidate, existing)) {
       map.set(key, candidate);
     }
   };
@@ -460,10 +465,12 @@ async function backfillDispatchRowCreationTimesAndOrderDates() {
     const nextRows = rows.map((row) => {
       if (!row || typeof row !== "object" || Array.isArray(row)) return row;
       const createdAt = dispatchRowCreatedTimestamp(row, plan.plan_date);
-      collectDispatchOrderDate(orderDateMap, dispatchDateMap, { ...row, createdAt }, plan.plan_date, 2);
-      if (row.createdAt === createdAt) return row;
+      const date = dispatchRowBusinessDate(row, plan.plan_date);
+      const nextRow = { ...row, createdAt, date };
+      collectDispatchOrderDate(orderDateMap, dispatchDateMap, nextRow, plan.plan_date, 2);
+      if (row.createdAt === createdAt && row.date === date) return row;
       changed = true;
-      return { ...row, createdAt };
+      return nextRow;
     });
     if (changed) {
       await db.prepare(`
@@ -479,9 +486,10 @@ async function backfillDispatchRowCreationTimesAndOrderDates() {
     const row = parseDispatchRowJson(recycle.row_json);
     if (!row || typeof row !== "object" || Array.isArray(row)) continue;
     const createdAt = dispatchRowCreatedTimestamp(row, recycle.plan_date);
-    const nextRow = { ...row, createdAt };
+    const date = dispatchRowBusinessDate(row, recycle.plan_date);
+    const nextRow = { ...row, createdAt, date };
     collectDispatchOrderDate(orderDateMap, dispatchDateMap, nextRow, recycle.plan_date, 1);
-    if (row.createdAt !== createdAt) {
+    if (row.createdAt !== createdAt || row.date !== date) {
       await db.prepare("UPDATE dispatch_plan_recycle SET row_json = @rowJson WHERE id = @id").run({
         id: recycle.id,
         rowJson: JSON.stringify(nextRow)

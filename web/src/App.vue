@@ -3816,7 +3816,7 @@ function sortDispatchPlanRowsForDisplay() {
 }
 
 function dispatchPlanDate(row = {}) {
-  return row.date || dispatchRowLiveOrder(row)?.date || row.order?.date || dispatchDate.value;
+  return row.date || dispatchDate.value;
 }
 
 function dispatchRowCreatedAt(row = {}) {
@@ -3826,7 +3826,7 @@ function dispatchRowCreatedAt(row = {}) {
 function dispatchRowCreatedDate(row = {}, fallbackDate = "") {
   const createdAt = dispatchRowCreatedAt(row);
   if (createdAt) return createdAt.slice(0, 10);
-  const fallback = String(fallbackDate || dispatchRowLiveOrder(row)?.date || row.order?.date || row.date || "").trim();
+  const fallback = String(fallbackDate || row.date || dispatchDate.value || "").trim();
   return fallback.slice(0, 10);
 }
 
@@ -3864,8 +3864,10 @@ async function saveDispatchPlan({ silent = false, throwOnError = false } = {}) {
   } catch (error) {
     if (error?.status === 409) {
       await loadDispatchPlansForCurrentFilter();
+      notify(error.message || "排车计划已被其他账号更新，请刷新后再保存");
+    } else if (!silent) {
+      notify(error.message || "排车计划保存到服务器失败");
     }
-    if (!silent) notify(error.message || "排车计划保存到服务器失败");
     if (throwOnError) throw error;
     return false;
   }
@@ -3979,6 +3981,11 @@ async function syncDispatchNosToOrders(rows = dispatchPlanRows.value) {
   }
 }
 
+async function refreshOrderRows() {
+  if (!canAccessModule("orders")) return;
+  orderRows.value = await apiFetchListFrom(ordersApi.listOrders, "订单");
+}
+
 async function syncDispatchDriverToOrder(row, driverName) {
   if (!driverName) return;
   const currentOrder = dispatchRowLiveOrder(row);
@@ -4020,12 +4027,12 @@ async function handleDispatchDriverChange(row, driverName) {
     target.mainlandDriver = "";
   }
   try {
-    await syncDispatchDriverToOrder(target, nextDriverName);
     await saveDispatchPlan({ silent: true, throwOnError: true });
+    await refreshOrderRows();
     if (nextDriverName && target.orderNo) notify("已同步订单运输模式和香港司机");
   } catch (error) {
     Object.assign(target, previous);
-    await saveDispatchPlan({ silent: true });
+    if (error?.status !== 409) await saveDispatchPlan({ silent: true });
     notify(error.message || "同步订单司机失败");
   }
 }
@@ -4058,8 +4065,8 @@ async function handleDispatchStatusChange(row) {
   }
   try {
     if (nextStatus !== previousStatus) target.previousStatus = previousStatus;
-    await syncDispatchRowOrderStatus(target, target.status || DISPATCH_PLAN_DEFAULT_STATUS);
-    saveDispatchPlan({ silent: true });
+    await saveDispatchPlan({ silent: true, throwOnError: true });
+    await refreshOrderRows();
   } catch (error) {
     target.status = previousStatus;
     target.previousStatus = previousRecordedStatus;
@@ -4081,8 +4088,8 @@ async function returnDispatchRowStatus(row) {
   try {
     target.status = previousStatus;
     target.previousStatus = "";
-    await syncDispatchRowOrderStatus(target, previousStatus);
     await saveDispatchPlan({ silent: true, throwOnError: true });
+    await refreshOrderRows();
     activeDispatchStatusPool.value = previousStatus;
     notify(`排车状态已返回到${previousStatus}`);
   } catch (error) {
@@ -4817,7 +4824,7 @@ function dispatchMessageText(rows = dispatchPlanDisplayRows.value) {
   return rows.map((row) => {
     const order = row.order || {};
     const record = { ...order, loading: order.loading || row.loading, unloading: order.unloading || row.unloading };
-    const date = row.date || order.date || dispatchDate.value || "-";
+    const date = dispatchPlanDate(row) || "-";
     const time = row.loadTime || order.loadingTime || "-";
     const direction = order.direction || row.direction || "";
     return [
@@ -15375,7 +15382,7 @@ function dispatchListDetailCellText(row = {}, key = "") {
   const order = row.order || {};
   const values = {
     sequence: row.displayIndex + 1,
-    loadTime: `${row.date || order.date || dispatchDate.value} ${row.loadTime || "-"}`,
+    loadTime: `${dispatchPlanDate(row)} ${row.loadTime || "-"}`,
     dispatchNo: row.dispatchNo || "-",
     createdByName: row.createdByName || row.createdByUsername || "-",
     customer: partnerDisplayLabel(order.customer || row.customer || "", "客户") || "-",
@@ -25241,7 +25248,7 @@ function orderDetailFeeRows(order = {}) {
                       </template>
                       <template v-else-if="column.key === 'loadTime'">
                         <div class="dispatch-load-time-field">
-                          <span class="dispatch-load-date">{{ row.date || row.order.date || dispatchDate }}</span>
+                          <span class="dispatch-load-date">{{ dispatchPlanDate(row) }}</span>
                           <input
                             class="dispatch-time-input dispatch-time-hour-input"
                             title="装车小时"
@@ -29221,7 +29228,7 @@ function orderDetailFeeRows(order = {}) {
           <div class="modal-head">
             <div>
               <h2>{{ activeDispatchDetail.dispatchNo || '-' }} · 排车明细</h2>
-              <p class="modal-subtitle">{{ partnerDisplayLabel(activeDispatchDetail.order.customer || activeDispatchDetail.customer || '', '客户') || '-' }} · {{ activeDispatchDetail.date || activeDispatchDetail.order.date || dispatchDate }} · {{ activeDispatchDetail.status || '-' }}</p>
+              <p class="modal-subtitle">{{ partnerDisplayLabel(activeDispatchDetail.order.customer || activeDispatchDetail.customer || '', '客户') || '-' }} · {{ dispatchPlanDate(activeDispatchDetail) }} · {{ activeDispatchDetail.status || '-' }}</p>
             </div>
             <div class="modal-detail-actions">
               <button class="ghost-btn small" type="button" @click="openEditDispatchPlanRow(activeDispatchDetail)"><IconSvg name="edit" />编辑</button>
@@ -29235,7 +29242,7 @@ function orderDetailFeeRows(order = {}) {
                 <dl class="detail-dl">
                   <dt>排车单号</dt><dd>{{ activeDispatchDetail.dispatchNo || '-' }}</dd>
                   <dt>订单号</dt><dd>{{ activeDispatchDetail.order.no || activeDispatchDetail.orderNo || '-' }}</dd>
-                  <dt>装车日期</dt><dd>{{ activeDispatchDetail.date || activeDispatchDetail.order.date || dispatchDate }}</dd>
+                  <dt>装车日期</dt><dd>{{ dispatchPlanDate(activeDispatchDetail) }}</dd>
                   <dt>创建时间</dt><dd>{{ activeDispatchDetail.createdAt || '-' }}</dd>
                   <dt>装车时间</dt><dd>{{ activeDispatchDetail.loadTime || '-' }}</dd>
                   <dt>排车状态</dt><dd>{{ activeDispatchDetail.status || '-' }}</dd>

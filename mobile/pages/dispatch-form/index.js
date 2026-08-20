@@ -936,7 +936,11 @@ Page({
 
   async loadPlanRows(date) {
     const plan = await api.getDispatchPlan(date);
-    return normalizeDispatchRows(plan && plan.rows ? plan.rows : [], date);
+    const rows = normalizeDispatchRows(plan && plan.rows ? plan.rows : [], date);
+    return {
+      rows,
+      updatedAt: plan && (plan.updatedAt || plan.version) ? (plan.updatedAt || plan.version) : ""
+    };
   },
 
   async saveRowToPlan(row, targetDate) {
@@ -944,14 +948,21 @@ Page({
     const originDate = this.data.originDate;
     const cleanRow = sanitizeDispatchRow(row);
     if (mode === "edit" && originDate && originDate !== targetDate) {
-      const targetRows = await this.loadPlanRows(targetDate);
-      const nextRows = targetRows.filter((item) => item.id !== cleanRow.id).concat([cleanRow]);
-      await api.saveDispatchPlan(targetDate, sortDispatchRows(nextRows, [], targetDate));
-      const originRows = await this.loadPlanRows(originDate);
-      await api.saveDispatchPlan(originDate, originRows.filter((item) => item.id !== cleanRow.id).map(sanitizeDispatchRow));
+      const targetPlan = await this.loadPlanRows(targetDate);
+      const nextRows = targetPlan.rows.filter((item) => item.id !== cleanRow.id).concat([cleanRow]);
+      await api.saveDispatchPlan(targetDate, sortDispatchRows(nextRows, [], targetDate), {
+        baseRows: targetPlan.rows.map(sanitizeDispatchRow),
+        updatedAt: targetPlan.updatedAt
+      });
+      const originPlan = await this.loadPlanRows(originDate);
+      await api.saveDispatchPlan(originDate, originPlan.rows.filter((item) => item.id !== cleanRow.id).map(sanitizeDispatchRow), {
+        baseRows: originPlan.rows.map(sanitizeDispatchRow),
+        updatedAt: originPlan.updatedAt
+      });
       return;
     }
-    const rows = await this.loadPlanRows(targetDate);
+    const plan = await this.loadPlanRows(targetDate);
+    const rows = plan.rows;
     let replaced = false;
     const nextRows = rows.map((item) => {
       if (mode === "edit" && item.id === cleanRow.id) {
@@ -961,7 +972,10 @@ Page({
       return item;
     });
     if (!replaced) nextRows.push(cleanRow);
-    await api.saveDispatchPlan(targetDate, sortDispatchRows(nextRows, [], targetDate));
+    await api.saveDispatchPlan(targetDate, sortDispatchRows(nextRows, [], targetDate), {
+      baseRows: rows.map(sanitizeDispatchRow),
+      updatedAt: plan.updatedAt
+    });
   },
 
   async submitForm() {

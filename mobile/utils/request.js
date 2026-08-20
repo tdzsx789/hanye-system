@@ -54,7 +54,10 @@ function request(path, options) {
           wx.showToast({ title: "请重新登录", icon: "none" });
           redirectToLogin();
         }
-        reject(new Error(message));
+        const error = new Error(message);
+        error.status = statusCode;
+        error.payload = data;
+        reject(error);
       },
       fail(error) {
         reject(new Error(error && error.errMsg ? error.errMsg : "网络连接失败"));

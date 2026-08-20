@@ -148,6 +148,7 @@ function sanitizeDispatchRow(row) {
   const item = row || {};
   return {
     id: valueText(item.id),
+    date: valueText(item.date),
     createdAt: dispatchRowCreatedAt(item, item.date),
     dispatchNo: valueText(item.dispatchNo),
     orderNo: valueText(item.orderNo),
@@ -248,8 +249,8 @@ function compareDispatchRows(left, right) {
   if (!rightGroup && leftGroup) return -1;
   const groupCompare = leftGroup.localeCompare(rightGroup, "zh-Hans-CN", { numeric: true, sensitivity: "base" });
   if (groupCompare !== 0) return groupCompare;
-  const leftDate = valueText((left && left.date) || (left && left.order && left.order.date));
-  const rightDate = valueText((right && right.date) || (right && right.order && right.order.date));
+  const leftDate = valueText(left && left.date);
+  const rightDate = valueText(right && right.date);
   const dateCompare = leftDate.localeCompare(rightDate);
   if (dateCompare !== 0) return dateCompare;
   const timeCompare = dispatchPlanTimeRank(left && left.loadTime) - dispatchPlanTimeRank(right && right.loadTime);
@@ -398,7 +399,7 @@ function presentDispatchRows(rows, orders, date, options) {
     return Object.assign({}, row, {
       displayIndex: displayIndex + 1,
       customerText: valueText(order.customer || row.customer) || "-",
-      dateText: valueText(row.date || order.date || date),
+      dateText: valueText(row.date || date),
       driverText: driverDisplayText(row),
       orderNoText: valueText(order.no || row.orderNo) || "-",
       orderStatusText: valueText(order.status),
@@ -554,7 +555,7 @@ function dispatchMessageText(rows, orders, date) {
       unloading: order.unloading || row.unloading
     });
     return [
-      `装货时间：${row.date || order.date || date || "-"}   ${row.loadTime || "-"}  口岸：${order.port || row.port || "-"}`,
+      `装货时间：${row.date || date || "-"}   ${row.loadTime || "-"}  口岸：${order.port || row.port || "-"}`,
       `车牌：${row.plate || order.plate || "-"} 吨位：${order.tonnage || row.tonnage || "-"}    板数：${order.quantity || row.quantity || "-"}`,
       "",
       dispatchLocationBlock("装货地", record, "loading"),
@@ -571,6 +572,7 @@ function createDispatchRowFromOrder(order, date, existingRows) {
   const createdAt = currentTimestampInputValue();
   return sanitizeDispatchRow({
     id: `dispatch-${order.no}-${Date.now()}`,
+    date,
     createdAt,
     dispatchNo: order.dispatchNo || generateDispatchNo(date, existingRows || []),
     orderNo: order.no,
@@ -600,7 +602,7 @@ function formFromDispatchRow(row, date) {
   const order = source.order || {};
   return {
     id: source.id || "",
-    date: source.date || date || order.date || todayInputValue(),
+    date: source.date || date || todayInputValue(),
     createdAt: dispatchRowCreatedAt(source, date),
     dispatchNo: source.dispatchNo || order.dispatchNo || "",
     orderNo: source.orderNo || order.no || "",
@@ -640,6 +642,7 @@ function rowFromForm(form, orderNo) {
   const source = form || {};
   return sanitizeDispatchRow({
     id: source.id || `dispatch-manual-${Date.now()}`,
+    date: source.date,
     createdAt: source.createdAt || source.created_at || currentTimestampInputValue(),
     dispatchNo: source.dispatchNo,
     orderNo: orderNo || source.orderNo || "",

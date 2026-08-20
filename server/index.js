@@ -192,6 +192,15 @@ function booleanFlag(value, fallback = false) {
 const ADMIN_ONLY_DELETE_ORDER_STATUSES = new Set(["待确认", "通关中"]);
 const DISPATCH_PLAN_DEFAULT_STATUS = "预排";
 const DISPATCH_STATUS_OPTIONS = ["预排", "已派车", "通关中", "已签收", "异常滞留"];
+const DISPATCH_STATUS_TO_ORDER_STATUS = {
+  "预排": "预排",
+  "待预排": "预排",
+  "已预排": "预排",
+  "已派车": "预排",
+  "通关中": "通关中",
+  "已签收": "已签收",
+  "异常滞留": "费用待确认"
+};
 const ORDER_STATUS_TO_DISPATCH_STATUS = {
   "预排": "预排",
   "正常": "预排",
@@ -4851,21 +4860,29 @@ function dispatchRowCreatedDate(row = {}, fallbackDate = "") {
   return dispatchRowCreatedAt(row, fallbackDate).slice(0, 10);
 }
 
-function businessDateFromNo(value = "") {
-  const matched = String(value || "").trim().match(/^(?:HY|PC)(\d{4})(\d{2})(\d{2})/);
-  if (!matched) return "";
-  const date = `${matched[1]}-${matched[2]}-${matched[3]}`;
-  return parseInputDate(date) ? date : "";
-}
-
 function dispatchRowBusinessDate(row = {}, fallbackDate = "") {
   const rowDate = String(row?.date || "").trim().slice(0, 10);
   const fallback = String(fallbackDate || "").trim().slice(0, 10);
   return (parseInputDate(rowDate) ? rowDate : "")
-    || (parseInputDate(fallback) ? fallback : "")
-    || businessDateFromNo(dispatchRowText(row, "dispatchNo"))
-    || businessDateFromNo(dispatchRowText(row, "orderNo"))
-    || dispatchRowCreatedDate(row, fallbackDate);
+    || (parseInputDate(fallback) ? fallback : "");
+}
+
+function dispatchRowStatusRank(row = {}) {
+  const status = normalizeDispatchPlanStatus(row?.status || row?.dispatch_status || "");
+  if (status === "已签收") return 60;
+  if (status === "异常滞留") return 55;
+  if (status === "通关中") return 50;
+  if (status === "已派车") return 40;
+  if (status === DISPATCH_PLAN_DEFAULT_STATUS) return 30;
+  return status ? 20 : 0;
+}
+
+function isPreferredDispatchDateCandidate(candidate, existing) {
+  if (!existing) return true;
+  if (candidate.priority !== existing.priority) return candidate.priority > existing.priority;
+  if (candidate.statusRank !== existing.statusRank) return candidate.statusRank > existing.statusRank;
+  if (candidate.date !== existing.date) return candidate.date > existing.date;
+  return candidate.createdAt > existing.createdAt;
 }
 
 function dispatchRowHasReference(row = {}) {
@@ -4883,12 +4900,8 @@ async function orderDateFromLinkedDispatchRow(orderNo = "", dispatchNo = "", fal
       || (normalizedDispatchNo && dispatchRowText(row, "dispatchNo") === normalizedDispatchNo);
     if (!matches) return;
     const createdAt = dispatchRowCreatedAt(row, planDate);
-    const candidate = { date: dispatchRowBusinessDate(row, planDate), createdAt, priority };
-    if (
-      !matched
-      || candidate.priority > matched.priority
-      || (candidate.priority === matched.priority && candidate.createdAt < matched.createdAt)
-    ) {
+    const candidate = { date: dispatchRowBusinessDate(row, planDate), createdAt, priority, statusRank: dispatchRowStatusRank(row) };
+    if (candidate.date && isPreferredDispatchDateCandidate(candidate, matched)) {
       matched = candidate;
     }
   };
@@ -5337,6 +5350,22 @@ function createDispatchPlanConflictError(message, detail = "") {
   return error;
 }
 
+function normalizeDispatchPlanVersion(value = "") {
+  return String(value || "").trim();
+}
+
+function ensureDispatchPlanVersionFresh(existingPlan, clientVersion) {
+  if (!existingPlan) return;
+  const currentVersion = normalizeDispatchPlanVersion(existingPlan.updated_at);
+  const normalizedClientVersion = normalizeDispatchPlanVersion(clientVersion);
+  if (!normalizedClientVersion) {
+    throw createDispatchPlanConflictError("排车计划已更新，请刷新后再保存", "缺少版本号");
+  }
+  if (currentVersion && currentVersion !== normalizedClientVersion) {
+    throw createDispatchPlanConflictError("排车计划已被其他账号更新，请刷新后再保存", `当前版本 ${currentVersion}，客户端版本 ${normalizedClientVersion}`);
+  }
+}
+
 function mergeDispatchPlanRows(existingRows = [], incomingRows = [], baseRows = []) {
   const normalizedExistingRows = dedupeDispatchPlanRows(existingRows);
   const normalizedIncomingRows = dedupeDispatchPlanRows(incomingRows);
@@ -5408,6 +5437,7 @@ async function lockDispatchPlanDate(date) {
 function dispatchRowOrderSyncKey(row = {}) {
   return [
     "createdAt",
+    "date",
     "orderNo",
     "dispatchNo",
     "plate",
@@ -5416,7 +5446,9 @@ function dispatchRowOrderSyncKey(row = {}) {
     "transportMode",
     "driver",
     "hkDriver",
-    "mainlandDriver"
+    "mainlandDriver",
+    "status",
+    "previousStatus"
   ].map((key) => `${key}:${dispatchRowText(row, key)}`).join("|");
 }
 
@@ -5708,6 +5740,7 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = []) {
         hk_driver = @hkDriver,
         mainland_driver = @mainlandDriver,
         transport_mode = @transportMode,
+        status = @status,
         order_date = @orderDate
     WHERE no = @no AND deleted_at IS NULL
   `);
@@ -5727,6 +5760,7 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = []) {
     const driver = isSingleDriver
       ? (rowDriver || rowHkDriver || order.driver || "")
       : [rowHkDriver || rowDriver, rowMainlandDriver].filter(Boolean).join(" / ");
+    const orderStatus = DISPATCH_STATUS_TO_ORDER_STATUS[normalizeDispatchPlanStatus(row.status)] || order.status || "预排";
 
     await updateOrder.run({
       no: order.no,
@@ -5738,6 +5772,7 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = []) {
       hkDriver: isSingleDriver ? "" : (rowHkDriver || rowDriver),
       mainlandDriver: isSingleDriver ? "" : rowMainlandDriver,
       transportMode,
+      status: orderStatus,
       orderDate: dispatchRowBusinessDate(row, planDate || order.order_date)
     });
     synced += 1;
@@ -5974,56 +6009,72 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
   }
   const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
   const baseRows = Array.isArray(req.body.baseRows) ? req.body.baseRows : [];
+  const clientVersion = req.body.version || req.body.updatedAt || "";
   const requestCreator = creatorFieldsFromAccount(req.account);
-  const result = await db.transaction(async () => {
-    await lockDispatchPlanDate(date);
-    const existingPlan = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
-    const existingRows = parseDispatchPlanRowsJson(existingPlan?.rows_json);
-    if (existingRows.length > 0 && baseRows.length === 0) {
-      throw createDispatchPlanConflictError("排车计划已更新，请刷新后再保存", "缺少基线快照");
+  let result;
+  try {
+    result = await db.transaction(async () => {
+      await lockDispatchPlanDate(date);
+      const existingPlan = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
+      const existingRows = parseDispatchPlanRowsJson(existingPlan?.rows_json);
+      ensureDispatchPlanVersionFresh(existingPlan, clientVersion);
+      if (existingRows.length > 0 && baseRows.length === 0) {
+        throw createDispatchPlanConflictError("排车计划已更新，请刷新后再保存", "缺少基线快照");
+      }
+      const existingRowsLookup = dispatchRowLookup(existingRows);
+      const rowsNeedingOrderSync = [];
+      const cleanRows = rows
+        .map((row) => {
+          const existingRow = findExistingDispatchRow(row, existingRowsLookup);
+          const cleanRow = normalizeDispatchPlanRow(row, existingRow, requestCreator, date);
+          if (dispatchRowHasReference(cleanRow) && dispatchRowNeedsOrderSync(cleanRow, existingRow)) {
+            rowsNeedingOrderSync.push(cleanRow);
+          }
+          return cleanRow;
+        })
+        .filter(dispatchRowHasReference);
+      const cleanBaseRows = baseRows
+        .map((row) => normalizeDispatchPlanRow(row, findExistingDispatchRow(row, existingRowsLookup), requestCreator, date))
+        .filter(dispatchRowHasReference);
+      const merged = mergeDispatchPlanRows(existingRows, cleanRows, cleanBaseRows);
+      if (merged.stats.conflict > 0) {
+        throw createDispatchPlanConflictError("排车计划已更新，请刷新后再保存", `冲突 ${merged.stats.conflict} 条`);
+      }
+      const rowsJson = JSON.stringify(merged.rows);
+      const planCreator = existingPlan && creatorFieldsHaveValue(creatorFieldsFromRecord(existingPlan))
+        ? creatorFieldsFromRecord(existingPlan)
+        : requestCreator;
+      await db.prepare(`
+        INSERT INTO dispatch_plans
+          (plan_date, rows_json, created_by_account_id, created_by_username, created_by_display_name, updated_at)
+        VALUES
+          (@date, @rowsJson, @createdByAccountId, @createdByUsername, @createdByName, CURRENT_TIMESTAMP)
+        ON CONFLICT(plan_date) DO UPDATE SET
+          rows_json = excluded.rows_json,
+          updated_at = CURRENT_TIMESTAMP
+      `).run({
+        date,
+        rowsJson,
+        createdByAccountId: planCreator.createdByAccountId,
+        createdByUsername: planCreator.createdByUsername,
+        createdByName: planCreator.createdByName
+      });
+      await syncDispatchPlanRowsToOrders(date, rowsNeedingOrderSync);
+      const saved = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
+      return { saved, incomingCount: cleanRows.length, savedCount: merged.rows.length, stats: merged.stats };
+    })();
+  } catch (error) {
+    if (error?.statusCode === 409) {
+      const latest = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
+      res.status(409).json({
+        message: error.message,
+        detail: error.detail || "",
+        latest: latest ? mapDispatchPlanRecord(latest) : { date, rows: [], updatedAt: "" }
+      });
+      return;
     }
-    const existingRowsLookup = dispatchRowLookup(existingRows);
-    const rowsNeedingOrderSync = [];
-    const cleanRows = rows
-      .map((row) => {
-        const existingRow = findExistingDispatchRow(row, existingRowsLookup);
-        const cleanRow = normalizeDispatchPlanRow(row, existingRow, requestCreator, date);
-        if (dispatchRowHasReference(cleanRow) && dispatchRowNeedsOrderSync(cleanRow, existingRow)) {
-          rowsNeedingOrderSync.push(cleanRow);
-        }
-        return cleanRow;
-      })
-      .filter(dispatchRowHasReference);
-    const cleanBaseRows = baseRows
-      .map((row) => normalizeDispatchPlanRow(row, findExistingDispatchRow(row, existingRowsLookup), requestCreator, date))
-      .filter(dispatchRowHasReference);
-    const merged = mergeDispatchPlanRows(existingRows, cleanRows, cleanBaseRows);
-    if (merged.stats.conflict > 0) {
-      throw createDispatchPlanConflictError("排车计划已更新，请刷新后再保存", `冲突 ${merged.stats.conflict} 条`);
-    }
-    const rowsJson = JSON.stringify(merged.rows);
-    const planCreator = existingPlan && creatorFieldsHaveValue(creatorFieldsFromRecord(existingPlan))
-      ? creatorFieldsFromRecord(existingPlan)
-      : requestCreator;
-    await db.prepare(`
-      INSERT INTO dispatch_plans
-        (plan_date, rows_json, created_by_account_id, created_by_username, created_by_display_name, updated_at)
-      VALUES
-        (@date, @rowsJson, @createdByAccountId, @createdByUsername, @createdByName, CURRENT_TIMESTAMP)
-      ON CONFLICT(plan_date) DO UPDATE SET
-        rows_json = excluded.rows_json,
-        updated_at = CURRENT_TIMESTAMP
-    `).run({
-      date,
-      rowsJson,
-      createdByAccountId: planCreator.createdByAccountId,
-      createdByUsername: planCreator.createdByUsername,
-      createdByName: planCreator.createdByName
-    });
-    await syncDispatchPlanRowsToOrders(date, rowsNeedingOrderSync);
-    const saved = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
-    return { saved, incomingCount: cleanRows.length, savedCount: merged.rows.length, stats: merged.stats };
-  })();
+    throw error;
+  }
   await writeAudit(
     "update",
     "dispatch_plan",

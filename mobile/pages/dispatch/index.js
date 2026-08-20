@@ -6,7 +6,6 @@ const {
   buildDispatchWarnings,
   createDispatchRowFromOrder,
   dispatchMessageText,
-  dispatchOrderStatusForPlanStatus,
   dispatchReturnStatusForRow,
   dispatchStatusActionItems,
   dispatchStatusOptionsForRow,
@@ -95,6 +94,8 @@ Page({
     expandedIds: [],
     loading: false,
     orders: [],
+    planBaseRows: [],
+    planUpdatedAt: "",
     rawRows: [],
     selectedDispatchCount: 0,
     selectedDispatchIds: [],
@@ -255,6 +256,8 @@ Page({
         drivers,
         loading: false,
         orders,
+        planBaseRows: rows.map((item) => sanitizeDispatchRow(item)),
+        planUpdatedAt: plan && (plan.updatedAt || plan.version) ? (plan.updatedAt || plan.version) : "",
         rawRows: rows,
         selectedDispatchIds: nextSelectedIds,
         vehicles
@@ -514,6 +517,54 @@ Page({
     }
   },
 
+  dispatchPlanSaveOptions() {
+    return {
+      baseRows: (this.data.planBaseRows || []).map((item) => sanitizeDispatchRow(item)),
+      updatedAt: this.data.planUpdatedAt || ""
+    };
+  },
+
+  applySavedDispatchPlan(savedPlan, fallbackRows, options) {
+    const source = options || {};
+    const date = this.data.dispatchDate;
+    const rows = savedPlan && Array.isArray(savedPlan.rows)
+      ? savedPlan.rows.map((item) => sanitizeDispatchRow(item))
+      : fallbackRows.map((item) => sanitizeDispatchRow(item));
+    const savedRows = source.sort === false
+      ? rows
+      : sortDispatchRows(rows, this.data.orders, date);
+    this.setData({
+      rawRows: savedRows,
+      planBaseRows: savedRows.map((item) => sanitizeDispatchRow(item)),
+      planUpdatedAt: savedPlan && (savedPlan.updatedAt || savedPlan.version) ? (savedPlan.updatedAt || savedPlan.version) : this.data.planUpdatedAt,
+      selectedDispatchIds: []
+    });
+    this.refreshDerivedData();
+    return savedRows;
+  },
+
+  async handleDispatchSaveError(error, fallbackMessage) {
+    if (error && error.status === 409) {
+      const latest = error.payload && error.payload.latest;
+      if (latest && Array.isArray(latest.rows)) {
+        const rows = sortDispatchRows(latest.rows, this.data.orders, this.data.dispatchDate);
+        this.setData({
+          rawRows: rows,
+          planBaseRows: rows.map((item) => sanitizeDispatchRow(item)),
+          planUpdatedAt: latest.updatedAt || latest.version || "",
+          selectedDispatchIds: []
+        });
+        this.refreshDerivedData();
+      } else {
+        await this.loadBoard({ silent: true });
+      }
+      wx.showToast({ title: error.message || "排车表已被更新，请刷新后再操作", icon: "none" });
+      return true;
+    }
+    wx.showToast({ title: error.message || fallbackMessage, icon: "none" });
+    return false;
+  },
+
   async saveRows(rows, options) {
     const source = options || {};
     const date = this.data.dispatchDate;
@@ -522,19 +573,12 @@ Page({
       : sortDispatchRows(rows, this.data.orders, date);
     this.setData({ saving: true });
     try {
-      const savedPlan = await api.saveDispatchPlan(date, nextRows);
-      const savedRows = savedPlan && Array.isArray(savedPlan.rows)
-        ? sortDispatchRows(savedPlan.rows, this.data.orders, date)
-        : nextRows;
-      this.setData({
-        rawRows: savedRows,
-        selectedDispatchIds: []
-      });
-      this.refreshDerivedData();
+      const savedPlan = await api.saveDispatchPlan(date, nextRows, this.dispatchPlanSaveOptions());
+      this.applySavedDispatchPlan(savedPlan, nextRows, source);
       if (source.toast) wx.showToast({ title: source.toast, icon: "none" });
       return true;
     } catch (error) {
-      wx.showToast({ title: error.message || "保存排车表失败", icon: "none" });
+      await this.handleDispatchSaveError(error, "保存排车表失败");
       return false;
     } finally {
       this.setData({ saving: false });
@@ -595,23 +639,16 @@ Page({
     rows[index] = row;
     this.setData({ saving: true });
     try {
-      const orderStatus = dispatchOrderStatusForPlanStatus(nextStatus);
-      if (row.orderNo && orderStatus) {
-        const hasOrder = (this.data.orders || []).some((order) => order.no === row.orderNo);
-        if (!hasOrder) throw new Error(`关联订单 ${row.orderNo} 不存在`);
-        const updatedOrder = await api.updateOrderStatus(row.orderNo, orderStatus);
-        const orders = this.data.orders.map((order) => order.no === updatedOrder.no ? updatedOrder : order);
-        this.setData({ orders });
+      if (row.orderNo && !(this.data.orders || []).some((order) => order.no === row.orderNo)) {
+        throw new Error(`关联订单 ${row.orderNo} 不存在`);
       }
-      const savedPlan = await api.saveDispatchPlan(this.data.dispatchDate, rows.map((item) => sanitizeDispatchRow(item)));
-      const savedRows = savedPlan && Array.isArray(savedPlan.rows)
-        ? savedPlan.rows.map((item) => sanitizeDispatchRow(item))
-        : rows.map((item) => sanitizeDispatchRow(item));
-      this.setData({
-        rawRows: savedRows,
-        selectedDispatchIds: [],
-        ...(source.switchToStatus ? { activeStatus: nextStatus } : {})
-      });
+      const savedPlan = await api.saveDispatchPlan(
+        this.data.dispatchDate,
+        rows.map((item) => sanitizeDispatchRow(item)),
+        this.dispatchPlanSaveOptions()
+      );
+      this.applySavedDispatchPlan(savedPlan, rows, { sort: false });
+      if (source.switchToStatus) this.setData({ activeStatus: nextStatus });
       this.refreshDerivedData();
       wx.showToast({ title: source.toast || "排车状态已同步", icon: "none" });
     } catch (error) {
@@ -620,7 +657,7 @@ Page({
       rows[index] = row;
       this.setData({ rawRows: rows.map((item) => sanitizeDispatchRow(item)) });
       this.refreshDerivedData();
-      wx.showToast({ title: error.message || "状态同步失败", icon: "none" });
+      await this.handleDispatchSaveError(error, "状态同步失败");
     } finally {
       this.setData({ saving: false });
     }
