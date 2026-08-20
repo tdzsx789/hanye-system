@@ -4865,9 +4865,9 @@ function dispatchExportShortLocation(value = "") {
 function dispatchExportRoute(row = {}) {
   const route = dispatchExportText(row.route);
   if (route) return route;
-  const loading = dispatchExportText(row.loading);
-  const unloading = dispatchExportText(row.unloading);
-  return [loading, unloading].filter(Boolean).join(" → ") || "";
+  const loading = dispatchExportShortLocation(row.loading);
+  const unloading = dispatchExportShortLocation(row.unloading);
+  return [loading, unloading].filter(Boolean).join(" → ") || "-";
 }
 
 function dispatchExportTextWidth(value = "") {
@@ -4896,15 +4896,15 @@ function dispatchExportCellDisplayText(value, columnNumber) {
 }
 
 function dispatchExportRowHeight(values = [], columnWidths = []) {
-  const baseHeight = 18;
-  const extraLineHeight = 14;
+  const baseHeight = 20;
+  const extraLineHeight = 16;
   const lineCounts = values.map((value, index) => {
     const width = Number(columnWidths[index] || 0);
     const effectiveWidth = Math.max(8, Math.floor(width * 1.1));
     return dispatchExportWrappedLineCount(dispatchExportCellDisplayText(value, index + 1), effectiveWidth);
   });
   const maxLines = Math.max(1, ...lineCounts);
-  return Math.min(180, baseHeight + Math.max(0, maxLines - 1) * extraLineHeight);
+  return Math.min(260, baseHeight + Math.max(0, maxLines - 1) * extraLineHeight);
 }
 
 function dispatchExportDateValue(value = "", fallback = "") {
@@ -5059,7 +5059,7 @@ async function renderDispatchPlanXlsxBuffer(rows = [], title = "", fallbackDate 
   workbook.created = new Date();
   const worksheet = workbook.addWorksheet("排车表");
   const headers = ["序号", "日期", "客户", "车牌", "装/卸", "吨位", "计重", "HK司机", "大陆司机", "口岸", "进/出", "订车时间", "供应商", "外派", "备注"];
-  const columnWidths = [6.5, 12, 21, 15.5, 36.5, 8.5, 18, 12.5, 10.5, 13.5, 9, 10.5, 16, 10.5, 39];
+  const columnWidths = [6.5, 12, 21, 15.5, 48, 8.5, 18, 12.5, 10.5, 13.5, 9, 10.5, 16, 10.5, 36];
   columnWidths.forEach((width, index) => {
     worksheet.getColumn(index + 1).width = width;
   });
