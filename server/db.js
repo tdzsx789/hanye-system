@@ -341,6 +341,177 @@ async function backfillCustomerShortNames() {
   }
 }
 
+function localDateInputValue(date = new Date()) {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 10);
+}
+
+function localTimestampInputValue(date = new Date()) {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 19).replace("T", " ");
+}
+
+function normalizeInputDate(value = "") {
+  const text = String(value || "").trim().slice(0, 10);
+  const matched = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!matched) return "";
+  const date = new Date(Number(matched[1]), Number(matched[2]) - 1, Number(matched[3]));
+  return localDateInputValue(date) === text ? text : "";
+}
+
+function normalizeTimestampText(value = "") {
+  const text = String(value || "").trim();
+  const matched = text.match(/^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  if (!matched) return "";
+  const date = normalizeInputDate(matched[1]);
+  if (!date) return "";
+  if (!matched[2]) return `${date} 00:00:00`;
+  return `${date} ${matched[2]}:${matched[3]}:${matched[4] || "00"}`;
+}
+
+function dispatchRowTimestampFromId(row = {}) {
+  const id = String(row?.id || "").trim();
+  const matched = id.match(/(?:^|[-_])(\d{13})(?:$|[-_])/);
+  if (!matched) return "";
+  const timestamp = Number(matched[1]);
+  if (!Number.isFinite(timestamp)) return "";
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  if (year < 2020 || year > 2100) return "";
+  return localTimestampInputValue(date);
+}
+
+function dispatchRowCreatedTimestamp(row = {}, fallbackDate = "") {
+  return normalizeTimestampText(row?.createdAt || row?.created_at)
+    || dispatchRowTimestampFromId(row)
+    || normalizeTimestampText(fallbackDate)
+    || `${localDateInputValue()} 00:00:00`;
+}
+
+function dispatchRowOrderNo(row = {}) {
+  return String(row?.orderNo || row?.order_no || "").trim();
+}
+
+function dispatchRowDispatchNo(row = {}) {
+  return String(row?.dispatchNo || row?.dispatch_no || "").trim();
+}
+
+function businessDateFromNo(value = "") {
+  const matched = String(value || "").trim().match(/^(?:HY|PC)(\d{4})(\d{2})(\d{2})/);
+  if (!matched) return "";
+  return normalizeInputDate(`${matched[1]}-${matched[2]}-${matched[3]}`);
+}
+
+function dispatchRowBusinessDate(row = {}, fallbackDate = "") {
+  return normalizeInputDate(row?.date)
+    || normalizeInputDate(fallbackDate)
+    || businessDateFromNo(dispatchRowDispatchNo(row))
+    || businessDateFromNo(dispatchRowOrderNo(row))
+    || dispatchRowCreatedTimestamp(row, fallbackDate).slice(0, 10);
+}
+
+function parseDispatchRowsJson(rowsJson = "[]") {
+  try {
+    const rows = JSON.parse(rowsJson || "[]");
+    return Array.isArray(rows) ? rows : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseDispatchRowJson(rowJson = "{}") {
+  try {
+    const row = JSON.parse(rowJson || "{}");
+    return row && typeof row === "object" && !Array.isArray(row) ? row : {};
+  } catch {
+    return {};
+  }
+}
+
+function collectDispatchOrderDate(orderDateMap, dispatchDateMap, row = {}, fallbackDate = "", priority = 0) {
+  const createdAt = dispatchRowCreatedTimestamp(row, fallbackDate);
+  const businessDate = dispatchRowBusinessDate(row, fallbackDate);
+  const orderNo = dispatchRowOrderNo(row);
+  const dispatchNo = dispatchRowDispatchNo(row);
+  const candidate = { date: businessDate, createdAt, priority };
+  const assign = (map, key) => {
+    if (!key || !businessDate) return;
+    const existing = map.get(key);
+    if (
+      !existing
+      || candidate.priority > existing.priority
+      || (candidate.priority === existing.priority && candidate.createdAt < existing.createdAt)
+    ) {
+      map.set(key, candidate);
+    }
+  };
+  assign(orderDateMap, orderNo);
+  assign(dispatchDateMap, dispatchNo);
+}
+
+async function backfillDispatchRowCreationTimesAndOrderDates() {
+  const orderDateMap = new Map();
+  const dispatchDateMap = new Map();
+  const plans = await db.prepare("SELECT plan_date, rows_json FROM dispatch_plans").all();
+
+  for (const plan of plans) {
+    const rows = parseDispatchRowsJson(plan.rows_json);
+    let changed = false;
+    const nextRows = rows.map((row) => {
+      if (!row || typeof row !== "object" || Array.isArray(row)) return row;
+      const createdAt = dispatchRowCreatedTimestamp(row, plan.plan_date);
+      collectDispatchOrderDate(orderDateMap, dispatchDateMap, { ...row, createdAt }, plan.plan_date, 2);
+      if (row.createdAt === createdAt) return row;
+      changed = true;
+      return { ...row, createdAt };
+    });
+    if (changed) {
+      await db.prepare(`
+        UPDATE dispatch_plans
+        SET rows_json = @rowsJson, updated_at = CURRENT_TIMESTAMP
+        WHERE plan_date = @planDate
+      `).run({ planDate: plan.plan_date, rowsJson: JSON.stringify(nextRows) });
+    }
+  }
+
+  const recycleRows = await db.prepare("SELECT id, plan_date, row_json FROM dispatch_plan_recycle").all();
+  for (const recycle of recycleRows) {
+    const row = parseDispatchRowJson(recycle.row_json);
+    if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+    const createdAt = dispatchRowCreatedTimestamp(row, recycle.plan_date);
+    const nextRow = { ...row, createdAt };
+    collectDispatchOrderDate(orderDateMap, dispatchDateMap, nextRow, recycle.plan_date, 1);
+    if (row.createdAt !== createdAt) {
+      await db.prepare("UPDATE dispatch_plan_recycle SET row_json = @rowJson WHERE id = @id").run({
+        id: recycle.id,
+        rowJson: JSON.stringify(nextRow)
+      });
+    }
+  }
+
+  const updateOrderDate = await db.prepare(`
+    UPDATE orders
+    SET order_date = @orderDate
+    WHERE no = @no
+      AND order_date <> @orderDate
+  `);
+  for (const [no, item] of orderDateMap.entries()) {
+    await updateOrderDate.run({ no, orderDate: item.date });
+  }
+
+  const ordersWithoutOrderNoMap = await db.prepare(`
+    SELECT no, dispatch_no
+    FROM orders
+    WHERE COALESCE(dispatch_no, '') <> ''
+  `).all();
+  for (const order of ordersWithoutOrderNoMap) {
+    if (orderDateMap.has(order.no)) continue;
+    const item = dispatchDateMap.get(String(order.dispatch_no || "").trim());
+    if (!item) continue;
+    await updateOrderDate.run({ no: order.no, orderDate: item.date });
+  }
+}
+
 async function dropColumnIfExists(table, column) {
   if (await hasColumn(table, column)) {
     await db.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
@@ -1271,6 +1442,7 @@ async function initializeSchema() {
   await ensureTonnageMasterData();
   await ensureOrderStatusMasterData();
   await reconcileLegacyPendingReviewOrders();
+  await backfillDispatchRowCreationTimesAndOrderDates();
 
   if (seedDemoDataEnabled) {
     await seedDemoData();
@@ -1835,6 +2007,7 @@ function demoDispatchPlanRows(date) {
     .filter((order) => order.date === date)
     .map((order, index) => ({
       id: `demo-${date}-${index + 1}`,
+      createdAt: `${date} ${index === 0 ? "08:30:00" : index === 1 ? "12:30:00" : "15:30:00"}`,
       dispatchNo: order.dispatchNo,
       orderNo: order.no,
       customer: order.customer,

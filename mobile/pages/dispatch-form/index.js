@@ -1,6 +1,6 @@
 const api = require("../../utils/api");
 const { clearDispatchFormContext, DISPATCH_DATE_KEY, getDispatchFormContext } = require("../../utils/context");
-const { todayInputValue } = require("../../utils/date");
+const { currentTimestampInputValue, todayInputValue } = require("../../utils/date");
 const { dispatchCopyQuery, dispatchSharePath, enableShareMenu, shareImageUrl } = require("../../utils/share");
 const {
   BUSINESS_TYPE_OPTIONS,
@@ -416,6 +416,7 @@ Page({
       form = formFromDispatchRow({}, date);
       form.dispatchNo = "";
       form.orderNo = "";
+      form.createdAt = "";
     }
     if (mode === "copy") {
       form.id = "";
@@ -425,6 +426,7 @@ Page({
       form.createdByAccountId = null;
       form.createdByUsername = "";
       form.createdByName = "";
+      form.createdAt = "";
     }
     normalizeDispatchFormForDisplay(form);
     const locationPatch = locationEntriesPatchFromForm(form);
@@ -980,8 +982,13 @@ Page({
       form.customerId = customer.id;
       form.customer = customer.name;
       const shouldCreateOrder = this.data.mode !== "edit" || !form.orderNo;
+      const createdAt = form.createdAt || currentTimestampInputValue();
+      form.createdAt = createdAt;
       const payload = orderPayloadFromForm(form, customer, shouldCreateOrder);
-      if (shouldCreateOrder) delete payload.dispatchNo;
+      if (shouldCreateOrder) {
+        delete payload.dispatchNo;
+        payload.date = form.date;
+      }
       const order = shouldCreateOrder
         ? await api.createOrder(payload)
         : await api.updateOrder(form.orderNo, payload);

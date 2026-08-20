@@ -2030,10 +2030,41 @@ body.is-modal-dragging .modal-head {
 
 .modal-actions {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   gap: 10px;
   padding: 14px 18px 18px;
   border-top: 1px solid var(--border);
+}
+
+.modal-actions-leading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-right: 12px;
+}
+
+.order-status-action-btn {
+  border-color: var(--dispatch-status-active-border, var(--border));
+  color: #fff;
+  background: var(--dispatch-status-active-border, var(--blue));
+  box-shadow: 0 8px 18px rgb(15 23 42 / 10%);
+}
+
+.order-status-action-btn:hover:not(:disabled) {
+  border-color: var(--dispatch-status-active-border, var(--accent));
+  color: #fff;
+  background: var(--dispatch-status-text, var(--blue));
+  transform: translateY(-1px);
+}
+
+.order-status-action-btn:disabled {
+  border-color: #cbd5e1;
+  color: #64748b;
+  background: #f1f5f9;
+  box-shadow: none;
+  opacity: 1;
 }
 
 .login-page {
@@ -3423,6 +3454,11 @@ select {
 .order-small-filter {
   flex: 0 0 118px;
   width: 118px;
+}
+
+.order-toolbar-stat {
+  flex: 0 0 auto;
+  min-height: 34px;
 }
 
 .order-search-field {

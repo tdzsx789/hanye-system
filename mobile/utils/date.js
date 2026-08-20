@@ -16,6 +16,11 @@ function todayInputValue() {
   return inputDateFromDate(new Date());
 }
 
+function currentTimestampInputValue(date) {
+  const value = date || new Date();
+  return `${inputDateFromDate(value)} ${pad(value.getHours())}:${pad(value.getMinutes())}:${pad(value.getSeconds())}`;
+}
+
 function addDaysToInputDate(value, offset) {
   const date = parseInputDate(value) || new Date();
   date.setDate(date.getDate() + Number(offset || 0));
@@ -49,6 +54,7 @@ function daysUntilInputDate(target, reference) {
 
 module.exports = {
   addDaysToInputDate,
+  currentTimestampInputValue,
   daysUntilInputDate,
   formatDateLabel,
   inputDateFromDate,

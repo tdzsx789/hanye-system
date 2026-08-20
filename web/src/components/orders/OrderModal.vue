@@ -56,6 +56,9 @@ const emit = defineEmits(["close", "submit", "panelClick"]);
       </div>
       <slot />
       <div class="modal-actions">
+        <div v-if="$slots.actionsLeading" class="modal-actions-leading">
+          <slot name="actionsLeading" />
+        </div>
         <button type="button" class="ghost-btn" @click="emit('close')">{{ showSubmit ? '取消' : '关闭' }}</button>
         <button v-if="showSubmit" class="primary-btn" type="submit" :disabled="loading"><IconSvg :name="submitIcon" />{{ submitLabel }}</button>
       </div>

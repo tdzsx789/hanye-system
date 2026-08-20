@@ -12,10 +12,42 @@ const {
   TRANSPORT_MODE_OPTIONS,
   VEHICLE_SOURCE_OPTIONS
 } = require("./constants");
-const { daysUntilInputDate, todayInputValue } = require("./date");
+const { currentTimestampInputValue, daysUntilInputDate, todayInputValue } = require("./date");
 
 function valueText(value) {
   return value === undefined || value === null ? "" : String(value).trim();
+}
+
+function normalizeTimestampInputValue(value) {
+  const text = valueText(value);
+  const matched = text.match(/^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  if (!matched) return "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(matched[1])) return "";
+  if (!matched[2]) return `${matched[1]} 00:00:00`;
+  return `${matched[1]} ${matched[2]}:${matched[3]}:${matched[4] || "00"}`;
+}
+
+function timestampInputValueFromRowId(row) {
+  const id = valueText(row && row.id);
+  const matched = id.match(/(?:^|[-_])(\d{13})(?:$|[-_])/);
+  if (!matched) return "";
+  const timestamp = Number(matched[1]);
+  if (!Number.isFinite(timestamp)) return "";
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  if (year < 2020 || year > 2100) return "";
+  return currentTimestampInputValue(date);
+}
+
+function dispatchRowCreatedAt(row, fallbackDate) {
+  return normalizeTimestampInputValue((row && (row.createdAt || row.created_at)) || "")
+    || timestampInputValueFromRowId(row)
+    || normalizeTimestampInputValue(fallbackDate)
+    || `${todayInputValue()} 00:00:00`;
+}
+
+function dispatchRowCreatedDate(row, fallbackDate) {
+  return dispatchRowCreatedAt(row, fallbackDate).slice(0, 10);
 }
 
 function uniqueTextList(values) {
@@ -116,6 +148,7 @@ function sanitizeDispatchRow(row) {
   const item = row || {};
   return {
     id: valueText(item.id),
+    createdAt: dispatchRowCreatedAt(item, item.date),
     dispatchNo: valueText(item.dispatchNo),
     orderNo: valueText(item.orderNo),
     customer: valueText(item.customer),
@@ -150,6 +183,7 @@ function normalizeDispatchRows(rows, date) {
       normalized.id = `dispatch-mobile-${Date.now()}-${index}`;
     }
     normalized.date = row && row.date ? row.date : date;
+    normalized.createdAt = dispatchRowCreatedAt(row, date);
     return normalized;
   });
 }
@@ -279,6 +313,22 @@ function splitDispatchLocationEntries(value) {
     .filter(Boolean);
 }
 
+function dispatchMessageLocationDetail(value) {
+  const text = valueText(value);
+  if (!text) return "";
+  if (text.indexOf("/") >= 0) {
+    const parts = text.split("/").map((part) => part.trim()).filter(Boolean);
+    if (parts.length >= 3) return parts.slice(2).join(" / ");
+    if (parts.length === 2) return parts[1];
+    return parts[0] || "";
+  }
+  return text
+    .replace(/^(?:[\u4e00-\u9fa5]{2,16}?(?:省|自治区|特别行政区))/, "")
+    .replace(/^(?:北京市|上海市|天津市|重庆市|香港|澳门|[\u4e00-\u9fa5]{2,16}?市)/, "")
+    .replace(/^(?:[\u4e00-\u9fa5]{1,16}?(?:区|县))/, "")
+    .trim();
+}
+
 function dispatchVehicleSourceText(row) {
   const order = row && row.order ? row.order : {};
   const source = valueText(order.vehicleSource || (row && row.vehicleSource));
@@ -348,7 +398,7 @@ function presentDispatchRows(rows, orders, date, options) {
     return Object.assign({}, row, {
       displayIndex: displayIndex + 1,
       customerText: valueText(order.customer || row.customer) || "-",
-      dateText: valueText(order.date || row.date || date),
+      dateText: valueText(row.date || order.date || date),
       driverText: driverDisplayText(row),
       orderNoText: valueText(order.no || row.orderNo) || "-",
       orderStatusText: valueText(order.status),
@@ -487,10 +537,11 @@ function buildDispatchWarnings(rows, orders, vehicles, drivers, date) {
 function dispatchLocationBlock(label, record, field) {
   const entries = splitDispatchLocationEntries(record && record[field]);
   if (entries.length <= 1) {
-    return `${label}：${entries[0] || "-"}`;
+    const location = entries[0] || "-";
+    return `${label}：${dispatchMessageLocationDetail(location) || location}`;
   }
   return entries
-    .map((location, index) => `${label}${index + 1}：${location || "-"}`)
+    .map((location, index) => `${label}${index + 1}：${dispatchMessageLocationDetail(location) || location || "-"}`)
     .join("\n");
 }
 
@@ -503,7 +554,7 @@ function dispatchMessageText(rows, orders, date) {
       unloading: order.unloading || row.unloading
     });
     return [
-      `装货时间：${order.date || row.date || date || "-"}   ${row.loadTime || "-"}  口岸：${order.port || row.port || "-"}`,
+      `装货时间：${row.date || order.date || date || "-"}   ${row.loadTime || "-"}  口岸：${order.port || row.port || "-"}`,
       `车牌：${row.plate || order.plate || "-"} 吨位：${order.tonnage || row.tonnage || "-"}    板数：${order.quantity || row.quantity || "-"}`,
       "",
       dispatchLocationBlock("装货地", record, "loading"),
@@ -517,8 +568,10 @@ function dispatchMessageText(rows, orders, date) {
 
 function createDispatchRowFromOrder(order, date, existingRows) {
   const mode = normalizeTransportMode(order && order.transportMode ? order.transportMode : "单司机") || "单司机";
+  const createdAt = currentTimestampInputValue();
   return sanitizeDispatchRow({
     id: `dispatch-${order.no}-${Date.now()}`,
+    createdAt,
     dispatchNo: order.dispatchNo || generateDispatchNo(date, existingRows || []),
     orderNo: order.no,
     customer: order.customer || "",
@@ -547,7 +600,8 @@ function formFromDispatchRow(row, date) {
   const order = source.order || {};
   return {
     id: source.id || "",
-    date: order.date || source.date || date || todayInputValue(),
+    date: source.date || date || order.date || todayInputValue(),
+    createdAt: dispatchRowCreatedAt(source, date),
     dispatchNo: source.dispatchNo || order.dispatchNo || "",
     orderNo: source.orderNo || order.no || "",
     customerId: order.customerId || source.customerId || "",
@@ -586,6 +640,7 @@ function rowFromForm(form, orderNo) {
   const source = form || {};
   return sanitizeDispatchRow({
     id: source.id || `dispatch-manual-${Date.now()}`,
+    createdAt: source.createdAt || source.created_at || currentTimestampInputValue(),
     dispatchNo: source.dispatchNo,
     orderNo: orderNo || source.orderNo || "",
     customer: source.customer,

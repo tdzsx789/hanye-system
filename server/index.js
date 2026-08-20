@@ -62,6 +62,7 @@ const PREVIEW_MIMES = new Set(SAFE_FILE_TYPES.flatMap((item) => item.mimes));
 const AUTH_TOKEN_TTL_SECONDS = Number(process.env.AUTH_TOKEN_TTL_SECONDS || 7 * 24 * 60 * 60);
 const VEHICLE_PROFIT_EXCHANGE_RATE_MODULES = ["bossVehicleProfit", "bossSupplierProfit", "bossDashboard", "bossCompanyProfit", "financeWages", "financeSupplierStatements", "financeCustomsStatements"];
 const COMPANY_EXPENSE_MODULES = ["bossCompanyExpenses", "bossDashboard", "bossCompanyProfit"];
+const ORDER_CREATE_LOCK_ID = 524460;
 const AUTH_SECRET = process.env.HANYE_AUTH_SECRET || process.env.AUTH_SECRET || "hanye-system-local-dev-secret";
 const VEHICLE_EXPENSE_TYPES = new Set(["fuel", "repair", "annual", "other"]);
 const VEHICLE_ANNUAL_EXPENSE_NAMES = new Set(["保险费", "年审费", "牌头费"]);
@@ -189,6 +190,8 @@ function booleanFlag(value, fallback = false) {
 }
 
 const ADMIN_ONLY_DELETE_ORDER_STATUSES = new Set(["待确认", "通关中"]);
+const DISPATCH_PLAN_DEFAULT_STATUS = "预排";
+const DISPATCH_STATUS_OPTIONS = ["预排", "已派车", "通关中", "已签收", "异常滞留"];
 const ORDER_STATUS_TO_DISPATCH_STATUS = {
   "预排": "预排",
   "正常": "预排",
@@ -203,6 +206,13 @@ function requestHasAdminOrderDeletePermission(req) {
 
 function requestCanManageOrderAudit(req) {
   return normalizeAccountRole(req.account?.role) === "财务";
+}
+
+function normalizeDispatchPlanStatus(status = "") {
+  const text = String(status || "").trim();
+  if (text === "待预排" || text === "已预排") return DISPATCH_PLAN_DEFAULT_STATUS;
+  if (text === "完成结算") return "已签收";
+  return DISPATCH_STATUS_OPTIONS.includes(text) ? text : DISPATCH_PLAN_DEFAULT_STATUS;
 }
 
 app.disable("x-powered-by");
@@ -3634,6 +3644,45 @@ function mapAuditLog(row) {
   };
 }
 
+async function loadCustomerShortNameMap() {
+  const rows = await db.prepare(`
+    SELECT id, name, short_name
+    FROM customers
+    WHERE deleted_at IS NULL AND type = '客户'
+  `).all();
+  const map = new Map();
+  rows.forEach((row) => {
+    const shortName = String(row.short_name || "").trim();
+    const name = String(row.name || "").trim();
+    if (!shortName || !name) return;
+    map.set(name, shortName);
+    map.set(String(row.id || "").trim(), shortName);
+  });
+  return map;
+}
+
+function shortNameFromMap(value = "", shortNameMap = new Map()) {
+  const text = String(value || "").trim();
+  return shortNameMap.get(text) || "";
+}
+
+async function latestDeleteOperatorName(entityType, entityIds = []) {
+  const ids = [...new Set((Array.isArray(entityIds) ? entityIds : [entityIds])
+    .map((item) => String(item || "").trim())
+    .filter(Boolean))];
+  if (!entityType || ids.length === 0) return "";
+  const row = await db.prepare(`
+    SELECT actor
+    FROM audit_logs
+    WHERE action = 'delete'
+      AND entity_type = @entityType
+      AND entity_id = ANY(@entityIds::text[])
+    ORDER BY id DESC
+    LIMIT 1
+  `).get({ entityType, entityIds: ids });
+  return String(row?.actor || "").trim() || "";
+}
+
 function mapFile(row) {
   const storageProvider = row.storage_provider || "";
   const hasOssObject = storageProvider === "oss" && Boolean(row.object_key);
@@ -3708,7 +3757,10 @@ async function nextOrderNo(date = todayInputValue()) {
   const rows = await db.prepare(`
     SELECT no FROM orders
     WHERE no LIKE ?
-  `).all(`${prefix}%`);
+    UNION ALL
+    SELECT order_no AS no FROM dispatch_plan_recycle
+    WHERE order_no LIKE ?
+  `).all(`${prefix}%`, `${prefix}%`);
   return nextBusinessNoFromRows(prefix, rows);
 }
 
@@ -3718,11 +3770,15 @@ async function nextDispatchNo(date = todayInputValue()) {
     SELECT dispatch_no FROM orders
     WHERE dispatch_no LIKE ?
   `).all(`${prefix}%`);
+  const recycleRows = await db.prepare(`
+    SELECT dispatch_no FROM dispatch_plan_recycle
+    WHERE dispatch_no LIKE ?
+  `).all(`${prefix}%`);
   const plan = await db.prepare("SELECT rows_json FROM dispatch_plans WHERE plan_date = ?").get(normalizeBusinessNoDate(date));
   const planRows = parseDispatchPlanRowsJson(plan?.rows_json)
     .map((row) => ({ dispatch_no: row.dispatchNo }))
     .filter((row) => String(row.dispatch_no || "").startsWith(prefix));
-  return nextBusinessNoFromRows(prefix, [...orderRows, ...planRows]);
+  return nextBusinessNoFromRows(prefix, [...orderRows, ...recycleRows, ...planRows]);
 }
 
 app.get("/api/health", async (_req, res) => {
@@ -4031,7 +4087,13 @@ app.get("/api/customs-businesses/recycle", async (_req, res) => {
     WHERE deleted_at IS NOT NULL
     ORDER BY deleted_at DESC, business_date DESC, id DESC
   `).all();
-  res.json(rows.map(mapCustomsBusiness));
+  const customerShortNames = await loadCustomerShortNameMap();
+  const mappedRows = await Promise.all(rows.map(async (row) => ({
+    ...mapCustomsBusiness(row),
+    customerShortName: shortNameFromMap(row.company, customerShortNames),
+    operatorName: await latestDeleteOperatorName("customs_business", String(row.id))
+  })));
+  res.json(mappedRows);
 });
 
 app.post("/api/customs-businesses/export/excel", async (req, res) => {
@@ -4192,7 +4254,13 @@ app.get("/api/other-businesses/recycle", async (_req, res) => {
     WHERE deleted_at IS NOT NULL
     ORDER BY deleted_at DESC, business_date DESC, id DESC
   `).all();
-  res.json(rows.map(mapOtherBusiness));
+  const customerShortNames = await loadCustomerShortNameMap();
+  const mappedRows = await Promise.all(rows.map(async (row) => ({
+    ...mapOtherBusiness(row),
+    customerShortName: shortNameFromMap(row.customer, customerShortNames),
+    operatorName: await latestDeleteOperatorName("other_business", String(row.id))
+  })));
+  res.json(mappedRows);
 });
 
 app.post("/api/other-businesses", async (req, res) => {
@@ -4745,8 +4813,106 @@ function dispatchRowText(row = {}, key = "") {
   return String(row?.[key] ?? "").trim();
 }
 
+function localTimestampInputValue(date = new Date()) {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 19).replace("T", " ");
+}
+
+function normalizeTimestampText(value = "") {
+  const text = String(value || "").trim();
+  const matched = text.match(/^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  if (!matched) return "";
+  const date = parseInputDate(matched[1]) ? matched[1] : "";
+  if (!date) return "";
+  if (!matched[2]) return `${date} 00:00:00`;
+  return `${date} ${matched[2]}:${matched[3]}:${matched[4] || "00"}`;
+}
+
+function dispatchRowTimestampFromId(row = {}) {
+  const id = String(row?.id || "").trim();
+  const matched = id.match(/(?:^|[-_])(\d{13})(?:$|[-_])/);
+  if (!matched) return "";
+  const timestamp = Number(matched[1]);
+  if (!Number.isFinite(timestamp)) return "";
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  if (year < 2020 || year > 2100) return "";
+  return localTimestampInputValue(date);
+}
+
+function dispatchRowCreatedAt(row = {}, fallbackDate = "") {
+  return normalizeTimestampText(row?.createdAt || row?.created_at)
+    || dispatchRowTimestampFromId(row)
+    || normalizeTimestampText(fallbackDate)
+    || `${todayInputValue()} 00:00:00`;
+}
+
+function dispatchRowCreatedDate(row = {}, fallbackDate = "") {
+  return dispatchRowCreatedAt(row, fallbackDate).slice(0, 10);
+}
+
+function businessDateFromNo(value = "") {
+  const matched = String(value || "").trim().match(/^(?:HY|PC)(\d{4})(\d{2})(\d{2})/);
+  if (!matched) return "";
+  const date = `${matched[1]}-${matched[2]}-${matched[3]}`;
+  return parseInputDate(date) ? date : "";
+}
+
+function dispatchRowBusinessDate(row = {}, fallbackDate = "") {
+  const rowDate = String(row?.date || "").trim().slice(0, 10);
+  const fallback = String(fallbackDate || "").trim().slice(0, 10);
+  return (parseInputDate(rowDate) ? rowDate : "")
+    || (parseInputDate(fallback) ? fallback : "")
+    || businessDateFromNo(dispatchRowText(row, "dispatchNo"))
+    || businessDateFromNo(dispatchRowText(row, "orderNo"))
+    || dispatchRowCreatedDate(row, fallbackDate);
+}
+
 function dispatchRowHasReference(row = {}) {
   return dispatchRowLookupKeys(row).length > 0;
+}
+
+async function orderDateFromLinkedDispatchRow(orderNo = "", dispatchNo = "", fallbackDate = "") {
+  const normalizedOrderNo = String(orderNo || "").trim();
+  const normalizedDispatchNo = String(dispatchNo || "").trim();
+  if (!normalizedOrderNo && !normalizedDispatchNo) return String(fallbackDate || "").trim().slice(0, 10);
+
+  let matched = null;
+  const recordMatch = (row = {}, planDate = "", priority = 0) => {
+    const matches = (normalizedOrderNo && dispatchRowText(row, "orderNo") === normalizedOrderNo)
+      || (normalizedDispatchNo && dispatchRowText(row, "dispatchNo") === normalizedDispatchNo);
+    if (!matches) return;
+    const createdAt = dispatchRowCreatedAt(row, planDate);
+    const candidate = { date: dispatchRowBusinessDate(row, planDate), createdAt, priority };
+    if (
+      !matched
+      || candidate.priority > matched.priority
+      || (candidate.priority === matched.priority && candidate.createdAt < matched.createdAt)
+    ) {
+      matched = candidate;
+    }
+  };
+
+  const plans = await db.prepare("SELECT plan_date, rows_json FROM dispatch_plans").all();
+  for (const plan of plans) {
+    const rows = parseDispatchPlanRowsJson(plan.rows_json);
+    rows.forEach((row) => recordMatch(row, plan.plan_date, 2));
+  }
+
+  const recycleRows = await db.prepare(`
+    SELECT plan_date, row_json
+    FROM dispatch_plan_recycle
+    WHERE (@orderNo <> '' AND order_no = @orderNo)
+       OR (@dispatchNo <> '' AND dispatch_no = @dispatchNo)
+    ORDER BY restored_at NULLS FIRST, deleted_at DESC, id DESC
+  `).all({ orderNo: normalizedOrderNo, dispatchNo: normalizedDispatchNo });
+  for (const recycle of recycleRows) {
+    const row = parseDispatchPlanRowJson(recycle.row_json);
+    if (dispatchRowHasReference(row)) recordMatch(row, recycle.plan_date, 1);
+  }
+
+  if (matched?.date) return matched.date;
+  return String(fallbackDate || "").trim().slice(0, 10);
 }
 
 function dedupeDispatchPlanRows(rows = []) {
@@ -4762,11 +4928,13 @@ function dedupeDispatchPlanRows(rows = []) {
   return dedupedRows;
 }
 
-function normalizeDispatchPlanRow(row = {}, existingRow = null, requestCreator = {}) {
+function normalizeDispatchPlanRow(row = {}, existingRow = null, requestCreator = {}, fallbackDate = "") {
   const item = row && typeof row === "object" ? row : {};
   const creator = dispatchRowCreatorFields(item, existingRow, requestCreator);
   return {
     id: String(item.id || ""),
+    createdAt: dispatchRowCreatedAt(item.createdAt || item.created_at ? item : (existingRow || item), item.date || existingRow?.date || fallbackDate),
+    date: String(fallbackDate || item.date || ""),
     dispatchNo: String(item.dispatchNo || ""),
     orderNo: String(item.orderNo || ""),
     customer: String(item.customer || ""),
@@ -4978,7 +5146,7 @@ function compareDispatchExportRows(left = {}, right = {}) {
 function dispatchExportWorkbookTitle(rows = [], fallbackDate = todayInputValue()) {
   const first = rows.find((row) => dispatchExportText(row?.plate, row?.order?.plate) || dispatchExportText(row?.dispatchNo, row?.order?.dispatchNo)) || rows[0] || {};
   const order = dispatchExportNestedRow(first.order);
-  const dateText = dispatchExportText(order.date, first.date, fallbackDate);
+  const dateText = dispatchExportText(first.date, order.date, fallbackDate);
   const date = parseInputDate(dateText);
   if (!date) return `${dateText || fallbackDate}汉业公司跟单表`;
   return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日汉业公司跟单表`;
@@ -5239,6 +5407,7 @@ async function lockDispatchPlanDate(date) {
 
 function dispatchRowOrderSyncKey(row = {}) {
   return [
+    "createdAt",
     "orderNo",
     "dispatchNo",
     "plate",
@@ -5284,6 +5453,7 @@ function normalizeDispatchRecycleRow(row = {}, planDate = todayInputValue()) {
   const creator = creatorFieldsFromRecord(item);
   return {
     id: String(item.id || item.dispatchNo || item.dispatch_no || `dispatch-restored-${Date.now()}`),
+    createdAt: dispatchRowCreatedAt(item, planDate),
     dispatchNo: String(item.dispatchNo || item.dispatch_no || ""),
     orderNo: String(item.orderNo || item.order_no || ""),
     customer: String(item.customer || ""),
@@ -5442,12 +5612,48 @@ async function restoreDispatchPlanRowsLinkedToOrder(orderRow = {}) {
   return restored;
 }
 
+async function syncDispatchPlanRowsStatusForOrder(orderRow = {}, dispatchStatus = "") {
+  const normalizedStatus = String(dispatchStatus || "").trim();
+  if (!DISPATCH_STATUS_OPTIONS.includes(normalizedStatus)) return 0;
+  const orderNo = String(orderRow.no || orderRow.order_no || "").trim();
+  const dispatchNo = String(orderRow.dispatch_no || orderRow.dispatchNo || "").trim();
+  if (!orderNo && !dispatchNo) return 0;
+
+  const plans = await db.prepare("SELECT plan_date, rows_json FROM dispatch_plans").all();
+  let changed = 0;
+  for (const plan of plans) {
+    await lockDispatchPlanDate(plan.plan_date);
+    const rows = parseDispatchPlanRowsJson(plan.rows_json);
+    let planChanged = false;
+    const nextRows = rows.map((row) => {
+      if (!dispatchRowMatchesRefs(row, orderNo, dispatchNo)) return row;
+      const previousStatus = normalizeDispatchPlanStatus(row.status);
+      if (previousStatus === normalizedStatus) return row;
+      planChanged = true;
+      changed += 1;
+      return {
+        ...row,
+        status: normalizedStatus,
+        previousStatus: previousStatus && previousStatus !== normalizedStatus ? previousStatus : row.previousStatus || ""
+      };
+    });
+    if (!planChanged) continue;
+    await db.prepare(`
+      UPDATE dispatch_plans
+      SET rows_json = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE plan_date = ?
+    `).run(JSON.stringify(nextRows), plan.plan_date);
+  }
+  return changed;
+}
+
 function dispatchRecycleRowFromOrder(order = {}) {
   const mapped = mapOrder(order);
   const creator = creatorFieldsFromRecord(order);
   const dispatchStatus = ORDER_STATUS_TO_DISPATCH_STATUS[mapped.status] || "预排";
   return {
     id: `dispatch-restored-${mapped.no || mapped.dispatchNo || Date.now()}`,
+    createdAt: mapped.date || todayInputValue(),
     dispatchNo: mapped.dispatchNo,
     orderNo: mapped.no,
     customer: mapped.customer || "",
@@ -5532,7 +5738,7 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = []) {
       hkDriver: isSingleDriver ? "" : (rowHkDriver || rowDriver),
       mainlandDriver: isSingleDriver ? "" : rowMainlandDriver,
       transportMode,
-      orderDate: /^\d{4}-\d{2}-\d{2}$/.test(planDate) ? planDate : order.order_date
+      orderDate: dispatchRowBusinessDate(row, planDate || order.order_date)
     });
     synced += 1;
   }
@@ -5582,7 +5788,17 @@ app.get("/api/dispatch-plans/recycle", async (_req, res) => {
     WHERE restored_at IS NULL
     ORDER BY deleted_at DESC, plan_date DESC, id DESC
   `).all();
-  res.json(rows.map(mapDispatchRecycleRecord));
+  const customerShortNames = await loadCustomerShortNameMap();
+  const mappedRows = await Promise.all(rows.map(async (row) => ({
+    ...mapDispatchRecycleRecord(row),
+    customerShortName: shortNameFromMap(row.customer || row.row?.customer || "", customerShortNames),
+    operatorName: await latestDeleteOperatorName("dispatch_plan", [
+      row.dispatch_no,
+      row.order_no,
+      row.plan_date
+    ])
+  })));
+  res.json(mappedRows);
 });
 
 app.post("/api/dispatch-plans/recycle", async (req, res) => {
@@ -5771,7 +5987,7 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
     const cleanRows = rows
       .map((row) => {
         const existingRow = findExistingDispatchRow(row, existingRowsLookup);
-        const cleanRow = normalizeDispatchPlanRow(row, existingRow, requestCreator);
+        const cleanRow = normalizeDispatchPlanRow(row, existingRow, requestCreator, date);
         if (dispatchRowHasReference(cleanRow) && dispatchRowNeedsOrderSync(cleanRow, existingRow)) {
           rowsNeedingOrderSync.push(cleanRow);
         }
@@ -5779,7 +5995,7 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
       })
       .filter(dispatchRowHasReference);
     const cleanBaseRows = baseRows
-      .map((row) => normalizeDispatchPlanRow(row, findExistingDispatchRow(row, existingRowsLookup), requestCreator))
+      .map((row) => normalizeDispatchPlanRow(row, findExistingDispatchRow(row, existingRowsLookup), requestCreator, date))
       .filter(dispatchRowHasReference);
     const merged = mergeDispatchPlanRows(existingRows, cleanRows, cleanBaseRows);
     if (merged.stats.conflict > 0) {
@@ -5819,7 +6035,14 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
 
 app.get("/api/orders/recycle", async (_req, res) => {
   const rows = await db.prepare("SELECT * FROM orders WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, order_date DESC").all();
-  res.json(await hydrateOrderFees(rows.map(mapOrder)));
+  const mappedRows = await hydrateOrderFees(rows.map(mapOrder));
+  const customerShortNames = await loadCustomerShortNameMap();
+  const rowsWithOperator = await Promise.all(mappedRows.map(async (row) => ({
+    ...row,
+    customerShortName: shortNameFromMap(row.customer, customerShortNames),
+    operatorName: await latestDeleteOperatorName("order", String(row.no))
+  })));
+  res.json(rowsWithOperator);
 });
 
 app.get("/api/orders/export/csv", async (req, res) => {
@@ -5956,11 +6179,16 @@ function pickBody(body, camelKey, snakeKey, fallback) {
 }
 
 async function readOrderPayload(body, existing = null) {
-  const date = pickBody(body, "date", "order_date", existing?.order_date || todayInputValue());
+  const submittedDate = pickBody(body, "date", "order_date", existing?.order_date || todayInputValue());
   const dispatchNo = String(pickBody(body, "dispatchNo", "dispatch_no", existing?.dispatch_no || "") || "").trim();
+  const initialLinkedDate = await orderDateFromLinkedDispatchRow(existing?.no || body.no || "", dispatchNo, submittedDate);
+  const dateForNewNumbers = initialLinkedDate || submittedDate;
+  const no = existing?.no || body.no || (await nextOrderNo(dateForNewNumbers));
+  const resolvedDispatchNo = dispatchNo || (existing ? "" : await nextDispatchNo(dateForNewNumbers));
+  const dispatchDate = await orderDateFromLinkedDispatchRow(no, resolvedDispatchNo, dateForNewNumbers);
   return {
-    no: existing?.no || body.no || (await nextOrderNo(date)),
-    dispatchNo: dispatchNo || (existing ? "" : await nextDispatchNo(date)),
+    no,
+    dispatchNo: resolvedDispatchNo,
     customerId: pickBody(body, "customerId", "customer_id", existing?.customer_id || null),
     customer: String(pickBody(body, "customer", "customer_name", existing?.customer || "") || "").trim(),
     businessType: String(pickBody(body, "businessType", "business_type", existing?.business_type || "运输") || "运输").trim(),
@@ -5979,7 +6207,7 @@ async function readOrderPayload(body, existing = null) {
     transportMode: String(pickBody(body, "transportMode", "transport_mode", existing?.transport_mode || "") || "").trim(),
     loading: String(pickBody(body, "loading", "loading_place", existing?.loading || "") || "").trim(),
     unloading: String(pickBody(body, "unloading", "unloading_place", existing?.unloading || "") || "").trim(),
-    date,
+    date: dispatchDate || dateForNewNumbers,
     receivableHKD: Number(pickBody(body, "receivableHKD", "hkd_receivable", existing?.receivable_hkd || 0) || 0),
     receivableRMB: Number(pickBody(body, "receivableRMB", "rmb_receivable", existing?.receivable_rmb || 0) || 0),
     status: String(pickBody(body, "status", null, existing?.status || "待确认") || "待确认").trim(),
@@ -5990,6 +6218,43 @@ async function readOrderPayload(body, existing = null) {
     sixSheetNo: String(pickBody(body, "sixSheetNo", "six_sheet_no", existing?.six_sheet_no || "") || "").trim(),
     fees: Array.isArray(body.fees) ? body.fees : null
   };
+}
+
+async function assignOrderBusinessNumbers(item, requestedNo = "", requestedDispatchNo = "") {
+  const no = String(requestedNo || "").trim();
+  const dispatchNo = String(requestedDispatchNo || "").trim();
+  const date = normalizeBusinessNoDate(item.date || todayInputValue());
+  item.no = no || await nextOrderNo(date);
+  item.dispatchNo = dispatchNo || await nextDispatchNo(date);
+}
+
+async function lockOrderCreation() {
+  await db.prepare("SELECT pg_advisory_xact_lock(?)").get(ORDER_CREATE_LOCK_ID);
+}
+
+async function orderBusinessNumberConflict(no = "", dispatchNo = "") {
+  const orderNo = String(no || "").trim();
+  const dispatch = String(dispatchNo || "").trim();
+  const existingOrder = await db.prepare(`
+    SELECT no, dispatch_no, deleted_at
+    FROM orders
+    WHERE no = @orderNo
+       OR (@dispatchNo <> '' AND dispatch_no = @dispatchNo)
+    LIMIT 1
+  `).get({ orderNo, dispatchNo: dispatch });
+  if (existingOrder?.no === orderNo) return `订单号 ${orderNo} 已存在`;
+  if (dispatch && existingOrder?.dispatch_no === dispatch) return `排车单号 ${dispatch} 已存在`;
+
+  const recycleRow = await db.prepare(`
+    SELECT order_no, dispatch_no
+    FROM dispatch_plan_recycle
+    WHERE (@orderNo <> '' AND order_no = @orderNo)
+       OR (@dispatchNo <> '' AND dispatch_no = @dispatchNo)
+    LIMIT 1
+  `).get({ orderNo, dispatchNo: dispatch });
+  if (recycleRow?.order_no === orderNo) return `订单号 ${orderNo} 已在回收站中`;
+  if (dispatch && recycleRow?.dispatch_no === dispatch) return `排车单号 ${dispatch} 已在回收站中`;
+  return "";
 }
 
 async function resolveOrderCustomer(item) {
@@ -6015,7 +6280,9 @@ async function resolveOrderCustomer(item) {
 }
 
 app.post("/api/orders", async (req, res) => {
-  const item = await readOrderPayload(req.body);
+  const requestedNo = String(req.body?.no || "").trim();
+  const requestedDispatchNo = String(req.body?.dispatchNo || req.body?.dispatch_no || "").trim();
+  const item = await readOrderPayload({ ...req.body, no: requestedNo || undefined, dispatchNo: requestedDispatchNo });
   Object.assign(item, creatorFieldsFromAccount(req.account));
   item.fees = item.fees || [];
   if (!(await resolveOrderCustomer(item))) {
@@ -6028,6 +6295,12 @@ app.post("/api/orders", async (req, res) => {
   }
 
   const transaction = db.transaction(async () => {
+    await lockOrderCreation();
+    await assignOrderBusinessNumbers(item, requestedNo, requestedDispatchNo);
+    const conflict = await orderBusinessNumberConflict(item.no, item.dispatchNo);
+    if (conflict) {
+      throw createDispatchPlanConflictError(conflict);
+    }
     await db.prepare(`
       INSERT INTO orders
         (no, dispatch_no, customer_id, customer, business_type, port, direction, tonnage, currency, quantity,
@@ -6042,8 +6315,15 @@ app.post("/api/orders", async (req, res) => {
     `).run(item);
     await saveOrderFees(item.no, item.fees, item.currency);
   });
-
-  await transaction();
+  try {
+    await transaction();
+  } catch (error) {
+    if (error?.statusCode === 409) {
+      res.status(409).json({ message: error.message });
+      return;
+    }
+    throw error;
+  }
   await writeAudit("create", "order", item.no, item.customer);
   const created = await db.prepare("SELECT * FROM orders WHERE no = ?").get(item.no);
   res.status(201).json((await hydrateOrderFees([mapOrder(created)]))[0]);
@@ -6197,6 +6477,10 @@ app.patch("/api/orders/:no/status", async (req, res) => {
 
   await writeAudit(status === "已审核" ? "audit" : "update_status", "order", no, `状态改为${status}`);
   const row = await db.prepare("SELECT * FROM orders WHERE no = ?").get(no);
+  const dispatchStatus = ORDER_STATUS_TO_DISPATCH_STATUS[status] || "";
+  if (dispatchStatus) {
+    await syncDispatchPlanRowsStatusForOrder(row, dispatchStatus);
+  }
   res.json((await hydrateOrderFees([mapOrder(row)]))[0]);
 });
 

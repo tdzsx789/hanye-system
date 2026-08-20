@@ -718,6 +718,37 @@ function todayInputValue() {
   return local.toISOString().slice(0, 10);
 }
 
+function currentTimestampInputValue() {
+  const now = new Date();
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 19).replace("T", " ");
+}
+
+function timestampInputValueFromDate(date) {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 19).replace("T", " ");
+}
+
+function normalizeTimestampInputValue(value = "") {
+  const text = String(value || "").trim();
+  const matched = text.match(/^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  if (!matched || !parseInputDate(matched[1])) return "";
+  if (!matched[2]) return `${matched[1]} 00:00:00`;
+  return `${matched[1]} ${matched[2]}:${matched[3]}:${matched[4] || "00"}`;
+}
+
+function timestampInputValueFromRowId(row = {}) {
+  const id = String(row?.id || "").trim();
+  const matched = id.match(/(?:^|[-_])(\d{13})(?:$|[-_])/);
+  if (!matched) return "";
+  const timestamp = Number(matched[1]);
+  if (!Number.isFinite(timestamp)) return "";
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  if (year < 2020 || year > 2100) return "";
+  return timestampInputValueFromDate(date);
+}
+
 function normalizePriceEffectiveDate(value = "", fallback = todayInputValue()) {
   const text = String(value || "").trim().slice(0, 10);
   return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : fallback;
@@ -2414,7 +2445,7 @@ const visibleCustomers = computed(() => {
 });
 
 const homeTodayOrders = computed(() =>
-  orderRows.value.filter((order) => order.date === todayInputValue() && !order.deletedAt)
+  orderRows.value.filter((order) => String(order.date || "").trim().slice(0, 10) === todayInputValue() && !order.deletedAt)
 );
 
 const homePendingOrders = computed(() =>
@@ -2447,7 +2478,7 @@ const homeRecentDispatchRows = computed(() => dispatchPlanDisplayRows.value.slic
 
 const dispatchModalNo = computed(() => {
   const editingRow = dispatchPlanRows.value.find((row) => row.id === editingDispatchRowId.value);
-  return editingRow?.dispatchNo || generateDispatchNo(dispatchForm.date || dispatchDate.value);
+  return editingRow?.dispatchNo || generateDispatchNo(currentTimestampInputValue().slice(0, 10));
 });
 
 const customerModalTitleId = computed(() => editingCustomerId.value || "KH00021053");
@@ -3464,9 +3495,11 @@ function normalizeDispatchPlanRows(rows = [], date = dispatchDate.value) {
   rows.forEach((row) => {
     const status = normalizeDispatchPlanStatus(row.status, row);
     const previousStatus = normalizeOptionalDispatchPlanStatus(row.previousStatus);
+    const createdAt = dispatchRowCreatedAt(row) || timestampInputValueFromRowId(row) || normalizeTimestampInputValue(date);
     normalizedRows.push({
       ...row,
       date: row.date || date,
+      createdAt,
       dispatchNo: row.dispatchNo || generateDispatchNo(date, normalizedRows),
       driver: row.driver || "",
       loadTime: row.loadTime || "",
@@ -3786,6 +3819,17 @@ function dispatchPlanDate(row = {}) {
   return row.date || dispatchRowLiveOrder(row)?.date || row.order?.date || dispatchDate.value;
 }
 
+function dispatchRowCreatedAt(row = {}) {
+  return normalizeTimestampInputValue(row.createdAt || row.created_at) || timestampInputValueFromRowId(row);
+}
+
+function dispatchRowCreatedDate(row = {}, fallbackDate = "") {
+  const createdAt = dispatchRowCreatedAt(row);
+  if (createdAt) return createdAt.slice(0, 10);
+  const fallback = String(fallbackDate || dispatchRowLiveOrder(row)?.date || row.order?.date || row.date || "").trim();
+  return fallback.slice(0, 10);
+}
+
 function findDispatchPlanRowTarget(row = {}) {
   const refId = String(row?.id || "").trim();
   const refDispatchNo = String(row?.dispatchNo || "").trim();
@@ -3844,7 +3888,7 @@ function dispatchStatusOptionsForRow(row) {
     return ["通关中"];
   }
   if (currentStatus === DISPATCH_LOCKED_STATUS) {
-    return ["已签收", "异常滞留"];
+    return [DISPATCH_LOCKED_STATUS];
   }
   if (currentStatus === "已签收") {
     return ["已签收"];
@@ -3856,7 +3900,7 @@ function dispatchStatusOptionsForRow(row) {
 }
 
 function isDispatchStatusSelectDisabled(row) {
-  return dispatchStatusValueForRow(row) === "已签收";
+  return [DISPATCH_LOCKED_STATUS, "已签收", "异常滞留"].includes(dispatchStatusValueForRow(row));
 }
 
 const DISPATCH_STATUS_FALLBACK_PREVIOUS = {
@@ -3875,6 +3919,7 @@ function dispatchReturnStatusForRow(row = {}) {
 }
 
 function canReturnDispatchStatus(row = {}) {
+  if ([DISPATCH_LOCKED_STATUS, "已签收", "异常滞留"].includes(dispatchStatusValueForRow(row))) return false;
   return Boolean(dispatchReturnStatusForRow(row));
 }
 
@@ -4166,8 +4211,11 @@ function generateDispatchNo(date = dispatchDate.value, extraRows = []) {
 function createManualDispatchPlanRow() {
   const isOutsourced = dispatchForm.vehicleSource === "外派车辆";
   const planDate = dispatchForm.date || dispatchDate.value;
+  const createdAt = currentTimestampInputValue();
   return {
     id: `dispatch-manual-${Date.now()}`,
+    createdAt,
+    date: planDate,
     dispatchNo: generateDispatchNo(planDate),
     orderNo: "",
     customer: dispatchForm.customer,
@@ -4223,6 +4271,7 @@ async function saveEditedDispatchPlanRow() {
   const isOutsourced = dispatchForm.vehicleSource === "外派车辆";
   const updatedRow = {
     ...originalRow,
+    date: planDate,
     customer: matchedCustomer.name,
     plate: dispatchForm.plate,
     port: dispatchForm.port,
@@ -4318,6 +4367,9 @@ async function saveManualDispatchPlanRow() {
   const isCopyingDispatch = Boolean(copyingDispatchRowId.value);
   try {
     loading.value = true;
+    const createdAt = row.createdAt || currentTimestampInputValue();
+    row.createdAt = createdAt;
+    row.date = planDate;
     const item = await ordersApi.createOrder({
       customerId: matchedCustomer.id,
       customer: matchedCustomer.name,
@@ -4365,9 +4417,13 @@ async function saveManualDispatchPlanRow() {
 
 function createDispatchPlanRow(order) {
   const mode = normalizeTransportMode(order.transportMode || "单司机") || "单司机";
+  const planDate = dispatchDate.value;
+  const createdAt = currentTimestampInputValue();
   return {
     id: `dispatch-${order.no}-${Date.now()}`,
-    dispatchNo: order.dispatchNo || generateDispatchNo(order.date),
+    createdAt,
+    date: planDate,
+    dispatchNo: order.dispatchNo || generateDispatchNo(planDate),
     orderNo: order.no,
     customer: order.customer || "",
     plate: order.plate || "",
@@ -4474,8 +4530,9 @@ async function saveDuplicateDispatchRows() {
         return;
       }
 
-      const dispatchNo = generateDispatchNo(dispatchDate.value, duplicatedRows);
       const note = String(draft.note || "").trim() || String(sourceRow.note || "").trim();
+      const createdAt = currentTimestampInputValue();
+      const dispatchNo = generateDispatchNo(dispatchDate.value, duplicatedRows);
       const item = await ordersApi.createOrder({
         customerId: matchedCustomer.id,
         customer: matchedCustomer.name,
@@ -4506,6 +4563,8 @@ async function saveDuplicateDispatchRows() {
       const duplicatedRow = {
         ...sourceRow,
         id: `dispatch-copy-${Date.now()}-${duplicatedRows.length}`,
+        createdAt,
+        date: dispatchDate.value,
         dispatchNo: item.dispatchNo || dispatchNo,
         orderNo: item.no,
         customer: item.customer || matchedCustomer.name,
@@ -4564,7 +4623,7 @@ function applyDispatchRowToOrderForm(row) {
     plate: row.plate || "",
     loading: row.loading || "",
     unloading: row.unloading || "",
-    date: dispatchDate.value || orderForm.date,
+    date: dispatchPlanDate(row),
     status: DISPATCH_STATUS_TO_ORDER_STATUS[row.status] || orderForm.status,
     remark: [orderForm.remark, row.note ? `排车备注：${row.note}` : ""].filter(Boolean).join("\n")
   });
@@ -4758,7 +4817,7 @@ function dispatchMessageText(rows = dispatchPlanDisplayRows.value) {
   return rows.map((row) => {
     const order = row.order || {};
     const record = { ...order, loading: order.loading || row.loading, unloading: order.unloading || row.unloading };
-    const date = order.date || row.date || dispatchDate.value || "-";
+    const date = row.date || order.date || dispatchDate.value || "-";
     const time = row.loadTime || order.loadingTime || "-";
     const direction = order.direction || row.direction || "";
     return [
@@ -6885,7 +6944,7 @@ function periodFilterDateValue(filterKey) {
 }
 
 function periodSourceDates(scope) {
-  if (scope === "orders") return orderRows.value.map((item) => item.date);
+  if (scope === "orders") return orderRows.value.map((item) => String(item.date || "").trim().slice(0, 10));
   if (scope === "finance") return [
     ...orderRows.value.map((item) => item.date),
     ...driverAdjustmentRows.value.map((item) => item.date)
@@ -10750,7 +10809,7 @@ function matchesOrderSearchKeyword(order = {}) {
 const orderFilterBaseRows = computed(() =>
   orderRows.value.filter((item) =>
     isOrderVisibleInOrderManagement(item)
-    && isOrderDateFilterMatch(item.date)
+    && isOrderDateFilterMatch(String(item.date || "").trim().slice(0, 10))
   )
 );
 
@@ -14231,19 +14290,36 @@ function dispatchLocationContactLines(record = {}, target, location = "", index 
   ].filter(Boolean);
 }
 
+function dispatchMessageLocationDetail(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (text.includes("/")) {
+    const parts = text.split("/").map((part) => part.trim()).filter(Boolean);
+    if (parts.length >= 3) return parts.slice(2).join(" / ");
+    if (parts.length === 2) return parts[1];
+    return parts[0] || "";
+  }
+  return text
+    .replace(/^(?:[\u4e00-\u9fa5]{2,16}?(?:省|自治区|特别行政区))/, "")
+    .replace(/^(?:北京市|上海市|天津市|重庆市|香港|澳门|[\u4e00-\u9fa5]{2,16}?市)/, "")
+    .replace(/^(?:[\u4e00-\u9fa5]{1,16}?(?:区|县))/, "")
+    .trim();
+}
+
 function dispatchLocationBlock(label, record = {}, target) {
   const locations = splitAddressBookLocationValue(record[target]);
   const entries = locations.length ? locations : [""];
   if (entries.length <= 1) {
     const location = entries[0] || "-";
+    const displayLocation = dispatchMessageLocationDetail(location) || location;
     return [
-      `${label}：${location}`,
+      `${label}：${displayLocation}`,
       ...dispatchLocationContactLines(record, target, location)
     ].join("\n");
   }
   return entries
     .flatMap((location, index) => [
-      `${label}${index + 1}：${location || "-"}`,
+      `${label}${index + 1}：${dispatchMessageLocationDetail(location) || location || "-"}`,
       ...dispatchLocationContactLines(record, target, location, index)
     ])
     .join("\n");
@@ -15299,7 +15375,7 @@ function dispatchListDetailCellText(row = {}, key = "") {
   const order = row.order || {};
   const values = {
     sequence: row.displayIndex + 1,
-    loadTime: `${order.date || row.date || dispatchDate.value} ${row.loadTime || "-"}`,
+    loadTime: `${row.date || order.date || dispatchDate.value} ${row.loadTime || "-"}`,
     dispatchNo: row.dispatchNo || "-",
     createdByName: row.createdByName || row.createdByUsername || "-",
     customer: partnerDisplayLabel(order.customer || row.customer || "", "客户") || "-",
@@ -17920,13 +17996,15 @@ async function submitOrderModal() {
   await saveOrder();
 }
 
-async function saveOrder() {
+async function saveOrder(options = {}) {
+  const closeAfterSave = options.closeAfterSave !== false;
+  const notifySuccess = options.notifySuccess !== false;
   try {
     if (orderAttachmentUploading.value) {
       notify("附件正在上传，请稍候再保存订单");
-      return;
+      return null;
     }
-    if (!(await confirmSaveOrderWithMissingAdvanceReceipts())) return;
+    if (!(await confirmSaveOrderWithMissingAdvanceReceipts())) return null;
     loading.value = true;
     if (orderIsCustomsOnly.value) {
       clearOrderTransportFields();
@@ -17987,10 +18065,65 @@ async function saveOrder() {
       pendingDispatchBindId.value = "";
     }
     editingOrderNo.value = item.no;
-    closeOrderModal();
-    notify(`已保存订单：${item.no}`);
+    if (closeAfterSave) closeOrderModal();
+    if (notifySuccess) notify(`已保存订单：${item.no}`);
+    return item;
   } catch (error) {
     notify(error.message);
+    return null;
+  } finally {
+    loading.value = false;
+  }
+}
+
+function syncLocalDispatchRowsForOrderStatus(order = {}, dispatchStatus = "") {
+  const orderNo = String(order.no || "").trim();
+  const dispatchNo = String(order.dispatchNo || "").trim();
+  if (!orderNo && !dispatchNo) return;
+  dispatchPlanRows.value = dispatchPlanRows.value.map((row) => {
+    const matchesOrder = orderNo && String(row.orderNo || row.order?.no || "").trim() === orderNo;
+    const matchesDispatch = dispatchNo && String(row.dispatchNo || row.order?.dispatchNo || "").trim() === dispatchNo;
+    if (!matchesOrder && !matchesDispatch) return row;
+    const previousStatus = dispatchStatusValueForRow(row);
+    return {
+      ...row,
+      status: dispatchStatus,
+      previousStatus: previousStatus && previousStatus !== dispatchStatus ? previousStatus : row.previousStatus || ""
+    };
+  });
+}
+
+function orderModalStatusValue() {
+  return String(orderForm.status || "").trim();
+}
+
+function orderStatusActionDisabled(targetStatus = "") {
+  const status = orderModalStatusValue();
+  if (status === "已签收") return true;
+  if (targetStatus === "异常滞留" && ["异常滞留", "费用待确认"].includes(status)) return true;
+  return false;
+}
+
+async function completeOrderFromOrderModal(targetStatus = "") {
+  if (orderViewMode.value || orderAuditMode.value) return;
+  if (orderStatusActionDisabled(targetStatus)) return;
+  const orderStatus = targetStatus === "异常滞留" ? "费用待确认" : targetStatus;
+  const dispatchStatus = targetStatus === "异常滞留" ? "异常滞留" : targetStatus;
+  if (!["已签收", "费用待确认"].includes(orderStatus)) return;
+  const saved = await saveOrder({ closeAfterSave: false, notifySuccess: false });
+  if (!saved?.no) return;
+  try {
+    loading.value = true;
+    const updated = await ordersApi.updateOrderStatus(saved.no, orderStatus);
+    replaceOrder(updated);
+    syncLocalDispatchRowsForOrderStatus(updated, dispatchStatus);
+    if (canAccessModule("dispatchBoard")) {
+      await loadDispatchPlansForCurrentFilter();
+    }
+    closeOrderModal();
+    notify(`订单 ${updated.no} 已标记为${targetStatus}`);
+  } catch (error) {
+    notify(error.message || `更新${targetStatus}状态失败`);
   } finally {
     loading.value = false;
   }
@@ -24670,6 +24803,10 @@ function orderDetailFeeRows(order = {}) {
         </div>
 	        <div class="toolbar order-page-toolbar">
 	          <div class="order-filter-group">
+	            <span class="dispatch-toolbar-stat order-toolbar-stat">
+	              <span>当前订单</span>
+	              <strong>{{ filteredOrders.length }}</strong>
+	            </span>
 	            <label class="order-search-field">
 	              <input
 	                v-model.trim="orderSearchKeyword"
@@ -24898,7 +25035,7 @@ function orderDetailFeeRows(order = {}) {
 
 		        <div class="dispatch-summary-row">
 	          <span class="dispatch-toolbar-stat">
-	            <span>当前排车</span>
+	            <span>当前订单</span>
 	            <strong>{{ searchedDispatchPlanTotalRows.length }}</strong>
 	          </span>
 	          <div class="dispatch-filter-row">
@@ -25078,7 +25215,7 @@ function orderDetailFeeRows(order = {}) {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="row in searchedDispatchPlanRows" :key="row.id" @click="openDispatchDetail(row)">
+                  <tr v-for="row in searchedDispatchPlanRows" :key="row.id" @dblclick="openDispatchDetail(row)">
                     <td
                       v-for="(column, index) in visibleDispatchTableColumns"
                       :key="column.key"
@@ -25104,7 +25241,7 @@ function orderDetailFeeRows(order = {}) {
                       </template>
                       <template v-else-if="column.key === 'loadTime'">
                         <div class="dispatch-load-time-field">
-                          <span class="dispatch-load-date">{{ row.order.date || row.date || dispatchDate }}</span>
+                          <span class="dispatch-load-date">{{ row.date || row.order.date || dispatchDate }}</span>
                           <input
                             class="dispatch-time-input dispatch-time-hour-input"
                             title="装车小时"
@@ -29084,7 +29221,7 @@ function orderDetailFeeRows(order = {}) {
           <div class="modal-head">
             <div>
               <h2>{{ activeDispatchDetail.dispatchNo || '-' }} · 排车明细</h2>
-              <p class="modal-subtitle">{{ partnerDisplayLabel(activeDispatchDetail.order.customer || activeDispatchDetail.customer || '', '客户') || '-' }} · {{ activeDispatchDetail.order.date || activeDispatchDetail.date || dispatchDate }} · {{ activeDispatchDetail.status || '-' }}</p>
+              <p class="modal-subtitle">{{ partnerDisplayLabel(activeDispatchDetail.order.customer || activeDispatchDetail.customer || '', '客户') || '-' }} · {{ activeDispatchDetail.date || activeDispatchDetail.order.date || dispatchDate }} · {{ activeDispatchDetail.status || '-' }}</p>
             </div>
             <div class="modal-detail-actions">
               <button class="ghost-btn small" type="button" @click="openEditDispatchPlanRow(activeDispatchDetail)"><IconSvg name="edit" />编辑</button>
@@ -29098,7 +29235,8 @@ function orderDetailFeeRows(order = {}) {
                 <dl class="detail-dl">
                   <dt>排车单号</dt><dd>{{ activeDispatchDetail.dispatchNo || '-' }}</dd>
                   <dt>订单号</dt><dd>{{ activeDispatchDetail.order.no || activeDispatchDetail.orderNo || '-' }}</dd>
-                  <dt>装车日期</dt><dd>{{ activeDispatchDetail.order.date || activeDispatchDetail.date || dispatchDate }}</dd>
+                  <dt>装车日期</dt><dd>{{ activeDispatchDetail.date || activeDispatchDetail.order.date || dispatchDate }}</dd>
+                  <dt>创建时间</dt><dd>{{ activeDispatchDetail.createdAt || '-' }}</dd>
                   <dt>装车时间</dt><dd>{{ activeDispatchDetail.loadTime || '-' }}</dd>
                   <dt>排车状态</dt><dd>{{ activeDispatchDetail.status || '-' }}</dd>
                   <dt>备注</dt><dd>{{ activeDispatchDetail.note || '-' }}</dd>
@@ -30811,6 +30949,26 @@ function orderDetailFeeRows(order = {}) {
           </form>
         </div>
         </template>
+        <template #actionsLeading>
+          <button
+            v-if="editingOrderNo && !orderReadOnlyMode && orderHasTransportFields"
+            type="button"
+            class="ghost-btn order-status-action-btn dispatch-status-exception"
+            :disabled="loading || orderStatusActionDisabled('异常滞留')"
+            @click="completeOrderFromOrderModal('异常滞留')"
+          >
+            <IconSvg name="minus" />异常滞留
+          </button>
+          <button
+            v-if="editingOrderNo && !orderReadOnlyMode && orderHasTransportFields"
+            type="button"
+            class="ghost-btn order-status-action-btn dispatch-status-signed"
+            :disabled="loading || orderStatusActionDisabled('已签收')"
+            @click="completeOrderFromOrderModal('已签收')"
+          >
+            <IconSvg name="check" />已签收
+          </button>
+        </template>
       </OrderModal>
 
       <div v-if="feeItemManagerOpen" class="modal-backdrop nested-modal-backdrop" @click.self="closeFeeItemManager">
@@ -31239,19 +31397,21 @@ function orderDetailFeeRows(order = {}) {
                     <th>客户</th>
                     <th>日期</th>
                     <th>状态</th>
+                    <th>操作人</th>
                     <th>操作</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr v-for="order in recycleRows" :key="order.no">
                     <td>{{ order.no }}</td>
-                    <td>{{ order.customer }}</td>
+                    <td>{{ order.customerShortName || partnerDisplayLabel(order.customer || '', '客户') || order.customer || '-' }}</td>
                     <td>{{ order.date }}</td>
                     <td>{{ order.status }}</td>
+                    <td>{{ order.operatorName || '-' }}</td>
                     <td><button class="icon-btn success" @click="restoreOrder(order)"><IconSvg name="restore" />恢复</button></td>
                   </tr>
                   <tr v-if="recycleRows.length === 0">
-                    <td colspan="5">{{ recycleScope === 'all' ? '暂无订单回收站数据' : '暂无回收站数据' }}</td>
+                    <td colspan="6">{{ recycleScope === 'all' ? '暂无订单回收站数据' : '暂无回收站数据' }}</td>
                   </tr>
                 </tbody>
               </table>
@@ -31266,6 +31426,7 @@ function orderDetailFeeRows(order = {}) {
                     <th>客户</th>
                     <th>日期</th>
                     <th>删除时间</th>
+                    <th>操作人</th>
                     <th>操作</th>
                   </tr>
                 </thead>
@@ -31273,13 +31434,14 @@ function orderDetailFeeRows(order = {}) {
                   <tr v-for="row in dispatchRecycleRows" :key="row.id">
                     <td>{{ row.dispatchNo || '-' }}</td>
                     <td>{{ row.orderNo || '-' }}</td>
-                    <td>{{ partnerDisplayLabel(row.customer || row.row?.customer || '', '客户') || '-' }}</td>
+                    <td>{{ row.customerShortName || partnerDisplayLabel(row.customer || row.row?.customer || '', '客户') || '-' }}</td>
                     <td>{{ row.date || row.planDate || '-' }}</td>
                     <td>{{ row.deletedAt || '-' }}</td>
+                    <td>{{ row.operatorName || '-' }}</td>
                     <td><button class="icon-btn success" type="button" @click="restoreDispatchRecycleRow(row)"><IconSvg name="restore" />恢复</button></td>
                   </tr>
                   <tr v-if="dispatchRecycleRows.length === 0">
-                    <td colspan="6">暂无排车单回收站数据</td>
+                    <td colspan="7">暂无排车单回收站数据</td>
                   </tr>
                 </tbody>
               </table>
@@ -31295,6 +31457,7 @@ function orderDetailFeeRows(order = {}) {
                     <th>客户</th>
                     <th>进出口</th>
                     <th>删除时间</th>
+                    <th>操作人</th>
                     <th>操作</th>
                   </tr>
                 </thead>
@@ -31303,13 +31466,14 @@ function orderDetailFeeRows(order = {}) {
                     <td>{{ row.date }}</td>
                     <td>{{ row.declarationNo }}</td>
                     <td>{{ row.sixSheetNo }}</td>
-                    <td>{{ partnerDisplayLabel(row.company || '', '客户') || row.company }}</td>
+                    <td>{{ row.customerShortName || partnerDisplayLabel(row.company || '', '客户') || row.company }}</td>
                     <td>{{ row.direction }}</td>
                     <td>{{ row.deletedAt }}</td>
+                    <td>{{ row.operatorName || '-' }}</td>
                     <td><button class="icon-btn success" type="button" @click="restoreCustomsBusiness(row)"><IconSvg name="restore" />恢复</button></td>
                   </tr>
                   <tr v-if="customsBusinessRecycleRows.length === 0">
-                    <td colspan="7">暂无报关业务回收站数据</td>
+                    <td colspan="8">暂无报关业务回收站数据</td>
                   </tr>
                 </tbody>
               </table>
@@ -31326,6 +31490,7 @@ function orderDetailFeeRows(order = {}) {
                     <th>成本合计</th>
                     <th>利润</th>
                     <th>删除时间</th>
+                    <th>操作人</th>
                     <th>操作</th>
                   </tr>
                 </thead>
@@ -31333,15 +31498,16 @@ function orderDetailFeeRows(order = {}) {
                   <tr v-for="row in otherBusinessRecycleRows" :key="row.id">
                     <td>{{ row.date }}</td>
                     <td>{{ row.title }}</td>
-                          <td>{{ partnerDisplayLabel(row.customer || '', '客户') || row.customer }}</td>
+                          <td>{{ row.customerShortName || partnerDisplayLabel(row.customer || '', '客户') || row.customer }}</td>
                     <td>RMB {{ money(row.totalIncome) }}</td>
                     <td>RMB {{ money(row.totalCost) }}</td>
                     <td><strong>RMB {{ money(row.profit) }}</strong></td>
                     <td>{{ row.deletedAt }}</td>
+                    <td>{{ row.operatorName || '-' }}</td>
                     <td><button class="icon-btn success" type="button" @click="restoreOtherBusiness(row)"><IconSvg name="restore" />恢复</button></td>
                   </tr>
                   <tr v-if="otherBusinessRecycleRows.length === 0">
-                    <td colspan="8">暂无其他业务回收站数据</td>
+                    <td colspan="9">暂无其他业务回收站数据</td>
                   </tr>
                 </tbody>
               </table>
