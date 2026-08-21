@@ -258,6 +258,20 @@ function normalizeLocationText(value = "") {
     .toLowerCase();
 }
 
+function normalizeCityLookupText(value = "") {
+  const text = normalizeLocationText(value);
+  if (!text) return "";
+  if (text === "香港" || text === "澳门") return text;
+  return text.replace(/市$/u, "");
+}
+
+function cityNameMatches(left = "", right = "") {
+  const leftText = normalizeLocationText(left);
+  const rightText = normalizeLocationText(right);
+  if (!leftText || !rightText) return false;
+  return leftText === rightText || normalizeCityLookupText(leftText) === normalizeCityLookupText(rightText);
+}
+
 function splitLocationParts(value = "") {
   const text = String(value || "").trim();
   if (!text) return { city: "", district: "", detail: "" };
@@ -451,24 +465,35 @@ function areaCatalogCityOptions(catalog = {}, rows = []) {
 
 function areaCatalogDistrictOptions(catalog = {}, city = "", rows = []) {
   const targetCity = String(city || "").trim();
-  const allCatalogDistricts = Object.values(catalog.level2OptionsByLevel1 || {}).flat();
-  const cityCatalogDistricts = targetCity && catalog.level2OptionsByLevel1
-    ? (catalog.level2OptionsByLevel1[targetCity] || [])
+  const level2OptionsByLevel1 = catalog.level2OptionsByLevel1 || {};
+  const allCatalogDistricts = Object.keys(level2OptionsByLevel1).reduce((result, level1) => {
+    return result.concat(level2OptionsByLevel1[level1] || []);
+  }, []);
+  const cityCatalogDistricts = targetCity
+    ? Object.keys(level2OptionsByLevel1).reduce((result, level1) => {
+      return cityNameMatches(level1, targetCity) ? result.concat(level2OptionsByLevel1[level1] || []) : result;
+    }, [])
     : [];
   const catalogDistricts = targetCity ? (cityCatalogDistricts.length ? cityCatalogDistricts : allCatalogDistricts) : allCatalogDistricts;
   const rowDistricts = (Array.isArray(rows) ? rows : [])
     .map((row) => splitLocationParts(row && row.area))
-    .filter((parts) => !targetCity || parts.city === targetCity)
+    .filter((parts) => !targetCity || cityNameMatches(parts.city, targetCity))
     .map((parts) => parts.district);
   return uniqueSortedTextList([...catalogDistricts, ...rowDistricts]);
 }
 
 function filterLocationOptions(options = [], keyword = "") {
   const normalizedKeyword = normalizeLocationText(keyword);
+  const cityKeyword = normalizeCityLookupText(keyword);
   const rows = Array.isArray(options) ? options : [];
   if (!normalizedKeyword) return rows.slice(0, 12);
   return rows
-    .filter((item) => normalizeLocationText(item).indexOf(normalizedKeyword) >= 0)
+    .filter((item) => {
+      const itemText = normalizeLocationText(item);
+      if (itemText.indexOf(normalizedKeyword) >= 0) return true;
+      const cityItem = normalizeCityLookupText(item);
+      return Boolean(cityKeyword && cityItem && (cityItem.indexOf(cityKeyword) >= 0 || cityKeyword.indexOf(cityItem) >= 0));
+    })
     .slice(0, 12);
 }
 

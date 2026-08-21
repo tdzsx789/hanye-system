@@ -558,6 +558,7 @@ async function initializeSchema() {
       customs_export_home_fee DOUBLE PRECISION NOT NULL DEFAULT 150,
       customs_import_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30,
       customs_export_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30,
+      customs_verification_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (CURRENT_DATE::text),
       deleted_at TEXT
     );
@@ -672,6 +673,7 @@ async function initializeSchema() {
       name TEXT NOT NULL DEFAULT '',
       fuel_station TEXT NOT NULL DEFAULT '',
       fuel_liters DOUBLE PRECISION NOT NULL DEFAULT 0,
+      fuel_price_per_liter DOUBLE PRECISION NOT NULL DEFAULT 0,
       odometer_km DOUBLE PRECISION NOT NULL DEFAULT 0,
       plate TEXT NOT NULL REFERENCES vehicles(plate) ON UPDATE CASCADE,
       expense_date TEXT NOT NULL DEFAULT (CURRENT_DATE::text),
@@ -1122,7 +1124,8 @@ async function initializeSchema() {
       "customs_import_home_fee DOUBLE PRECISION NOT NULL DEFAULT 100",
       "customs_export_home_fee DOUBLE PRECISION NOT NULL DEFAULT 150",
       "customs_import_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30",
-      "customs_export_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30"
+      "customs_export_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30",
+      "customs_verification_fee DOUBLE PRECISION NOT NULL DEFAULT 0"
     ],
     files: [
       "storage_provider TEXT NOT NULL DEFAULT 'oss'",
@@ -1146,6 +1149,7 @@ async function initializeSchema() {
     vehicle_expenses: [
       "fuel_station TEXT NOT NULL DEFAULT ''",
       "fuel_liters DOUBLE PRECISION NOT NULL DEFAULT 0",
+      "fuel_price_per_liter DOUBLE PRECISION NOT NULL DEFAULT 0",
       "odometer_km DOUBLE PRECISION NOT NULL DEFAULT 0",
       "start_date TEXT NOT NULL DEFAULT ''",
       "end_date TEXT NOT NULL DEFAULT ''"

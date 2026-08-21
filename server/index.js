@@ -208,6 +208,18 @@ const ORDER_STATUS_TO_DISPATCH_STATUS = {
   "已签收": "已签收",
   "费用待确认": "异常滞留"
 };
+const ORDER_STATUS_OPTIONS = ["待确认", "预排", "正常", "通关中", "已签收", "已审核", "缺票据", "费用待确认"];
+const ORDER_STATUS_RANK = {
+  "待确认": 10,
+  "预排": 20,
+  "正常": 25,
+  "已派车": 30,
+  "通关中": 40,
+  "缺票据": 45,
+  "费用待确认": 50,
+  "已签收": 60,
+  "已审核": 70
+};
 
 function requestHasAdminOrderDeletePermission(req) {
   return normalizeAccountRole(req.account?.role) === "管理员";
@@ -222,6 +234,28 @@ function normalizeDispatchPlanStatus(status = "") {
   if (text === "待预排" || text === "已预排") return DISPATCH_PLAN_DEFAULT_STATUS;
   if (text === "完成结算") return "已签收";
   return DISPATCH_STATUS_OPTIONS.includes(text) ? text : DISPATCH_PLAN_DEFAULT_STATUS;
+}
+
+function normalizeOrderStatus(status = "", fallback = "待确认") {
+  const text = String(status || "").trim();
+  if (text === "已派车") return "预排";
+  if (ORDER_STATUS_OPTIONS.includes(text)) return text;
+  return fallback;
+}
+
+function orderStatusRank(status = "") {
+  return ORDER_STATUS_RANK[normalizeOrderStatus(status, "")] || 0;
+}
+
+function shouldPreventOrderStatusDowngrade(currentStatus = "", nextStatus = "") {
+  const current = normalizeOrderStatus(currentStatus, "");
+  const next = normalizeOrderStatus(nextStatus, "");
+  if (!current || !next || current === next) return false;
+  if (current === "已审核") return true;
+  if (["通关中", "费用待确认", "缺票据", "已签收"].includes(current)) {
+    return orderStatusRank(next) < orderStatusRank(current);
+  }
+  return false;
 }
 
 app.disable("x-powered-by");
@@ -296,7 +330,8 @@ function mapCustomer(row) {
     customsImportHomeFee: 100,
     customsExportHomeFee: 150,
     customsImportPageFee: 30,
-    customsExportPageFee: 30
+    customsExportPageFee: 30,
+    customsVerificationFee: 0
   };
   return {
     id: row.id,
@@ -323,6 +358,7 @@ function mapCustomer(row) {
     customsExportHomeFee: Number(row.customs_export_home_fee ?? customsDefaults.customsExportHomeFee),
     customsImportPageFee: Number(row.customs_import_page_fee ?? customsDefaults.customsImportPageFee),
     customsExportPageFee: Number(row.customs_export_page_fee ?? customsDefaults.customsExportPageFee),
+    customsVerificationFee: Number(row.customs_verification_fee ?? customsDefaults.customsVerificationFee),
     createdAt: row.created_at,
     invoice: {
       title: row.invoice_title || row.name || "",
@@ -373,6 +409,7 @@ function normalizeCustomerPayload(body, id = "") {
     customsExportHomeFee: numericOrDefault(body.customsExportHomeFee ?? body.customs_export_home_fee, 150),
     customsImportPageFee: numericOrDefault(body.customsImportPageFee ?? body.customs_import_page_fee, 30),
     customsExportPageFee: numericOrDefault(body.customsExportPageFee ?? body.customs_export_page_fee, 30),
+    customsVerificationFee: numericOrDefault(body.customsVerificationFee ?? body.customs_verification_fee, 0),
     createdAt: body.createdAt || todayInputValue(),
     invoiceTitle: String(body.invoiceTitle || invoice.title || name).trim(),
     invoiceTaxNo: String(body.invoiceTax || invoice.taxNo || taxNo).trim(),
@@ -2690,12 +2727,15 @@ function mapVehicleExpense(row) {
   const year = row.expense_year || String(row.start_date || row.expense_date || "").slice(0, 4) || "";
   const startDate = row.start_date || "";
   const endDate = row.end_date || "";
+  const fuelLiters = Number(row.fuel_liters || 0);
+  const fuelPricePerLiter = Number(row.fuel_price_per_liter || 0) || (fuelLiters > 0 && Number(row.amount || 0) > 0 ? Number((Number(row.amount || 0) / fuelLiters).toFixed(1)) : 0);
   return {
     id: row.id,
     type: row.expense_type,
     name: row.name || "",
     fuelStation: row.fuel_station || "",
-    fuelLiters: Number(row.fuel_liters || 0),
+    fuelLiters,
+    fuelPricePerLiter,
     odometerKm: Number(row.odometer_km || 0),
     plate: row.plate || "",
     date: row.expense_date || "",
@@ -2747,15 +2787,50 @@ function normalizeVehicleExpensePayload(body = {}, current = null) {
   const name = type === "annual"
     ? (VEHICLE_ANNUAL_EXPENSE_NAMES.has(rawName) ? rawName : "保险费")
     : (rawName || defaultNames[type]);
+  const fuelLitersRaw = Number(body.fuelLiters ?? body.fuel_liters ?? current?.fuel_liters ?? 0);
+  const derivedFuelPrice = fuelLitersRaw > 0 && Number(body.amount ?? current?.amount ?? 0) > 0
+    ? Number((Number(body.amount ?? current?.amount ?? 0) / fuelLitersRaw).toFixed(1))
+    : 0;
+  const fuelPriceRaw = Number(body.fuelPricePerLiter ?? body.fuel_price_per_liter ?? current?.fuel_price_per_liter ?? derivedFuelPrice ?? 0);
+  const amountRaw = Number(body.amount ?? current?.amount ?? 0);
+  const roundedFuelLiters = type === "fuel" ? Number(fuelLitersRaw.toFixed(1)) : 0;
+  const roundedFuelPrice = type === "fuel" ? Number(fuelPriceRaw.toFixed(1)) : 0;
+  let roundedAmount = Number.isFinite(amountRaw) ? amountRaw : 0;
+  if (type === "fuel") {
+    if (roundedFuelPrice > 0 && roundedFuelLiters > 0) {
+      roundedAmount = Number((roundedFuelLiters * roundedFuelPrice).toFixed(1));
+    } else if (roundedFuelPrice > 0 && roundedAmount > 0 && roundedFuelLiters <= 0) {
+      const litersFromAmount = roundedAmount / roundedFuelPrice;
+      roundedAmount = Number(roundedAmount.toFixed(1));
+      return {
+        type,
+        name,
+        fuelStation: String(body.fuelStation ?? body.fuel_station ?? current?.fuel_station ?? "").trim(),
+        fuelLiters: Number(litersFromAmount.toFixed(1)),
+        fuelPricePerLiter: roundedFuelPrice,
+        odometerKm: Number(body.odometerKm ?? body.odometer_km ?? current?.odometer_km ?? 0),
+        plate: String(body.plate ?? current?.plate ?? "").trim(),
+        date,
+        year: type === "annual" ? annualYear : null,
+        startDate,
+        endDate,
+        currency: normalizeVehicleExpenseCurrency(body.currency ?? current?.currency ?? "人民币"),
+        amount: roundedAmount,
+        note: String(body.note ?? current?.note ?? "").trim()
+      };
+    }
+    if (roundedFuelPrice > 0 && roundedAmount > 0 && roundedFuelLiters > 0) {
+      roundedAmount = Number((roundedFuelLiters * roundedFuelPrice).toFixed(1));
+    }
+  }
   return {
     type,
     name,
     fuelStation: type === "fuel"
       ? String(body.fuelStation ?? body.fuel_station ?? current?.fuel_station ?? "").trim()
       : "",
-    fuelLiters: type === "fuel"
-      ? Number(body.fuelLiters ?? body.fuel_liters ?? current?.fuel_liters ?? 0)
-      : 0,
+    fuelLiters: type === "fuel" ? roundedFuelLiters : 0,
+    fuelPricePerLiter: type === "fuel" ? roundedFuelPrice : 0,
     odometerKm: type === "fuel"
       ? Number(body.odometerKm ?? body.odometer_km ?? current?.odometer_km ?? 0)
       : 0,
@@ -2765,7 +2840,7 @@ function normalizeVehicleExpensePayload(body = {}, current = null) {
     startDate,
     endDate,
     currency: normalizeVehicleExpenseCurrency(body.currency ?? current?.currency ?? "人民币"),
-    amount: Number(body.amount ?? current?.amount ?? 0),
+    amount: type === "fuel" ? Number(roundedAmount.toFixed(1)) : Number(body.amount ?? current?.amount ?? 0),
     note: String(body.note ?? current?.note ?? "").trim()
   };
 }
@@ -3863,13 +3938,16 @@ function otherBusinessCustomFieldsBreakdown(fields = []) {
 }
 
 function normalizeCustomsBusinessPayload(body = {}) {
+  const direction = String(body.direction ?? "").trim();
   const homeFee = integerField(body.homeFee ?? body.home_fee);
   const customsFee = integerField(body.customsFee ?? body.customs_fee);
   const pageFee = integerField(body.pageFee ?? body.page_fee);
   const manifestFee = integerField(body.manifestFee ?? body.manifest_fee);
   const inspectionFee = integerField(body.inspectionFee ?? body.inspection_fee);
   const checkFee = integerField(body.checkFee ?? body.check_fee);
-  const verificationFee = integerField(body.verificationFee ?? body.verification_fee);
+  const verificationFee = ["金二进口", "金二出口"].includes(direction)
+    ? integerField(body.verificationFee ?? body.verification_fee)
+    : 0;
   const otherFee = integerField(body.otherFee ?? body.other_fee);
   const customFields = normalizeCustomsBusinessCustomFields(body.customFields ?? body.custom_fields);
   const computedTotal = homeFee + customsFee + pageFee + manifestFee + inspectionFee + checkFee + verificationFee
@@ -3879,7 +3957,7 @@ function normalizeCustomsBusinessPayload(body = {}) {
     declarationNo: String(body.declarationNo ?? body.declaration_no ?? "").trim(),
     sixSheetNo: String(body.sixSheetNo ?? body.six_sheet_no ?? "").trim(),
     company: String(body.company ?? "").trim(),
-    direction: String(body.direction ?? "").trim(),
+    direction,
     itemCount: integerField(body.itemCount ?? body.item_count),
     pageCount: integerField(body.pageCount ?? body.page_count),
     homeFee,
@@ -5001,7 +5079,8 @@ app.patch("/api/customers/:id", async (req, res) => {
         customs_import_home_fee = @customsImportHomeFee,
         customs_export_home_fee = @customsExportHomeFee,
         customs_import_page_fee = @customsImportPageFee,
-        customs_export_page_fee = @customsExportPageFee
+        customs_export_page_fee = @customsExportPageFee,
+        customs_verification_fee = @customsVerificationFee
     WHERE id = @id AND deleted_at IS NULL
   `).run(item);
   if (result.changes === 0) {
@@ -5026,13 +5105,13 @@ app.post("/api/customers", async (req, res) => {
        tax_no, contact, mobile, driver_wage_adjust_hkd, default_template_id,
        invoice_title, invoice_tax_no, invoice_bank, invoice_account, invoice_address_phone,
        customs_home_item_count, customs_page_item_count, customs_import_home_fee, customs_export_home_fee,
-       customs_import_page_fee, customs_export_page_fee)
+       customs_import_page_fee, customs_export_page_fee, customs_verification_fee)
     VALUES
       (@id, @type, @customerCategory, @name, @shortName, @province, @city, @address, @term, @settlementCurrency, @receivableRMB, @receivableHKD, @recentOrder, @createdAt,
        @taxNo, @contact, @mobile, @driverWageAdjustHKD, @defaultTemplateId,
        @invoiceTitle, @invoiceTaxNo, @invoiceBank, @invoiceAccount, @invoiceAddressPhone,
        @customsHomeItemCount, @customsPageItemCount, @customsImportHomeFee, @customsExportHomeFee,
-       @customsImportPageFee, @customsExportPageFee)
+       @customsImportPageFee, @customsExportPageFee, @customsVerificationFee)
   `).run(item);
   await writeAudit("create", "customer", item.id, item.name);
   res.status(201).json(mapCustomer(await db.prepare("SELECT * FROM customers WHERE id = ?").get(item.id)));
@@ -5783,16 +5862,19 @@ function normalizeDispatchPlanVersion(value = "") {
   return String(value || "").trim();
 }
 
-function ensureDispatchPlanVersionFresh(existingPlan, clientVersion) {
+function dispatchPlanVersionState(existingPlan, clientVersion) {
   if (!existingPlan) return;
   const currentVersion = normalizeDispatchPlanVersion(existingPlan.updated_at);
   const normalizedClientVersion = normalizeDispatchPlanVersion(clientVersion);
   if (!normalizedClientVersion) {
-    throw createDispatchPlanConflictError("排车计划已更新，请刷新后再保存", "缺少版本号");
+    return { missing: true, stale: Boolean(currentVersion), currentVersion, clientVersion: normalizedClientVersion };
   }
-  if (currentVersion && currentVersion !== normalizedClientVersion) {
-    throw createDispatchPlanConflictError("排车计划已被其他账号更新，请刷新后再保存", `当前版本 ${currentVersion}，客户端版本 ${normalizedClientVersion}`);
-  }
+  return {
+    missing: false,
+    stale: Boolean(currentVersion && currentVersion !== normalizedClientVersion),
+    currentVersion,
+    clientVersion: normalizedClientVersion
+  };
 }
 
 function mergeDispatchPlanRows(existingRows = [], incomingRows = [], baseRows = []) {
@@ -6197,7 +6279,10 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = []) {
     const driver = isSingleDriver
       ? (rowDriver || rowHkDriver || order.driver || "")
       : [rowHkDriver || rowDriver, rowMainlandDriver].filter(Boolean).join(" / ");
-    const orderStatus = DISPATCH_STATUS_TO_ORDER_STATUS[normalizeDispatchPlanStatus(row.status)] || order.status || "预排";
+    const mappedOrderStatus = DISPATCH_STATUS_TO_ORDER_STATUS[normalizeDispatchPlanStatus(row.status)] || order.status || "预排";
+    const orderStatus = shouldPreventOrderStatusDowngrade(order.status, mappedOrderStatus)
+      ? order.status
+      : mappedOrderStatus;
 
     await updateOrder.run({
       no: order.no,
@@ -6217,6 +6302,83 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = []) {
   }
 
   return synced;
+}
+
+async function orderStatusByDispatchReferences(rows = []) {
+  const refs = rows
+    .map((row) => ({
+      orderNo: dispatchRowText(row, "orderNo"),
+      dispatchNo: dispatchRowText(row, "dispatchNo")
+    }))
+    .filter((ref) => ref.orderNo || ref.dispatchNo);
+  if (!refs.length) return new Map();
+  const conditions = [];
+  const params = {};
+  refs.forEach((ref, index) => {
+    if (ref.orderNo) {
+      const key = `orderNo${index}`;
+      params[key] = ref.orderNo;
+      conditions.push(`no = @${key}`);
+    }
+    if (ref.dispatchNo) {
+      const key = `dispatchNo${index}`;
+      params[key] = ref.dispatchNo;
+      conditions.push(`dispatch_no = @${key}`);
+    }
+  });
+  if (!conditions.length) return new Map();
+  const orders = await db.prepare(`
+    SELECT no, dispatch_no, status
+    FROM orders
+    WHERE deleted_at IS NULL
+      AND (${conditions.join(" OR ")})
+  `).all(params);
+  const map = new Map();
+  orders.forEach((order) => {
+    const status = normalizeOrderStatus(order.status, "");
+    if (!status) return;
+    [
+      order.no && `order:${order.no}`,
+      order.dispatch_no && `dispatch:${order.dispatch_no}`
+    ].filter(Boolean).forEach((key) => map.set(key, status));
+  });
+  return map;
+}
+
+function dispatchStatusFromProtectedOrderStatus(orderStatus = "") {
+  const status = normalizeOrderStatus(orderStatus, "");
+  if (status === "已签收" || status === "已审核") return "已签收";
+  if (status === "费用待确认" || status === "缺票据") return "异常滞留";
+  if (status === "通关中") return "通关中";
+  return "";
+}
+
+async function protectDispatchRowsFromOrderDowngrade(rows = [], existingRows = []) {
+  const statusMap = await orderStatusByDispatchReferences(rows);
+  if (!statusMap.size) return rows;
+  const existingLookup = dispatchRowLookup(existingRows);
+  return rows.map((row) => {
+    const orderStatus = dispatchRowLookupKeys(row)
+      .map((key) => statusMap.get(key))
+      .filter(Boolean)
+      .sort((left, right) => orderStatusRank(right) - orderStatusRank(left))[0] || "";
+    const protectedDispatchStatus = dispatchStatusFromProtectedOrderStatus(orderStatus);
+    if (!protectedDispatchStatus) return row;
+    const currentStatus = normalizeDispatchPlanStatus(row.status);
+    if (dispatchRowStatusRank({ status: protectedDispatchStatus }) <= dispatchRowStatusRank({ status: currentStatus })) {
+      return row;
+    }
+    const existingRow = findExistingDispatchRow(row, existingLookup);
+    const existingStatus = normalizeDispatchPlanStatus(existingRow?.status || "");
+    const existingPreviousStatus = normalizeDispatchPlanStatus(existingRow?.previousStatus || "");
+    return {
+      ...row,
+      status: protectedDispatchStatus,
+      previousStatus: existingStatus === protectedDispatchStatus && existingPreviousStatus && existingPreviousStatus !== protectedDispatchStatus
+        ? existingPreviousStatus
+        : (currentStatus && currentStatus !== protectedDispatchStatus ? currentStatus : row.previousStatus || "")
+    };
+  });
 }
 
 async function removeDispatchPlanRowsLinkedToOrder(orderRow = {}) {
@@ -6455,9 +6617,12 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
       await lockDispatchPlanDate(date);
       const existingPlan = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
       const existingRows = parseDispatchPlanRowsJson(existingPlan?.rows_json);
-      ensureDispatchPlanVersionFresh(existingPlan, clientVersion);
+      const versionState = dispatchPlanVersionState(existingPlan, clientVersion);
       if (existingRows.length > 0 && baseRows.length === 0) {
         throw createDispatchPlanConflictError("排车计划已更新，请刷新后再保存", "缺少基线快照");
+      }
+      if (versionState?.missing && existingRows.length > 0) {
+        throw createDispatchPlanConflictError("排车计划已更新，请刷新后再保存", "缺少版本号");
       }
       const existingRowsLookup = dispatchRowLookup(existingRows);
       const rowsNeedingOrderSync = [];
@@ -6478,7 +6643,8 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
       if (merged.stats.conflict > 0) {
         throw createDispatchPlanConflictError("排车计划已更新，请刷新后再保存", `冲突 ${merged.stats.conflict} 条`);
       }
-      const rowsJson = JSON.stringify(merged.rows);
+      const protectedRows = await protectDispatchRowsFromOrderDowngrade(merged.rows, existingRows);
+      const rowsJson = JSON.stringify(protectedRows);
       const planCreator = existingPlan && creatorFieldsHaveValue(creatorFieldsFromRecord(existingPlan))
         ? creatorFieldsFromRecord(existingPlan)
         : requestCreator;
@@ -6499,7 +6665,7 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
       });
       await syncDispatchPlanRowsToOrders(date, rowsNeedingOrderSync);
       const saved = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
-      return { saved, incomingCount: cleanRows.length, savedCount: merged.rows.length, stats: merged.stats };
+      return { saved, incomingCount: cleanRows.length, savedCount: protectedRows.length, stats: merged.stats };
     })();
   } catch (error) {
     if (error?.statusCode === 409) {
@@ -6689,6 +6855,13 @@ async function readOrderPayload(body, existing = null) {
   const no = existing?.no || body.no || (await nextOrderNo(dateForNewNumbers));
   const resolvedDispatchNo = dispatchNo || (existing ? "" : await nextDispatchNo(dateForNewNumbers));
   const dispatchDate = await orderDateFromLinkedDispatchRow(no, resolvedDispatchNo, dateForNewNumbers);
+  const submittedStatus = normalizeOrderStatus(
+    pickBody(body, "status", null, existing?.status || "待确认"),
+    existing?.status || "待确认"
+  );
+  const status = existing && shouldPreventOrderStatusDowngrade(existing.status, submittedStatus)
+    ? existing.status
+    : submittedStatus;
   return {
     no,
     dispatchNo: resolvedDispatchNo,
@@ -6714,7 +6887,7 @@ async function readOrderPayload(body, existing = null) {
     date: dispatchDate || dateForNewNumbers,
     receivableHKD: Number(pickBody(body, "receivableHKD", "hkd_receivable", existing?.receivable_hkd || 0) || 0),
     receivableRMB: Number(pickBody(body, "receivableRMB", "rmb_receivable", existing?.receivable_rmb || 0) || 0),
-    status: String(pickBody(body, "status", null, existing?.status || "待确认") || "待确认").trim(),
+    status,
     remark: String(pickBody(body, "remark", null, existing?.remark || "") || "").trim(),
     tripNoEnabled: pickBody(body, "tripNoEnabled", "trip_no_enabled", existing?.trip_no_enabled || 0) ? 1 : 0,
     tripNo: String(pickBody(body, "tripNo", "trip_no", existing?.trip_no || "") || "").trim(),
@@ -6972,6 +7145,10 @@ app.patch("/api/orders/:no/status", async (req, res) => {
     res.status(409).json({ message: "已审核订单只能先取消审核" });
     return;
   }
+  if (!(current.status === "已审核" && status === "已签收") && shouldPreventOrderStatusDowngrade(current.status, status)) {
+    res.status(409).json({ message: `${current.status}订单不能退回${status}` });
+    return;
+  }
 
   const result = await db.prepare("UPDATE orders SET status = ? WHERE no = ? AND deleted_at IS NULL").run(status, no);
   if (result.changes === 0) {
@@ -7224,8 +7401,8 @@ app.post("/api/vehicle-expenses", async (req, res) => {
     }
   }
   const result = await db.prepare(`
-    INSERT INTO vehicle_expenses (expense_type, name, fuel_station, fuel_liters, odometer_km, plate, expense_date, start_date, end_date, expense_year, currency, amount, note)
-    VALUES (@type, @name, @fuelStation, @fuelLiters, @odometerKm, @plate, @date, @startDate, @endDate, @year, @currency, @amount, @note)
+    INSERT INTO vehicle_expenses (expense_type, name, fuel_station, fuel_liters, fuel_price_per_liter, odometer_km, plate, expense_date, start_date, end_date, expense_year, currency, amount, note)
+    VALUES (@type, @name, @fuelStation, @fuelLiters, @fuelPricePerLiter, @odometerKm, @plate, @date, @startDate, @endDate, @year, @currency, @amount, @note)
   `).run(item);
   await writeAudit("create", "vehicle_expense", String(result.lastInsertId), `${item.plate}/${item.name}/${item.amount}`);
   res.status(201).json(mapVehicleExpense(await db.prepare("SELECT * FROM vehicle_expenses WHERE id = ?").get(result.lastInsertId)));
@@ -7276,6 +7453,7 @@ app.patch("/api/vehicle-expenses/:id", async (req, res) => {
         name = @name,
         fuel_station = @fuelStation,
         fuel_liters = @fuelLiters,
+        fuel_price_per_liter = @fuelPricePerLiter,
         odometer_km = @odometerKm,
         plate = @plate,
         expense_date = @date,

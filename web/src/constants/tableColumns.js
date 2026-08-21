@@ -152,6 +152,7 @@ export function createCustomerListDetailColumns() {
     { key: "customsExportHomeFee", label: "出口主页费用", width: 116, min: 96 },
     { key: "customsImportPageFee", label: "进口续页费用", width: 116, min: 96 },
     { key: "customsExportPageFee", label: "出口续页费用", width: 116, min: 96 },
+    { key: "customsVerificationFee", label: "核注费", width: 96, min: 78 },
     { key: "createdAt", label: "创建日期", width: 110, min: 86 },
     { key: "actions", label: "操作", width: 138, min: 100, locked: true }
   ]);

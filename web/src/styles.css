@@ -11385,12 +11385,35 @@ tr.selected {
 }
 
 .dispatch-edit-modal {
-  max-width: 840px;
+  width: min(1120px, calc(100vw - 48px));
+  max-width: none;
   overflow: visible;
 }
 
 .dispatch-edit-modal .modal-body {
   overflow: visible;
+}
+
+.dispatch-recognition-file-input,
+.dispatch-excel-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.dispatch-edit-modal .modal-actions {
+  flex-wrap: wrap;
+}
+
+.dispatch-recognition-status {
+  margin-right: auto;
+}
+
+.dispatch-recognize-btn,
+.dispatch-excel-recognize-btn {
+  white-space: nowrap;
 }
 
 .dispatch-form-grid {
@@ -11565,11 +11588,11 @@ tr.selected {
 
 .dispatch-address-item {
   display: grid;
-  grid-template-columns: 24px minmax(140px, 0.28fr) minmax(170px, 0.34fr) minmax(360px, 1fr) auto;
+  grid-template-columns: 24px minmax(118px, 0.18fr) minmax(150px, 0.22fr) minmax(0, 1fr) auto;
   min-width: 0;
-  align-items: center;
+  align-items: start;
   gap: 8px;
-  min-height: 36px;
+  min-height: 48px;
   padding: 5px 6px;
   border: 1px solid #dbe7f5;
   border-radius: 8px;
@@ -11591,6 +11614,7 @@ tr.selected {
   display: grid;
   width: 22px;
   height: 22px;
+  margin-top: 5px;
   place-items: center;
   border-radius: 6px;
   background: #e8f2ff;
@@ -11599,10 +11623,10 @@ tr.selected {
   font-weight: 900;
 }
 
-.dispatch-address-item input {
+.dispatch-address-item input,
+.dispatch-address-item textarea {
   width: 100%;
   min-width: 0;
-  height: 32px;
   padding: 0 4px;
   border: 0;
   border-radius: 6px;
@@ -11610,6 +11634,18 @@ tr.selected {
   color: var(--text);
   font-weight: 700;
   box-shadow: none;
+}
+
+.dispatch-address-item input {
+  height: 32px;
+}
+
+.dispatch-address-item textarea {
+  box-sizing: border-box;
+  min-height: 52px;
+  padding: 6px 4px;
+  line-height: 1.45;
+  resize: vertical;
 }
 
 .dispatch-address-item .dispatch-location-district-search {
@@ -11658,7 +11694,8 @@ tr.selected {
   cursor: pointer;
 }
 
-.dispatch-address-item input:focus {
+.dispatch-address-item input:focus,
+.dispatch-address-item textarea:focus {
   border-color: transparent;
   box-shadow: none;
   outline: none;
@@ -11676,6 +11713,7 @@ tr.selected {
 .dispatch-address-remove.icon-only {
   width: 22px;
   height: 22px;
+  margin-top: 5px;
   padding: 0;
   border: 0;
   border-radius: 999px;
@@ -11731,6 +11769,19 @@ tr.selected {
 }
 
 @media (max-width: 760px) {
+  .dispatch-edit-modal .modal-actions {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .dispatch-recognition-status,
+  .dispatch-recognize-btn,
+  .dispatch-excel-recognize-btn {
+    width: 100%;
+    margin-right: 0;
+    justify-content: center;
+  }
+
   .dispatch-location-pair {
     grid-template-columns: 1fr;
   }

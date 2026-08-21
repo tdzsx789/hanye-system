@@ -219,7 +219,8 @@ const DEFAULT_CUSTOMS_CUSTOMER_CONFIG = {
   customsImportHomeFee: 100,
   customsExportHomeFee: 150,
   customsImportPageFee: 30,
-  customsExportPageFee: 30
+  customsExportPageFee: 30,
+  customsVerificationFee: 0
 };
 const bossCompanyExpenseRows = ref([]);
 const customerOrderColumns = reactive(createCustomerOrderColumns());
@@ -648,7 +649,8 @@ function normalizeCustomerRecord(customer = {}) {
     customsImportHomeFee: Number(row.customsImportHomeFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportHomeFee),
     customsExportHomeFee: Number(row.customsExportHomeFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportHomeFee),
     customsImportPageFee: Number(row.customsImportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee),
-    customsExportPageFee: Number(row.customsExportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee)
+    customsExportPageFee: Number(row.customsExportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee),
+    customsVerificationFee: Number(row.customsVerificationFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee)
   };
 }
 
@@ -1338,8 +1340,10 @@ let noticeTimer;
 let orderAttachmentUploadStatusTimer;
 let orderFeeCostSyncTimer;
 let vehicleExpenseReceiptUploadStatusTimer;
+let dispatchRecognitionStatusTimer;
 let realtimeClient = null;
 let realtimeRefreshTimer = null;
+let dispatchPlanSavePromise = Promise.resolve();
 let dispatchPlanAutoSavePromise = Promise.resolve();
 let modalDragState = null;
 const bossVehicleExchangeRateSaveTimers = {};
@@ -1533,6 +1537,7 @@ const customerForm = reactive({
   customsExportHomeFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportHomeFee,
   customsImportPageFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee,
   customsExportPageFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee,
+  customsVerificationFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee,
   invoicePasteText: ""
 });
 
@@ -1603,6 +1608,13 @@ const dispatchForm = reactive({
   note: ""
 });
 const dispatchLoadHourDraft = ref("");
+const dispatchExcelFileInput = ref(null);
+const dispatchImageFileInput = ref(null);
+const dispatchExcelRecognizing = ref(false);
+const dispatchImageRecognizing = ref(false);
+const dispatchRecognitionStatus = ref("");
+const dispatchRecognitionTone = ref("busy");
+const dispatchRecognitionBusy = computed(() => dispatchExcelRecognizing.value || dispatchImageRecognizing.value);
 
 const DISPATCH_LOAD_HOUR_OPTIONS = Array.from({ length: 24 }, (_, index) => String(index).padStart(2, "0"));
 const DISPATCH_LOAD_MINUTE_OPTIONS = ["00", "15", "30", "45"];
@@ -1943,6 +1955,7 @@ const vehicleExpenseForm = reactive({
   name: "",
   fuelStation: "",
   fuelLiters: "",
+  fuelPricePerLiter: "",
   odometerKm: "",
   plate: "",
   date: todayInputValue(),
@@ -1953,6 +1966,7 @@ const vehicleExpenseForm = reactive({
   amount: "",
   note: ""
 });
+const vehicleExpenseFuelLastEdited = ref("liters");
 
 const driverForm = reactive({
   id: null,
@@ -2602,7 +2616,7 @@ function relatedOrderLocationText(value) {
     .split(/[\/｜|>]+/)
     .map((item) => normalizeFreightLabel(item))
     .filter(Boolean);
-  return parts.slice(0, 2).join(" / ") || "-";
+  return parts.slice(0, 2).join(" / ") || normalizeFreightLabel(value) || "-";
 }
 
 function relatedOrderRouteText(order) {
@@ -3102,6 +3116,39 @@ function vehicleExpenseAllocationText(item = {}) {
   return "按有效期分摊";
 }
 
+function roundVehicleExpenseFuelValue(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "";
+  return Number(number.toFixed(1));
+}
+
+function syncVehicleExpenseFuelFields(source = vehicleExpenseFuelLastEdited.value) {
+  if (vehicleExpenseForm.type !== "fuel") return;
+  const liters = Number(vehicleExpenseForm.fuelLiters || 0);
+  const price = Number(vehicleExpenseForm.fuelPricePerLiter || 0);
+  const amount = Number(vehicleExpenseForm.amount || 0);
+  if (!Number.isFinite(price) || price <= 0) return;
+  const normalizedSource = ["liters", "amount", "price"].includes(source) ? source : vehicleExpenseFuelLastEdited.value;
+  const preferredSource = normalizedSource === "price" ? vehicleExpenseFuelLastEdited.value : normalizedSource;
+  if (preferredSource === "amount") {
+    if (amount > 0) {
+      vehicleExpenseForm.fuelLiters = roundVehicleExpenseFuelValue(amount / price);
+      vehicleExpenseForm.amount = roundVehicleExpenseFuelValue(amount);
+    }
+  } else {
+    if (liters > 0) {
+      vehicleExpenseForm.amount = roundVehicleExpenseFuelValue(liters * price);
+      vehicleExpenseForm.fuelLiters = roundVehicleExpenseFuelValue(liters);
+    }
+  }
+  vehicleExpenseForm.fuelPricePerLiter = roundVehicleExpenseFuelValue(price);
+  vehicleExpenseForm.fuelLiters = roundVehicleExpenseFuelValue(vehicleExpenseForm.fuelLiters);
+  vehicleExpenseForm.amount = roundVehicleExpenseFuelValue(vehicleExpenseForm.amount);
+  if (normalizedSource !== "price") {
+    vehicleExpenseFuelLastEdited.value = preferredSource === "amount" ? "amount" : "liters";
+  }
+}
+
 function vehicleExpenseReceiptCategory() {
   return "车辆支出票据";
 }
@@ -3124,6 +3171,7 @@ function vehicleExpenseFormValidationMessage() {
   if (type === "other" && !String(vehicleExpenseForm.name || "").trim()) return "请填写支出名称";
   if (type === "fuel") {
     if (!Number(vehicleExpenseForm.fuelLiters || 0)) return "请填写加油升数";
+    if (!Number(vehicleExpenseForm.fuelPricePerLiter || 0)) return "请填写每升单价";
     if (!Number(vehicleExpenseForm.odometerKm || 0)) return "请填写加油时公里数";
     if (!String(vehicleExpenseForm.fuelStation || "").trim()) return "请填写加油站";
   }
@@ -3140,6 +3188,9 @@ function vehicleExpenseFormValidationMessage() {
 }
 
 async function persistVehicleExpenseFromModal(options = {}) {
+  if (vehicleExpenseForm.type === "fuel") {
+    syncVehicleExpenseFuelFields(vehicleExpenseFuelLastEdited.value);
+  }
   const validationMessage = vehicleExpenseFormValidationMessage();
   if (validationMessage) {
     options.form?.reportValidity?.();
@@ -3843,26 +3894,38 @@ function findDispatchPlanRowTarget(row = {}) {
   }) || dispatchPlanRows.value[row?.index];
 }
 
-async function saveDispatchPlan({ silent = false, throwOnError = false } = {}) {
+function createDispatchPlanSaveSnapshot() {
+  return {
+    date: dispatchDate.value,
+    loadedDates: [...(dispatchLoadedDates.value || [])],
+    rows: cloneDispatchPlanRows(dispatchPlanRows.value)
+  };
+}
+
+async function runDispatchPlanSave({ silent = false, throwOnError = false } = {}, snapshot = createDispatchPlanSaveSnapshot()) {
   if (!canAccessModule("dispatchBoard")) {
     if (!silent) notify("当前账号无权保存排车计划");
     return false;
   }
-  sortDispatchPlanRowsForDisplay();
-  localStorage.setItem("hanye_dispatch_date", dispatchDate.value);
-  const dates = new Set([...(dispatchLoadedDates.value || []), ...dispatchPlanRows.value.map(dispatchPlanDate)]);
+  const snapshotRows = normalizeDispatchPlanRows(snapshot.rows || [], snapshot.date || dispatchDate.value)
+    .sort(compareDispatchPlanRowsForAutoSort);
+  localStorage.setItem("hanye_dispatch_date", snapshot.date || dispatchDate.value);
+  const dates = new Set([...(snapshot.loadedDates || []), ...snapshotRows.map(dispatchPlanDate)]);
   const saveJobs = Array.from(dates).map((date) => {
-    const rows = dispatchPlanRows.value.filter((row) => dispatchPlanDate(row) === date);
+    const rows = snapshotRows.filter((row) => dispatchPlanDate(row) === date);
     return persistDispatchPlanRows(date, rows);
   });
   try {
     await Promise.all(saveJobs);
-    await syncDispatchNosToOrders(dispatchPlanRows.value);
-    applyDispatchRowsToLocalOrders(dispatchPlanRows.value);
+    await syncDispatchNosToOrders(snapshotRows);
+    applyDispatchRowsToLocalOrders(snapshotRows);
     if (!silent) notify("排车计划已保存");
     return true;
   } catch (error) {
     if (error?.status === 409) {
+      if (error.payload?.latest) {
+        updateDispatchPlanBaseFromRecord(error.payload.latest, error.payload.latest.date || dispatchDate.value);
+      }
       await loadDispatchPlansForCurrentFilter();
       notify(error.message || "排车计划已被其他账号更新，请刷新后再保存");
     } else if (!silent) {
@@ -3871,6 +3934,14 @@ async function saveDispatchPlan({ silent = false, throwOnError = false } = {}) {
     if (throwOnError) throw error;
     return false;
   }
+}
+
+function saveDispatchPlan(options = {}) {
+  const snapshot = createDispatchPlanSaveSnapshot();
+  dispatchPlanSavePromise = dispatchPlanSavePromise
+    .catch(() => {})
+    .then(() => runDispatchPlanSave(options, snapshot));
+  return dispatchPlanSavePromise;
 }
 
 function queueDispatchPlanAutoSave() {
@@ -4102,6 +4173,7 @@ async function returnDispatchRowStatus(row) {
 function closeDispatchModal(options = {}) {
   if (loading.value && !options.force) return;
   closeDispatchDriverPicker();
+  clearDispatchRecognitionStatus();
   dispatchModalOpen.value = false;
   editingDispatchRowId.value = "";
   copyingDispatchRowId.value = "";
@@ -4131,6 +4203,7 @@ function resetDispatchForm() {
   dispatchCustomerKeyword.value = "";
   dispatchLoadHourDraft.value = "";
   dispatchCustomerPickerOpen.value = false;
+  clearDispatchRecognitionStatus();
 }
 
 async function openDispatchModal() {
@@ -4742,9 +4815,10 @@ function dispatchShortLocation(value = "") {
     .split(/[\n；;]/)
     .map((part) => part.trim())
     .find(Boolean) || "";
-  if (!firstAddress || !firstAddress.includes("/")) return "";
-  const [city = "", district = ""] = firstAddress.split("/").map((part) => part.trim());
-  return [city, district].map((part) => String(part || "").trim()).filter(Boolean).join(" / ");
+  if (!firstAddress) return "";
+  if (!firstAddress.includes("/")) return firstAddress;
+  const parts = firstAddress.split("/").map((part) => part.trim()).filter(Boolean);
+  return parts.slice(0, 2).join(" / ") || firstAddress.replace(/[\/\s]+/g, " ").trim();
 }
 
 function dispatchOrderRouteText(order) {
@@ -5845,7 +5919,7 @@ const customsBusinessFormTotal = computed(() =>
   + Number(customsBusinessForm.manifestFee || 0)
   + Number(customsBusinessForm.inspectionFee || 0)
   + Number(customsBusinessForm.checkFee || 0)
-  + Number(customsBusinessForm.verificationFee || 0)
+  + (customsBusinessShowsVerificationFee.value ? Number(customsBusinessForm.verificationFee || 0) : 0)
   + normalizeCustomsBusinessCustomFields(customsBusinessForm.customFields)
     .reduce((sum, field) => sum + customsBusinessCustomFieldAmount(field), 0)
 );
@@ -5941,6 +6015,14 @@ const customsBusinessSelectedCustomer = computed(() =>
   findCustomsBusinessCustomerByName(customsBusinessForm.company)
 );
 
+function customsBusinessNeedsVerificationFee(direction = customsBusinessForm.direction) {
+  return ["金二进口", "金二出口"].includes(String(direction || "").trim());
+}
+
+const customsBusinessShowsVerificationFee = computed(() =>
+  customsBusinessNeedsVerificationFee()
+);
+
 function customsBusinessDirectionFeeType(direction = customsBusinessForm.direction) {
   const text = String(direction || "").trim();
   if (text.includes("进口")) return "import";
@@ -5974,6 +6056,12 @@ const customsBusinessPageUnitFee = computed(() => {
   return Number(customer[key] ?? 0) || 0;
 });
 
+function customsBusinessConfiguredVerificationFee() {
+  if (!customsBusinessShowsVerificationFee.value) return 0;
+  const customer = customsBusinessSelectedCustomer.value;
+  return customsBusinessIntegerValue(customer?.customsVerificationFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee);
+}
+
 const calculatedCustomsBusinessPageCount = computed(() => {
   const customer = customsBusinessSelectedCustomer.value;
   if (!customer) return 0;
@@ -5994,6 +6082,10 @@ const customsBusinessHomeFeeDisplay = computed(() => {
 });
 
 function syncCalculatedCustomsBusinessCharges() {
+  const nextVerificationFee = customsBusinessConfiguredVerificationFee();
+  if (Number(customsBusinessForm.verificationFee || 0) !== nextVerificationFee) {
+    customsBusinessForm.verificationFee = nextVerificationFee;
+  }
   const feeType = customsBusinessDirectionFeeType();
   if (!feeType) {
     if (!String(customsBusinessForm.direction || "").trim()) {
@@ -6020,7 +6112,8 @@ watch(
     () => customsBusinessSelectedCustomer.value?.customsHomeItemCount,
     () => customsBusinessSelectedCustomer.value?.customsPageItemCount,
     () => customsBusinessSelectedCustomer.value?.customsImportPageFee,
-    () => customsBusinessSelectedCustomer.value?.customsExportPageFee
+    () => customsBusinessSelectedCustomer.value?.customsExportPageFee,
+    () => customsBusinessSelectedCustomer.value?.customsVerificationFee
   ],
   syncCalculatedCustomsBusinessCharges,
   { immediate: true }
@@ -10674,6 +10767,7 @@ const customerPageColumns = computed(() => {
       { key: "customsExportHomeFee", label: "出口主页费用" },
       { key: "customsImportPageFee", label: "进口续页费用" },
       { key: "customsExportPageFee", label: "出口续页费用" },
+      { key: "customsVerificationFee", label: "核注费" },
       { key: "createdAt", label: "创建日期" }
     ];
   }
@@ -10912,6 +11006,841 @@ function handleDispatchVehicleSourceChange() {
   }
 }
 
+function dispatchExcelSimplifyText(value = "") {
+  const map = {
+    裝: "装",
+    車: "车",
+    櫃: "柜",
+    貨: "货",
+    運: "运",
+    輸: "输",
+    廠: "厂",
+    時: "时",
+    間: "间",
+    約: "约",
+    關: "关",
+    報: "报",
+    聯: "联",
+    繫: "系",
+    絡: "络",
+    電: "电",
+    話: "话",
+    號: "号",
+    數: "数",
+    總: "总",
+    積: "积",
+    體: "体",
+    稱: "称",
+    達: "达",
+    興: "兴",
+    灃: "沣",
+    倉: "仓",
+    單: "单",
+    寶: "宝",
+    區: "区",
+    龍: "龙",
+    灣: "湾",
+    載: "载",
+    註: "注"
+  };
+  return String(value || "").replace(new RegExp(`[${Object.keys(map).join("")}]`, "g"), (char) => map[char] || char);
+}
+
+function compactDispatchOcrText(value = "") {
+  return dispatchExcelSimplifyText(value)
+    .replace(/\u00a0/g, " ")
+    .replace(/([\u4e00-\u9fa5])\s+(?=[\u4e00-\u9fa5])/g, "$1")
+    .replace(/([粤港澳])\s+(?=[A-Z0-9港澳])/gi, "$1")
+    .replace(/([A-Z0-9])\s+(?=[港澳])/gi, "$1")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\s*\n\s*/g, "\n")
+    .trim();
+}
+
+function escapeDispatchRecognitionRegExp(value = "") {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeDispatchExcelLookupText(value = "") {
+  return dispatchExcelSimplifyText(value)
+    .replace(/\s+/g, "")
+    .replace(/[：:／/｜|,，.;；"'“”‘’()（）\[\]【】{}<>《》\-_*·。]/g, "")
+    .toLowerCase();
+}
+
+function cleanDispatchExcelCellText(value = "") {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return timestampInputValueFromDate(value).slice(0, 16);
+  }
+  return String(value ?? "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function dispatchExcelRowText(row = []) {
+  return row.map(cleanDispatchExcelCellText).filter(Boolean).join(" ");
+}
+
+function dispatchExcelAllText(rows = []) {
+  return rows.map(dispatchExcelRowText).filter(Boolean).join("\n");
+}
+
+function dispatchExcelTextAfterLabel(cellText = "", label = "") {
+  const text = cleanDispatchExcelCellText(cellText);
+  if (!text) return "";
+  const normalizedText = normalizeDispatchExcelLookupText(text);
+  const normalizedLabel = normalizeDispatchExcelLookupText(label);
+  if (!normalizedLabel || !normalizedText.includes(normalizedLabel)) return "";
+  const colonIndex = text.search(/[：:]/);
+  if (colonIndex >= 0) {
+    const beforeColon = text.slice(0, colonIndex);
+    if (normalizeDispatchExcelLookupText(beforeColon).includes(normalizedLabel)) {
+      return text.slice(colonIndex + 1).trim();
+    }
+  }
+  const plainLabel = String(label || "").replace(/[：:]\s*$/, "").trim();
+  if (plainLabel) {
+    const escaped = plainLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const stripped = text.replace(new RegExp(`^\\s*${escaped}\\s*[：:]?\\s*`, "i"), "").trim();
+    if (stripped && stripped !== text) return stripped;
+  }
+  return "";
+}
+
+function findDispatchExcelRowIndex(rows = [], labels = [], options = {}) {
+  const normalizedLabels = labels.map(normalizeDispatchExcelLookupText).filter(Boolean);
+  if (!normalizedLabels.length) return -1;
+  const startRow = Math.max(0, Number(options.startRow || 0));
+  const endRow = Math.min(rows.length, Number.isFinite(options.endRow) ? options.endRow : rows.length);
+  for (let rowIndex = startRow; rowIndex < endRow; rowIndex += 1) {
+    const rowText = normalizeDispatchExcelLookupText(dispatchExcelRowText(rows[rowIndex]));
+    if (normalizedLabels.some((label) => rowText.includes(label))) return rowIndex;
+  }
+  return -1;
+}
+
+function dispatchExcelValueAfterLabel(rows = [], labels = [], options = {}) {
+  const normalizedLabels = labels.map(normalizeDispatchExcelLookupText).filter(Boolean);
+  if (!normalizedLabels.length) return "";
+  const startRow = Math.max(0, Number(options.startRow || 0));
+  const endRow = Math.min(rows.length, Number.isFinite(options.endRow) ? options.endRow : rows.length);
+  for (let rowIndex = startRow; rowIndex < endRow; rowIndex += 1) {
+    const row = rows[rowIndex] || [];
+    for (let cellIndex = 0; cellIndex < row.length; cellIndex += 1) {
+      const cellText = cleanDispatchExcelCellText(row[cellIndex]);
+      const normalizedCell = normalizeDispatchExcelLookupText(cellText);
+      const labelIndex = normalizedLabels.findIndex((label) => normalizedCell.includes(label));
+      if (labelIndex < 0) continue;
+      const inlineValue = dispatchExcelTextAfterLabel(cellText, labels[labelIndex]);
+      if (inlineValue) return inlineValue;
+      const remainder = row
+        .slice(cellIndex + 1)
+        .map(cleanDispatchExcelCellText)
+        .filter(Boolean);
+      if (remainder.length) return remainder.join(" ");
+      break;
+    }
+  }
+  return "";
+}
+
+function normalizeDispatchExcelDate(value = "") {
+  const text = cleanDispatchExcelCellText(value);
+  const matched = text.match(/(\d{4})[.\-/年](\d{1,2})[.\-/月](\d{1,2})/);
+  if (!matched) return "";
+  const date = new Date(Number(matched[1]), Number(matched[2]) - 1, Number(matched[3]));
+  if (Number.isNaN(date.getTime())) return "";
+  return dateInputFromDate(date);
+}
+
+function normalizeDispatchExcelTime(value = "") {
+  const text = cleanDispatchExcelCellText(value);
+  const matched = text.match(/(上午|下午|am|pm)?\s*(\d{1,2})[：:](\d{1,2})/i);
+  if (!matched) return "";
+  const meridiem = String(matched[1] || "").toLowerCase();
+  let hour = Number(matched[2]);
+  const minute = Number(matched[3]);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return "";
+  if ((meridiem === "下午" || meridiem === "pm") && hour < 12) hour += 12;
+  if ((meridiem === "上午" || meridiem === "am") && hour === 12) hour = 0;
+  return normalizeDispatchLoadTime(`${hour}:${String(minute).padStart(2, "0")}`);
+}
+
+function normalizeDispatchRecognitionPlate(value = "") {
+  const compact = dispatchExcelSimplifyText(value).toUpperCase().replace(/[^A-Z0-9\u4e00-\u9fa5港澳]/g, "");
+  if (!compact) return "";
+  const labeled = compact.match(/车牌([粤港澳京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵青藏川宁琼][A-Z0-9]{0,6}(?:港|澳)?)/);
+  const direct = compact.match(/([粤港澳京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵青藏川宁琼][A-Z0-9]{1,7}(?:港|澳)?)/);
+  return labeled?.[1] || direct?.[1] || "";
+}
+
+function parseDispatchExcelTonnage(value = "") {
+  const text = cleanDispatchExcelCellText(value).toUpperCase().replace(/\s+/g, "");
+  if (!text) return "";
+  const truckMatch = text.match(/(?:^|[^0-9])(?:\d+X)?(\d{1,2})T/);
+  if (truckMatch) {
+    const tonnage = `${Number(truckMatch[1])}T`;
+    if (TONNAGE_OPTIONS.includes(tonnage)) return tonnage;
+  }
+  const containerMatch = text.match(/(20|40|45)\s*(?:尺|GP|HQ|柜|櫃)/);
+  if (containerMatch) {
+    const tonnage = `${containerMatch[1]}尺柜`;
+    if (TONNAGE_OPTIONS.includes(tonnage)) return tonnage;
+  }
+  return TONNAGE_OPTIONS.find((item) => normalizeDispatchExcelLookupText(text).includes(normalizeDispatchExcelLookupText(item))) || "";
+}
+
+function parseDispatchRecognitionQuantity(value = "") {
+  const text = compactDispatchOcrText(value).toUpperCase().replace(/\s+/g, "");
+  const labelMatch = text.match(/(?:箱(?:件\/板)?数|件\/板数|板数|件数)[:：]?([0-9]+(?:\.[0-9]+)?\s*(?:P|板|件|箱)?)/);
+  const directMatch = text.match(/(?:^|[^A-Z0-9])([0-9]+(?:\.[0-9]+)?)(P|板|件|箱)(?:[^A-Z0-9]|$)/);
+  if (labelMatch) return labelMatch[1].replace(/P$/i, "板");
+  if (directMatch) return `${Number(directMatch[1])}${directMatch[2].toUpperCase() === "P" ? "板" : directMatch[2]}`;
+  return "";
+}
+
+function parseDispatchRecognitionWeight(value = "") {
+  const text = compactDispatchOcrText(value).toUpperCase().replace(/\s+/g, "");
+  const matched = text.match(/重量[:：]?([0-9]+(?:\.[0-9]+)?\s*(?:KG|KGS|公斤|吨|T)?)/);
+  if (!matched) return "";
+  const unit = matched[1].replace(/KGS$/i, "kg").replace(/KG$/i, "kg");
+  return unit;
+}
+
+function parseDispatchExcelPort(value = "") {
+  const text = normalizeDispatchExcelLookupText(value);
+  const options = [
+    { value: "深圳湾海关", keywords: ["深圳湾", "深圳灣"] },
+    { value: "莲塘海关", keywords: ["莲塘", "蓮塘"] },
+    { value: "文锦渡海关", keywords: ["文锦渡", "文錦渡"] },
+    { value: "大桥海关", keywords: ["大桥", "大橋", "港珠澳"] }
+  ];
+  return options.find((option) => option.keywords.some((keyword) => text.includes(normalizeDispatchExcelLookupText(keyword))))?.value || "";
+}
+
+function parseDispatchExcelDirection(rows = []) {
+  const destination = dispatchExcelValueAfterLabel(rows, ["出口目的港", "目的港"]);
+  const origin = dispatchExcelValueAfterLabel(rows, ["起运港", "起運港"]);
+  if (normalizeDispatchExcelLookupText(destination).includes("香港")) return "出口";
+  if (normalizeDispatchExcelLookupText(origin).includes("香港")) return "进口";
+  const allText = normalizeDispatchExcelLookupText(dispatchExcelAllText(rows));
+  if (allText.includes("进口")) return "进口";
+  if (allText.includes("出口")) return "出口";
+  return "";
+}
+
+function inferHongKongDistrict(address = "") {
+  const text = dispatchExcelSimplifyText(address);
+  const englishText = String(address || "").toUpperCase().replace(/\s+/g, " ");
+  const englishDistricts = [
+    { district: "元朗区", patterns: [/\bYUEN\s+LONG\b/] },
+    { district: "葵青区", patterns: [/\bKWAI\s+CHUNG\b/, /\bTSING\s+YI\b/] },
+    { district: "荃湾区", patterns: [/\bTSUEN\s+WAN\b/] },
+    { district: "屯门区", patterns: [/\bTUEN\s+MUN\b/] },
+    { district: "观塘区", patterns: [/\bKWUN\s+TONG\b/] },
+    { district: "沙田区", patterns: [/\bSHA\s+TIN\b/] },
+    { district: "大埔区", patterns: [/\bTAI\s+PO\b/] }
+  ];
+  const englishMatched = englishDistricts.find((item) => item.patterns.some((pattern) => pattern.test(englishText)));
+  if (englishMatched) return englishMatched.district;
+  const districts = ["中西区", "湾仔区", "东区", "南区", "油尖旺区", "深水埗区", "九龙城区", "黄大仙区", "观塘区", "葵青区", "荃湾区", "屯门区", "元朗区", "北区", "大埔区", "沙田区", "西贡区", "离岛区"];
+  const matched = districts.find((district) => text.includes(district));
+  if (!matched) return "";
+  const originalMatched = address.match(new RegExp(matched.replace("区", "[区區]")));
+  return originalMatched?.[0] || matched;
+}
+
+function cleanHongKongLocationDetail(address = "", district = "") {
+  let detail = cleanDispatchExcelCellText(address)
+    .replace(/^香港\s*/i, "")
+    .replace(/^新界\s*/i, "")
+    .replace(/^九[龍龙]\s*/i, "")
+    .replace(/^香港島\s*/i, "");
+  if (district) {
+    detail = detail.replace(new RegExp(`^${district.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*`), "");
+    detail = detail.replace(new RegExp(`^${dispatchExcelSimplifyText(district).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*`), "");
+  }
+  return detail.trim();
+}
+
+function appendUniqueDispatchExcelParts(parts = []) {
+  const result = [];
+  parts.forEach((part) => {
+    const text = cleanDispatchExcelCellText(part);
+    if (!text) return;
+    const normalized = normalizeDispatchExcelLookupText(text);
+    if (!normalized) return;
+    const duplicated = result.some((item) => {
+      const current = normalizeDispatchExcelLookupText(item);
+      return current.includes(normalized) || normalized.includes(current);
+    });
+    if (!duplicated) result.push(text);
+  });
+  return result;
+}
+
+function buildDispatchExcelLocation({ address = "", company = "", contact = "", defaultCity = "", defaultDistrict = "" } = {}) {
+  const cleanAddress = cleanDispatchExcelCellText(address);
+  if (!cleanAddress && !company && !contact) return "";
+  return appendUniqueDispatchExcelParts([cleanAddress, company, contact]).join(" ");
+}
+
+function matchDispatchExcelCustomer(allText = "") {
+  const normalizedAllText = normalizeDispatchExcelLookupText(allText);
+  if (!normalizedAllText) return null;
+  return customerRows.value
+    .filter((item) => item.type === "客户")
+    .map((item) => {
+      const values = [item.name, item.shortName, item.short_name, item.id]
+        .map(cleanDispatchExcelCellText)
+        .filter((value, index, array) => value && array.indexOf(value) === index);
+      const matchedValues = values.filter((value) => {
+        const normalized = normalizeDispatchExcelLookupText(value);
+        return normalized.length >= 2 && normalizedAllText.includes(normalized);
+      });
+      const score = matchedValues.reduce((total, value) => total + normalizeDispatchExcelLookupText(value).length, 0);
+      return { item, score };
+    })
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score)[0]?.item || null;
+}
+
+function recognizeDispatchExcelRows(rows = []) {
+  const allText = dispatchExcelAllText(rows);
+  const loadingCompany = dispatchExcelValueAfterLabel(rows, ["装货公司名称", "裝貨公司名稱"]);
+  const loadingAddressIndex = findDispatchExcelRowIndex(rows, ["装货公司地址", "裝貨公司地址"]);
+  const unloadingStartIndex = findDispatchExcelRowIndex(rows, ["落货地址", "落貨地址"]);
+  const loadingAddress = dispatchExcelValueAfterLabel(rows, ["装货公司地址", "裝貨公司地址"]);
+  const loadingContact = dispatchExcelValueAfterLabel(rows, ["联系人", "聯繫人"], {
+    startRow: loadingAddressIndex >= 0 ? loadingAddressIndex + 1 : 0,
+    endRow: unloadingStartIndex >= 0 ? unloadingStartIndex : rows.length
+  });
+  const unloadingCompany = dispatchExcelValueAfterLabel(rows, ["公司名称", "公司名稱"], {
+    startRow: unloadingStartIndex >= 0 ? unloadingStartIndex : 0,
+    endRow: unloadingStartIndex >= 0 ? unloadingStartIndex + 2 : rows.length
+  });
+  const unloadingAddress = dispatchExcelValueAfterLabel(rows, ["地址"], {
+    startRow: unloadingStartIndex >= 0 ? unloadingStartIndex + 1 : 0,
+    endRow: unloadingStartIndex >= 0 ? unloadingStartIndex + 5 : rows.length
+  });
+  const unloadingContact = dispatchExcelValueAfterLabel(rows, ["联系人/电话", "联系人电话", "聯繫人/電話", "聯繫人電話"], {
+    startRow: unloadingStartIndex >= 0 ? unloadingStartIndex : 0,
+    endRow: unloadingStartIndex >= 0 ? unloadingStartIndex + 6 : rows.length
+  });
+  const arrivalValue = dispatchExcelValueAfterLabel(rows, ["到厂时间", "到廠時間"]);
+  const bookingValue = dispatchExcelValueAfterLabel(rows, ["约车时间", "約車時間"]);
+  const vehicleTypeValue = dispatchExcelValueAfterLabel(rows, ["车/柜型", "車/櫃型", "车型", "車型"]);
+  const portValue = dispatchExcelValueAfterLabel(rows, ["通关口岸", "通關口岸"]);
+  return {
+    customer: matchDispatchExcelCustomer(allText),
+    date: normalizeDispatchExcelDate(arrivalValue) || normalizeDispatchExcelDate(bookingValue),
+    loadTime: normalizeDispatchExcelTime(arrivalValue),
+    loading: buildDispatchExcelLocation({
+      address: loadingAddress,
+      company: loadingCompany,
+      contact: loadingContact
+    }),
+    unloading: buildDispatchExcelLocation({
+      address: unloadingAddress,
+      company: unloadingCompany,
+      contact: unloadingContact,
+      defaultCity: "香港"
+    }),
+    direction: parseDispatchExcelDirection(rows),
+    tonnage: parseDispatchExcelTonnage(vehicleTypeValue),
+    port: parseDispatchExcelPort(portValue || allText)
+  };
+}
+
+function dispatchRecognitionLineIncludes(line = "", labels = []) {
+  const normalizedLine = normalizeDispatchExcelLookupText(line);
+  return labels.some((label) => normalizedLine.includes(normalizeDispatchExcelLookupText(label)));
+}
+
+function dispatchRecognitionLineText(lines = [], labels = []) {
+  return lines.find((line) => dispatchRecognitionLineIncludes(line, labels)) || "";
+}
+
+function isDispatchLikelyMetadataLine(line = "") {
+  const normalized = normalizeDispatchExcelLookupText(line);
+  if (!normalized) return true;
+  return [
+    "运单号",
+    "托运单",
+    "车牌",
+    "订车日期",
+    "装货时间",
+    "车型",
+    "柜型",
+    "序号",
+    "柜号",
+    "口岸",
+    "备注",
+    "六联单号",
+    "货物名称",
+    "箱件板数",
+    "重量",
+    "注意事项"
+  ].some((label) => normalized.includes(normalizeDispatchExcelLookupText(label)));
+}
+
+function normalizeDispatchImageAddressLine(line = "") {
+  let text = cleanDispatchExcelCellText(line)
+    .replace(/〈/g, "（")
+    .replace(/〉/g, "）")
+    .replace(/([（][^）)]*)\)/g, "$1）")
+    .replace(/\bC0(?=[\s.,，。]|$)/g, "CO")
+    .replace(/\bPARKR(?=[\s,，]|$)/gi, "PARK");
+  if (isDispatchMostlyLatinLine(text)) {
+    text = text
+      .replace(/，/g, ",")
+      .replace(/\s*,\s*/g, ", ")
+      .replace(/\s*\.\s*/g, ".")
+      .replace(/\bN\.T\./gi, "N. T.")
+      .replace(/\bCO\.,\s*Ltd\.?/gi, "CO., Ltd.");
+  }
+  return text
+    .replace(/\s*([：:])\s*/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isDispatchImageInstructionLine(line = "") {
+  const text = normalizeDispatchImageAddressLine(line);
+  const normalized = normalizeDispatchExcelLookupText(text);
+  if (!normalized) return true;
+  if (/^\d+\s*[.、]/.test(text)) return true;
+  return ["注意事项", "装卸货拍照", "装御货拍照", "请司机", "封条", "交仓文件"].some((label) =>
+    normalized.includes(normalizeDispatchExcelLookupText(label))
+  );
+}
+
+function isDispatchLikelyImageLocationContextLine(line = "") {
+  const text = normalizeDispatchImageAddressLine(line).replace(/^[：:\-—"'“”‘’|｜\s]+/, "");
+  if (!text || text.length < 3 || /^[\d\s./:：-]+$/.test(text) || /^[A-Z]$/i.test(text)) return false;
+  const normalized = normalizeDispatchExcelLookupText(text);
+  if (!normalized || isDispatchLikelyMetadataLine(text) || isDispatchImageInstructionLine(text)) return false;
+  if (["装货地点", "装货地址", "送货地点", "卸货地点", "落货地点", "落货地址"].some((label) => normalized.includes(normalizeDispatchExcelLookupText(label)))) {
+    return false;
+  }
+  return /物流|仓|倉|公司|有限公司|货仓|貨倉|园区|園區|warehouse|logistics|park|road|street|ltd|limited|co/i.test(text) || isDispatchMostlyLatinLine(text);
+}
+
+function cleanDispatchImageAddressBlock(value = "") {
+  const rejectLabels = [
+    "装货地点",
+    "装货地址",
+    "送货地点",
+    "卸货地点",
+    "落货地点",
+    "落货地址",
+    "送货地址",
+    "六联单号",
+    "货物名称",
+    "注意事项",
+    "装卸货拍照",
+    "装御货拍照",
+    "请司机",
+    "封条",
+    "交仓文件",
+    "序号",
+    "车型",
+    "柜型",
+    "柜号",
+    "口岸",
+    "备注"
+  ].map(normalizeDispatchExcelLookupText);
+  return compactDispatchOcrText(value)
+    .split(/\n+/)
+    .map((line) => normalizeDispatchImageAddressLine(line).replace(/^[：:\-—"'“”‘’|｜\s]+/, ""))
+    .map((line) => line.replace(/^(装货地点|装货地址|送货地点|卸货地点|落货地点|落货地址)\s*[：:"'“”‘’|｜\s]*\s*/i, ""))
+    .map((line) => line.replace(/^[：:\-—"'“”‘’|｜\s]+/, ""))
+    .filter((line) => {
+      if (!line) return false;
+      const normalized = normalizeDispatchExcelLookupText(line);
+      if (!normalized) return false;
+      if (rejectLabels.some((label) => normalized === label || normalized.includes(label))) return false;
+      if (isDispatchImageInstructionLine(line)) return false;
+      if (/^[A-Z]$/i.test(line)) return false;
+      return !/^[\d\s./:：-]+$/.test(line);
+    })
+    .join(" ")
+    .replace(/\s*([：:])\s*/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function collectDispatchImageLeadingContextLines(lines = [], startIndex = 0) {
+  const result = [];
+  for (let index = startIndex - 1; index >= Math.max(0, startIndex - 3); index -= 1) {
+    const line = lines[index];
+    if (!isDispatchLikelyImageLocationContextLine(line)) break;
+    result.unshift(line);
+  }
+  return result;
+}
+
+function extractDispatchImageSection(text = "", startLabels = [], endLabels = [], options = {}) {
+  const source = compactDispatchOcrText(text);
+  if (!source) return "";
+  const normalizedStartLabels = startLabels.map(normalizeDispatchExcelLookupText).filter(Boolean);
+  const normalizedEndLabels = endLabels.map(normalizeDispatchExcelLookupText).filter(Boolean);
+  const lines = source.split(/\n+/).map(cleanDispatchExcelCellText).filter(Boolean);
+  const collected = [];
+  let collecting = false;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const normalizedLine = normalizeDispatchExcelLookupText(line);
+    if (!collecting) {
+      const startLabel = normalizedStartLabels.find((label) => normalizedLine.includes(label));
+      if (!startLabel) continue;
+      collecting = true;
+      if (options.includeLeadingContext) {
+        collected.push(...collectDispatchImageLeadingContextLines(lines, index));
+      }
+      const originalLabel = startLabels.find((label) => normalizeDispatchExcelLookupText(label) === startLabel) || "";
+      const stripped = originalLabel
+        ? line.replace(new RegExp(`^[\\s\\S]*?${escapeDispatchRecognitionRegExp(originalLabel)}\\s*[：:"'“”‘’|｜\\s]*`, "i"), "")
+        : line;
+      if (stripped.trim()) collected.push(stripped);
+      continue;
+    }
+    if (normalizedEndLabels.some((label) => normalizedLine.includes(label)) || isDispatchImageInstructionLine(line)) break;
+    collected.push(line);
+  }
+  return cleanDispatchImageAddressBlock(collected.join("\n"));
+}
+
+function isDispatchMostlyLatinLine(line = "") {
+  const latinCount = (line.match(/[A-Za-z]/g) || []).length;
+  const chineseCount = (line.match(/[\u4e00-\u9fa5]/g) || []).length;
+  return latinCount >= 8 && latinCount > chineseCount * 2;
+}
+
+function isDispatchLikelyHongKongEnglishLine(line = "") {
+  const text = normalizeDispatchImageAddressLine(line);
+  if (!isDispatchMostlyLatinLine(text)) return false;
+  return /\b(?:HONG\s*KONG|N\.?\s*T\.?|YUEN|LONG|KOWLOON|LOGISTICS|PARK|ROAD|STREET|LTD|LIMITED|CO\.?|C0\.?)\b/i.test(text);
+}
+
+function trimDispatchMainlandLoadingText(block = "") {
+  const text = cleanDispatchImageAddressBlock(block);
+  if (!text) return "";
+  const markerIndex = text.search(/\b(?:HONG\s*KONG|N\.?\s*T\.?|YUEN\s+LONG|KOWLOON|INTERNATIONAL|LOGISTICS|PARK|ROAD|STREET|LTD|LIMITED|CO\.?|C0\.?)\b/i);
+  if (markerIndex > 0 && /[\u4e00-\u9fa5]/.test(text.slice(0, markerIndex))) {
+    return text.slice(0, markerIndex).trim();
+  }
+  return text;
+}
+
+function extractDispatchImageUnloadingSection(text = "") {
+  const source = compactDispatchOcrText(text);
+  if (!source) return "";
+  const unloadingLabels = ["送货地点", "卸货地点", "落货地点", "落货地址"].map(normalizeDispatchExcelLookupText);
+  const loadingLabels = ["装货地点", "装货地址", "提货地点"].map(normalizeDispatchExcelLookupText);
+  const endLabels = ["六联单号", "货物名称", "箱", "重量", "注意事项", "备注"].map(normalizeDispatchExcelLookupText);
+  const lines = source.split(/\n+/).map(cleanDispatchExcelCellText).filter(Boolean);
+  const startIndex = lines.findIndex((line) => unloadingLabels.some((label) => normalizeDispatchExcelLookupText(line).includes(label)));
+  if (startIndex < 0) return "";
+
+  const loadingIndex = lines
+    .slice(0, startIndex)
+    .map((line, index) => ({ line, index }))
+    .filter(({ line }) => loadingLabels.some((label) => normalizeDispatchExcelLookupText(line).includes(label)));
+  const lastLoadingMatch = loadingIndex[loadingIndex.length - 1];
+  const loadingStartIndex = lastLoadingMatch?.index ?? -1;
+  const prefixLines = lines
+    .slice(Math.max(0, loadingStartIndex + 1), startIndex)
+    .filter(isDispatchLikelyHongKongEnglishLine);
+  const collected = [...prefixLines];
+  for (let index = startIndex; index < lines.length; index += 1) {
+    const line = lines[index];
+    const normalizedLine = normalizeDispatchExcelLookupText(line);
+    if (index > startIndex && (endLabels.some((label) => normalizedLine.includes(label)) || isDispatchImageInstructionLine(line))) break;
+    if (index === startIndex) {
+      const matchedLabel = unloadingLabels.find((label) => normalizedLine.includes(label));
+      const originalLabel = ["送货地点", "卸货地点", "落货地点", "落货地址"]
+        .find((label) => normalizeDispatchExcelLookupText(label) === matchedLabel) || "";
+      const stripped = originalLabel
+        ? line.replace(new RegExp(`^[\\s\\S]*?${escapeDispatchRecognitionRegExp(originalLabel)}\\s*[：:"'“”‘’|｜\\s]*`, "i"), "")
+        : line;
+      if (stripped.trim()) collected.push(stripped);
+    } else {
+      collected.push(line);
+    }
+  }
+  return cleanDispatchImageAddressBlock(collected.join("\n"));
+}
+
+function buildDispatchImageLocation(block = "", options = {}) {
+  const text = cleanDispatchImageAddressBlock(block);
+  if (!text) return "";
+  return buildDispatchExcelLocation({ address: text, defaultCity: options.defaultCity || "" });
+}
+
+function parseDispatchImageDirection(allText = "", loadingBlock = "", unloadingBlock = "") {
+  const normalized = normalizeDispatchExcelLookupText(allText);
+  if (normalized.includes("出口")) return "出口";
+  if (normalized.includes("进口")) return "进口";
+  const loadingText = normalizeDispatchExcelLookupText(loadingBlock);
+  const unloadingText = normalizeDispatchExcelLookupText(unloadingBlock);
+  if (unloadingText.includes("香港") || unloadingText.includes("hongkong")) return "出口";
+  if (loadingText.includes("香港") || loadingText.includes("hongkong")) return "进口";
+  return "";
+}
+
+function parseDispatchImageWeighing(allText = "") {
+  const normalized = normalizeDispatchExcelLookupText(allText);
+  if (!normalized.includes("过磅")) return undefined;
+  if (normalized.includes("不用过磅") || normalized.includes("无需过磅") || normalized.includes("不需过磅") || normalized.includes("免过磅") || normalized.includes("不过磅")) {
+    return false;
+  }
+  return true;
+}
+
+function recognizeDispatchImageText(rawText = "") {
+  const text = compactDispatchOcrText(rawText);
+  const lines = text.split(/\n+/).map(cleanDispatchExcelCellText).filter(Boolean);
+  const allText = lines.join("\n");
+  const loadingTimeText = dispatchRecognitionLineText(lines, ["装货时间", "裝貨時間", "到厂时间", "到廠時間"]) || allText;
+  const loadingBlock = extractDispatchImageSection(
+    allText,
+    ["装货地点", "装货地址", "提货地点"],
+    ["送货地点", "送货地址", "卸货地点", "落货地点", "落货地址", "六联单号", "货物名称", "箱", "注意事项"],
+    { includeLeadingContext: true }
+  );
+  const unloadingBlock = extractDispatchImageUnloadingSection(allText);
+  const result = {
+    customer: matchDispatchExcelCustomer(allText),
+    date: normalizeDispatchExcelDate(loadingTimeText),
+    loadTime: normalizeDispatchExcelTime(loadingTimeText),
+    plate: normalizeDispatchRecognitionPlate(dispatchRecognitionLineText(lines, ["车牌", "車牌"]) || allText),
+    port: parseDispatchExcelPort(allText),
+    tonnage: parseDispatchExcelTonnage(allText),
+    quantity: parseDispatchRecognitionQuantity(allText),
+    weight: parseDispatchRecognitionWeight(allText),
+    loading: buildDispatchImageLocation(trimDispatchMainlandLoadingText(loadingBlock)),
+    unloading: buildDispatchImageLocation(unloadingBlock, { defaultCity: "香港" }),
+    direction: parseDispatchImageDirection(allText, loadingBlock, unloadingBlock)
+  };
+  const needsWeighing = parseDispatchImageWeighing(allText);
+  if (typeof needsWeighing === "boolean") result.needsWeighing = needsWeighing;
+  return result;
+}
+
+function clearDispatchLocationDraftsForTarget(target) {
+  Object.keys(dispatchLocationDrafts).forEach((key) => {
+    if (key.startsWith(`${target}:`)) delete dispatchLocationDrafts[key];
+  });
+  Object.keys(dispatchLocationInputComposing).forEach((key) => {
+    if (key.startsWith(`${target}:`)) delete dispatchLocationInputComposing[key];
+  });
+  dispatchLocationDistrictPicker.key = "";
+  dispatchLocationDistrictPicker.keyword = "";
+}
+
+function setDispatchRecognitionStatus(message = "", tone = "busy") {
+  window.clearTimeout(dispatchRecognitionStatusTimer);
+  dispatchRecognitionStatus.value = message;
+  dispatchRecognitionTone.value = tone;
+}
+
+function clearDispatchRecognitionStatus() {
+  window.clearTimeout(dispatchRecognitionStatusTimer);
+  dispatchRecognitionStatus.value = "";
+  dispatchRecognitionTone.value = "busy";
+}
+
+function scheduleClearDispatchRecognitionStatus(delay = 4200) {
+  window.clearTimeout(dispatchRecognitionStatusTimer);
+  dispatchRecognitionStatusTimer = window.setTimeout(() => {
+    dispatchRecognitionStatus.value = "";
+    dispatchRecognitionTone.value = "busy";
+  }, delay);
+}
+
+function dispatchRecognitionDetailOnlyLocation(value = "") {
+  const detail = cleanDispatchExcelCellText(value);
+  return detail ? composeDispatchLocationParts("", "", detail) : "";
+}
+
+function applyDispatchExcelRecognition(result = {}, options = {}) {
+  const sourceLabel = options.sourceLabel || "Excel";
+  const filled = new Set();
+  if (result.customer) {
+    selectDispatchCustomer(result.customer);
+    filled.add("客户");
+  }
+  [
+    ["date", "排车日期", result.date],
+    ["port", "口岸", result.port],
+    ["direction", "进出口", result.direction],
+    ["tonnage", "吨位", result.tonnage],
+    ["loadTime", "装车时间", result.loadTime],
+    ["plate", "车牌", result.plate],
+    ["quantity", "件数/板数", result.quantity],
+    ["weight", "重量", result.weight]
+  ].forEach(([field, label, value]) => {
+    const text = cleanDispatchExcelCellText(value);
+    if (!text) return;
+    dispatchForm[field] = text;
+    filled.add(label);
+  });
+  if (typeof result.needsWeighing === "boolean") {
+    dispatchForm.needsWeighing = result.needsWeighing;
+    filled.add("是否过磅");
+  }
+  if (result.loading) {
+    clearDispatchLocationDraftsForTarget("loading");
+    setDispatchLocationEntries("loading", [dispatchRecognitionDetailOnlyLocation(result.loading)]);
+    filled.add("装货地");
+  }
+  if (result.unloading) {
+    clearDispatchLocationDraftsForTarget("unloading");
+    setDispatchLocationEntries("unloading", [dispatchRecognitionDetailOnlyLocation(result.unloading)]);
+    filled.add("卸货地");
+  }
+  syncDispatchLoadHourDraft();
+  const filledLabels = [...filled];
+  if (!filledLabels.length) {
+    const message = `没有识别到可回填的排车信息，请确认${sourceLabel}内容是否清晰`;
+    notify(message);
+    setDispatchRecognitionStatus(message, "error");
+    scheduleClearDispatchRecognitionStatus(6200);
+    return [];
+  }
+  const suffix = result.customer ? "" : "；客户未自动匹配，请手动选择客户";
+  const message = `已识别：${filledLabels.join("、")}${suffix}`;
+  notify(message);
+  setDispatchRecognitionStatus(message, "success");
+  scheduleClearDispatchRecognitionStatus(5200);
+  return filledLabels;
+}
+
+function readDispatchExcelFileAsArrayBuffer(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error("读取 Excel 文件失败"));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function openDispatchExcelFilePicker() {
+  if (dispatchRecognitionBusy.value) return;
+  const input = dispatchExcelFileInput.value;
+  if (!input) return;
+  input.value = "";
+  input.click();
+}
+
+async function handleDispatchExcelFileChange(event) {
+  const file = event?.target?.files?.[0];
+  if (event?.target) event.target.value = "";
+  if (!file || dispatchRecognitionBusy.value) return;
+  dispatchExcelRecognizing.value = true;
+  setDispatchRecognitionStatus("正在读取 Excel 文件", "busy");
+  try {
+    const buffer = await readDispatchExcelFileAsArrayBuffer(file);
+    setDispatchRecognitionStatus("正在解析 Excel 内容", "busy");
+    const XLSX = await import("xlsx");
+    const workbook = XLSX.read(buffer, {
+      type: "array",
+      cellDates: true,
+      raw: false
+    });
+    const sheetName = workbook.SheetNames[0];
+    if (!sheetName) throw new Error("Excel 文件没有可识别的工作表");
+    const worksheet = workbook.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json(worksheet, {
+      header: 1,
+      defval: "",
+      raw: false,
+      blankrows: false
+    });
+    applyDispatchExcelRecognition(recognizeDispatchExcelRows(rows), { sourceLabel: "Excel" });
+  } catch (error) {
+    const message = error.message || "Excel 自动识别失败";
+    setDispatchRecognitionStatus(message, "error");
+    scheduleClearDispatchRecognitionStatus(6200);
+    notify(message);
+  } finally {
+    dispatchExcelRecognizing.value = false;
+  }
+}
+
+function isDispatchImageFile(file) {
+  const type = String(file?.type || "").toLowerCase();
+  const name = String(file?.name || "").toLowerCase();
+  return type.startsWith("image/") || /\.(png|jpe?g|webp|bmp|gif|tiff?)$/.test(name);
+}
+
+function openDispatchImageFilePicker() {
+  if (dispatchRecognitionBusy.value) return;
+  const input = dispatchImageFileInput.value;
+  if (!input) return;
+  input.value = "";
+  input.click();
+}
+
+function dispatchOcrStatusLabel(status = "") {
+  const text = String(status || "").toLowerCase();
+  if (text.includes("loading tesseract core")) return "正在加载 OCR 核心";
+  if (text.includes("loading language")) return "正在加载中英文识别模型";
+  if (text.includes("initializing")) return "正在初始化 OCR";
+  if (text.includes("recognizing")) return "正在识别图片文字";
+  return status || "正在识别图片";
+}
+
+async function recognizeDispatchImageFile(file) {
+  setDispatchRecognitionStatus("正在加载 OCR 识别模型", "busy");
+  const module = await import("tesseract.js");
+  const Tesseract = module.default || module;
+  if (!Tesseract?.createWorker) throw new Error("OCR 识别组件加载失败");
+  const worker = await Tesseract.createWorker("chi_sim+eng", 1, {
+    logger(message = {}) {
+      const label = dispatchOcrStatusLabel(message.status);
+      const progress = Number(message.progress || 0);
+      const percent = progress > 0 && progress <= 1 ? ` ${Math.round(progress * 100)}%` : "";
+      setDispatchRecognitionStatus(`${label}${percent}`, "busy");
+    }
+  });
+  try {
+    await worker.setParameters?.({
+      preserve_interword_spaces: "1"
+    });
+    const result = await worker.recognize(file);
+    return result?.data?.text || "";
+  } finally {
+    await worker.terminate();
+  }
+}
+
+async function handleDispatchImageFileChange(event) {
+  const file = event?.target?.files?.[0];
+  if (event?.target) event.target.value = "";
+  if (!file || dispatchRecognitionBusy.value) return;
+  if (!isDispatchImageFile(file)) {
+    notify("请选择图片文件进行自动识别");
+    return;
+  }
+  dispatchImageRecognizing.value = true;
+  try {
+    const text = await recognizeDispatchImageFile(file);
+    if (!text.trim()) throw new Error("图片里没有识别到文字，请换一张更清晰的图片");
+    setDispatchRecognitionStatus("正在匹配排车单字段", "busy");
+    applyDispatchExcelRecognition(recognizeDispatchImageText(text), { sourceLabel: "图片" });
+  } catch (error) {
+    const message = error.message || "图片自动识别失败";
+    setDispatchRecognitionStatus(message, "error");
+    scheduleClearDispatchRecognitionStatus(6800);
+    notify(message);
+  } finally {
+    dispatchImageRecognizing.value = false;
+  }
+}
+
 const filteredOrders = computed(() => {
   return sortRowsByTable(orderFilterBaseRows.value.filter((item) =>
     orderMatchesSelectFilters(item) && matchesOrderSearchKeyword(item)
@@ -11050,7 +11979,8 @@ const CUSTOMS_CUSTOMER_DETAIL_KEYS = new Set([
   "customsImportHomeFee",
   "customsExportHomeFee",
   "customsImportPageFee",
-  "customsExportPageFee"
+  "customsExportPageFee",
+  "customsVerificationFee"
 ]);
 const CUSTOMS_CUSTOMER_HIDDEN_FINANCE_KEYS = new Set(["receivableRMB", "receivableHKD", "recentOrderDate"]);
 
@@ -15338,6 +16268,7 @@ function customerListDetailCellText(item = {}, key = "") {
     customsExportHomeFee: `人民币 ${Number(item.customsExportHomeFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportHomeFee).toLocaleString()}`,
     customsImportPageFee: `人民币 ${Number(item.customsImportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee).toLocaleString()}`,
     customsExportPageFee: `人民币 ${Number(item.customsExportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee).toLocaleString()}`,
+    customsVerificationFee: `人民币 ${Number(item.customsVerificationFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee).toLocaleString()}`,
     createdAt: item.createdAt || "-"
   };
   return values[key] ?? item[key] ?? "-";
@@ -15578,6 +16509,13 @@ function splitDispatchLocationParts(value = "") {
   if (!text) return { city: "", district: "", detail: "" };
   if (text.includes("/")) {
     const parts = text.split("/").map((part) => part.trim());
+    if (!parts[0] && !parts[1] && parts.slice(2).some(Boolean)) {
+      return {
+        city: "",
+        district: "",
+        detail: parts.slice(2).join(" / ")
+      };
+    }
     if (!parts[0] && parts.filter(Boolean).length === 1) {
       return splitLocationParts(parts.filter(Boolean)[0]);
     }
@@ -15840,9 +16778,9 @@ function invalidDispatchLocationMessage(target) {
   if (!entries.length) return `请填写${label}`;
   const invalidIndex = entries.findIndex((entry) => {
     const parts = splitDispatchLocationParts(entry);
-    return !parts.city;
+    return !parts.city && !parts.detail;
   });
-  return invalidIndex >= 0 ? `${label}第 ${invalidIndex + 1} 条需要填写市` : "";
+  return invalidIndex >= 0 ? `${label}第 ${invalidIndex + 1} 条需要填写市或详细地址` : "";
 }
 
 function addDispatchLocationEntry(target) {
@@ -17528,6 +18466,7 @@ function buildCustomerPayload() {
     customsExportHomeFee: customerConfigNumber(customerForm.customsExportHomeFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportHomeFee),
     customsImportPageFee: customerConfigNumber(customerForm.customsImportPageFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee),
     customsExportPageFee: customerConfigNumber(customerForm.customsExportPageFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee),
+    customsVerificationFee: customerConfigNumber(customerForm.customsVerificationFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee),
     invoice: {
       title: customerForm.invoiceTitle || customerForm.name,
       taxNo: customerForm.invoiceTax,
@@ -17646,6 +18585,7 @@ function openCustomerModal(customer = null, createType = activePartnerType.value
     customsExportHomeFee: Number(customer?.customsExportHomeFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportHomeFee),
     customsImportPageFee: Number(customer?.customsImportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee),
     customsExportPageFee: Number(customer?.customsExportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee),
+    customsVerificationFee: Number(customer?.customsVerificationFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee),
     invoicePasteText: ""
   });
   customerModalOpen.value = true;
@@ -19533,6 +20473,7 @@ function resetVehicleExpenseForm(config = activeVehicleExpenseConfig.value) {
     name: config.type === "annual" ? config.defaultName : (config.type === "other" ? "" : config.defaultName),
     fuelStation: "",
     fuelLiters: "",
+    fuelPricePerLiter: "",
     odometerKm: "",
     plate: selectedVehiclePlate.value || vehicleRows.value[0]?.plate || "",
     date: config.type === "annual" ? annualStartDate : periodFilterDateValue(periodFilterValue("vehicleExpenses")),
@@ -19543,6 +20484,7 @@ function resetVehicleExpenseForm(config = activeVehicleExpenseConfig.value) {
     amount: "",
     note: ""
   });
+  vehicleExpenseFuelLastEdited.value = "liters";
   resetVehicleExpenseReceiptState();
 }
 
@@ -19552,11 +20494,21 @@ function openVehicleExpenseModal(item = null) {
   editingVehicleExpenseId.value = item?.id || null;
   const annualStartDate = config.type === "annual" ? vehicleExpenseAnnualStartDate(item || {}) || todayInputValue() : "";
   const annualEndDate = config.type === "annual" ? vehicleExpenseAnnualEndDate(item || {}) || addInputYears(annualStartDate, 1) : "";
+  const fuelLiters = Number(item?.fuelLiters || 0);
+  const fuelPricePerLiter = Number(item?.fuelPricePerLiter || 0);
+  const fuelAmount = Number(item?.amount || 0);
+  const normalizedFuelAmount = fuelPricePerLiter > 0 && fuelLiters > 0
+    ? Number((fuelLiters * fuelPricePerLiter).toFixed(1))
+    : (fuelPricePerLiter > 0 && fuelAmount > 0 && fuelLiters <= 0 ? Number(fuelAmount.toFixed(1)) : fuelAmount);
+  const normalizedFuelLiters = fuelPricePerLiter > 0 && fuelAmount > 0 && fuelLiters <= 0
+    ? Number((fuelAmount / fuelPricePerLiter).toFixed(1))
+    : fuelLiters;
   Object.assign(vehicleExpenseForm, {
     type: config.type,
     name: item?.name || (config.type === "other" ? "" : config.defaultName),
     fuelStation: item?.fuelStation || "",
-    fuelLiters: item?.fuelLiters || "",
+    fuelLiters: config.type === "fuel" ? normalizedFuelLiters : "",
+    fuelPricePerLiter: config.type === "fuel" ? Number(fuelPricePerLiter ? fuelPricePerLiter.toFixed(1) : "") || "" : "",
     odometerKm: item?.odometerKm || "",
     plate: item?.plate || selectedVehiclePlate.value || vehicleRows.value[0]?.plate || "",
     date: item?.date || (config.type === "annual" ? annualStartDate : periodFilterDateValue(periodFilterValue("vehicleExpenses"))),
@@ -19564,9 +20516,13 @@ function openVehicleExpenseModal(item = null) {
     endDate: annualEndDate,
     year: Number(String(annualStartDate || item?.year || item?.date || currentPeriodMonthKey()).slice(0, 4) || currentPeriodMonthKey().slice(0, 4)),
     currency: item?.currency || "人民币",
-    amount: item?.amount || "",
+    amount: config.type === "fuel" ? Number(normalizedFuelAmount ? normalizedFuelAmount.toFixed(1) : "") || "" : (item?.amount || ""),
     note: item?.note || ""
   });
+  vehicleExpenseFuelLastEdited.value = config.type === "fuel"
+    ? (fuelPricePerLiter > 0 && fuelLiters > 0 ? "liters" : (fuelPricePerLiter > 0 && fuelAmount > 0 && fuelLiters <= 0 ? "amount" : "liters"))
+    : "liters";
+  syncVehicleExpenseFuelFields(vehicleExpenseFuelLastEdited.value);
   vehicleExpenseModalOpen.value = true;
   if (item?.id) {
     setVehicleExpenseReceiptUploadStatus("正在加载票据", "busy");
@@ -21870,7 +22826,8 @@ function parseOrderFreightTemplate(item) {
   }
 }
 
-function applyFeeTemplateRows(fees) {
+function applyFeeTemplateRows(fees, options = {}) {
+  const stripAttachments = options.stripAttachments !== false;
   orderFees.value = (Array.isArray(fees) ? fees : []).map((fee) => {
     const savedCost = normalizeFeeCost(fee);
     const hasUnitPriceManualFlag = fee.unitPriceManual !== undefined || fee.unit_price_manual !== undefined || fee.manualUnitPrice !== undefined || fee._manualUnitPrice !== undefined;
@@ -21898,7 +22855,7 @@ function applyFeeTemplateRows(fees) {
       remark: fee.remark || "",
       driverRole: fee.driverRole || "",
       driverName: fee.driverName || "",
-      attachments: Array.isArray(fee.attachments) ? fee.attachments : []
+      attachments: stripAttachments ? [] : (Array.isArray(fee.attachments) ? fee.attachments : [])
     });
     return {
       ...row,
@@ -21952,7 +22909,7 @@ function loadSavedFeeTemplate(item) {
     return;
   }
   applyOrderTemplateFields(content.order || {});
-  applyFeeTemplateRows(fees);
+  applyFeeTemplateRows(fees, { stripAttachments: true });
   loadFeeTemplateMenuOpen.value = false;
   notify(`已载入模板：${item.name}`);
 }
@@ -21964,7 +22921,7 @@ function loadLatestOrderTemplate() {
     return;
   }
   applyOrderTemplateFields(order);
-  applyFeeTemplateRows(order.fees);
+  applyFeeTemplateRows(order.fees, { stripAttachments: true });
   loadFeeTemplateMenuOpen.value = false;
   notify(`已载入最近订单模板：${order.no}`);
 }
@@ -23776,6 +24733,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   closeRealtimeConnection();
   stopModalDrag();
+  window.clearTimeout(dispatchRecognitionStatusTimer);
   document.removeEventListener("pointerdown", startModalDrag);
   document.removeEventListener("click", handleDispatchDriverPickerDocumentClick, true);
   document.removeEventListener("focusin", handleDispatchDriverPickerFocusIn, true);
@@ -29889,6 +30847,9 @@ function orderDetailFeeRows(order = {}) {
                 <label>出口续页费用
                   <input v-model.number="customerForm.customsExportPageFee" type="number" min="0" step="0.01" />
                 </label>
+                <label>核注费
+                  <input v-model.number="customerForm.customsVerificationFee" type="number" min="0" step="0.01" />
+                </label>
               </template>
               <label class="span-6">复制文本识别
                 <textarea
@@ -29950,6 +30911,20 @@ function orderDetailFeeRows(order = {}) {
 	            <datalist id="dispatch-location-city-options">
 	              <option v-for="city in addressBookCityOptions" :key="city" :value="city">{{ city }}</option>
 	            </datalist>
+            <input
+              ref="dispatchExcelFileInput"
+              class="dispatch-recognition-file-input dispatch-excel-file-input"
+              type="file"
+              accept=".xls,.xlsx,.csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv"
+              @change="handleDispatchExcelFileChange"
+            />
+            <input
+              ref="dispatchImageFileInput"
+              class="dispatch-recognition-file-input"
+              type="file"
+              accept="image/*"
+              @change="handleDispatchImageFileChange"
+            />
             <div class="dispatch-date-picker-row">
               <label>排车日期<input v-model="dispatchForm.date" type="date" /></label>
             </div>
@@ -30096,9 +31071,10 @@ function orderDetailFeeRows(order = {}) {
 	                            <p v-if="dispatchFilteredDistrictOptions('loading', index).length === 0" @mousedown.prevent="closeDispatchLocationDistrictPicker('loading', index)">暂无匹配片区</p>
 	                          </div>
 	                        </span>
-	                        <input
+	                        <textarea
 	                          class="dispatch-address-detail-input"
 	                          :value="dispatchLocationDraftValue('loading', index, 'detail')"
+                            rows="2"
 	                          :placeholder="index === 0 ? '详细地址，例如：美泰物流园A栋一楼' : '继续填写第 ' + (index + 1) + ' 个地址'"
 	                          :disabled="!dispatchCustomerSelected"
 	                          @input="handleDispatchLocationTextInput('loading', index, 'detail', $event)"
@@ -30106,7 +31082,7 @@ function orderDetailFeeRows(order = {}) {
 	                          @compositionstart="handleDispatchLocationTextCompositionStart('loading', index, 'detail')"
 	                          @compositionend="handleDispatchLocationTextCompositionEnd('loading', index, 'detail', $event)"
 	                          @blur="commitDispatchLocationDraftPart('loading', index, 'detail')"
-                        />
+                        ></textarea>
                         <button
                           v-if="dispatchLocationEntries('loading').length > 1 && index > 0"
                           class="dispatch-address-remove icon-only"
@@ -30197,9 +31173,10 @@ function orderDetailFeeRows(order = {}) {
 	                            <p v-if="dispatchFilteredDistrictOptions('unloading', index).length === 0" @mousedown.prevent="closeDispatchLocationDistrictPicker('unloading', index)">暂无匹配片区</p>
 	                          </div>
 	                        </span>
-	                        <input
+	                        <textarea
 	                          class="dispatch-address-detail-input"
 	                          :value="dispatchLocationDraftValue('unloading', index, 'detail')"
+                            rows="2"
 	                          :placeholder="index === 0 ? '详细地址，例如：赤鱲角駿運路' : '继续填写第 ' + (index + 1) + ' 个地址'"
 	                          :disabled="!dispatchCustomerSelected"
 	                          @input="handleDispatchLocationTextInput('unloading', index, 'detail', $event)"
@@ -30207,7 +31184,7 @@ function orderDetailFeeRows(order = {}) {
 	                          @compositionstart="handleDispatchLocationTextCompositionStart('unloading', index, 'detail')"
 	                          @compositionend="handleDispatchLocationTextCompositionEnd('unloading', index, 'detail', $event)"
 	                          @blur="commitDispatchLocationDraftPart('unloading', index, 'detail')"
-                        />
+                        ></textarea>
                         <button
                           v-if="dispatchLocationEntries('unloading').length > 1 && index > 0"
                           class="dispatch-address-remove icon-only"
@@ -30230,6 +31207,16 @@ function orderDetailFeeRows(order = {}) {
             </div>
           </div>
           <div class="modal-actions">
+            <span v-if="dispatchRecognitionStatus" class="upload-status-pill dispatch-recognition-status" :class="`is-${dispatchRecognitionTone}`" aria-live="polite">
+              <span class="upload-status-dot"></span>
+              <span>{{ dispatchRecognitionStatus }}</span>
+            </span>
+            <button type="button" class="ghost-btn dispatch-recognize-btn dispatch-image-recognize-btn" :disabled="dispatchRecognitionBusy" @click="openDispatchImageFilePicker">
+              <IconSvg name="sparkles" />{{ dispatchImageRecognizing ? '图片识别中' : '上传图片自动识别' }}
+            </button>
+            <button type="button" class="ghost-btn dispatch-recognize-btn dispatch-excel-recognize-btn" :disabled="dispatchRecognitionBusy" @click="openDispatchExcelFilePicker">
+              <IconSvg name="upload" />{{ dispatchExcelRecognizing ? 'Excel识别中' : '上传excel自动识别' }}
+            </button>
             <button type="button" class="ghost-btn" @click="closeDispatchModal">取消</button>
             <button class="primary-btn" type="submit"><IconSvg name="save" />保存排车单</button>
           </div>
@@ -31380,7 +32367,10 @@ function orderDetailFeeRows(order = {}) {
                 <input v-model.trim="vehicleExpenseForm.name" readonly />
               </label>
               <label v-if="vehicleExpenseForm.type === 'fuel'">加油升数
-                <input v-model.number="vehicleExpenseForm.fuelLiters" type="number" min="0.01" step="0.01" placeholder="例如：68.5" required />
+                <input v-model.number="vehicleExpenseForm.fuelLiters" type="number" min="0.1" step="0.1" placeholder="例如：68.5" required @input="vehicleExpenseFuelLastEdited = 'liters'; syncVehicleExpenseFuelFields('liters')" />
+              </label>
+              <label v-if="vehicleExpenseForm.type === 'fuel'">每升单价
+                <input v-model.number="vehicleExpenseForm.fuelPricePerLiter" type="number" min="0.1" step="0.1" placeholder="例如：6.5" required @input="syncVehicleExpenseFuelFields('price')" />
               </label>
               <label v-if="vehicleExpenseForm.type === 'fuel'">加油时公里数
                 <input v-model.number="vehicleExpenseForm.odometerKm" type="number" min="0.01" step="0.01" placeholder="例如：158320" required />
@@ -31412,7 +32402,7 @@ function orderDetailFeeRows(order = {}) {
                 </select>
               </label>
               <label>费用
-                <input v-model.number="vehicleExpenseForm.amount" type="number" min="0.01" step="0.01" required />
+                <input v-model.number="vehicleExpenseForm.amount" type="number" min="0.1" step="0.1" required @input="vehicleExpenseFuelLastEdited = 'amount'; syncVehicleExpenseFuelFields('amount')" />
               </label>
               <div class="vehicle-expense-receipt-panel span-2">
                 <div class="vehicle-expense-receipt-head">
@@ -31693,7 +32683,7 @@ function orderDetailFeeRows(order = {}) {
 	          <label>舱单费<input v-model.number="customsBusinessForm.manifestFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'manifestFee', $event)" /></label>
 	          <label>报检费<input v-model.number="customsBusinessForm.inspectionFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'inspectionFee', $event)" /></label>
 	          <label>查验费<input v-model.number="customsBusinessForm.checkFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'checkFee', $event)" /></label>
-	          <label>核注费<input v-model.number="customsBusinessForm.verificationFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'verificationFee', $event)" /></label>
+	          <label v-if="customsBusinessShowsVerificationFee">核注费<input :value="money(customsBusinessForm.verificationFee)" readonly /></label>
 	          <label>其他费用<input v-model.number="customsBusinessForm.otherFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'otherFee', $event)" /></label>
 	          <div class="span-4 customs-business-custom-fields">
 	            <div class="customs-business-custom-head">
