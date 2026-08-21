@@ -6769,7 +6769,12 @@ function currentPeriodMonthKey() {
   return todayInputValue().slice(0, 7);
 }
 
-const STATEMENT_PERIOD_MODES = PERIOD_FILTER_MODES;
+const ORDER_DISPATCH_PERIOD_MODES = [
+  { key: "month", label: "按月查看" },
+  { key: "day", label: "按天查看" },
+  { key: "year", label: "按年查看" },
+  { key: "all", label: "全部" }
+];
 const STATEMENT_RECONCILIATION_PERIOD_MODES = [
   ...PERIOD_FILTER_MODES,
   { key: "range", label: "自定义范围" }
@@ -11139,6 +11144,15 @@ function dispatchExcelValueAfterLabel(rows = [], labels = [], options = {}) {
         .map(cleanDispatchExcelCellText)
         .filter(Boolean);
       if (remainder.length) return remainder.join(" ");
+      const followingRows = Math.max(0, Number(options.followingRows || 0));
+      for (let offset = 1; offset <= followingRows; offset += 1) {
+        const nextRow = rows[rowIndex + offset];
+        if (!nextRow) break;
+        const nextText = dispatchExcelRowText(nextRow);
+        if (!nextText) continue;
+        if (isDispatchLikelyMetadataLine(nextText)) continue;
+        return nextText;
+      }
       break;
     }
   }
@@ -11193,7 +11207,7 @@ function parseDispatchExcelTonnage(value = "") {
 
 function parseDispatchRecognitionQuantity(value = "") {
   const text = compactDispatchOcrText(value).toUpperCase().replace(/\s+/g, "");
-  const labelMatch = text.match(/(?:箱(?:件\/板)?数|件\/板数|板数|件数)[:：]?([0-9]+(?:\.[0-9]+)?\s*(?:P|板|件|箱)?)/);
+  const labelMatch = text.match(/(?:货物数量|貨物數量|箱(?:件\/板)?数|件\/板数|板数|件数)[:：]?([0-9]+(?:\.[0-9]+)?\s*(?:P|板|件|箱)?)/);
   const directMatch = text.match(/(?:^|[^A-Z0-9])([0-9]+(?:\.[0-9]+)?)(P|板|件|箱)(?:[^A-Z0-9]|$)/);
   if (labelMatch) return labelMatch[1].replace(/P$/i, "板");
   if (directMatch) return `${Number(directMatch[1])}${directMatch[2].toUpperCase() === "P" ? "板" : directMatch[2]}`;
@@ -11280,6 +11294,63 @@ function appendUniqueDispatchExcelParts(parts = []) {
   return result;
 }
 
+const DISPATCH_IMAGE_ADDRESS_TAIL_WHITELIST = new Set([
+  "hk",
+  "nt",
+  "co",
+  "ltd",
+  "st",
+  "rd",
+  "ft",
+  "kg",
+  "am",
+  "pm",
+  "no",
+  "rm",
+  "blk",
+  "fl"
+]);
+
+function stripDispatchImageAddressTailArtifacts(value = "") {
+  let text = cleanDispatchExcelCellText(value).replace(/\s+/g, " ");
+  if (!text) return "";
+  const normalizedText = normalizeDispatchExcelLookupText(text);
+  const hasAddressContext = /[\u4e00-\u9fa5]/.test(text)
+    || ["hongkong", "yuenlong", "kowloon", "logistics", "park", "road", "street", "ltd", "limited", "warehouse", "company", "co"].some((keyword) =>
+      normalizedText.includes(keyword)
+    );
+  if (hasAddressContext) {
+    while (true) {
+      const spacedTail = text.match(/(?:^|[\s,，。\.；;：:、\-])([A-Za-z]{1,2})\.?$/);
+      if (spacedTail) {
+        const token = spacedTail[1].toLowerCase();
+        if (!DISPATCH_IMAGE_ADDRESS_TAIL_WHITELIST.has(token)) {
+          text = text.slice(0, spacedTail.index).trimEnd();
+          continue;
+        }
+      }
+      const attachedTail = text.match(/([A-Za-z]{1,2})$/);
+      if (attachedTail) {
+        const token = attachedTail[1];
+        const normalizedToken = token.toLowerCase();
+        if (!DISPATCH_IMAGE_ADDRESS_TAIL_WHITELIST.has(normalizedToken) && token !== token.toUpperCase()) {
+          const prefix = text.slice(0, -attachedTail[1].length);
+          if (prefix && /[\s,，。\.；;：:、\-]|[\u4e00-\u9fa5]/.test(prefix)) {
+            text = prefix.trimEnd();
+            continue;
+          }
+        }
+      }
+      break;
+    }
+  }
+  return text
+    .replace(/\s*([：:])\s*/g, "$1")
+    .replace(/\s+/g, " ")
+    .replace(/[，,;；、\s]+$/g, "")
+    .trim();
+}
+
 function buildDispatchExcelLocation({ address = "", company = "", contact = "", defaultCity = "", defaultDistrict = "" } = {}) {
   const cleanAddress = cleanDispatchExcelCellText(address);
   if (!cleanAddress && !company && !contact) return "";
@@ -11328,14 +11399,16 @@ function recognizeDispatchExcelRows(rows = []) {
     startRow: unloadingStartIndex >= 0 ? unloadingStartIndex : 0,
     endRow: unloadingStartIndex >= 0 ? unloadingStartIndex + 6 : rows.length
   });
-  const arrivalValue = dispatchExcelValueAfterLabel(rows, ["到厂时间", "到廠時間"]);
-  const bookingValue = dispatchExcelValueAfterLabel(rows, ["约车时间", "約車時間"]);
-  const vehicleTypeValue = dispatchExcelValueAfterLabel(rows, ["车/柜型", "車/櫃型", "车型", "車型"]);
-  const portValue = dispatchExcelValueAfterLabel(rows, ["通关口岸", "通關口岸"]);
+  const loadingTimeValue = dispatchExcelValueAfterLabel(rows, ["装货时间", "裝貨時間", "装车时间", "裝車時間", "到厂时间", "到廠時間"], { followingRows: 2 });
+  const bookingValue = dispatchExcelValueAfterLabel(rows, ["约车时间", "約車時間"], { followingRows: 1 });
+  const vehicleTypeValue = dispatchExcelValueAfterLabel(rows, ["车/柜型", "車/櫃型", "车柜型", "車櫃型", "车型", "車型", "柜型", "櫃型"]);
+  const portValue = dispatchExcelValueAfterLabel(rows, ["通关口岸", "通關口岸", "口岸"], { followingRows: 1 });
+  const plateValue = dispatchExcelValueAfterLabel(rows, ["车牌", "車牌", "车牌号", "車牌號", "车号", "車號"], { followingRows: 1 });
+  const noteValue = dispatchExcelValueAfterLabel(rows, ["备注", "備注", "備註", "注意事项", "注意事項"], { followingRows: 4 });
   return {
     customer: matchDispatchExcelCustomer(allText),
-    date: normalizeDispatchExcelDate(arrivalValue) || normalizeDispatchExcelDate(bookingValue),
-    loadTime: normalizeDispatchExcelTime(arrivalValue),
+    date: normalizeDispatchExcelDate(loadingTimeValue) || normalizeDispatchExcelDate(bookingValue),
+    loadTime: normalizeDispatchExcelTime(loadingTimeValue) || normalizeDispatchExcelTime(bookingValue),
     loading: buildDispatchExcelLocation({
       address: loadingAddress,
       company: loadingCompany,
@@ -11348,8 +11421,13 @@ function recognizeDispatchExcelRows(rows = []) {
       defaultCity: "香港"
     }),
     direction: parseDispatchExcelDirection(rows),
-    tonnage: parseDispatchExcelTonnage(vehicleTypeValue),
-    port: parseDispatchExcelPort(portValue || allText)
+    tonnage: parseDispatchExcelTonnage(vehicleTypeValue || allText),
+    port: parseDispatchExcelPort(portValue || allText),
+    plate: normalizeDispatchRecognitionPlate(plateValue || allText),
+    quantity: parseDispatchRecognitionQuantity(allText),
+    weight: parseDispatchRecognitionWeight(allText),
+    needsWeighing: parseDispatchImageWeighing(allText),
+    note: noteValue
   };
 }
 
@@ -11451,11 +11529,12 @@ function cleanDispatchImageAddressBlock(value = "") {
     "口岸",
     "备注"
   ].map(normalizeDispatchExcelLookupText);
-  return compactDispatchOcrText(value)
+  const cleaned = compactDispatchOcrText(value)
     .split(/\n+/)
     .map((line) => normalizeDispatchImageAddressLine(line).replace(/^[：:\-—"'“”‘’|｜\s]+/, ""))
     .map((line) => line.replace(/^(装货地点|装货地址|送货地点|卸货地点|落货地点|落货地址)\s*[：:"'“”‘’|｜\s]*\s*/i, ""))
     .map((line) => line.replace(/^[：:\-—"'“”‘’|｜\s]+/, ""))
+    .map((line) => stripDispatchImageAddressTailArtifacts(line))
     .filter((line) => {
       if (!line) return false;
       const normalized = normalizeDispatchExcelLookupText(line);
@@ -11469,6 +11548,7 @@ function cleanDispatchImageAddressBlock(value = "") {
     .replace(/\s*([：:])\s*/g, "$1")
     .replace(/\s+/g, " ")
     .trim();
+  return stripDispatchImageAddressTailArtifacts(cleaned);
 }
 
 function collectDispatchImageLeadingContextLines(lines = [], startIndex = 0) {
@@ -11620,6 +11700,7 @@ function recognizeDispatchImageText(rawText = "") {
     tonnage: parseDispatchExcelTonnage(allText),
     quantity: parseDispatchRecognitionQuantity(allText),
     weight: parseDispatchRecognitionWeight(allText),
+    note: extractDispatchImageNoteText(allText),
     loading: buildDispatchImageLocation(trimDispatchMainlandLoadingText(loadingBlock)),
     unloading: buildDispatchImageLocation(unloadingBlock, { defaultCity: "香港" }),
     direction: parseDispatchImageDirection(allText, loadingBlock, unloadingBlock)
@@ -11665,6 +11746,71 @@ function dispatchRecognitionDetailOnlyLocation(value = "") {
   return detail ? composeDispatchLocationParts("", "", detail) : "";
 }
 
+function dispatchImageTextAfterLabel(line = "", label = "") {
+  const text = cleanDispatchExcelCellText(line);
+  const normalizedText = normalizeDispatchExcelLookupText(text);
+  const normalizedLabel = normalizeDispatchExcelLookupText(label);
+  if (!normalizedText || !normalizedLabel || !normalizedText.includes(normalizedLabel)) return "";
+  const colonIndex = text.search(/[：:]/);
+  if (colonIndex >= 0) {
+    const beforeColon = text.slice(0, colonIndex);
+    if (normalizeDispatchExcelLookupText(beforeColon).includes(normalizedLabel)) {
+      return text.slice(colonIndex + 1).trim();
+    }
+  }
+  const plainLabel = String(label || "").replace(/[：:]\s*$/, "").trim();
+  if (plainLabel) {
+    const escaped = plainLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const stripped = text.replace(new RegExp(`^\\s*${escaped}\\s*[：:]?\\s*`, "i"), "").trim();
+    if (stripped && stripped !== text) return stripped;
+  }
+  return "";
+}
+
+function stripDispatchImageWeightRemarkText(value = "") {
+  return normalizeDispatchImageAddressLine(value)
+    .replace(/(?:不?用|无须|无需|不需|免)?过磅/ig, "")
+    .replace(/^[：:\-—"'“”‘’|｜\s]+/, "")
+    .replace(/[，,；;、\s]+$/g, "")
+    .trim();
+}
+
+function extractDispatchImageNoteText(text = "") {
+  const source = compactDispatchOcrText(text);
+  if (!source) return "";
+  const lines = source.split(/\n+/).map(cleanDispatchExcelCellText).filter(Boolean);
+  const collected = [];
+  const remarkLine = lines.find((line) => {
+    const normalized = normalizeDispatchExcelLookupText(line);
+    return normalized.includes(normalizeDispatchExcelLookupText("备注")) && !normalized.includes(normalizeDispatchExcelLookupText("注意事项"));
+  });
+  if (remarkLine) {
+    const remark = stripDispatchImageWeightRemarkText(dispatchImageTextAfterLabel(remarkLine, "备注"));
+    if (remark) collected.push(remark);
+  }
+  const noteIndex = lines.findIndex((line) => normalizeDispatchExcelLookupText(line).includes(normalizeDispatchExcelLookupText("注意事项")));
+  if (noteIndex >= 0) {
+    const inline = dispatchImageTextAfterLabel(lines[noteIndex], "注意事项");
+    if (inline) collected.push(inline);
+    for (let index = noteIndex + 1; index < lines.length; index += 1) {
+      const line = normalizeDispatchImageAddressLine(lines[index]);
+      if (!line) continue;
+      const normalized = normalizeDispatchExcelLookupText(line);
+      if (isDispatchLikelyMetadataLine(line) && !/^\d+\s*[.、]/.test(line)) break;
+      if (normalized.includes(normalizeDispatchExcelLookupText("装货地点"))
+        || normalized.includes(normalizeDispatchExcelLookupText("装货地址"))
+        || normalized.includes(normalizeDispatchExcelLookupText("送货地点"))
+        || normalized.includes(normalizeDispatchExcelLookupText("卸货地点"))
+        || normalized.includes(normalizeDispatchExcelLookupText("落货地点"))
+        || normalized.includes(normalizeDispatchExcelLookupText("落货地址"))) {
+        break;
+      }
+      collected.push(line);
+    }
+  }
+  return appendUniqueDispatchExcelParts(collected).join(" ");
+}
+
 function applyDispatchExcelRecognition(result = {}, options = {}) {
   const sourceLabel = options.sourceLabel || "Excel";
   const filled = new Set();
@@ -11687,6 +11833,10 @@ function applyDispatchExcelRecognition(result = {}, options = {}) {
     dispatchForm[field] = text;
     filled.add(label);
   });
+  if (result.note) {
+    dispatchForm.note = cleanDispatchExcelCellText(result.note);
+    filled.add("备注");
+  }
   if (typeof result.needsWeighing === "boolean") {
     dispatchForm.needsWeighing = result.needsWeighing;
     filled.add("是否过磅");
@@ -25843,14 +25993,14 @@ function orderDetailFeeRows(order = {}) {
             </div>
             <div class="segmented statement-mode-tabs">
               <button
-                v-for="mode in STATEMENT_PERIOD_MODES"
+                v-for="mode in ORDER_DISPATCH_PERIOD_MODES"
                 :key="mode.key"
                 type="button"
                 :class="{ active: orderDateFilterMode === DATE_FILTER_MODE_PERIOD && orderPeriodMode === mode.key }"
                 @click="setOrderPeriodMode(mode.key)"
               >{{ mode.label }}</button>
             </div>
-            <label v-if="orderDateFilterMode === DATE_FILTER_MODE_PERIOD && orderPeriodMode !== 'all'">年份
+            <label v-if="orderDateFilterMode === DATE_FILTER_MODE_PERIOD && ['month', 'year'].includes(orderPeriodMode)">年份
               <select v-model="orderSelectedYear">
                 <option v-for="year in orderPeriodYearOptions" :key="year" :value="year">{{ year }}年</option>
               </select>
@@ -25859,6 +26009,13 @@ function orderDetailFeeRows(order = {}) {
               <select v-model="orderSelectedMonth">
                 <option v-for="item in statementMonthOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
               </select>
+            </label>
+            <label v-if="orderDateFilterMode === DATE_FILTER_MODE_PERIOD && orderPeriodMode === 'day'">日期
+              <input
+                type="date"
+                :value="periodFilterDay('orders')"
+                @change="setPeriodFilterDay('orders', $event.target.value)"
+              />
             </label>
           </div>
           <div class="order-top-actions">
@@ -26073,14 +26230,14 @@ function orderDetailFeeRows(order = {}) {
             </div>
             <div class="segmented statement-mode-tabs">
               <button
-                v-for="mode in STATEMENT_PERIOD_MODES"
+                v-for="mode in ORDER_DISPATCH_PERIOD_MODES"
                 :key="mode.key"
                 type="button"
                 :class="{ active: dispatchDateFilterMode === DATE_FILTER_MODE_PERIOD && dispatchRangePeriodMode === mode.key }"
                 @click="setDispatchRangePeriodMode(mode.key)"
               >{{ mode.label }}</button>
             </div>
-            <label v-if="dispatchDateFilterMode === DATE_FILTER_MODE_PERIOD && dispatchRangePeriodMode !== 'all'">年份
+            <label v-if="dispatchDateFilterMode === DATE_FILTER_MODE_PERIOD && ['month', 'year'].includes(dispatchRangePeriodMode)">年份
               <select v-model="dispatchRangeSelectedYear">
                 <option v-for="year in dispatchRangeYearOptions" :key="year" :value="year">{{ year }}年</option>
               </select>
@@ -26089,6 +26246,13 @@ function orderDetailFeeRows(order = {}) {
               <select v-model="dispatchRangeSelectedMonth">
                 <option v-for="item in statementMonthOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
               </select>
+            </label>
+            <label v-if="dispatchDateFilterMode === DATE_FILTER_MODE_PERIOD && dispatchRangePeriodMode === 'day'">日期
+              <input
+                type="date"
+                :value="periodFilterDay('dispatchRange')"
+                @change="setPeriodFilterDay('dispatchRange', $event.target.value)"
+              />
             </label>
           </div>
 
@@ -30996,7 +31160,7 @@ function orderDetailFeeRows(order = {}) {
                   </select>
                 </span>
               </label>
-              <label class="span-2">备注<input v-model.trim="dispatchForm.note" placeholder="备注" /></label>
+              <label class="span-2 dispatch-note-field">备注<textarea v-model.trim="dispatchForm.note" rows="2" placeholder="备注"></textarea></label>
               <label v-if="dispatchForm.vehicleSource === '外派车辆'">外派供应商<select v-model="dispatchForm.supplier"><option value=""></option><option v-for="customer in customerRows.filter((item) => item.type === '供应商')" :key="customer.id" :value="customer.name">{{ customerShortDisplay(customer) }}</option></select></label>
               <div class="dispatch-location-pair">
 	                <label class="dispatch-location-field" :class="{ 'is-disabled': !dispatchCustomerSelected }">

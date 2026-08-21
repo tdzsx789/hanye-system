@@ -11387,11 +11387,15 @@ tr.selected {
 .dispatch-edit-modal {
   width: min(1120px, calc(100vw - 48px));
   max-width: none;
-  overflow: visible;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .dispatch-edit-modal .modal-body {
-  overflow: visible;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 
 .dispatch-recognition-file-input,
@@ -11429,6 +11433,16 @@ tr.selected {
 .dispatch-date-picker-row input {
   min-height: 36px;
   line-height: 36px;
+}
+
+.dispatch-form-grid textarea {
+  min-height: 70px;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.dispatch-note-field {
+  align-content: start;
 }
 
 .dispatch-form-grid .span-2 {
