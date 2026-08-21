@@ -359,6 +359,7 @@ function mapCustomer(row) {
     customsImportPageFee: Number(row.customs_import_page_fee ?? customsDefaults.customsImportPageFee),
     customsExportPageFee: Number(row.customs_export_page_fee ?? customsDefaults.customsExportPageFee),
     customsVerificationFee: Number(row.customs_verification_fee ?? customsDefaults.customsVerificationFee),
+    customsCustomFields: normalizeCustomsBusinessCustomFields(row.customs_custom_fields),
     createdAt: row.created_at,
     invoice: {
       title: row.invoice_title || row.name || "",
@@ -369,6 +370,35 @@ function mapCustomer(row) {
       addressPhone: row.invoice_address_phone || row.address || ""
     }
   };
+}
+
+const customerColumnAvailability = new Map();
+
+async function tableColumnExists(table, column) {
+  const tableName = String(table || "").trim();
+  const columnName = String(column || "").trim();
+  if (!tableName || !columnName) return false;
+  const key = `${tableName}.${columnName}`;
+  if (!customerColumnAvailability.has(key)) {
+    const row = await db.prepare(`
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = ?
+        AND column_name = ?
+      LIMIT 1
+    `).get(tableName, columnName);
+    customerColumnAvailability.set(key, Boolean(row));
+  }
+  return customerColumnAvailability.get(key);
+}
+
+async function customerColumnExists(column) {
+  return tableColumnExists("customers", column);
+}
+
+async function customsBusinessColumnExists(column) {
+  return tableColumnExists("customs_businesses", column);
 }
 
 function normalizeCustomerPayload(body, id = "") {
@@ -410,6 +440,8 @@ function normalizeCustomerPayload(body, id = "") {
     customsImportPageFee: numericOrDefault(body.customsImportPageFee ?? body.customs_import_page_fee, 30),
     customsExportPageFee: numericOrDefault(body.customsExportPageFee ?? body.customs_export_page_fee, 30),
     customsVerificationFee: numericOrDefault(body.customsVerificationFee ?? body.customs_verification_fee, 0),
+    customsCustomFields: normalizeCustomsBusinessCustomFields(body.customsCustomFields ?? body.customs_custom_fields),
+    customsCustomFieldsJson: JSON.stringify(normalizeCustomsBusinessCustomFields(body.customsCustomFields ?? body.customs_custom_fields)),
     createdAt: body.createdAt || todayInputValue(),
     invoiceTitle: String(body.invoiceTitle || invoice.title || name).trim(),
     invoiceTaxNo: String(body.invoiceTax || invoice.taxNo || taxNo).trim(),
@@ -3185,6 +3217,16 @@ function mapStatementDownload(row) {
 }
 
 function mapCustomsBusiness(row) {
+  const customFields = normalizeCustomsBusinessCustomFields(row.custom_fields);
+  const knownTotalWithoutHomeFee = Number(row.customs_fee || 0)
+    + Number(row.page_fee || 0)
+    + Number(row.manifest_fee || 0)
+    + Number(row.inspection_fee || 0)
+    + Number(row.check_fee || 0)
+    + Number(row.verification_fee || 0)
+    + customsBusinessCustomFieldsTotal(customFields);
+  const inferredHomeFee = Math.max(0, Number(row.total || 0) - knownTotalWithoutHomeFee);
+  const homeFee = Number(row.home_fee || 0) || inferredHomeFee;
   return {
     id: row.id,
     date: row.business_date || "",
@@ -3194,6 +3236,7 @@ function mapCustomsBusiness(row) {
     direction: row.direction || "",
     itemCount: Number(row.item_count || 0),
     pageCount: Number(row.page_count || 0),
+    homeFee,
     customsFee: Number(row.customs_fee || 0),
     pageFee: Number(row.page_fee || 0),
     manifestFee: Number(row.manifest_fee || 0),
@@ -3201,7 +3244,7 @@ function mapCustomsBusiness(row) {
     checkFee: Number(row.check_fee || 0),
     verificationFee: Number(row.verification_fee || 0),
     otherFee: Number(row.other_fee || 0),
-    customFields: normalizeCustomsBusinessCustomFields(row.custom_fields),
+    customFields,
     total: Number(row.total || 0),
     remark: row.remark || "",
     createdAt: row.created_at || "",
@@ -4588,13 +4631,14 @@ app.post("/api/customs-businesses", async (req, res) => {
     res.status(400).json({ message: "请填写报关单号或六联单号" });
     return;
   }
+  const hasHomeFee = await customsBusinessColumnExists("home_fee");
   const result = await db.prepare(`
     INSERT INTO customs_businesses
       (business_date, declaration_no, six_sheet_no, company, direction, item_count, page_count,
-       customs_fee, page_fee, manifest_fee, inspection_fee, check_fee, verification_fee, other_fee, custom_fields, total, remark)
+       ${hasHomeFee ? "home_fee, " : ""}customs_fee, page_fee, manifest_fee, inspection_fee, check_fee, verification_fee, other_fee, custom_fields, total, remark)
     VALUES
       (@date, @declarationNo, @sixSheetNo, @company, @direction, @itemCount, @pageCount,
-       @customsFee, @pageFee, @manifestFee, @inspectionFee, @checkFee, @verificationFee, @otherFee, @customFieldsJson, @total, @remark)
+       ${hasHomeFee ? "@homeFee, " : ""}@customsFee, @pageFee, @manifestFee, @inspectionFee, @checkFee, @verificationFee, @otherFee, @customFieldsJson, @total, @remark)
   `).run(item);
   await writeAudit("create", "customs_business", String(result.lastInsertId), `${item.date}/${item.company}/${item.declarationNo || item.sixSheetNo}`);
   const row = await db.prepare("SELECT * FROM customs_businesses WHERE id = ?").get(result.lastInsertId);
@@ -4619,6 +4663,7 @@ app.put("/api/customs-businesses/:id", async (req, res) => {
     return;
   }
 
+  const hasHomeFee = await customsBusinessColumnExists("home_fee");
   await db.prepare(`
     UPDATE customs_businesses
     SET business_date = @date,
@@ -4628,6 +4673,7 @@ app.put("/api/customs-businesses/:id", async (req, res) => {
         direction = @direction,
         item_count = @itemCount,
         page_count = @pageCount,
+        ${hasHomeFee ? "home_fee = @homeFee," : ""}
         customs_fee = @customsFee,
         page_fee = @pageFee,
         manifest_fee = @manifestFee,
@@ -5051,6 +5097,8 @@ app.patch("/api/customers/:id", async (req, res) => {
     return;
   }
 
+  const hasCustomsVerificationFee = await customerColumnExists("customs_verification_fee");
+  const hasCustomsCustomFields = await customerColumnExists("customs_custom_fields");
   const result = await db.prepare(`
     UPDATE customers
     SET type = @type,
@@ -5079,8 +5127,9 @@ app.patch("/api/customers/:id", async (req, res) => {
         customs_import_home_fee = @customsImportHomeFee,
         customs_export_home_fee = @customsExportHomeFee,
         customs_import_page_fee = @customsImportPageFee,
-        customs_export_page_fee = @customsExportPageFee,
-        customs_verification_fee = @customsVerificationFee
+        customs_export_page_fee = @customsExportPageFee
+        ${hasCustomsVerificationFee ? ", customs_verification_fee = @customsVerificationFee" : ""}
+        ${hasCustomsCustomFields ? ", customs_custom_fields = @customsCustomFieldsJson" : ""}
     WHERE id = @id AND deleted_at IS NULL
   `).run(item);
   if (result.changes === 0) {
@@ -5099,19 +5148,21 @@ app.post("/api/customers", async (req, res) => {
     return;
   }
 
+  const hasCustomsVerificationFee = await customerColumnExists("customs_verification_fee");
+  const hasCustomsCustomFields = await customerColumnExists("customs_custom_fields");
   await db.prepare(`
     INSERT INTO customers
       (id, type, customer_category, name, short_name, province, city, address, term, settlement_currency, receivable_rmb, receivable_hkd, recent_order, created_at,
        tax_no, contact, mobile, driver_wage_adjust_hkd, default_template_id,
        invoice_title, invoice_tax_no, invoice_bank, invoice_account, invoice_address_phone,
        customs_home_item_count, customs_page_item_count, customs_import_home_fee, customs_export_home_fee,
-       customs_import_page_fee, customs_export_page_fee, customs_verification_fee)
+       customs_import_page_fee, customs_export_page_fee${hasCustomsVerificationFee ? ", customs_verification_fee" : ""}${hasCustomsCustomFields ? ", customs_custom_fields" : ""})
     VALUES
       (@id, @type, @customerCategory, @name, @shortName, @province, @city, @address, @term, @settlementCurrency, @receivableRMB, @receivableHKD, @recentOrder, @createdAt,
        @taxNo, @contact, @mobile, @driverWageAdjustHKD, @defaultTemplateId,
        @invoiceTitle, @invoiceTaxNo, @invoiceBank, @invoiceAccount, @invoiceAddressPhone,
        @customsHomeItemCount, @customsPageItemCount, @customsImportHomeFee, @customsExportHomeFee,
-       @customsImportPageFee, @customsExportPageFee, @customsVerificationFee)
+       @customsImportPageFee, @customsExportPageFee${hasCustomsVerificationFee ? ", @customsVerificationFee" : ""}${hasCustomsCustomFields ? ", @customsCustomFieldsJson" : ""})
   `).run(item);
   await writeAudit("create", "customer", item.id, item.name);
   res.status(201).json(mapCustomer(await db.prepare("SELECT * FROM customers WHERE id = ?").get(item.id)));

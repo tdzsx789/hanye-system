@@ -638,6 +638,23 @@ function customerCategoryValue(customer = {}) {
   return customer?.type === "客户" ? normalizeCustomerCategory(customer.customerCategory || customer.customer_category) : "";
 }
 
+function customerMatchesCategory(customer = {}, category = "运输客户") {
+  return customer?.type === "客户" && customerCategoryValue(customer) === normalizeCustomerCategory(category);
+}
+
+function customerNameMatchesCategory(value = "", category = "运输客户") {
+  const text = String(value || "").trim();
+  if (!text) return false;
+  return customerRows.value.some((item) =>
+    customerMatchesCategory(item, category)
+    && (
+      String(item.name || "").trim() === text
+      || String(item.shortName || item.short_name || "").trim() === text
+      || String(item.id || "").trim() === text
+    )
+  );
+}
+
 function normalizeCustomerRecord(customer = {}) {
   const row = customer || {};
   return {
@@ -650,7 +667,8 @@ function normalizeCustomerRecord(customer = {}) {
     customsExportHomeFee: Number(row.customsExportHomeFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportHomeFee),
     customsImportPageFee: Number(row.customsImportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee),
     customsExportPageFee: Number(row.customsExportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee),
-    customsVerificationFee: Number(row.customsVerificationFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee)
+    customsVerificationFee: Number(row.customsVerificationFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee),
+    customsCustomFields: normalizeCustomsBusinessCustomFields(row.customsCustomFields || row.customs_custom_fields)
   };
 }
 
@@ -697,11 +715,12 @@ function supplierDisplayLabel(value = "") {
   return partnerDisplayLabel(value, "供应商") || String(value || "").trim();
 }
 
-function findPartnerByTypedLabel(value = "", type = "") {
+function findPartnerByTypedLabel(value = "", type = "", category = "") {
   const text = String(value || "").trim();
   if (!text) return null;
   return customerRows.value.find((item) =>
     (!type || item.type === type) &&
+    (!category || type !== "客户" || customerMatchesCategory(item, category)) &&
     (
       String(item.name || "").trim() === text
       || String(item.shortName || item.short_name || "").trim() === text
@@ -1476,6 +1495,7 @@ function blankCustomsBusinessForm() {
     direction: "",
     itemCount: 0,
     pageCount: 0,
+    homeFee: 0,
     customsFee: 0,
     pageFee: 0,
     manifestFee: 0,
@@ -1489,6 +1509,12 @@ function blankCustomsBusinessForm() {
 }
 
 const customsBusinessForm = reactive(blankCustomsBusinessForm());
+const customsBusinessAutoCharges = reactive({
+  homeFee: 0,
+  pageCount: 0,
+  pageFee: 0,
+  verificationFee: 0
+});
 
 function createBlankOtherBusinessCustomField() {
   return {
@@ -1538,6 +1564,7 @@ const customerForm = reactive({
   customsImportPageFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee,
   customsExportPageFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee,
   customsVerificationFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee,
+  customsCustomFields: [],
   invoicePasteText: ""
 });
 
@@ -3446,6 +3473,7 @@ const dispatchPlanDisplayRows = computed(() =>
 
 const dispatchCustomerFilterOptions = computed(() =>
   dispatchFilterOptionValues(dispatchPlanDisplayRows.value, dispatchCustomerFilterValues)
+    .filter((customer) => customerNameMatchesCategory(customer, "运输客户"))
 );
 
 const dispatchPlateFilterOptions = computed(() =>
@@ -5846,7 +5874,12 @@ function preventCustomsBusinessDecimalInput(event) {
 
 function normalizeCustomsBusinessIntegerInput(target, key, event) {
   if (!target || !key) return;
-  const nextValue = customsBusinessIntegerValue(event?.target?.value ?? target[key]);
+  const rawValue = event?.target?.value ?? target[key];
+  if (String(rawValue ?? "") === "") {
+    target[key] = "";
+    return;
+  }
+  const nextValue = customsBusinessIntegerValue(rawValue);
   target[key] = nextValue;
   if (event?.target && event.target.value !== String(nextValue)) {
     event.target.value = String(nextValue);
@@ -5857,6 +5890,7 @@ function normalizeCustomsBusinessFormIntegers() {
   [
     "itemCount",
     "pageCount",
+    "homeFee",
     "customsFee",
     "pageFee",
     "manifestFee",
@@ -5900,6 +5934,13 @@ function customBusinessHasIncompleteCustomField() {
     );
 }
 
+function customerHasIncompleteCustomsCustomField() {
+  return Array.isArray(customerForm.customsCustomFields)
+    && customerForm.customsCustomFields.some((field) =>
+      !customsBusinessCustomFieldName(field) && customsBusinessCustomFieldAmount(field) !== 0
+    );
+}
+
 function addCustomsBusinessCustomField() {
   if (!Array.isArray(customsBusinessForm.customFields)) {
     customsBusinessForm.customFields = [];
@@ -5912,8 +5953,20 @@ function removeCustomsBusinessCustomField(index) {
   customsBusinessForm.customFields.splice(index, 1);
 }
 
+function addCustomerCustomsCustomField() {
+  if (!Array.isArray(customerForm.customsCustomFields)) {
+    customerForm.customsCustomFields = [];
+  }
+  customerForm.customsCustomFields.push(createBlankCustomsBusinessCustomField());
+}
+
+function removeCustomerCustomsCustomField(index) {
+  if (!Array.isArray(customerForm.customsCustomFields)) return;
+  customerForm.customsCustomFields.splice(index, 1);
+}
+
 const customsBusinessFormTotal = computed(() =>
-  customsBusinessIntegerValue(customsBusinessHomeFee.value)
+  Number(customsBusinessForm.homeFee || 0)
   + Number(customsBusinessForm.pageFee || 0)
   + Number(customsBusinessForm.customsFee || 0)
   + Number(customsBusinessForm.manifestFee || 0)
@@ -5991,13 +6044,24 @@ function handleCustomsBusinessCompanyInput(event) {
   customsBusinessCompanyPickerOpen.value = true;
   const exactCustomer = findCustomsBusinessCustomerByName(value);
   customsBusinessForm.company = exactCustomer ? exactCustomer.name : "";
+  if (exactCustomer) applyCustomsBusinessCustomerDefaultFields(exactCustomer);
 }
 
 function selectCustomsBusinessCompany(customer) {
   const company = String(customer?.name || "").trim();
   customsBusinessForm.company = company;
   customsBusinessCompanySearch.value = customerShortDisplay(customer) || company;
+  applyCustomsBusinessCustomerDefaultFields(customer);
   customsBusinessCompanyPickerOpen.value = false;
+}
+
+function applyCustomsBusinessCustomerDefaultFields(customer = customsBusinessSelectedCustomer.value) {
+  if (!customer || editingCustomsBusinessId.value || copyingCustomsBusinessId.value) return;
+  const defaults = normalizeCustomsBusinessCustomFields(customer.customsCustomFields);
+  customsBusinessForm.customFields = defaults.map((field) => ({
+    name: field.name,
+    value: customsBusinessIntegerValue(field.value)
+  }));
 }
 
 function clearCustomsBusinessCompany() {
@@ -6076,32 +6140,50 @@ const calculatedCustomsBusinessPageFee = computed(() =>
   calculatedCustomsBusinessPageCount.value * customsBusinessPageUnitFee.value
 );
 
-const customsBusinessHomeFeeDisplay = computed(() => {
-  if (!customsBusinessSelectedCustomer.value || !customsBusinessDirectionFeeType()) return "";
-  return money(customsBusinessIntegerValue(customsBusinessHomeFee.value));
-});
+function calculatedCustomsBusinessChargeValues() {
+  const feeType = customsBusinessDirectionFeeType();
+  return {
+    homeFee: customsBusinessHomeFee.value,
+    pageCount: feeType ? calculatedCustomsBusinessPageCount.value : 0,
+    pageFee: feeType ? calculatedCustomsBusinessPageFee.value : 0,
+    verificationFee: customsBusinessConfiguredVerificationFee()
+  };
+}
 
-function syncCalculatedCustomsBusinessCharges() {
-  const nextVerificationFee = customsBusinessConfiguredVerificationFee();
-  if (Number(customsBusinessForm.verificationFee || 0) !== nextVerificationFee) {
-    customsBusinessForm.verificationFee = nextVerificationFee;
+function setCustomsBusinessAutoChargeBaseline(values = {}) {
+  customsBusinessAutoCharges.homeFee = customsBusinessIntegerValue(values.homeFee);
+  customsBusinessAutoCharges.pageCount = customsBusinessIntegerValue(values.pageCount);
+  customsBusinessAutoCharges.pageFee = customsBusinessIntegerValue(values.pageFee);
+  customsBusinessAutoCharges.verificationFee = customsBusinessIntegerValue(values.verificationFee);
+}
+
+function maybeApplyCustomsBusinessAutoCharge(key, value, options = {}) {
+  const nextValue = customsBusinessIntegerValue(value);
+  const currentValue = customsBusinessIntegerValue(customsBusinessForm[key]);
+  const previousAutoValue = customsBusinessIntegerValue(customsBusinessAutoCharges[key]);
+  const shouldApply = options.force || currentValue === previousAutoValue;
+  if (shouldApply && currentValue !== nextValue) {
+    customsBusinessForm[key] = nextValue;
   }
+  if (shouldApply) {
+    customsBusinessAutoCharges[key] = nextValue;
+  }
+}
+
+function syncCalculatedCustomsBusinessCharges(options = {}) {
+  const calculated = calculatedCustomsBusinessChargeValues();
+  maybeApplyCustomsBusinessAutoCharge("homeFee", calculated.homeFee, options);
+  maybeApplyCustomsBusinessAutoCharge("verificationFee", calculated.verificationFee, options);
   const feeType = customsBusinessDirectionFeeType();
   if (!feeType) {
     if (!String(customsBusinessForm.direction || "").trim()) {
-      customsBusinessForm.pageCount = 0;
-      customsBusinessForm.pageFee = 0;
+      maybeApplyCustomsBusinessAutoCharge("pageCount", 0, options);
+      maybeApplyCustomsBusinessAutoCharge("pageFee", 0, options);
     }
     return;
   }
-  const nextPageCount = calculatedCustomsBusinessPageCount.value;
-  const nextPageFee = customsBusinessIntegerValue(calculatedCustomsBusinessPageFee.value);
-  if (Number(customsBusinessForm.pageCount || 0) !== nextPageCount) {
-    customsBusinessForm.pageCount = nextPageCount;
-  }
-  if (Number(customsBusinessForm.pageFee || 0) !== nextPageFee) {
-    customsBusinessForm.pageFee = nextPageFee;
-  }
+  maybeApplyCustomsBusinessAutoCharge("pageCount", calculated.pageCount, options);
+  maybeApplyCustomsBusinessAutoCharge("pageFee", calculated.pageFee, options);
 }
 
 watch(
@@ -6323,6 +6405,7 @@ function resetCustomsBusinessColumnOrder() {
 
 const customsBusinessCompanyFilterOptions = computed(() =>
   orderFilterOptionValues(customsBusinessRows.value, customsBusinessNameValues)
+    .filter((company) => customerNameMatchesCategory(company, "报关客户"))
 );
 
 const customsBusinessDirectionFilterOptions = computed(() =>
@@ -10812,7 +10895,7 @@ const showCustomerDetailPrimaryAction = computed(() => {
 const orderCustomerOptions = computed(() => {
   const keyword = normalizeLocationText(orderCustomerKeyword.value);
   return customerRows.value
-    .filter((item) => item.type === "客户")
+    .filter((item) => customerMatchesCategory(item, "运输客户"))
     .filter((item) => {
       if (!keyword) return true;
       return normalizeLocationText([item.id, item.name, item.shortName, item.taxNo, item.mobile, item.contact].join(" ")).includes(keyword);
@@ -10834,7 +10917,7 @@ const orderSupplierOptions = computed(() => {
 const dispatchCustomerOptions = computed(() => {
   const keyword = normalizeLocationText(dispatchCustomerKeyword.value);
   return customerRows.value
-    .filter((item) => item.type === "客户")
+    .filter((item) => customerMatchesCategory(item, "运输客户"))
     .filter((item) => {
       if (!keyword) return true;
       return normalizeLocationText([item.id, item.name, item.shortName, item.taxNo, item.mobile, item.contact, item.type].join(" ")).includes(keyword);
@@ -10938,7 +11021,8 @@ function orderRowsForFilterOptions(excludedFilter = "") {
 }
 
 const orderCustomerFilterOptions = computed(() => {
-  return orderFilterOptionValues(orderRowsForFilterOptions("customer"), (item) => [item.customer]);
+  return orderFilterOptionValues(orderRowsForFilterOptions("customer"), (item) => [item.customer])
+    .filter((customer) => customerNameMatchesCategory(customer, "运输客户"));
 });
 
 const orderPlateFilterOptions = computed(() =>
@@ -10994,7 +11078,7 @@ function selectDispatchCustomer(customer) {
 }
 
 function handleDispatchCustomerInput() {
-  const customer = findPartnerByTypedLabel(dispatchCustomerKeyword.value, "客户");
+  const customer = findPartnerByTypedLabel(dispatchCustomerKeyword.value, "客户", "运输客户");
   dispatchForm.customer = customer?.name || dispatchCustomerKeyword.value;
   dispatchForm.customerId = customer?.id || "";
   dispatchCustomerPickerOpen.value = true;
@@ -17391,6 +17475,7 @@ async function loadAllCustomsBusinesses(options = {}) {
 
 function resetCustomsBusinessForm() {
   Object.assign(customsBusinessForm, blankCustomsBusinessForm());
+  setCustomsBusinessAutoChargeBaseline(customsBusinessForm);
   editingCustomsBusinessId.value = "";
   copyingCustomsBusinessId.value = "";
   customsBusinessCompanySearch.value = "";
@@ -17406,6 +17491,7 @@ function assignCustomsBusinessForm(row = {}) {
     direction: row.direction || "",
     itemCount: customsBusinessIntegerValue(row.itemCount),
     pageCount: customsBusinessIntegerValue(row.pageCount),
+    homeFee: customsBusinessIntegerValue(row.homeFee),
     customsFee: customsBusinessIntegerValue(row.customsFee),
     pageFee: customsBusinessIntegerValue(row.pageFee),
     manifestFee: customsBusinessIntegerValue(row.manifestFee),
@@ -17417,6 +17503,7 @@ function assignCustomsBusinessForm(row = {}) {
       .map((field) => ({ name: field.name, value: customsBusinessIntegerValue(field.value) })),
     remark: row.remark || ""
   });
+  setCustomsBusinessAutoChargeBaseline(calculatedCustomsBusinessChargeValues());
   customsBusinessCompanySearch.value = partnerDisplayLabel(row.company || "", "客户") || String(row.company || "");
   customsBusinessCompanyPickerOpen.value = false;
 }
@@ -17451,6 +17538,7 @@ function openCustomsBusinessModal() {
   customsBusinessForm.date = periodFilterDateValue(customsBusinessPeriodFilter.value);
   customsBusinessCompanySearch.value = "";
   customsBusinessCompanyPickerOpen.value = false;
+  syncCalculatedCustomsBusinessCharges({ force: true });
   customsBusinessModalOpen.value = true;
 }
 
@@ -17496,8 +17584,6 @@ async function saveCustomsBusiness() {
     return;
   }
   normalizeCustomsBusinessFormIntegers();
-  syncCalculatedCustomsBusinessCharges();
-  normalizeCustomsBusinessFormIntegers();
   const customFields = normalizeCustomsBusinessCustomFields(customsBusinessForm.customFields);
   try {
     customsBusinessSaving.value = true;
@@ -17506,7 +17592,7 @@ async function saveCustomsBusiness() {
     const payload = {
       ...customsBusinessForm,
       company,
-      homeFee: customsBusinessIntegerValue(customsBusinessHomeFee.value),
+      homeFee: customsBusinessIntegerValue(customsBusinessForm.homeFee),
       customFields,
       total: customsBusinessFormTotal.value
     };
@@ -18617,6 +18703,7 @@ function buildCustomerPayload() {
     customsImportPageFee: customerConfigNumber(customerForm.customsImportPageFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee),
     customsExportPageFee: customerConfigNumber(customerForm.customsExportPageFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee),
     customsVerificationFee: customerConfigNumber(customerForm.customsVerificationFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee),
+    customsCustomFields: normalizeCustomsBusinessCustomFields(customerForm.customsCustomFields),
     invoice: {
       title: customerForm.invoiceTitle || customerForm.name,
       taxNo: customerForm.invoiceTax,
@@ -18736,6 +18823,8 @@ function openCustomerModal(customer = null, createType = activePartnerType.value
     customsImportPageFee: Number(customer?.customsImportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee),
     customsExportPageFee: Number(customer?.customsExportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee),
     customsVerificationFee: Number(customer?.customsVerificationFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee),
+    customsCustomFields: normalizeCustomsBusinessCustomFields(customer?.customsCustomFields)
+      .map((field) => ({ name: field.name, value: customsBusinessIntegerValue(field.value) })),
     invoicePasteText: ""
   });
   customerModalOpen.value = true;
@@ -18747,6 +18836,10 @@ function handleCustomerProvinceChange() {
 
 async function saveCustomer() {
   try {
+    if (customerHasIncompleteCustomsCustomField()) {
+      notify("请填写自定义类型名称，或删除空白类型");
+      return;
+    }
     loading.value = true;
     const payload = buildCustomerPayload();
     const item = normalizeCustomerRecord(editingCustomerId.value
@@ -18824,7 +18917,7 @@ function openOrderCustomerPicker() {
 }
 
 function handleOrderCustomerInput() {
-  const customer = findPartnerByTypedLabel(orderCustomerKeyword.value, "客户");
+  const customer = findPartnerByTypedLabel(orderCustomerKeyword.value, "客户", "运输客户");
   orderForm.customerId = customer?.id || "";
   orderForm.customer = customer?.name || orderCustomerKeyword.value;
   orderCustomerPickerOpen.value = true;
@@ -31014,6 +31107,21 @@ function orderDetailFeeRows(order = {}) {
                 <label>核注费
                   <input v-model.number="customerForm.customsVerificationFee" type="number" min="0" step="0.01" />
                 </label>
+                <div class="span-6 customs-business-custom-fields">
+                  <div class="customs-business-custom-head">
+                    <span>自定义类型默认值</span>
+                    <button class="ghost-btn small" type="button" @click="addCustomerCustomsCustomField"><IconSvg name="plus" />新增类型</button>
+                  </div>
+                  <div v-if="customerForm.customsCustomFields.length" class="customs-business-custom-list">
+                    <div v-for="(field, index) in customerForm.customsCustomFields" :key="index" class="customs-business-custom-row">
+                      <label>类型名称<input v-model.trim="field.name" placeholder="例如：查验服务费" /></label>
+                      <label>默认值<input v-model.number="field.value" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(field, 'value', $event)" /></label>
+                      <button class="icon-btn icon-only danger" type="button" title="删除类型" aria-label="删除类型" @click="removeCustomerCustomsCustomField(index)">
+                        <IconSvg name="trash" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
               </template>
               <label class="span-6">复制文本识别
                 <textarea
@@ -32840,14 +32948,14 @@ function orderDetailFeeRows(order = {}) {
 	          </label>
 	          <label>进出口<select v-model="customsBusinessForm.direction"><option value=""></option><option>进口</option><option>出口</option><option>金二进口</option><option>金二出口</option></select></label>
 	          <label>品名项数<input v-model.number="customsBusinessForm.itemCount" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'itemCount', $event)" /></label>
-	          <label>续页<input :value="customsBusinessForm.pageCount" type="number" min="0" step="1" readonly /></label>
-	          <label>续页费<input :value="money(customsBusinessForm.pageFee)" readonly /></label>
-	          <label>主页费用<input :value="customsBusinessHomeFeeDisplay" readonly /></label>
+	          <label>续页<input v-model.number="customsBusinessForm.pageCount" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'pageCount', $event)" /></label>
+	          <label>续页费<input v-model.number="customsBusinessForm.pageFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'pageFee', $event)" /></label>
+	          <label>主页费用<input v-model.number="customsBusinessForm.homeFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'homeFee', $event)" /></label>
 	          <label>报关费<input v-model.number="customsBusinessForm.customsFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'customsFee', $event)" /></label>
 	          <label>舱单费<input v-model.number="customsBusinessForm.manifestFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'manifestFee', $event)" /></label>
 	          <label>报检费<input v-model.number="customsBusinessForm.inspectionFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'inspectionFee', $event)" /></label>
 	          <label>查验费<input v-model.number="customsBusinessForm.checkFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'checkFee', $event)" /></label>
-	          <label v-if="customsBusinessShowsVerificationFee">核注费<input :value="money(customsBusinessForm.verificationFee)" readonly /></label>
+	          <label v-if="customsBusinessShowsVerificationFee">核注费<input v-model.number="customsBusinessForm.verificationFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'verificationFee', $event)" /></label>
 	          <label>其他费用<input v-model.number="customsBusinessForm.otherFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'otherFee', $event)" /></label>
 	          <div class="span-4 customs-business-custom-fields">
 	            <div class="customs-business-custom-head">

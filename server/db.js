@@ -570,6 +570,7 @@ async function initializeSchema() {
       customs_import_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30,
       customs_export_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30,
       customs_verification_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
+      customs_custom_fields TEXT NOT NULL DEFAULT '[]',
       created_at TEXT NOT NULL DEFAULT (CURRENT_DATE::text),
       deleted_at TEXT
     );
@@ -832,6 +833,7 @@ async function initializeSchema() {
       direction TEXT NOT NULL DEFAULT '',
       item_count DOUBLE PRECISION NOT NULL DEFAULT 0,
       page_count DOUBLE PRECISION NOT NULL DEFAULT 0,
+      home_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
       customs_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
       page_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
       manifest_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
@@ -1136,7 +1138,8 @@ async function initializeSchema() {
       "customs_export_home_fee DOUBLE PRECISION NOT NULL DEFAULT 150",
       "customs_import_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30",
       "customs_export_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30",
-      "customs_verification_fee DOUBLE PRECISION NOT NULL DEFAULT 0"
+      "customs_verification_fee DOUBLE PRECISION NOT NULL DEFAULT 0",
+      "customs_custom_fields TEXT NOT NULL DEFAULT '[]'"
     ],
     files: [
       "storage_provider TEXT NOT NULL DEFAULT 'oss'",
@@ -1146,6 +1149,7 @@ async function initializeSchema() {
     ],
     customs_businesses: [
       "custom_fields TEXT NOT NULL DEFAULT '[]'",
+      "home_fee DOUBLE PRECISION NOT NULL DEFAULT 0",
       "verification_fee DOUBLE PRECISION NOT NULL DEFAULT 0",
       "deleted_at TEXT"
     ],
