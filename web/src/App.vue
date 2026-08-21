@@ -245,7 +245,6 @@ const CUSTOMS_BUSINESS_PREFIX_COLUMNS = [
   { key: "pageCount", label: "续页", width: 72 },
   { key: "pageFee", label: "续页费", width: 92, amount: true },
   { key: "customsFee", label: "报关费", width: 92, amount: true },
-  { key: "manifestFee", label: "舱单费", width: 92, amount: true },
   { key: "inspectionFee", label: "报检费", width: 92, amount: true },
   { key: "checkFee", label: "查验费", width: 92, amount: true },
   { key: "verificationFee", label: "核注费", width: 92, amount: true },
@@ -1498,7 +1497,6 @@ function blankCustomsBusinessForm() {
     homeFee: 0,
     customsFee: 0,
     pageFee: 0,
-    manifestFee: 0,
     inspectionFee: 0,
     checkFee: 0,
     verificationFee: 0,
@@ -5893,7 +5891,6 @@ function normalizeCustomsBusinessFormIntegers() {
     "homeFee",
     "customsFee",
     "pageFee",
-    "manifestFee",
     "inspectionFee",
     "checkFee",
     "verificationFee",
@@ -5969,7 +5966,6 @@ const customsBusinessFormTotal = computed(() =>
   Number(customsBusinessForm.homeFee || 0)
   + Number(customsBusinessForm.pageFee || 0)
   + Number(customsBusinessForm.customsFee || 0)
-  + Number(customsBusinessForm.manifestFee || 0)
   + Number(customsBusinessForm.inspectionFee || 0)
   + Number(customsBusinessForm.checkFee || 0)
   + (customsBusinessShowsVerificationFee.value ? Number(customsBusinessForm.verificationFee || 0) : 0)
@@ -6340,7 +6336,6 @@ function customsBusinessCellText(row = {}, column = {}) {
     pageCount: row.pageCount || "",
     customsFee: money(row.customsFee),
     pageFee: money(row.pageFee),
-    manifestFee: money(row.manifestFee),
     inspectionFee: money(row.inspectionFee),
     checkFee: money(row.checkFee),
     verificationFee: money(row.verificationFee),
@@ -9783,7 +9778,7 @@ const bossDashboardCustomsRevenueRows = computed(() =>
       customsFee: moneyRmbDisplay(row.customsFee || 0),
       pageFee: moneyRmbDisplay(row.pageFee || 0),
       verificationFee: moneyRmbDisplay(row.verificationFee || 0),
-      otherFee: moneyRmbDisplay(Number(row.manifestFee || 0) + Number(row.inspectionFee || 0) + Number(row.checkFee || 0) + Number(row.otherFee || 0)),
+      otherFee: moneyRmbDisplay(Number(row.inspectionFee || 0) + Number(row.checkFee || 0) + Number(row.otherFee || 0)),
       total: moneyRmbDisplay(row.total || 0),
       totalValue: Number(row.total || 0)
     }))
@@ -10067,7 +10062,6 @@ function buildCustomsStatementRows(sourceRows = []) {
       declarationCount: 0,
       customsFee: 0,
       pageFee: 0,
-      manifestFee: 0,
       inspectionFee: 0,
       checkFee: 0,
       verificationFee: 0,
@@ -10078,7 +10072,6 @@ function buildCustomsStatementRows(sourceRows = []) {
     if (item.declarationNo || item.sixSheetNo) row.declarationCount += 1;
     row.customsFee += Number(item.customsFee || 0);
     row.pageFee += Number(item.pageFee || 0);
-    row.manifestFee += Number(item.manifestFee || 0);
     row.inspectionFee += Number(item.inspectionFee || 0);
     row.checkFee += Number(item.checkFee || 0);
     row.verificationFee += Number(item.verificationFee || 0);
@@ -17494,7 +17487,6 @@ function assignCustomsBusinessForm(row = {}) {
     homeFee: customsBusinessIntegerValue(row.homeFee),
     customsFee: customsBusinessIntegerValue(row.customsFee),
     pageFee: customsBusinessIntegerValue(row.pageFee),
-    manifestFee: customsBusinessIntegerValue(row.manifestFee),
     inspectionFee: customsBusinessIntegerValue(row.inspectionFee),
     checkFee: customsBusinessIntegerValue(row.checkFee),
     verificationFee: customsBusinessIntegerValue(row.verificationFee),
@@ -21670,7 +21662,6 @@ const CUSTOMS_STATEMENT_EXPORT_HEADERS = [
   "续页",
   "续页费",
   "报关费",
-  "舱单费",
   "报检费",
   "查验费",
   "核注费",
@@ -21691,7 +21682,6 @@ function customsStatementExportRow(item = {}, index = 0) {
     item.pageCount || "",
     money(item.pageFee),
     money(item.customsFee),
-    money(item.manifestFee),
     money(item.inspectionFee),
     money(item.checkFee),
     money(item.verificationFee),
@@ -21703,7 +21693,7 @@ function customsStatementExportRow(item = {}, index = 0) {
 
 function customsStatementTotalRow(rows = []) {
   const total = rows.reduce((sum, row) => sum + Number(row.total || 0), 0);
-  return ["合计", ...Array.from({ length: 14 }, () => ""), money(total), ""];
+  return ["合计", ...Array.from({ length: 13 }, () => ""), money(total), ""];
 }
 
 function customsStatementExportFilename(company = "客户", start = "", end = "", extension = "xlsx") {
@@ -32950,9 +32940,8 @@ function orderDetailFeeRows(order = {}) {
 	          <label>品名项数<input v-model.number="customsBusinessForm.itemCount" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'itemCount', $event)" /></label>
 	          <label>续页<input v-model.number="customsBusinessForm.pageCount" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'pageCount', $event)" /></label>
 	          <label>续页费<input v-model.number="customsBusinessForm.pageFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'pageFee', $event)" /></label>
-	          <label>主页费用<input v-model.number="customsBusinessForm.homeFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'homeFee', $event)" /></label>
+	          <label>主页费<input v-model.number="customsBusinessForm.homeFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'homeFee', $event)" /></label>
 	          <label>报关费<input v-model.number="customsBusinessForm.customsFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'customsFee', $event)" /></label>
-	          <label>舱单费<input v-model.number="customsBusinessForm.manifestFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'manifestFee', $event)" /></label>
 	          <label>报检费<input v-model.number="customsBusinessForm.inspectionFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'inspectionFee', $event)" /></label>
 	          <label>查验费<input v-model.number="customsBusinessForm.checkFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'checkFee', $event)" /></label>
 	          <label v-if="customsBusinessShowsVerificationFee">核注费<input v-model.number="customsBusinessForm.verificationFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'verificationFee', $event)" /></label>

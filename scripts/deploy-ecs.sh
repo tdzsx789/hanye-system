@@ -18,6 +18,7 @@ SSH_OPTS=(
 RSYNC_EXCLUDES=(
   --exclude=".git"
   --exclude=".db-backups"
+  --exclude="backups"
   --exclude=".env"
   --exclude=".DS_Store"
   --exclude="node_modules"

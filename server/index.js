@@ -3220,7 +3220,6 @@ function mapCustomsBusiness(row) {
   const customFields = normalizeCustomsBusinessCustomFields(row.custom_fields);
   const knownTotalWithoutHomeFee = Number(row.customs_fee || 0)
     + Number(row.page_fee || 0)
-    + Number(row.manifest_fee || 0)
     + Number(row.inspection_fee || 0)
     + Number(row.check_fee || 0)
     + Number(row.verification_fee || 0)
@@ -3239,7 +3238,7 @@ function mapCustomsBusiness(row) {
     homeFee,
     customsFee: Number(row.customs_fee || 0),
     pageFee: Number(row.page_fee || 0),
-    manifestFee: Number(row.manifest_fee || 0),
+    manifestFee: 0,
     inspectionFee: Number(row.inspection_fee || 0),
     checkFee: Number(row.check_fee || 0),
     verificationFee: Number(row.verification_fee || 0),
@@ -3580,7 +3579,6 @@ const CUSTOMS_STATEMENT_EXPORT_COLUMNS = [
   { key: "pageCount", label: "续页", width: 8, pdfWidth: 30, amount: true },
   { key: "pageFee", label: "续页费", width: 11, pdfWidth: 44, amount: true },
   { key: "customsFee", label: "报关费", width: 11, pdfWidth: 44, amount: true },
-  { key: "manifestFee", label: "舱单费", width: 11, pdfWidth: 44, amount: true },
   { key: "inspectionFee", label: "报检费", width: 11, pdfWidth: 44, amount: true },
   { key: "checkFee", label: "查验费", width: 11, pdfWidth: 44, amount: true },
   { key: "verificationFee", label: "核注费", width: 11, pdfWidth: 44, amount: true },
@@ -3774,7 +3772,7 @@ async function renderCustomsStatementXlsxBuffer(rows = [], context = {}) {
     for (let columnNumber = 1; columnNumber <= mergeEndColumn; columnNumber += 1) {
       const cell = row.getCell(columnNumber);
       const column = columns[columnNumber - 1] || {};
-      if (column.amount && cell.value !== "") cell.numFmt = "#,##0.##";
+      if (column.amount && cell.value !== "") cell.numFmt = "#,##0";
       cell.font = { name: "Microsoft YaHei", size: 8, bold: isTotalRow, color: { argb: "FF17233C" } };
       cell.alignment = {
         vertical: "middle",
@@ -3985,7 +3983,7 @@ function normalizeCustomsBusinessPayload(body = {}) {
   const homeFee = integerField(body.homeFee ?? body.home_fee);
   const customsFee = integerField(body.customsFee ?? body.customs_fee);
   const pageFee = integerField(body.pageFee ?? body.page_fee);
-  const manifestFee = integerField(body.manifestFee ?? body.manifest_fee);
+  const manifestFee = 0;
   const inspectionFee = integerField(body.inspectionFee ?? body.inspection_fee);
   const checkFee = integerField(body.checkFee ?? body.check_fee);
   const verificationFee = ["金二进口", "金二出口"].includes(direction)
@@ -3993,7 +3991,7 @@ function normalizeCustomsBusinessPayload(body = {}) {
     : 0;
   const otherFee = integerField(body.otherFee ?? body.other_fee);
   const customFields = normalizeCustomsBusinessCustomFields(body.customFields ?? body.custom_fields);
-  const computedTotal = homeFee + customsFee + pageFee + manifestFee + inspectionFee + checkFee + verificationFee
+  const computedTotal = homeFee + customsFee + pageFee + inspectionFee + checkFee + verificationFee
     + customsBusinessCustomFieldsTotal(customFields);
   return {
     date: normalizeCustomsBusinessDate(body.date ?? body.businessDate ?? body.business_date),
