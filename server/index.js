@@ -18,7 +18,7 @@ import {
   verifyPassword
 } from "./auth.js";
 import PDFDocument from "pdfkit";
-import { afterCommit, db, databaseInfo, withAdvisoryLock, writeAudit as writeAuditRecord } from "./db.js";
+import { afterCommit, db, databaseInfo, startupDatabaseMaintenanceEnabled, withAdvisoryLock, writeAudit as writeAuditRecord } from "./db.js";
 import { createRealtimeHub, realtimeEventFromAudit } from "./realtime.js";
 
 const app = express();
@@ -9026,11 +9026,15 @@ app.get("/api/audit-logs", async (_req, res) => {
   res.json(rows.map(mapAuditLog));
 });
 
-try {
-  await migrateDatabaseFilesToOss();
-} catch (error) {
-  console.error("Database file OSS migration failed", error);
-  process.exit(1);
+if (startupDatabaseMaintenanceEnabled) {
+  try {
+    await migrateDatabaseFilesToOss();
+  } catch (error) {
+    console.error("Database file OSS migration failed", error);
+    process.exit(1);
+  }
+} else {
+  console.log("Startup database maintenance is disabled; skipping database file OSS migration.");
 }
 
 const server = http.createServer(app);

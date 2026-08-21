@@ -5,13 +5,24 @@ import { accountPermissionsForRole, hashPassword, normalizeAccountRole, roleLeve
 types.setTypeParser(20, (value) => Number(value));
 types.setTypeParser(1700, (value) => Number(value));
 
+function parseEnvBoolean(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  const text = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(text)) return true;
+  if (["0", "false", "no", "off"].includes(text)) return false;
+  return fallback;
+}
+
 const pgHost = process.env.PGHOST || "127.0.0.1";
 const pgPort = process.env.PGPORT || "5432";
 const pgDatabase = process.env.PGDATABASE || process.env.POSTGRES_DB || "hanye";
 const pgUser = process.env.PGUSER || process.env.POSTGRES_USER || "hanye";
 const pgPassword = process.env.PGPASSWORD || process.env.POSTGRES_PASSWORD || "hanye";
 const connectionString = process.env.DATABASE_URL || `postgres://${encodeURIComponent(pgUser)}:${encodeURIComponent(pgPassword)}@${pgHost}:${pgPort}/${pgDatabase}`;
-const seedDemoDataEnabled = ["1", "true", "yes", "on"].includes(String(process.env.SEED_DEMO_DATA || "").toLowerCase());
+export const startupDatabaseMaintenanceEnabled = parseEnvBoolean(process.env.STARTUP_DB_MAINTENANCE, true);
+const seedDemoDataEnabled = parseEnvBoolean(process.env.SEED_DEMO_DATA, false);
 
 function maskConnectionString(value) {
   try {
@@ -2433,15 +2444,19 @@ export async function writeAudit(action, entityType, entityId, detail = "", acto
   `).run(actor || "admin", action, entityType, entityId, detail);
 }
 
-await waitForDatabase();
-const initClient = await pool.connect();
-try {
-  await initClient.query("SELECT pg_advisory_lock(524458)");
-  await transactionClient.run(initClient, async () => {
-    await initializeSchema();
-    await ensureProtectedTemplates();
-  });
-} finally {
-  await initClient.query("SELECT pg_advisory_unlock(524458)");
-  initClient.release();
+if (startupDatabaseMaintenanceEnabled) {
+  await waitForDatabase();
+  const initClient = await pool.connect();
+  try {
+    await initClient.query("SELECT pg_advisory_lock(524458)");
+    await transactionClient.run(initClient, async () => {
+      await initializeSchema();
+      await ensureProtectedTemplates();
+    });
+  } finally {
+    await initClient.query("SELECT pg_advisory_unlock(524458)");
+    initClient.release();
+  }
+} else {
+  console.log("Startup database maintenance is disabled; skipping schema sync, backfills, and demo data.");
 }

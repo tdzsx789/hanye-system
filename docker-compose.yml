@@ -35,6 +35,7 @@ services:
       PGDATABASE: ${POSTGRES_DB:-hanye}
       PGUSER: ${POSTGRES_USER:-hanye}
       PGPASSWORD: ${POSTGRES_PASSWORD:-hanye_dev_password}
+      STARTUP_DB_MAINTENANCE: ${STARTUP_DB_MAINTENANCE:-1}
       SEED_DEMO_DATA: ${SEED_DEMO_DATA:-0}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
       OSS_BUCKET: ${OSS_BUCKET:-}
@@ -71,6 +72,7 @@ services:
       PGDATABASE: ${POSTGRES_DB:-hanye}
       PGUSER: ${POSTGRES_USER:-hanye}
       PGPASSWORD: ${POSTGRES_PASSWORD:-hanye_dev_password}
+      STARTUP_DB_MAINTENANCE: ${STARTUP_DB_MAINTENANCE:-1}
       SEED_DEMO_DATA: ${SEED_DEMO_DATA:-0}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
       OSS_BUCKET: ${OSS_BUCKET:-}

@@ -7,7 +7,6 @@ ECS_PORT="${ECS_PORT:-22}"
 ECS_KEY="${ECS_KEY:-$HOME/.ssh/hanye_ecs_codex}"
 REMOTE_DIR="${REMOTE_DIR:-/opt/hanye-system}"
 WEB_PORT="${WEB_PORT:-8081}"
-ENABLE_BACKUP="${ENABLE_BACKUP:-1}"
 
 SSH_OPTS=(
   -i "$ECS_KEY"
@@ -27,6 +26,7 @@ RSYNC_EXCLUDES=(
   --exclude="web/dist"
   --exclude="server/dist"
   --exclude="server/data"
+  --exclude="*.traineddata"
   --exclude="*.sqlite"
   --exclude="*.sqlite-shm"
   --exclude="*.sqlite-wal"
@@ -42,7 +42,7 @@ rsync -az --delete \
   ./ "${ECS_USER}@${ECS_HOST}:${REMOTE_DIR}/"
 
 ssh "${SSH_OPTS[@]}" "${ECS_USER}@${ECS_HOST}" \
-  "REMOTE_DIR='$REMOTE_DIR' WEB_PORT='$WEB_PORT' ENABLE_BACKUP='$ENABLE_BACKUP' bash -s" <<'REMOTE'
+  "REMOTE_DIR='$REMOTE_DIR' WEB_PORT='$WEB_PORT' bash -s" <<'REMOTE'
 set -euo pipefail
 
 cd "$REMOTE_DIR"
@@ -57,13 +57,21 @@ else
   printf '\nWEB_PORT=%s\n' "$WEB_PORT" >> .env
 fi
 
-if [ "$ENABLE_BACKUP" = "1" ]; then
-  docker compose --profile backup up -d --build
+if grep -q '^STARTUP_DB_MAINTENANCE=' .env; then
+  sed -i "s/^STARTUP_DB_MAINTENANCE=.*/STARTUP_DB_MAINTENANCE=0/" .env
 else
-  docker compose up -d --build
+  printf '\nSTARTUP_DB_MAINTENANCE=0\n' >> .env
 fi
 
-docker compose ps
+if grep -q '^SEED_DEMO_DATA=' .env; then
+  sed -i "s/^SEED_DEMO_DATA=.*/SEED_DEMO_DATA=0/" .env
+else
+  printf '\nSEED_DEMO_DATA=0\n' >> .env
+fi
+
+docker compose up -d --build --no-deps server server-standby web
+
+docker compose ps server server-standby web
 REMOTE
 
 echo "Done. Open: http://${ECS_HOST}:${WEB_PORT}/"

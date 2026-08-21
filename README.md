@@ -169,10 +169,9 @@ ECS_PORT=22
 ECS_KEY=~/.ssh/hanye_ecs_codex
 REMOTE_DIR=/opt/hanye-system
 WEB_PORT=8081
-ENABLE_BACKUP=1
 ```
 
-脚本会使用 `rsync --delete` 覆盖服务器代码，但会排除 `.env`、`.git`、`node_modules`、构建产物和本地 SQLite 文件；服务器上的 PostgreSQL Docker volume 不会被删除。部署完成后访问：
+脚本只会同步前后端代码，并在服务器上把 `STARTUP_DB_MAINTENANCE=0` 写入 `.env`，然后只重建 `server`、`server-standby` 和 `web` 容器；不会动 PostgreSQL 数据卷。部署完成后访问：
 
 ```text
 http://120.24.163.215:8081/
