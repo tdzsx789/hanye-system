@@ -1494,7 +1494,6 @@ function blankCustomsBusinessForm() {
     direction: "",
     itemCount: 0,
     pageCount: 0,
-    homeFee: 0,
     customsFee: 0,
     pageFee: 0,
     inspectionFee: 0,
@@ -1508,7 +1507,6 @@ function blankCustomsBusinessForm() {
 
 const customsBusinessForm = reactive(blankCustomsBusinessForm());
 const customsBusinessAutoCharges = reactive({
-  homeFee: 0,
   pageCount: 0,
   pageFee: 0,
   verificationFee: 0
@@ -1630,6 +1628,10 @@ const dispatchForm = reactive({
   loadTime: "",
   vehicleSource: "",
   supplier: "",
+  transportMode: "",
+  driver: "",
+  hkDriver: "",
+  mainlandDriver: "",
   note: ""
 });
 const dispatchLoadHourDraft = ref("");
@@ -4205,6 +4207,43 @@ function closeDispatchModal(options = {}) {
   copyingDispatchRowId.value = "";
 }
 
+function dispatchFormOwnSingleDriverMode() {
+  const mode = normalizeTransportMode(dispatchForm.transportMode || "");
+  return dispatchForm.vehicleSource === "本公司车辆" && (!mode || mode === "单司机");
+}
+
+function dispatchSingleDriverNameFromRow(row = {}, order = row.order || {}) {
+  const mode = normalizeTransportMode(row.transportMode || order.transportMode || "");
+  if (mode && mode !== "单司机") return "";
+  return String(row.driver || order.driver || row.hkDriver || order.hkDriver || "").trim();
+}
+
+function dispatchFormDriverFields(fallback = {}) {
+  if (dispatchForm.vehicleSource !== "本公司车辆") {
+    return {
+      transportMode: "",
+      driver: "",
+      hkDriver: "",
+      mainlandDriver: ""
+    };
+  }
+  if (!dispatchFormOwnSingleDriverMode()) {
+    return {
+      transportMode: normalizeTransportMode(fallback.transportMode || dispatchForm.transportMode || "") || fallback.transportMode || "",
+      driver: fallback.driver || "",
+      hkDriver: fallback.hkDriver || "",
+      mainlandDriver: fallback.mainlandDriver || ""
+    };
+  }
+  const driver = String(dispatchForm.driver || "").trim();
+  return {
+    transportMode: driver ? "单司机" : "",
+    driver,
+    hkDriver: driver,
+    mainlandDriver: ""
+  };
+}
+
 function resetDispatchForm() {
   Object.assign(dispatchForm, {
     date: dispatchDate.value || offsetDateInputValue(1),
@@ -4222,6 +4261,10 @@ function resetDispatchForm() {
     loadTime: "",
     vehicleSource: "本公司车辆",
     supplier: "",
+    transportMode: "",
+    driver: "",
+    hkDriver: "",
+    mainlandDriver: "",
     note: ""
   });
   editingDispatchRowId.value = "";
@@ -4243,6 +4286,7 @@ function fillDispatchFormFromPlanRow(row, fallbackDate = dispatchDate.value || o
   const customerName = order.customer || row.customer || "";
   const customer = customerRows.value.find((item) => item.type === "客户" && item.name === customerName);
   const planDate = row.date || order.date || fallbackDate || dispatchDate.value || offsetDateInputValue(1);
+  const transportMode = normalizeTransportMode(row.transportMode || order.transportMode || "");
   Object.assign(dispatchForm, {
     date: planDate,
     customerId: order.customerId || row.customerId || customer?.id || "",
@@ -4259,6 +4303,10 @@ function fillDispatchFormFromPlanRow(row, fallbackDate = dispatchDate.value || o
     loadTime: row.loadTime || order.loadTime || "",
     vehicleSource: order.vehicleSource || row.vehicleSource || "本公司车辆",
     supplier: order.supplier || row.supplier || "",
+    transportMode,
+    driver: dispatchSingleDriverNameFromRow(row, order),
+    hkDriver: row.hkDriver || order.hkDriver || "",
+    mainlandDriver: row.mainlandDriver || order.mainlandDriver || "",
     note: row.note || order.remark || ""
   });
   dispatchCustomerKeyword.value = partnerDisplayLabel(customerName, "客户") || customerName;
@@ -4317,6 +4365,7 @@ function generateDispatchNo(date = dispatchDate.value, extraRows = []) {
 
 function createManualDispatchPlanRow() {
   const isOutsourced = dispatchForm.vehicleSource === "外派车辆";
+  const driverFields = dispatchFormDriverFields();
   const planDate = dispatchForm.date || dispatchDate.value;
   const createdAt = currentTimestampInputValue();
   return {
@@ -4338,10 +4387,7 @@ function createManualDispatchPlanRow() {
     loadTime: dispatchForm.loadTime,
     vehicleSource: dispatchForm.vehicleSource,
     supplier: isOutsourced ? dispatchForm.supplier : "",
-    transportMode: "",
-    driver: "",
-    hkDriver: "",
-    mainlandDriver: "",
+    ...driverFields,
     status: DISPATCH_PLAN_DEFAULT_STATUS,
     previousStatus: "",
     ...currentCreatorFields(),
@@ -4378,6 +4424,14 @@ async function saveEditedDispatchPlanRow() {
   const originalPlanDate = dispatchPlanDate(originalRow);
   const planDate = dispatchForm.date || originalPlanDate || dispatchDate.value;
   const isOutsourced = dispatchForm.vehicleSource === "外派车辆";
+  const originalOrder = dispatchRowLiveOrder(originalRow) || {};
+  const driverFields = dispatchFormDriverFields({
+    ...originalRow,
+    transportMode: originalRow.transportMode || originalOrder.transportMode || "",
+    driver: originalRow.driver || originalOrder.driver || "",
+    hkDriver: originalRow.hkDriver || originalOrder.hkDriver || "",
+    mainlandDriver: originalRow.mainlandDriver || originalOrder.mainlandDriver || ""
+  });
   const updatedRow = {
     ...originalRow,
     date: planDate,
@@ -4394,6 +4448,7 @@ async function saveEditedDispatchPlanRow() {
     loadTime: dispatchForm.loadTime,
     vehicleSource: dispatchForm.vehicleSource,
     supplier: isOutsourced ? dispatchForm.supplier : "",
+    ...driverFields,
     note: dispatchForm.note
   };
 
@@ -4415,6 +4470,10 @@ async function saveEditedDispatchPlanRow() {
           vehicleSource: updatedRow.vehicleSource,
           supplier: updatedRow.supplier,
           plate: updatedRow.plate,
+          transportMode: updatedRow.transportMode,
+          driver: updatedRow.driver,
+          hkDriver: updatedRow.hkDriver,
+          mainlandDriver: updatedRow.mainlandDriver,
           loading: updatedRow.loading,
           unloading: updatedRow.unloading,
           date: planDate,
@@ -4494,6 +4553,10 @@ async function saveManualDispatchPlanRow() {
       vehicleSource: row.vehicleSource,
       supplier: row.supplier,
       plate: row.plate,
+      transportMode: row.transportMode,
+      driver: row.driver,
+      hkDriver: row.hkDriver,
+      mainlandDriver: row.mainlandDriver,
       loading: row.loading,
       unloading: row.unloading,
       date: planDate,
@@ -4548,7 +4611,7 @@ function createDispatchPlanRow(order) {
     vehicleSource: order.vehicleSource || "",
     supplier: order.supplier || "",
     transportMode: mode,
-    driver: "",
+    driver: mode === "单司机" ? (order.driver || order.hkDriver || "") : "",
     hkDriver: order.hkDriver || (mode === "单司机" ? order.driver || "" : ""),
     mainlandDriver: order.mainlandDriver || "",
     loadTime: order.loadTime || "",
@@ -4589,6 +4652,10 @@ function createDispatchDuplicateDraftRow(sourceRow, index) {
     unloading: sourceOrder.unloading || sourceRow.unloading || "",
     vehicleSource: sourceOrder.vehicleSource || sourceRow.vehicleSource || "",
     supplier: sourceOrder.supplier || sourceRow.supplier || "",
+    transportMode: sourceRow.transportMode || sourceOrder.transportMode || "",
+    driver: sourceRow.driver || sourceOrder.driver || sourceRow.hkDriver || sourceOrder.hkDriver || "",
+    hkDriver: sourceRow.hkDriver || sourceOrder.hkDriver || "",
+    mainlandDriver: sourceRow.mainlandDriver || sourceOrder.mainlandDriver || "",
     status: DISPATCH_PLAN_DEFAULT_STATUS,
     previousStatus: "",
     note: sourceRow.note || ""
@@ -4658,6 +4725,10 @@ async function saveDuplicateDispatchRows() {
         vehicleSource: draft.vehicleSource || sourceOrder.vehicleSource || sourceRow.vehicleSource || "",
         supplier: draft.supplier || sourceOrder.supplier || sourceRow.supplier || "",
         plate: draft.plate || sourceRow.plate || sourceOrder.plate || "",
+        transportMode: draft.transportMode || sourceRow.transportMode || sourceOrder.transportMode || "",
+        driver: draft.driver || sourceRow.driver || sourceOrder.driver || "",
+        hkDriver: draft.hkDriver || sourceRow.hkDriver || sourceOrder.hkDriver || "",
+        mainlandDriver: draft.mainlandDriver || sourceRow.mainlandDriver || sourceOrder.mainlandDriver || "",
         loading: draft.loading || sourceOrder.loading || sourceRow.loading || "",
         unloading: draft.unloading || sourceOrder.unloading || sourceRow.unloading || "",
         loadTime: draft.loadTime || sourceRow.loadTime || sourceOrder.loadTime || "",
@@ -4680,6 +4751,10 @@ async function saveDuplicateDispatchRows() {
         orderNo: item.no,
         customer: item.customer || matchedCustomer.name,
         plate: draft.plate || sourceRow.plate || "",
+        transportMode: draft.transportMode || sourceRow.transportMode || "",
+        driver: draft.driver || sourceRow.driver || "",
+        hkDriver: draft.hkDriver || sourceRow.hkDriver || "",
+        mainlandDriver: draft.mainlandDriver || sourceRow.mainlandDriver || "",
         needsWeighing: booleanFlag(draft.needsWeighing ?? sourceRow.needsWeighing, false),
         loadTime: draft.loadTime || sourceRow.loadTime || "",
         status: DISPATCH_PLAN_DEFAULT_STATUS,
@@ -4732,6 +4807,10 @@ function applyDispatchRowToOrderForm(row) {
     vehicleSource: row.vehicleSource || "",
     supplier: row.supplier || "",
     plate: row.plate || "",
+    transportMode: row.transportMode || orderForm.transportMode,
+    driver: row.driver || row.hkDriver || orderForm.driver,
+    hkDriver: row.hkDriver || "",
+    mainlandDriver: row.mainlandDriver || "",
     loading: row.loading || "",
     unloading: row.unloading || "",
     date: dispatchPlanDate(row),
@@ -4744,6 +4823,10 @@ function applyDispatchRowToOrderForm(row) {
   }
   if (row.vehicleSource === "外派车辆") {
     orderForm.plate = "";
+    orderForm.driver = "";
+    orderForm.hkDriver = "";
+    orderForm.mainlandDriver = "";
+    orderForm.transportMode = "";
   }
   pendingDispatchBindId.value = row.id;
 }
@@ -5888,7 +5971,6 @@ function normalizeCustomsBusinessFormIntegers() {
   [
     "itemCount",
     "pageCount",
-    "homeFee",
     "customsFee",
     "pageFee",
     "inspectionFee",
@@ -5963,8 +6045,7 @@ function removeCustomerCustomsCustomField(index) {
 }
 
 const customsBusinessFormTotal = computed(() =>
-  Number(customsBusinessForm.homeFee || 0)
-  + Number(customsBusinessForm.pageFee || 0)
+  Number(customsBusinessForm.pageFee || 0)
   + Number(customsBusinessForm.customsFee || 0)
   + Number(customsBusinessForm.inspectionFee || 0)
   + Number(customsBusinessForm.checkFee || 0)
@@ -6100,14 +6181,6 @@ function positiveCustomsConfigNumber(value, fallback = 0) {
   return Number.isFinite(number) && number > 0 ? number : fallback;
 }
 
-const customsBusinessHomeFee = computed(() => {
-  const customer = customsBusinessSelectedCustomer.value;
-  const feeType = customsBusinessDirectionFeeType();
-  if (!customer || !feeType) return 0;
-  const key = feeType === "import" ? "customsImportHomeFee" : "customsExportHomeFee";
-  return Number(customer[key] ?? 0) || 0;
-});
-
 const customsBusinessPageUnitFee = computed(() => {
   const customer = customsBusinessSelectedCustomer.value;
   const feeType = customsBusinessDirectionFeeType();
@@ -6139,7 +6212,6 @@ const calculatedCustomsBusinessPageFee = computed(() =>
 function calculatedCustomsBusinessChargeValues() {
   const feeType = customsBusinessDirectionFeeType();
   return {
-    homeFee: customsBusinessHomeFee.value,
     pageCount: feeType ? calculatedCustomsBusinessPageCount.value : 0,
     pageFee: feeType ? calculatedCustomsBusinessPageFee.value : 0,
     verificationFee: customsBusinessConfiguredVerificationFee()
@@ -6147,7 +6219,6 @@ function calculatedCustomsBusinessChargeValues() {
 }
 
 function setCustomsBusinessAutoChargeBaseline(values = {}) {
-  customsBusinessAutoCharges.homeFee = customsBusinessIntegerValue(values.homeFee);
   customsBusinessAutoCharges.pageCount = customsBusinessIntegerValue(values.pageCount);
   customsBusinessAutoCharges.pageFee = customsBusinessIntegerValue(values.pageFee);
   customsBusinessAutoCharges.verificationFee = customsBusinessIntegerValue(values.verificationFee);
@@ -6168,7 +6239,6 @@ function maybeApplyCustomsBusinessAutoCharge(key, value, options = {}) {
 
 function syncCalculatedCustomsBusinessCharges(options = {}) {
   const calculated = calculatedCustomsBusinessChargeValues();
-  maybeApplyCustomsBusinessAutoCharge("homeFee", calculated.homeFee, options);
   maybeApplyCustomsBusinessAutoCharge("verificationFee", calculated.verificationFee, options);
   const feeType = customsBusinessDirectionFeeType();
   if (!feeType) {
@@ -11082,9 +11152,17 @@ function handleDispatchVehicleSourceChange() {
     dispatchForm.supplier = "";
   } else if (dispatchForm.vehicleSource === "外派车辆") {
     dispatchForm.plate = "";
+    dispatchForm.driver = "";
+    dispatchForm.hkDriver = "";
+    dispatchForm.mainlandDriver = "";
+    dispatchForm.transportMode = "";
   } else {
     dispatchForm.plate = "";
     dispatchForm.supplier = "";
+    dispatchForm.driver = "";
+    dispatchForm.hkDriver = "";
+    dispatchForm.mainlandDriver = "";
+    dispatchForm.transportMode = "";
   }
 }
 
@@ -12177,13 +12255,12 @@ const visibleFinanceWageTableColumns = computed(() =>
 
 const visibleDispatchTableColumns = computed(() =>
   dispatchTableColumns.filter((column) =>
-    dispatchTableColumnVisibility[column.key] !== false &&
-    (column.key !== "driver" || activeDispatchStatusPool.value !== "预排")
+    dispatchTableColumnVisibility[column.key] !== false
   )
 );
 
 const dispatchDriverOptions = computed(() =>
-  [...driverRows.value]
+  [...activeDriverRows.value]
     .filter((driver) => String(driver?.name || "").trim())
     .sort((left, right) =>
       String(left.name || "").localeCompare(String(right.name || ""), "zh-Hans-CN", { numeric: true, sensitivity: "base" })
@@ -15421,7 +15498,7 @@ const currentAccountCanDeleteAdminOnlyOrder = computed(() =>
 );
 
 const currentAccountCanManageOrderAudit = computed(() =>
-  normalizeAccountRole(currentAccount.value.role) === "财务"
+  ["财务", "管理员"].includes(normalizeAccountRole(currentAccount.value.role))
 );
 
 watch(() => accountForm.role, (role) => {
@@ -16530,11 +16607,20 @@ function closeDispatchDriverPicker() {
   dispatchDriverSearchKeyword.value = "";
 }
 
+function canEditDispatchDriver(row = {}) {
+  return ["预排", "已派车"].includes(dispatchStatusValueForRow(row));
+}
+
+function dispatchDriverInputValue(row = {}) {
+  const text = dispatchDriverText(row);
+  return text === "-" ? "" : text;
+}
+
 function openDispatchDriverPicker(row = {}) {
-  if (!row?.id || row.status !== "已派车") return;
+  if (!row?.id || !canEditDispatchDriver(row)) return;
   if (dispatchDriverPickerRowId.value === row.id) return;
   dispatchDriverPickerRowId.value = row.id;
-  dispatchDriverSearchKeyword.value = String(row.driver || "").trim();
+  dispatchDriverSearchKeyword.value = dispatchDriverInputValue(row);
 }
 
 function toggleDispatchDriverPicker(row = {}) {
@@ -16560,7 +16646,19 @@ async function selectDispatchDriver(row = {}, driver = "") {
 }
 
 function dispatchDriverText(row = {}) {
-  return String(row.driver || "").trim() || "-";
+  const order = row.order || {};
+  const names = [
+    row.driver,
+    order.driver,
+    row.hkDriver,
+    order.hkDriver,
+    row.mainlandDriver,
+    order.mainlandDriver
+  ]
+    .flatMap((value) => String(value || "").split(/[\/／|｜、]+/))
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return names.length ? Array.from(new Set(names)).join(" / ") : "-";
 }
 
 function dispatchListDetailCellText(row = {}, key = "") {
@@ -17484,7 +17582,6 @@ function assignCustomsBusinessForm(row = {}) {
     direction: row.direction || "",
     itemCount: customsBusinessIntegerValue(row.itemCount),
     pageCount: customsBusinessIntegerValue(row.pageCount),
-    homeFee: customsBusinessIntegerValue(row.homeFee),
     customsFee: customsBusinessIntegerValue(row.customsFee),
     pageFee: customsBusinessIntegerValue(row.pageFee),
     inspectionFee: customsBusinessIntegerValue(row.inspectionFee),
@@ -17584,7 +17681,6 @@ async function saveCustomsBusiness() {
     const payload = {
       ...customsBusinessForm,
       company,
-      homeFee: customsBusinessIntegerValue(customsBusinessForm.homeFee),
       customFields,
       total: customsBusinessFormTotal.value
     };
@@ -19358,11 +19454,37 @@ function orderModalStatusValue() {
   return String(orderForm.status || "").trim();
 }
 
+const orderModalCurrentOrder = computed(() =>
+  editingOrderNo.value
+    ? orderRows.value.find((item) => item.no === editingOrderNo.value) || null
+    : null
+);
+
+const showOrderModalAuditAction = computed(() =>
+  Boolean(editingOrderNo.value)
+  && !orderAuditMode.value
+  && !orderViewMode.value
+  && orderModalStatusValue() === "已签收"
+  && canAuditOrder(orderModalCurrentOrder.value)
+);
+
+const orderModalAuditActionTitle = computed(() =>
+  orderAuditButtonTitle(orderModalCurrentOrder.value || { status: orderModalStatusValue() })
+);
+
 function orderStatusActionDisabled(targetStatus = "") {
   const status = orderModalStatusValue();
   if (status === "已签收") return true;
   if (targetStatus === "异常滞留" && ["异常滞留", "费用待确认"].includes(status)) return true;
   return false;
+}
+
+async function auditOrderFromOrderModal() {
+  if (!showOrderModalAuditAction.value) {
+    notify(orderModalAuditActionTitle.value || "只有已签收订单才能审核");
+    return;
+  }
+  await confirmOrderAudit();
 }
 
 async function completeOrderFromOrderModal(targetStatus = "") {
@@ -19724,7 +19846,7 @@ function canManageOrderAudit() {
 }
 
 function orderAuditPermissionMessage() {
-  return "只有财务可以审核或取消审核订单";
+  return "只有财务或管理员可以审核或取消审核订单";
 }
 
 function orderStatusValue(order = {}) {
@@ -26591,9 +26713,9 @@ function orderDetailFeeRows(order = {}) {
                         <input v-model.trim="dispatchPlanRows[row.index].plate" class="dispatch-plate-input" list="dispatchVehiclePlates" placeholder="车牌" @click.stop @input="handleDispatchPlateInput(row)" />
                       </template>
                       <template v-else-if="column.key === 'driver'">
-                        <span v-if="row.status === '已派车'" class="searchable-select dispatch-driver-select" :class="{ 'is-open': isDispatchDriverPickerOpen(row) }" @click.stop>
+                        <span v-if="canEditDispatchDriver(row)" class="searchable-select dispatch-driver-select" :class="{ 'is-open': isDispatchDriverPickerOpen(row) }" @click.stop>
                           <input
-                            :value="isDispatchDriverPickerOpen(row) ? dispatchDriverSearchKeyword : (row.driver || '')"
+                            :value="isDispatchDriverPickerOpen(row) ? dispatchDriverSearchKeyword : dispatchDriverInputValue(row)"
                             class="dispatch-driver-search-input"
                             type="text"
                             autocomplete="off"
@@ -31170,6 +31292,9 @@ function orderDetailFeeRows(order = {}) {
             <datalist id="dispatchPlateOptions">
               <option v-for="vehicle in vehicleRows" :key="vehicle.plate" :value="vehicle.plate">{{ vehicle.type }}</option>
             </datalist>
+            <datalist id="dispatchModalDriverOptions">
+              <option v-for="driver in dispatchDriverOptions" :key="`dispatch-modal-driver-${driver.id || driver.name}`" :value="driver.name">{{ dispatchDriverLabel(driver) }}</option>
+            </datalist>
 	            <datalist id="dispatch-location-city-options">
 	              <option v-for="city in addressBookCityOptions" :key="city" :value="city">{{ city }}</option>
 	            </datalist>
@@ -31223,6 +31348,9 @@ function orderDetailFeeRows(order = {}) {
                 </select>
               </label>
               <label v-else>车牌<input v-model.trim="dispatchForm.plate" placeholder="外派车牌/待定" /></label>
+              <label v-if="dispatchFormOwnSingleDriverMode()" class="dispatch-modal-driver-field">司机
+                <input v-model.trim="dispatchForm.driver" list="dispatchModalDriverOptions" placeholder="搜索并选择本公司司机" />
+              </label>
               <label>口岸<select v-model="dispatchForm.port"><option value=""></option><option>深圳湾海关</option><option>莲塘海关</option><option>文锦渡海关</option><option>大桥海关</option></select></label>
               <label class="dispatch-boolean-field">是否过磅
                 <span class="boolean-toggle">
@@ -32312,6 +32440,16 @@ function orderDetailFeeRows(order = {}) {
         </template>
         <template #actionsLeading>
           <button
+            v-if="showOrderModalAuditAction"
+            type="button"
+            class="icon-btn success order-modal-audit-btn"
+            :title="orderModalAuditActionTitle"
+            :disabled="loading"
+            @click="auditOrderFromOrderModal"
+          >
+            <IconSvg name="check" />审核
+          </button>
+          <button
             v-if="editingOrderNo && !orderReadOnlyMode && orderHasTransportFields"
             type="button"
             class="ghost-btn order-status-action-btn dispatch-status-exception"
@@ -32940,7 +33078,6 @@ function orderDetailFeeRows(order = {}) {
 	          <label>品名项数<input v-model.number="customsBusinessForm.itemCount" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'itemCount', $event)" /></label>
 	          <label>续页<input v-model.number="customsBusinessForm.pageCount" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'pageCount', $event)" /></label>
 	          <label>续页费<input v-model.number="customsBusinessForm.pageFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'pageFee', $event)" /></label>
-	          <label>主页费<input v-model.number="customsBusinessForm.homeFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'homeFee', $event)" /></label>
 	          <label>报关费<input v-model.number="customsBusinessForm.customsFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'customsFee', $event)" /></label>
 	          <label>报检费<input v-model.number="customsBusinessForm.inspectionFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'inspectionFee', $event)" /></label>
 	          <label>查验费<input v-model.number="customsBusinessForm.checkFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'checkFee', $event)" /></label>

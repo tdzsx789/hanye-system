@@ -73,6 +73,18 @@
         </picker>
         <input wx:else placeholder="输入车牌/待定" placeholder-class="placeholder" value="{{form.plate}}" data-field="plate" bindinput="onFieldInput" />
       </view>
+      <view wx:if="{{form.vehicleSource === '本公司车辆' && (!form.transportMode || form.transportMode === '单司机')}}" class="field-row driver-field">
+        <text class="field-label">司机</text>
+        <input placeholder="搜索并选择本公司司机" placeholder-class="placeholder" value="{{form.driver}}" data-field="driver" bindfocus="onDriverFocus" bindinput="onFieldInput" bindblur="scheduleCloseDriverSuggestion" />
+        <view wx:if="{{driverPickerOpen}}" class="suggestion-box driver-suggestion-box">
+          <view wx:for="{{driverSuggestions}}" wx:key="id" class="suggestion-item" data-value="{{item.name}}" bindtap="selectDriverSuggestion">
+            <text class="suggestion-primary">{{item.displayName || item.name}}</text>
+            <text wx:if="{{item.secondaryText}}" class="suggestion-secondary">{{item.secondaryText}}</text>
+          </view>
+          <view wx:if="{{!driverSuggestions.length}}" class="suggestion-empty">没有匹配司机</view>
+          <button class="quiet-btn suggestion-close" bindtap="closeDriverPicker">收起</button>
+        </view>
+      </view>
       <view wx:if="{{form.vehicleSource === '外派车辆'}}" class="field-row">
         <text class="field-label">外派供应商</text>
         <picker wx:if="{{supplierOptions.length}}" range="{{supplierOptions}}" data-field="supplier" data-options-key="supplierOptions" bindchange="onPickerChange">
@@ -168,13 +180,6 @@
         <picker range="{{transportModeOptions}}" data-field="transportMode" data-options-key="transportModeOptions" bindchange="onPickerChange">
           <view class="picker-box">{{form.transportMode || '请选择运输模式'}}</view>
         </picker>
-      </view>
-      <view wx:if="{{!form.transportMode || form.transportMode === '单司机'}}" class="field-row">
-        <text class="field-label">香港司机</text>
-        <picker wx:if="{{hkDriverOptions.length}}" range="{{hkDriverOptions}}" data-field="driver" data-options-key="hkDriverOptions" bindchange="onPickerChange">
-          <view class="picker-box">{{form.driver || '请选择香港司机'}}</view>
-        </picker>
-        <input wx:else placeholder="香港司机" placeholder-class="placeholder" value="{{form.driver}}" data-field="driver" bindinput="onFieldInput" />
       </view>
       <view wx:elif="{{form.transportMode === '双司机'}}" class="two-col">
         <view class="field-row">

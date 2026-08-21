@@ -2067,6 +2067,10 @@ body.is-modal-dragging .modal-head {
   opacity: 1;
 }
 
+.order-modal-audit-btn {
+  margin-right: 10px;
+}
+
 .login-page {
   min-height: 100vh;
   display: grid;

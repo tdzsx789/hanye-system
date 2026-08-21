@@ -226,7 +226,7 @@ function requestHasAdminOrderDeletePermission(req) {
 }
 
 function requestCanManageOrderAudit(req) {
-  return normalizeAccountRole(req.account?.role) === "财务";
+  return ["财务", "管理员"].includes(normalizeAccountRole(req.account?.role));
 }
 
 function normalizeDispatchPlanStatus(status = "") {
@@ -3224,8 +3224,6 @@ function mapCustomsBusiness(row) {
     + Number(row.check_fee || 0)
     + Number(row.verification_fee || 0)
     + customsBusinessCustomFieldsTotal(customFields);
-  const inferredHomeFee = Math.max(0, Number(row.total || 0) - knownTotalWithoutHomeFee);
-  const homeFee = Number(row.home_fee || 0) || inferredHomeFee;
   return {
     id: row.id,
     date: row.business_date || "",
@@ -3235,7 +3233,7 @@ function mapCustomsBusiness(row) {
     direction: row.direction || "",
     itemCount: Number(row.item_count || 0),
     pageCount: Number(row.page_count || 0),
-    homeFee,
+    homeFee: 0,
     customsFee: Number(row.customs_fee || 0),
     pageFee: Number(row.page_fee || 0),
     manifestFee: 0,
@@ -3980,7 +3978,7 @@ function otherBusinessCustomFieldsBreakdown(fields = []) {
 
 function normalizeCustomsBusinessPayload(body = {}) {
   const direction = String(body.direction ?? "").trim();
-  const homeFee = integerField(body.homeFee ?? body.home_fee);
+  const homeFee = 0;
   const customsFee = integerField(body.customsFee ?? body.customs_fee);
   const pageFee = integerField(body.pageFee ?? body.page_fee);
   const manifestFee = 0;
@@ -3991,7 +3989,7 @@ function normalizeCustomsBusinessPayload(body = {}) {
     : 0;
   const otherFee = integerField(body.otherFee ?? body.other_fee);
   const customFields = normalizeCustomsBusinessCustomFields(body.customFields ?? body.custom_fields);
-  const computedTotal = homeFee + customsFee + pageFee + inspectionFee + checkFee + verificationFee
+  const computedTotal = customsFee + pageFee + inspectionFee + checkFee + verificationFee
     + customsBusinessCustomFieldsTotal(customFields);
   return {
     date: normalizeCustomsBusinessDate(body.date ?? body.businessDate ?? body.business_date),
@@ -6848,7 +6846,7 @@ app.post("/api/orders/export/pdf", async (req, res) => {
 
 app.post("/api/orders/audit", async (req, res) => {
   if (!requestCanManageOrderAudit(req)) {
-    res.status(403).json({ message: "只有财务可以审核订单" });
+    res.status(403).json({ message: "只有财务或管理员可以审核订单" });
     return;
   }
   const orderNos = Array.isArray(req.body.orderNos) ? [...new Set(req.body.orderNos.map(String).filter(Boolean))] : [];
@@ -7183,7 +7181,7 @@ app.patch("/api/orders/:no/status", async (req, res) => {
     return;
   }
   if ((status === "已审核" || current.status === "已审核") && !requestCanManageOrderAudit(req)) {
-    res.status(403).json({ message: "只有财务可以审核或取消审核订单" });
+    res.status(403).json({ message: "只有财务或管理员可以审核或取消审核订单" });
     return;
   }
   if (status === "已审核" && current.status !== "已签收") {

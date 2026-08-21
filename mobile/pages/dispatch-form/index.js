@@ -119,6 +119,16 @@ function customerSearchText(customer) {
   ].join(" ").toLowerCase();
 }
 
+function driverSearchText(driver) {
+  return [
+    driver && driver.name,
+    driver && driver.type,
+    driver && driver.phone,
+    driver && driver.license,
+    driver && driver.employmentStatus
+  ].join(" ").toLowerCase();
+}
+
 function customerMatchesInput(customer, text) {
   const target = String(text || "").trim();
   if (!target || !customer) return false;
@@ -141,6 +151,27 @@ function decorateCustomerSuggestion(customer) {
     displayName: customerOptionPrimaryDisplay(customer),
     secondaryText: customerOptionSecondaryDisplay(customer)
   });
+}
+
+function decorateDriverSuggestion(driver) {
+  return {
+    id: driver && driver.id ? String(driver.id) : "",
+    name: String(driver && driver.name || "").trim(),
+    displayName: String(driver && driver.name || "").trim(),
+    secondaryText: String(driver && driver.type || "").trim()
+  };
+}
+
+function filterDriverSuggestions(drivers, keyword) {
+  const normalizedKeyword = String(keyword || "").trim().toLowerCase();
+  return (Array.isArray(drivers) ? drivers : [])
+    .filter((driver) => String(driver && driver.employmentStatus || "在职").trim() !== "离职")
+    .filter((driver) => {
+      if (!normalizedKeyword) return true;
+      return driverSearchText(driver).indexOf(normalizedKeyword) >= 0;
+    })
+    .slice(0, 8)
+    .map((driver) => decorateDriverSuggestion(driver));
 }
 
 const LOCATION_ENTRY_KEYS = {
@@ -566,6 +597,8 @@ Page({
     customers: [],
     currencyOptions: ["港币", "人民币"],
     directionOptions: DIRECTION_OPTIONS,
+    driverPickerOpen: false,
+    driverSuggestions: [],
     driverOptions: [],
     feeCategoryOptions: FEE_CATEGORY_OPTIONS,
     form: {},
@@ -755,6 +788,7 @@ Page({
       });
       this.syncAddressBookAreaPicker();
       this.refreshCustomerSuggestions();
+      this.refreshDriverSuggestions();
     } catch (error) {
       if (!silent) this.setData({ loadingRefs: false });
       if (silent) {
@@ -780,12 +814,54 @@ Page({
     this.setData({ customerSuggestions: rows });
   },
 
+  refreshDriverSuggestions(keyword) {
+    const text = keyword === undefined ? String(this.data.form.driver || "").trim() : String(keyword || "").trim();
+    this.setData({
+      driverSuggestions: filterDriverSuggestions(this.data.drivers || [], text)
+    });
+  },
+
+  closeDriverPicker() {
+    this.setData({
+      driverPickerOpen: false,
+      driverSuggestions: []
+    });
+  },
+
+  scheduleCloseDriverSuggestion() {
+    setTimeout(() => {
+      if (this.data.driverPickerOpen) {
+        this.closeDriverPicker();
+      }
+    }, 180);
+  },
+
+  onDriverFocus() {
+    this.setData({ driverPickerOpen: true });
+    this.refreshDriverSuggestions();
+  },
+
+  selectDriverSuggestion(event) {
+    const value = String(event.currentTarget.dataset.value || "").trim();
+    this.setData({
+      "form.driver": value,
+      driverPickerOpen: false,
+      driverSuggestions: []
+    });
+  },
+
   onFieldInput(event) {
     const field = event.currentTarget.dataset.field;
-    this.setData({ [`form.${field}`]: event.detail.value });
+    const value = event.detail.value;
+    this.setData({ [`form.${field}`]: value });
     if (field === "customer") {
       this.setData({ "form.customerId": "", customerPickerOpen: true });
       this.refreshCustomerSuggestions();
+      return;
+    }
+    if (field === "driver") {
+      this.setData({ driverPickerOpen: true });
+      this.refreshDriverSuggestions(value);
     }
   },
 
@@ -1017,7 +1093,7 @@ Page({
       form.transportMode = "";
     }
     normalizeDispatchFormForDisplay(form);
-    this.setData({ form });
+    this.setData({ form, driverPickerOpen: false, driverSuggestions: [] });
   },
 
   handleTransportModeChange(value) {
@@ -1042,7 +1118,7 @@ Page({
       form.mainlandDriver = "";
     }
     normalizeDispatchFormForDisplay(form);
-    this.setData({ form });
+    this.setData({ form, driverPickerOpen: false, driverSuggestions: [] });
   },
 
   onPickerChange(event) {
