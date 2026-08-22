@@ -67,6 +67,8 @@ const AUTH_SECRET = process.env.HANYE_AUTH_SECRET || process.env.AUTH_SECRET || 
 const VEHICLE_EXPENSE_TYPES = new Set(["fuel", "repair", "annual", "other"]);
 const VEHICLE_ANNUAL_EXPENSE_NAMES = new Set(["保险费", "年审费", "牌头费"]);
 const VEHICLE_PROFIT_DEFAULT_EXCHANGE_RATE = 0.88;
+const OWN_VEHICLE_SOURCE = "汉业物流";
+const LEGACY_OWN_VEHICLE_SOURCE = "本公司车辆";
 const OSS_ACCESS_KEY_ID = String(process.env.OSS_ACCESS_KEY_ID || process.env.ALIYUN_ACCESS_KEY_ID || process.env.ALIBABA_CLOUD_ACCESS_KEY_ID || "").trim();
 const OSS_ACCESS_KEY_SECRET = String(process.env.OSS_ACCESS_KEY_SECRET || process.env.ALIYUN_ACCESS_KEY_SECRET || process.env.ALIBABA_CLOUD_ACCESS_KEY_SECRET || "").trim();
 const OSS_BUCKET = String(process.env.OSS_BUCKET || "").trim();
@@ -317,6 +319,12 @@ function todayInputValue() {
   return local.toISOString().slice(0, 10);
 }
 
+function normalizeVehicleSource(value = "") {
+  const text = String(value || "").trim();
+  if (text === LEGACY_OWN_VEHICLE_SOURCE) return OWN_VEHICLE_SOURCE;
+  return text;
+}
+
 function normalizeEffectiveDate(value = "", fallback = todayInputValue()) {
   const text = String(value || "").trim();
   return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : fallback;
@@ -331,6 +339,7 @@ function mapCustomer(row) {
     customsExportHomeFee: 150,
     customsImportPageFee: 30,
     customsExportPageFee: 30,
+    customsManifestFee: 0,
     customsVerificationFee: 0
   };
   return {
@@ -358,6 +367,7 @@ function mapCustomer(row) {
     customsExportHomeFee: Number(row.customs_export_home_fee ?? customsDefaults.customsExportHomeFee),
     customsImportPageFee: Number(row.customs_import_page_fee ?? customsDefaults.customsImportPageFee),
     customsExportPageFee: Number(row.customs_export_page_fee ?? customsDefaults.customsExportPageFee),
+    customsManifestFee: Number(row.customs_manifest_fee ?? customsDefaults.customsManifestFee ?? 0),
     customsVerificationFee: Number(row.customs_verification_fee ?? customsDefaults.customsVerificationFee),
     customsCustomFields: normalizeCustomsBusinessCustomFields(row.customs_custom_fields),
     createdAt: row.created_at,
@@ -401,53 +411,69 @@ async function customsBusinessColumnExists(column) {
   return tableColumnExists("customs_businesses", column);
 }
 
+let orderFeeCostCurrencyColumnReady = false;
+
+async function ensureOrderFeeCostCurrencyColumn() {
+  if (orderFeeCostCurrencyColumnReady) return;
+  await db.exec(`
+    ALTER TABLE order_fees
+    ADD COLUMN IF NOT EXISTS cost_currency TEXT NOT NULL DEFAULT '港币';
+    UPDATE order_fees
+    SET cost_currency = COALESCE(NULLIF(cost_currency, ''), currency, '港币')
+    WHERE cost_currency IS NULL OR cost_currency = '';
+  `);
+  customerColumnAvailability.set("order_fees.cost_currency", true);
+  orderFeeCostCurrencyColumnReady = true;
+}
+
 function normalizeCustomerPayload(body, id = "") {
   const invoice = body.invoice || {};
   const numericOrDefault = (value, fallback) => {
     const number = Number(value);
     return Number.isFinite(number) ? number : fallback;
   };
-  const name = String(body.name || "").trim();
-  const shortName = String(body.shortName || body.short_name || "").trim();
-  const address = String(body.address || invoice.address || "").trim();
-  const taxNo = String(body.taxNo || invoice.taxNo || "").trim();
+  const name = userTextValue(body.name);
+  const shortName = userTextValue(body.shortName || body.short_name);
+  const address = userMultilineTextValue(body.address || invoice.address);
+  const taxNo = userTextValue(body.taxNo || invoice.taxNo);
   const type = body.type === "供应商" ? "供应商" : "客户";
   const customerCategory = type === "客户" && (body.customerCategory || body.customer_category) === "报关客户" ? "报关客户" : type === "客户" ? "运输客户" : "";
-  const settlementCurrency = String(body.settlementCurrency || "").trim();
+  const settlementCurrency = userTextValue(body.settlementCurrency);
   return {
     id,
     type,
     customerCategory,
     name,
     shortName,
-    province: String(body.province || "广东省").trim(),
-    city: String(body.city || "深圳市").trim(),
+    province: userTextValue(body.province || "广东省"),
+    city: userTextValue(body.city || "深圳市"),
     address,
-    term: String(body.term || "月结30天").trim(),
+    term: userTextValue(body.term || "月结30天"),
     settlementCurrency: type === "客户" ? (settlementCurrency || "人民币结算") : "",
     taxNo,
-    contact: String(body.contact || "").trim(),
-    mobile: String(body.mobile || "").trim(),
+    contact: userTextValue(body.contact),
+    mobile: userTextValue(body.mobile),
     driverWageAdjustHKD: Number(body.driverWageAdjustHKD || 0),
     defaultTemplateId: String(body.defaultTemplateId || "").trim(),
     receivableRMB: Number(body.receivableRMB || 0),
     receivableHKD: Number(body.receivableHKD || 0),
-    recentOrder: String(body.recentOrder || "-").trim(),
+    recentOrder: userTextValue(body.recentOrder || "-"),
     customsHomeItemCount: numericOrDefault(body.customsHomeItemCount ?? body.customs_home_item_count, 6),
     customsPageItemCount: numericOrDefault(body.customsPageItemCount ?? body.customs_page_item_count, 14),
     customsImportHomeFee: numericOrDefault(body.customsImportHomeFee ?? body.customs_import_home_fee, 100),
     customsExportHomeFee: numericOrDefault(body.customsExportHomeFee ?? body.customs_export_home_fee, 150),
     customsImportPageFee: numericOrDefault(body.customsImportPageFee ?? body.customs_import_page_fee, 30),
     customsExportPageFee: numericOrDefault(body.customsExportPageFee ?? body.customs_export_page_fee, 30),
+    customsManifestFee: numericOrDefault(body.customsManifestFee ?? body.customs_manifest_fee, 0),
     customsVerificationFee: numericOrDefault(body.customsVerificationFee ?? body.customs_verification_fee, 0),
     customsCustomFields: normalizeCustomsBusinessCustomFields(body.customsCustomFields ?? body.customs_custom_fields),
     customsCustomFieldsJson: JSON.stringify(normalizeCustomsBusinessCustomFields(body.customsCustomFields ?? body.customs_custom_fields)),
     createdAt: body.createdAt || todayInputValue(),
-    invoiceTitle: String(body.invoiceTitle || invoice.title || name).trim(),
-    invoiceTaxNo: String(body.invoiceTax || invoice.taxNo || taxNo).trim(),
-    invoiceBank: String(body.invoiceBank || invoice.bank || "").trim(),
-    invoiceAccount: String(body.invoiceAccount || invoice.account || "").trim(),
-    invoiceAddressPhone: String(body.invoiceAddressPhone || invoice.addressPhone || address).trim()
+    invoiceTitle: userTextValue(body.invoiceTitle || invoice.title || name),
+    invoiceTaxNo: userTextValue(body.invoiceTax || invoice.taxNo || taxNo),
+    invoiceBank: userTextValue(body.invoiceBank || invoice.bank),
+    invoiceAccount: userTextValue(body.invoiceAccount || invoice.account),
+    invoiceAddressPhone: userMultilineTextValue(body.invoiceAddressPhone || invoice.addressPhone || address)
   };
 }
 
@@ -457,36 +483,36 @@ function mapOrder(row) {
     no: row.no,
     dispatchNo: row.dispatch_no || "",
     customerId: row.customer_id,
-    customer: row.customer,
-    businessType: row.business_type,
-    port: row.port,
+    customer: userTextValue(row.customer),
+    businessType: userTextValue(row.business_type),
+    port: userTextValue(row.port),
     needsWeighing: Boolean(row.needs_weighing),
-    direction: row.direction,
-    tonnage: row.tonnage,
-    currency: row.currency,
-    quantity: row.quantity,
-    weight: row.weight,
-    vehicleSource: row.vehicle_source,
-    supplier: row.supplier,
-    plate: row.plate || "",
-    driver: row.driver || "",
-    hkDriver: row.hk_driver || "",
-    mainlandDriver: row.mainland_driver || "",
+    direction: userTextValue(row.direction),
+    tonnage: userTextValue(row.tonnage),
+    currency: userTextValue(row.currency),
+    quantity: userTextValue(row.quantity),
+    weight: userTextValue(row.weight),
+    vehicleSource: normalizeVehicleSource(row.vehicle_source),
+    supplier: userTextValue(row.supplier),
+    plate: normalizePlateText(row.plate),
+    driver: userTextValue(row.driver),
+    hkDriver: userTextValue(row.hk_driver),
+    mainlandDriver: userTextValue(row.mainland_driver),
     transportMode: normalizeTransportMode(row.transport_mode || ""),
-    loading: row.loading,
-    unloading: row.unloading,
+    loading: userRawMultilineTextValue(row.loading),
+    unloading: userRawMultilineTextValue(row.unloading),
     date: row.order_date,
     receivableHKD: row.receivable_hkd,
     receivableRMB: row.receivable_rmb,
-    status: row.status,
+    status: userTextValue(row.status),
     createdByAccountId: row.created_by_account_id || null,
     createdByUsername: row.created_by_username || "",
     createdByName,
-    remark: row.remark || "",
+    remark: userMultilineTextValue(row.remark),
     tripNoEnabled: Boolean(row.trip_no_enabled),
-    tripNo: row.trip_no || "",
+    tripNo: userTextValue(row.trip_no),
     sixSheetEnabled: Boolean(row.six_sheet_enabled),
-    sixSheetNo: row.six_sheet_no || "",
+    sixSheetNo: userTextValue(row.six_sheet_no),
     fees: []
   };
 }
@@ -865,6 +891,162 @@ function resolvePdfFontConfig() {
     { path: "C:/Windows/Fonts/simsun.ttc", family: "SimSun" },
     { path: "C:/Windows/Fonts/simhei.ttf" }
   ].filter(Boolean).find((item) => fs.existsSync(item.path)) || null;
+}
+
+const USER_TEXT_COMPAT_CHAR_MAP = {
+  "⺅": "亻",
+  "⺆": "冂",
+  "⺈": "刀",
+  "⺉": "刂",
+  "⺊": "卜",
+  "⺋": "卩",
+  "⺌": "小",
+  "⺍": "小",
+  "⺎": "兀",
+  "⺏": "尢",
+  "⺐": "尢",
+  "⺑": "彐",
+  "⺒": "巳",
+  "⺓": "幺",
+  "⺔": "彑",
+  "⺕": "彐",
+  "⺖": "忄",
+  "⺗": "心",
+  "⺘": "扌",
+  "⺙": "攵",
+  "⺛": "旡",
+  "⺜": "日",
+  "⺝": "月",
+  "⺞": "歹",
+  "⺟": "母",
+  "⺠": "民",
+  "⺡": "氵",
+  "⺢": "氺",
+  "⺣": "灬",
+  "⺤": "爫",
+  "⺥": "爫",
+  "⺦": "丬",
+  "⺧": "牛",
+  "⺨": "犭",
+  "⺩": "王",
+  "⺪": "疋",
+  "⺫": "目",
+  "⺬": "礻",
+  "⺭": "礻",
+  "⺮": "竹",
+  "⺯": "糹",
+  "⺰": "纟",
+  "⺱": "罒",
+  "⺲": "罒",
+  "⺳": "罒",
+  "⺴": "罒",
+  "⺵": "罒",
+  "⺶": "羊",
+  "⺷": "羊",
+  "⺸": "羊",
+  "⺹": "老",
+  "⺺": "聿",
+  "⺻": "聿",
+  "⺼": "月",
+  "⺽": "臼",
+  "⺾": "艹",
+  "⺿": "艹",
+  "⻀": "艹",
+  "⻁": "虎",
+  "⻂": "衤",
+  "⻃": "西",
+  "⻄": "西",
+  "⻅": "见",
+  "⻆": "角",
+  "⻇": "角",
+  "⻈": "讠",
+  "⻉": "贝",
+  "⻊": "足",
+  "⻋": "车",
+  "⻌": "辶",
+  "⻍": "辶",
+  "⻎": "辶",
+  "⻏": "阝",
+  "⻐": "钅",
+  "⻑": "長",
+  "⻒": "镸",
+  "⻓": "长",
+  "⻔": "门",
+  "⻕": "阝",
+  "⻖": "阝",
+  "⻗": "雨",
+  "⻘": "青",
+  "⻙": "韦",
+  "⻚": "页",
+  "⻛": "风",
+  "⻜": "飞",
+  "⻝": "食",
+  "⻞": "食",
+  "⻟": "食",
+  "⻠": "饣",
+  "⻢": "马",
+  "⻣": "骨",
+  "⻥": "鱼",
+  "⻦": "鸟",
+  "⻧": "卤",
+  "⻨": "麦",
+  "⻩": "黄",
+  "⻪": "黾",
+  "⻫": "齐",
+  "⻬": "齐",
+  "⻭": "齿",
+  "⻮": "齿",
+  "⻯": "龙",
+  "⻰": "龙",
+  "⻱": "龟",
+  "⻲": "龟",
+  "⻳": "龟"
+};
+const USER_TEXT_COMPAT_CHAR_RE = new RegExp(`[${Object.keys(USER_TEXT_COMPAT_CHAR_MAP).join("")}]`, "g");
+const USER_TEXT_CJK = "\\u3400-\\u9fff\\uf900-\\ufaff";
+
+function normalizeUserText(value = "", options = {}) {
+  const source = String(value ?? "");
+  let text = typeof source.normalize === "function" ? source.normalize("NFKC") : source;
+  text = text
+    .replace(USER_TEXT_COMPAT_CHAR_RE, (char) => USER_TEXT_COMPAT_CHAR_MAP[char] || char)
+    .replace(/\u00a0/g, " ")
+    .replace(/[\u200b-\u200d\ufeff]/g, "")
+    .replace(/\r\n?/g, "\n");
+  if (options.singleLine) text = text.replace(/\n+/g, " ");
+  if (options.compactCjkSpacing) {
+    text = text
+      .replace(new RegExp(`([${USER_TEXT_CJK}])[\\t ]+(?=[${USER_TEXT_CJK}])`, "gu"), "$1")
+      .replace(new RegExp(`([${USER_TEXT_CJK}])[\\t ]+(?=\\d)`, "gu"), "$1")
+      .replace(new RegExp(`(\\d)[\\t ]+(?=[${USER_TEXT_CJK}])`, "gu"), "$1")
+      .replace(/(\d)[\t ]+(?=\d)/g, "$1")
+      .replace(/(\d)\s*-\s*(?=\d)/g, "$1-")
+      .replace(new RegExp(`([${USER_TEXT_CJK}])\\s*([:：])\\s*`, "gu"), "$1$2")
+      .replace(new RegExp(`([:：])\\s*(?=[${USER_TEXT_CJK}\\d])`, "gu"), "$1");
+  }
+  text = text.replace(/[ \t]{2,}/g, " ");
+  return options.trim === false ? text : text.trim();
+}
+
+function userTextValue(value, options = {}) {
+  return normalizeUserText(value, {
+    singleLine: options.singleLine !== false,
+    compactCjkSpacing: true
+  });
+}
+
+function userMultilineTextValue(value) {
+  return normalizeUserText(value, { compactCjkSpacing: true });
+}
+
+function userRawMultilineTextValue(value) {
+  return String(value ?? "").replace(/\r\n?/g, "\n").trim();
+}
+
+function normalizePlateText(value = "") {
+  return userTextValue(value)
+    .replace(/\s+/g, "")
+    .toUpperCase();
 }
 
 function textValue(value) {
@@ -2653,30 +2835,31 @@ function mapOrderFee(row) {
   const quantity = Number(row.quantity || 0) > 0 ? Number(row.quantity) : 1;
   return {
     id: row.id,
-    category: row.category,
-    name: row.name,
+    category: userTextValue(row.category),
+    name: userTextValue(row.name),
     quantity,
     unitPrice: row.unit_price || 0,
     unitPriceManual: Boolean(row.unit_price_manual),
-    currency: row.currency,
+    currency: userTextValue(row.currency),
     amount: row.amount,
     amountManual: Boolean(row.amount_manual),
     cost: row.cost == null ? null : Number(row.cost || 0),
+    costCurrency: userTextValue(row.cost_currency || row.currency || "港币"),
     costManual: Boolean(row.cost_manual),
-    remark: row.remark,
-    driverRole: row.driver_role || "",
-    driverName: row.driver_name || ""
+    remark: userTextValue(row.remark),
+    driverRole: userTextValue(row.driver_role),
+    driverName: userTextValue(row.driver_name)
   };
 }
 
 function mapAddressBook(row) {
   return {
     id: row.id,
-    area: row.area || "",
-    contact: row.contact || "",
-    phone: row.phone || "",
-    address: row.address || "",
-    note: row.note || "",
+    area: userTextValue(row.area),
+    contact: userTextValue(row.contact),
+    phone: userTextValue(row.phone),
+    address: userMultilineTextValue(row.address),
+    note: userTextValue(row.note),
     createdAt: row.created_at || "",
     updatedAt: row.updated_at || ""
   };
@@ -2686,18 +2869,18 @@ function mapCustomerContact(row) {
   return {
     id: row.id,
     customerId: row.customer_id,
-    name: row.name || "",
-    gender: row.gender || "",
-    title: row.title || "",
-    mobile: row.mobile || "",
-    phone: row.phone || "",
-    area: row.area || "",
-    address: row.address || "",
-    fax: row.fax || "",
-    email: row.email || "",
-    wechat: row.wechat || "",
-    qq: row.qq || "",
-    remark: row.remark || "",
+    name: userTextValue(row.name),
+    gender: userTextValue(row.gender),
+    title: userTextValue(row.title),
+    mobile: userTextValue(row.mobile),
+    phone: userTextValue(row.phone),
+    area: userTextValue(row.area),
+    address: userMultilineTextValue(row.address),
+    fax: userTextValue(row.fax),
+    email: userTextValue(row.email),
+    wechat: userTextValue(row.wechat),
+    qq: userTextValue(row.qq),
+    remark: userTextValue(row.remark),
     createdAt: row.created_at || "",
     updatedAt: row.updated_at || ""
   };
@@ -2705,11 +2888,11 @@ function mapCustomerContact(row) {
 
 function normalizeAddressBookPayload(body) {
   return {
-    area: String(body.area || "").trim(),
-    contact: String(body.contact || "").trim(),
-    phone: String(body.phone || "").trim(),
-    address: String(body.address || "").trim(),
-    note: String(body.note || "").trim()
+    area: userTextValue(body.area),
+    contact: userTextValue(body.contact),
+    phone: userTextValue(body.phone),
+    address: userMultilineTextValue(body.address),
+    note: userTextValue(body.note)
   };
 }
 
@@ -2720,38 +2903,38 @@ function addressHistoryKey(value) {
 function normalizeCustomerContactPayload(body, existing = null) {
   return {
     customerId: String(body.customerId || body.customer_id || existing?.customer_id || "").trim(),
-    name: String(body.name || existing?.name || "").trim(),
-    gender: String(body.gender || existing?.gender || "").trim(),
-    title: String(body.title || existing?.title || "").trim(),
-    mobile: String(body.mobile || existing?.mobile || "").trim(),
-    phone: String(body.phone || existing?.phone || "").trim(),
-    area: String(body.area || existing?.area || "").trim(),
-    address: String(body.address || existing?.address || "").trim(),
-    fax: String(body.fax || existing?.fax || "").trim(),
-    email: String(body.email || existing?.email || "").trim(),
-    wechat: String(body.wechat || existing?.wechat || "").trim(),
-    qq: String(body.qq || existing?.qq || "").trim(),
-    remark: String(body.remark || existing?.remark || "").trim()
+    name: userTextValue(body.name || existing?.name),
+    gender: userTextValue(body.gender || existing?.gender),
+    title: userTextValue(body.title || existing?.title),
+    mobile: userTextValue(body.mobile || existing?.mobile),
+    phone: userTextValue(body.phone || existing?.phone),
+    area: userTextValue(body.area || existing?.area),
+    address: userMultilineTextValue(body.address || existing?.address),
+    fax: userTextValue(body.fax || existing?.fax),
+    email: userTextValue(body.email || existing?.email),
+    wechat: userTextValue(body.wechat || existing?.wechat),
+    qq: userTextValue(body.qq || existing?.qq),
+    remark: userTextValue(body.remark || existing?.remark)
   };
 }
 
 function mapVehicle(row) {
   return {
-    plate: row.plate,
-    brand: row.brand,
-    model: row.model,
-    type: row.vehicle_type,
+    plate: normalizePlateText(row.plate),
+    brand: userTextValue(row.brand),
+    model: userTextValue(row.model),
+    type: userTextValue(row.vehicle_type),
     purchaseDate: row.purchase_date,
     factoryDate: row.factory_date,
     mainlandReviewDate: row.mainland_review_date,
     hkReviewDate: row.hk_review_date,
     mainlandInsuranceDate: row.mainland_insurance_date,
     hkInsuranceDate: row.hk_insurance_date,
-    insuranceReminder: row.insurance_reminder,
-    maintenanceReminder: row.maintenance_reminder,
-    status: row.status,
+    insuranceReminder: userTextValue(row.insurance_reminder),
+    maintenanceReminder: userTextValue(row.maintenance_reminder),
+    status: userTextValue(row.status),
     monthlyCost: row.monthly_cost,
-    note: row.note
+    note: userTextValue(row.note)
   };
 }
 
@@ -2764,19 +2947,19 @@ function mapVehicleExpense(row) {
   return {
     id: row.id,
     type: row.expense_type,
-    name: row.name || "",
-    fuelStation: row.fuel_station || "",
+    name: userTextValue(row.name),
+    fuelStation: userTextValue(row.fuel_station),
     fuelLiters,
     fuelPricePerLiter,
     odometerKm: Number(row.odometer_km || 0),
-    plate: row.plate || "",
+    plate: normalizePlateText(row.plate),
     date: row.expense_date || "",
     year,
     startDate,
     endDate,
-    currency: row.currency || "人民币",
+    currency: userTextValue(row.currency || "人民币"),
     amount: Number(row.amount || 0),
-    note: row.note || "",
+    note: userTextValue(row.note),
     createdAt: row.created_at || "",
     updatedAt: row.updated_at || ""
   };
@@ -2792,7 +2975,7 @@ function normalizeVehicleExpensePayload(body = {}, current = null) {
   const type = VEHICLE_EXPENSE_TYPES.has(String(body.type || body.expenseType || current?.expense_type || "fuel"))
     ? String(body.type || body.expenseType || current?.expense_type || "fuel")
     : "fuel";
-  const rawName = String(body.name ?? current?.name ?? "").trim();
+  const rawName = userTextValue(body.name ?? current?.name ?? "");
   const currentYear = Number(current?.expense_year || String(current?.expense_date || "").slice(0, 4) || new Date().getFullYear());
   const yearValue = Number(body.year ?? body.expenseYear ?? current?.expense_year ?? currentYear);
   const year = Number.isInteger(yearValue) && yearValue >= 2000 && yearValue <= 2100 ? yearValue : currentYear || new Date().getFullYear();
@@ -2837,18 +3020,18 @@ function normalizeVehicleExpensePayload(body = {}, current = null) {
       return {
         type,
         name,
-        fuelStation: String(body.fuelStation ?? body.fuel_station ?? current?.fuel_station ?? "").trim(),
+        fuelStation: userTextValue(body.fuelStation ?? body.fuel_station ?? current?.fuel_station ?? ""),
         fuelLiters: Number(litersFromAmount.toFixed(1)),
         fuelPricePerLiter: roundedFuelPrice,
         odometerKm: Number(body.odometerKm ?? body.odometer_km ?? current?.odometer_km ?? 0),
-        plate: String(body.plate ?? current?.plate ?? "").trim(),
+        plate: normalizePlateText(body.plate ?? current?.plate ?? ""),
         date,
         year: type === "annual" ? annualYear : null,
         startDate,
         endDate,
         currency: normalizeVehicleExpenseCurrency(body.currency ?? current?.currency ?? "人民币"),
         amount: roundedAmount,
-        note: String(body.note ?? current?.note ?? "").trim()
+        note: userTextValue(body.note ?? current?.note ?? "")
       };
     }
     if (roundedFuelPrice > 0 && roundedAmount > 0 && roundedFuelLiters > 0) {
@@ -2859,40 +3042,40 @@ function normalizeVehicleExpensePayload(body = {}, current = null) {
     type,
     name,
     fuelStation: type === "fuel"
-      ? String(body.fuelStation ?? body.fuel_station ?? current?.fuel_station ?? "").trim()
+      ? userTextValue(body.fuelStation ?? body.fuel_station ?? current?.fuel_station ?? "")
       : "",
     fuelLiters: type === "fuel" ? roundedFuelLiters : 0,
     fuelPricePerLiter: type === "fuel" ? roundedFuelPrice : 0,
     odometerKm: type === "fuel"
       ? Number(body.odometerKm ?? body.odometer_km ?? current?.odometer_km ?? 0)
       : 0,
-    plate: String(body.plate ?? current?.plate ?? "").trim(),
+    plate: normalizePlateText(body.plate ?? current?.plate ?? ""),
     date,
     year: type === "annual" ? annualYear : null,
     startDate,
     endDate,
     currency: normalizeVehicleExpenseCurrency(body.currency ?? current?.currency ?? "人民币"),
     amount: type === "fuel" ? Number(roundedAmount.toFixed(1)) : Number(body.amount ?? current?.amount ?? 0),
-    note: String(body.note ?? current?.note ?? "").trim()
+    note: userTextValue(body.note ?? current?.note ?? "")
   };
 }
 
 function mapDriver(row) {
   return {
     id: row.id,
-    type: row.type || "香港司机",
-    name: row.name,
-    phone: row.phone,
-    idNo: row.id_no,
-    license: row.license,
+    type: userTextValue(row.type || "香港司机"),
+    name: userTextValue(row.name),
+    phone: userTextValue(row.phone),
+    idNo: userTextValue(row.id_no),
+    license: userTextValue(row.license),
     birthday: row.birthday,
     hireDate: row.hire_date,
     leaveDate: row.leave_date,
-    employmentStatus: row.employment_status || "在职",
+    employmentStatus: userTextValue(row.employment_status || "在职"),
     expireAt: row.expire_at,
-    status: row.status,
+    status: userTextValue(row.status),
     defaultWage: row.default_wage,
-    note: row.note
+    note: userTextValue(row.note)
   };
 }
 
@@ -2901,17 +3084,17 @@ const ORDER_FEE_CATEGORY_OPTIONS = ["正常", "代垫", "公司自费"];
 const FEE_ITEM_COST_SOURCE_OPTIONS = ["供应商", "香港司机", "大陆骑师", "公司自费", "其他支出"];
 
 function normalizeFeeItemCategory(value = "", fallback = "正常") {
-  const category = String(value || "").trim();
+  const category = userTextValue(value);
   return FEE_ITEM_CATEGORY_OPTIONS.includes(category) ? category : fallback;
 }
 
 function normalizeOrderFeeCategory(value = "", fallback = "正常") {
-  const category = String(value || "").trim();
+  const category = userTextValue(value);
   return ORDER_FEE_CATEGORY_OPTIONS.includes(category) ? category : fallback;
 }
 
 function normalizeFeeItemCostSourceToken(value = "") {
-  const source = String(value || "").trim();
+  const source = userTextValue(value);
   if (source === "司机") return "香港司机";
   if (source === "其他平台") return "大陆骑师";
   return source;
@@ -2955,10 +3138,10 @@ function mapFeeItem(row) {
   return {
     id: row.id,
     category: feeItemCategoryValue(row.category),
-    name: row.name,
-    currency: row.currency,
+    name: userTextValue(row.name),
+    currency: userTextValue(row.currency),
     defaultAmount: row.default_amount,
-    defaultDriverRole: row.default_driver_role || "",
+    defaultDriverRole: userTextValue(row.default_driver_role),
     costSource: costSources.join(","),
     costSources,
     sortOrder: row.sort_order
@@ -2969,13 +3152,13 @@ function mapFreightRate(row) {
   return {
     id: row.id,
     customerId: row.customer_id || "",
-    customerName: row.customer_name || "",
-    direction: row.direction,
-    level1: row.level1 || row.city || "",
-    level2: row.level2 || "",
-    level3: row.level3 || "",
-    city: row.city,
-    tonnage: row.tonnage,
+    customerName: userTextValue(row.customer_name),
+    direction: userTextValue(row.direction),
+    level1: userTextValue(row.level1 || row.city),
+    level2: userTextValue(row.level2),
+    level3: userTextValue(row.level3),
+    city: userTextValue(row.city),
+    tonnage: userTextValue(row.tonnage),
     rmbAmount: row.rmb_amount,
     hkdAmount: row.hkd_amount,
     sortOrder: row.sort_order,
@@ -2994,10 +3177,10 @@ function mapDriverWageRule(row) {
   return {
     id: row.id,
     driverId: row.driver_id,
-    direction: row.direction,
-    city: row.city,
+    direction: userTextValue(row.direction),
+    city: userTextValue(row.city),
     transportMode: normalizeTransportMode(row.transport_mode || "单司机") || "单司机",
-    currency: row.currency,
+    currency: userTextValue(row.currency),
     baseRMB: row.base_rmb,
     baseHKD: row.base_hkd,
     loadPerBoard: row.load_per_board,
@@ -3006,7 +3189,7 @@ function mapDriverWageRule(row) {
     addPointFee: row.add_point_fee,
     waitingPerHour: row.waiting_per_hour,
     advanceFeeRates,
-    note: row.note
+    note: userTextValue(row.note)
   };
 }
 
@@ -3059,13 +3242,13 @@ function mapCostCenterRate(row) {
     id: row.id,
     source,
     entityId: row.entity_id || "",
-    entityName: row.entity_name || "",
-    origin: row.origin || "",
-    destination: row.destination || "",
-    tonnage: row.tonnage || (source === "供应商" ? "3T" : ""),
-    currency: row.currency || "港币",
+    entityName: userTextValue(row.entity_name),
+    origin: userTextValue(row.origin),
+    destination: userTextValue(row.destination),
+    tonnage: userTextValue(row.tonnage || (source === "供应商" ? "3T" : "")),
+    currency: userTextValue(row.currency || "港币"),
     costValues: normalizeCostCenterValues(row.cost_values, row.currency || "港币"),
-    note: row.note || "",
+    note: userTextValue(row.note),
     effectiveDate: row.effective_date || "1970-01-01",
     updatedAt: row.updated_at || row.created_at || ""
   };
@@ -3112,19 +3295,19 @@ function readCompanyExpensePayload(body = {}, current = null) {
   return {
     entryType: entryType === "income" ? "income" : "expense",
     periodMonth: normalizePeriodMonthKey(body.periodMonth ?? body.period_month ?? body.month ?? current?.period_month ?? ""),
-    category: String(body.category ?? current?.category ?? "").trim(),
+    category: userTextValue(body.category ?? current?.category ?? ""),
     amount: Number(body.amount ?? current?.amount ?? 0),
-    note: String(body.note ?? current?.note ?? "").trim()
+    note: userTextValue(body.note ?? current?.note ?? "")
   };
 }
 
 function readCostCenterRatePayload(body = {}, current = null) {
-  const origin = String(body.origin ?? current?.origin ?? "").trim();
-  const destination = String(body.destination ?? current?.destination ?? "").trim();
+  const origin = userTextValue(body.origin ?? current?.origin ?? "");
+  const destination = userTextValue(body.destination ?? current?.destination ?? "");
   const source = normalizeCostCenterSource(body.source ?? current?.source ?? "");
-  const tonnage = String(body.tonnage ?? current?.tonnage ?? "").trim() || (source === "供应商" ? "3T" : "");
+  const tonnage = userTextValue(body.tonnage ?? current?.tonnage ?? "") || (source === "供应商" ? "3T" : "");
   const fallbackEffectiveDate = current?.effective_date || todayInputValue();
-  const entityName = String(body.entityName ?? body.entity_name ?? current?.entity_name ?? "").trim()
+  const entityName = userTextValue(body.entityName ?? body.entity_name ?? current?.entity_name ?? "")
     || [origin, destination].filter(Boolean).join(" - ")
     || source;
   return {
@@ -3139,7 +3322,7 @@ function readCostCenterRatePayload(body = {}, current = null) {
       body.costValues ?? body.cost_values ?? current?.cost_values,
       body.currency ?? current?.currency ?? "港币"
     )),
-    note: String(body.note ?? current?.note ?? "").trim(),
+    note: userTextValue(body.note ?? current?.note ?? ""),
     effectiveDate: normalizeEffectiveDate(
       body.effectiveDate ?? body.effective_date ?? body.modifiedDate ?? body.modified_date ?? current?.effective_date,
       fallbackEffectiveDate
@@ -3220,6 +3403,7 @@ function mapCustomsBusiness(row) {
   const customFields = normalizeCustomsBusinessCustomFields(row.custom_fields);
   const knownTotalWithoutHomeFee = Number(row.customs_fee || 0)
     + Number(row.page_fee || 0)
+    + Number(row.manifest_fee || 0)
     + Number(row.inspection_fee || 0)
     + Number(row.check_fee || 0)
     + Number(row.verification_fee || 0)
@@ -3227,23 +3411,23 @@ function mapCustomsBusiness(row) {
   return {
     id: row.id,
     date: row.business_date || "",
-    declarationNo: row.declaration_no || "",
-    sixSheetNo: row.six_sheet_no || "",
-    company: row.company || "",
-    direction: row.direction || "",
+    declarationNo: userTextValue(row.declaration_no),
+    sixSheetNo: userTextValue(row.six_sheet_no),
+    company: userTextValue(row.company),
+    direction: userTextValue(row.direction),
     itemCount: Number(row.item_count || 0),
     pageCount: Number(row.page_count || 0),
     homeFee: 0,
     customsFee: Number(row.customs_fee || 0),
     pageFee: Number(row.page_fee || 0),
-    manifestFee: 0,
+    manifestFee: Number(row.manifest_fee || 0),
     inspectionFee: Number(row.inspection_fee || 0),
     checkFee: Number(row.check_fee || 0),
     verificationFee: Number(row.verification_fee || 0),
     otherFee: Number(row.other_fee || 0),
     customFields,
     total: Number(row.total || 0),
-    remark: row.remark || "",
+    remark: userTextValue(row.remark),
     createdAt: row.created_at || "",
     updatedAt: row.updated_at || "",
     deletedAt: row.deleted_at || ""
@@ -3254,15 +3438,15 @@ function mapOtherBusiness(row) {
   return {
     id: row.id,
     date: row.business_date || "",
-    title: row.title || "",
-    customer: row.customer || "",
+    title: userTextValue(row.title),
+    customer: userTextValue(row.customer),
     cost: Number(row.cost || 0),
     income: Number(row.income || 0),
     customFields: normalizeOtherBusinessCustomFields(row.custom_fields),
     totalCost: Number(row.total_cost || 0),
     totalIncome: Number(row.total_income || 0),
     profit: Number(row.profit || 0),
-    remark: row.remark || "",
+    remark: userTextValue(row.remark),
     createdAt: row.created_at || "",
     updatedAt: row.updated_at || "",
     deletedAt: row.deleted_at || ""
@@ -3577,6 +3761,7 @@ const CUSTOMS_STATEMENT_EXPORT_COLUMNS = [
   { key: "pageCount", label: "续页", width: 8, pdfWidth: 30, amount: true },
   { key: "pageFee", label: "续页费", width: 11, pdfWidth: 44, amount: true },
   { key: "customsFee", label: "报关费", width: 11, pdfWidth: 44, amount: true },
+  { key: "manifestFee", label: "舱单费", width: 11, pdfWidth: 44, amount: true },
   { key: "inspectionFee", label: "报检费", width: 11, pdfWidth: 44, amount: true },
   { key: "checkFee", label: "查验费", width: 11, pdfWidth: 44, amount: true },
   { key: "verificationFee", label: "核注费", width: 11, pdfWidth: 44, amount: true },
@@ -3682,8 +3867,8 @@ function customsStatementExportContext(body = {}) {
 }
 
 const CUSTOMS_STATEMENT_OUTER_BORDER = { style: "medium", color: { argb: "FF000000" } };
-const CUSTOMS_STATEMENT_INNER_BORDER = { style: "thin", color: { argb: "FFD1D5DB" } };
-const CUSTOMS_STATEMENT_HEADER_BORDER = { style: "thin", color: { argb: "FF9CA3AF" } };
+const CUSTOMS_STATEMENT_INNER_BORDER = { style: "thin", color: { argb: "FF9CA3AF" } };
+const CUSTOMS_STATEMENT_HEADER_BORDER = { style: "thin", color: { argb: "FF6B7280" } };
 
 function customsStatementTableBorder(rowNumber, columnNumber, tableStartRow, tableEndRow, lastColumn, options = {}) {
   const isHeader = rowNumber === tableStartRow;
@@ -3698,13 +3883,12 @@ function customsStatementTableBorder(rowNumber, columnNumber, tableStartRow, tab
       bottom: CUSTOMS_STATEMENT_OUTER_BORDER
     };
   }
-  const border = {
+  return {
+    top: isTotal ? CUSTOMS_STATEMENT_OUTER_BORDER : CUSTOMS_STATEMENT_INNER_BORDER,
+    left: isFirstColumn ? CUSTOMS_STATEMENT_OUTER_BORDER : CUSTOMS_STATEMENT_INNER_BORDER,
+    right: isLastColumn ? CUSTOMS_STATEMENT_OUTER_BORDER : CUSTOMS_STATEMENT_INNER_BORDER,
     bottom: isTotal || rowNumber === tableEndRow ? CUSTOMS_STATEMENT_OUTER_BORDER : CUSTOMS_STATEMENT_INNER_BORDER
   };
-  if (isFirstColumn) border.left = CUSTOMS_STATEMENT_OUTER_BORDER;
-  if (isLastColumn) border.right = CUSTOMS_STATEMENT_OUTER_BORDER;
-  if (isTotal) border.top = CUSTOMS_STATEMENT_OUTER_BORDER;
-  return border;
 }
 
 async function renderCustomsStatementXlsxBuffer(rows = [], context = {}) {
@@ -3736,14 +3920,14 @@ async function renderCustomsStatementXlsxBuffer(rows = [], context = {}) {
   worksheet.mergeCells(1, 1, 1, mergeEndColumn);
   const titleCell = worksheet.getCell(1, 1);
   titleCell.value = context.title || "报关对账单";
-  titleCell.font = { name: "Microsoft YaHei", size: 15, bold: true, color: { argb: "FF17233C" } };
+  titleCell.font = { name: "Microsoft YaHei", size: 16, bold: true, color: { argb: "FF17233C" } };
   titleCell.alignment = { vertical: "middle", horizontal: "center", wrapText: false };
   worksheet.getRow(1).height = 28;
 
   worksheet.mergeCells(2, 1, 2, mergeEndColumn);
   const metaCell = worksheet.getCell(2, 1);
   metaCell.value = `客户：${context.company || ""}    范围：${context.rangeLabel || "全部"}    记录：${rows.length} 条`;
-  metaCell.font = { name: "Microsoft YaHei", size: 9, color: { argb: "FF64748B" } };
+  metaCell.font = { name: "Microsoft YaHei", size: 10, color: { argb: "FF475569" } };
   metaCell.alignment = { vertical: "middle", horizontal: "center", wrapText: false };
   worksheet.getRow(2).height = 22;
 
@@ -3752,10 +3936,10 @@ async function renderCustomsStatementXlsxBuffer(rows = [], context = {}) {
   const tableEndRow = tableStartRow + bodyRows.length;
   const headerRow = worksheet.getRow(tableStartRow);
   headerRow.values = columns.map((column) => column.label);
-  headerRow.height = 34;
+  headerRow.height = 36;
   for (let columnNumber = 1; columnNumber <= mergeEndColumn; columnNumber += 1) {
     const cell = headerRow.getCell(columnNumber);
-    cell.font = { name: "Microsoft YaHei", size: 8, bold: true, color: { argb: "FF1F2A44" } };
+    cell.font = { name: "Microsoft YaHei", size: 10, bold: true, color: { argb: "FF1F2A44" } };
     cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF1F5F9" } };
     cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
     cell.border = customsStatementTableBorder(tableStartRow, columnNumber, tableStartRow, tableEndRow, mergeEndColumn);
@@ -3766,12 +3950,12 @@ async function renderCustomsStatementXlsxBuffer(rows = [], context = {}) {
     const rowNumber = tableStartRow + 1 + rowIndex;
     const row = worksheet.getRow(rowNumber);
     row.values = values.map(excelSingleLineValue);
-    row.height = 22;
+    row.height = isTotalRow ? 26 : 24;
     for (let columnNumber = 1; columnNumber <= mergeEndColumn; columnNumber += 1) {
       const cell = row.getCell(columnNumber);
       const column = columns[columnNumber - 1] || {};
       if (column.amount && cell.value !== "") cell.numFmt = "#,##0";
-      cell.font = { name: "Microsoft YaHei", size: 8, bold: isTotalRow, color: { argb: "FF17233C" } };
+      cell.font = { name: "Microsoft YaHei", size: 10, bold: isTotalRow, color: { argb: "FF17233C" } };
       cell.alignment = {
         vertical: "middle",
         horizontal: column.amount ? "right" : (column.align || "left"),
@@ -3939,7 +4123,7 @@ function normalizeCustomsBusinessCustomFields(value = []) {
   const source = Array.isArray(value) ? value : parseJsonArrayText(value);
   const fieldsByName = new Map();
   source.forEach((field) => {
-    const name = String(field?.name ?? field?.label ?? field?.key ?? "").trim();
+    const name = userTextValue(field?.name ?? field?.label ?? field?.key ?? "");
     if (!name) return;
     const amount = integerField(field?.value ?? field?.amount ?? field?.fee);
     fieldsByName.set(name, {
@@ -3954,7 +4138,7 @@ function normalizeOtherBusinessCustomFields(value = []) {
   const source = Array.isArray(value) ? value : parseJsonArrayText(value);
   const fieldsByName = new Map();
   source.forEach((field) => {
-    const name = String(field?.name ?? field?.label ?? field?.key ?? "").trim();
+    const name = userTextValue(field?.name ?? field?.label ?? field?.key ?? "");
     if (!name) return;
     const existing = fieldsByName.get(name) || { name, income: 0, cost: 0 };
     existing.income = moneyNumberField(existing.income + moneyNumberField(field?.income ?? field?.revenue ?? field?.amount ?? field?.value));
@@ -3977,11 +4161,11 @@ function otherBusinessCustomFieldsBreakdown(fields = []) {
 }
 
 function normalizeCustomsBusinessPayload(body = {}) {
-  const direction = String(body.direction ?? "").trim();
+  const direction = userTextValue(body.direction ?? "");
   const homeFee = 0;
   const customsFee = integerField(body.customsFee ?? body.customs_fee);
   const pageFee = integerField(body.pageFee ?? body.page_fee);
-  const manifestFee = 0;
+  const manifestFee = integerField(body.manifestFee ?? body.manifest_fee);
   const inspectionFee = integerField(body.inspectionFee ?? body.inspection_fee);
   const checkFee = integerField(body.checkFee ?? body.check_fee);
   const verificationFee = ["金二进口", "金二出口"].includes(direction)
@@ -3989,13 +4173,13 @@ function normalizeCustomsBusinessPayload(body = {}) {
     : 0;
   const otherFee = integerField(body.otherFee ?? body.other_fee);
   const customFields = normalizeCustomsBusinessCustomFields(body.customFields ?? body.custom_fields);
-  const computedTotal = customsFee + pageFee + inspectionFee + checkFee + verificationFee
+  const computedTotal = customsFee + pageFee + manifestFee + inspectionFee + checkFee + verificationFee
     + customsBusinessCustomFieldsTotal(customFields);
   return {
     date: normalizeCustomsBusinessDate(body.date ?? body.businessDate ?? body.business_date),
-    declarationNo: String(body.declarationNo ?? body.declaration_no ?? "").trim(),
-    sixSheetNo: String(body.sixSheetNo ?? body.six_sheet_no ?? "").trim(),
-    company: String(body.company ?? "").trim(),
+    declarationNo: userTextValue(body.declarationNo ?? body.declaration_no ?? ""),
+    sixSheetNo: userTextValue(body.sixSheetNo ?? body.six_sheet_no ?? ""),
+    company: userTextValue(body.company ?? ""),
     direction,
     itemCount: integerField(body.itemCount ?? body.item_count),
     pageCount: integerField(body.pageCount ?? body.page_count),
@@ -4010,7 +4194,7 @@ function normalizeCustomsBusinessPayload(body = {}) {
     customFields,
     customFieldsJson: JSON.stringify(customFields),
     total: computedTotal,
-    remark: String(body.remark ?? "").trim()
+    remark: userTextValue(body.remark ?? "")
   };
 }
 
@@ -4023,8 +4207,8 @@ function normalizeOtherBusinessPayload(body = {}) {
   const totalIncome = moneyNumberField(income + customBreakdown.income);
   return {
     date: normalizeCustomsBusinessDate(body.date ?? body.businessDate ?? body.business_date),
-    title: String(body.title ?? "").trim(),
-    customer: String(body.customer ?? body.company ?? "").trim(),
+    title: userTextValue(body.title ?? ""),
+    customer: userTextValue(body.customer ?? body.company ?? ""),
     cost,
     income,
     customFields,
@@ -4032,7 +4216,7 @@ function normalizeOtherBusinessPayload(body = {}) {
     totalCost,
     totalIncome,
     profit: signedMoneyNumberField(totalIncome - totalCost),
-    remark: String(body.remark ?? "").trim()
+    remark: userTextValue(body.remark ?? "")
   };
 }
 
@@ -4098,15 +4282,15 @@ function mapAccount(row) {
   return {
     id: row.id,
     username: row.username,
-    displayName: row.display_name,
-    name: row.display_name,
+    displayName: userTextValue(row.display_name),
+    name: userTextValue(row.display_name),
     role,
     roleLevel: roleLevelFor(role),
     status: row.status,
     hireDate: row.hire_date || "",
-    phone: row.phone || "",
-    email: row.email || "",
-    note: row.note || "",
+    phone: userTextValue(row.phone),
+    email: userTextValue(row.email),
+    note: userTextValue(row.note),
     permissions: accountPermissionsForRole(role),
     allowedModules: allowedModulesForRole(role),
     tablePreferences: parseJsonObjectText(row.table_preferences, {}),
@@ -4530,10 +4714,10 @@ app.patch("/api/auth/password", async (req, res) => {
 app.patch("/api/auth/profile", async (req, res) => {
   const item = {
     id: req.account.id,
-    displayName: String(req.body?.displayName || "").trim(),
-    phone: String(req.body?.phone || "").trim(),
-    email: String(req.body?.email || "").trim(),
-    note: String(req.body?.note || "").trim()
+    displayName: userTextValue(req.body?.displayName),
+    phone: userTextValue(req.body?.phone),
+    email: userTextValue(req.body?.email),
+    note: userTextValue(req.body?.note)
   };
   const result = await db.prepare(`
     UPDATE app_accounts
@@ -5094,6 +5278,7 @@ app.patch("/api/customers/:id", async (req, res) => {
   }
 
   const hasCustomsVerificationFee = await customerColumnExists("customs_verification_fee");
+  const hasCustomsManifestFee = await customerColumnExists("customs_manifest_fee");
   const hasCustomsCustomFields = await customerColumnExists("customs_custom_fields");
   const result = await db.prepare(`
     UPDATE customers
@@ -5124,6 +5309,7 @@ app.patch("/api/customers/:id", async (req, res) => {
         customs_export_home_fee = @customsExportHomeFee,
         customs_import_page_fee = @customsImportPageFee,
         customs_export_page_fee = @customsExportPageFee
+        ${hasCustomsManifestFee ? ", customs_manifest_fee = @customsManifestFee" : ""}
         ${hasCustomsVerificationFee ? ", customs_verification_fee = @customsVerificationFee" : ""}
         ${hasCustomsCustomFields ? ", customs_custom_fields = @customsCustomFieldsJson" : ""}
     WHERE id = @id AND deleted_at IS NULL
@@ -5145,6 +5331,7 @@ app.post("/api/customers", async (req, res) => {
   }
 
   const hasCustomsVerificationFee = await customerColumnExists("customs_verification_fee");
+  const hasCustomsManifestFee = await customerColumnExists("customs_manifest_fee");
   const hasCustomsCustomFields = await customerColumnExists("customs_custom_fields");
   await db.prepare(`
     INSERT INTO customers
@@ -5152,13 +5339,13 @@ app.post("/api/customers", async (req, res) => {
        tax_no, contact, mobile, driver_wage_adjust_hkd, default_template_id,
        invoice_title, invoice_tax_no, invoice_bank, invoice_account, invoice_address_phone,
        customs_home_item_count, customs_page_item_count, customs_import_home_fee, customs_export_home_fee,
-       customs_import_page_fee, customs_export_page_fee${hasCustomsVerificationFee ? ", customs_verification_fee" : ""}${hasCustomsCustomFields ? ", customs_custom_fields" : ""})
+       customs_import_page_fee, customs_export_page_fee${hasCustomsManifestFee ? ", customs_manifest_fee" : ""}${hasCustomsVerificationFee ? ", customs_verification_fee" : ""}${hasCustomsCustomFields ? ", customs_custom_fields" : ""})
     VALUES
       (@id, @type, @customerCategory, @name, @shortName, @province, @city, @address, @term, @settlementCurrency, @receivableRMB, @receivableHKD, @recentOrder, @createdAt,
        @taxNo, @contact, @mobile, @driverWageAdjustHKD, @defaultTemplateId,
        @invoiceTitle, @invoiceTaxNo, @invoiceBank, @invoiceAccount, @invoiceAddressPhone,
        @customsHomeItemCount, @customsPageItemCount, @customsImportHomeFee, @customsExportHomeFee,
-       @customsImportPageFee, @customsExportPageFee${hasCustomsVerificationFee ? ", @customsVerificationFee" : ""}${hasCustomsCustomFields ? ", @customsCustomFieldsJson" : ""})
+       @customsImportPageFee, @customsExportPageFee${hasCustomsManifestFee ? ", @customsManifestFee" : ""}${hasCustomsVerificationFee ? ", @customsVerificationFee" : ""}${hasCustomsCustomFields ? ", @customsCustomFieldsJson" : ""})
   `).run(item);
   await writeAudit("create", "customer", item.id, item.name);
   res.status(201).json(mapCustomer(await db.prepare("SELECT * FROM customers WHERE id = ?").get(item.id)));
@@ -5270,13 +5457,18 @@ app.get("/api/orders", async (_req, res) => {
     WHERE deleted_at IS NULL
     ${ORDER_DEFAULT_SORT_SQL}
   `).all();
-  res.json(await hydrateOrderFees(rows.map(mapOrder)));
+  res.json(await hydrateOrderRowsForApi(rows.map(mapOrder)));
 });
 
 function parseDispatchPlanRowsJson(rowsJson = "[]") {
   try {
     const parsed = JSON.parse(rowsJson || "[]");
-    return Array.isArray(parsed) ? parsed : [];
+    return Array.isArray(parsed)
+      ? parsed.map((row) => ({
+        ...row,
+        vehicleSource: normalizeVehicleSource(row?.vehicleSource || row?.vehicle_source || "")
+      }))
+      : [];
   } catch {
     return [];
   }
@@ -5348,11 +5540,11 @@ function dispatchRowFieldProvided(row = {}, camelKey = "", snakeKey = "") {
 }
 
 function dispatchRowStringField(row = {}, existingRow = null, camelKey = "", snakeKey = "", fallback = "") {
-  if (Object.prototype.hasOwnProperty.call(row, camelKey)) return String(row[camelKey] ?? "");
-  if (snakeKey && Object.prototype.hasOwnProperty.call(row, snakeKey)) return String(row[snakeKey] ?? "");
-  if (existingRow && Object.prototype.hasOwnProperty.call(existingRow, camelKey)) return String(existingRow[camelKey] ?? "");
-  if (existingRow && snakeKey && Object.prototype.hasOwnProperty.call(existingRow, snakeKey)) return String(existingRow[snakeKey] ?? "");
-  return String(fallback ?? "");
+  if (Object.prototype.hasOwnProperty.call(row, camelKey)) return userTextValue(row[camelKey]);
+  if (snakeKey && Object.prototype.hasOwnProperty.call(row, snakeKey)) return userTextValue(row[snakeKey]);
+  if (existingRow && Object.prototype.hasOwnProperty.call(existingRow, camelKey)) return userTextValue(existingRow[camelKey]);
+  if (existingRow && snakeKey && Object.prototype.hasOwnProperty.call(existingRow, snakeKey)) return userTextValue(existingRow[snakeKey]);
+  return userTextValue(fallback);
 }
 
 function dispatchRowBooleanField(row = {}, existingRow = null, camelKey = "", snakeKey = "", fallback = false) {
@@ -5430,6 +5622,22 @@ function dispatchRowHasReference(row = {}) {
   return dispatchRowLookupKeys(row).length > 0;
 }
 
+function dispatchRowReferenceValue(row = {}, camelKey = "", snakeKey = "") {
+  return String(row?.[camelKey] ?? (snakeKey ? row?.[snakeKey] : "") ?? "").trim();
+}
+
+function dispatchRowOrderNo(row = {}) {
+  return dispatchRowReferenceValue(row, "orderNo", "order_no");
+}
+
+function dispatchRowDispatchNo(row = {}) {
+  return dispatchRowReferenceValue(row, "dispatchNo", "dispatch_no");
+}
+
+function dispatchRowLoadTime(row = {}) {
+  return String(row?.loadTime ?? row?.load_time ?? "").trim();
+}
+
 async function orderDateFromLinkedDispatchRow(orderNo = "", dispatchNo = "", fallbackDate = "") {
   const normalizedOrderNo = String(orderNo || "").trim();
   const normalizedDispatchNo = String(dispatchNo || "").trim();
@@ -5437,8 +5645,8 @@ async function orderDateFromLinkedDispatchRow(orderNo = "", dispatchNo = "", fal
 
   let matched = null;
   const recordMatch = (row = {}, planDate = "", priority = 0) => {
-    const matches = (normalizedOrderNo && dispatchRowText(row, "orderNo") === normalizedOrderNo)
-      || (normalizedDispatchNo && dispatchRowText(row, "dispatchNo") === normalizedDispatchNo);
+    const matches = (normalizedOrderNo && dispatchRowOrderNo(row) === normalizedOrderNo)
+      || (normalizedDispatchNo && dispatchRowDispatchNo(row) === normalizedDispatchNo);
     if (!matches) return;
     const createdAt = dispatchRowCreatedAt(row, planDate);
     const candidate = { date: dispatchRowBusinessDate(row, planDate), createdAt, priority, statusRank: dispatchRowStatusRank(row) };
@@ -5469,6 +5677,71 @@ async function orderDateFromLinkedDispatchRow(orderNo = "", dispatchNo = "", fal
   return String(fallbackDate || "").trim().slice(0, 10);
 }
 
+function recordOrderDispatchLoadInfoCandidate(lookup = new Map(), row = {}, planDate = "", priority = 0) {
+  const date = dispatchRowBusinessDate(row, planDate);
+  if (!date) return;
+  const keys = [
+    dispatchRowOrderNo(row) && `order:${dispatchRowOrderNo(row)}`,
+    dispatchRowDispatchNo(row) && `dispatch:${dispatchRowDispatchNo(row)}`
+  ].filter(Boolean);
+  if (!keys.length) return;
+  const candidate = {
+    date,
+    loadTime: dispatchRowLoadTime(row),
+    createdAt: dispatchRowCreatedAt(row, planDate),
+    priority,
+    statusRank: dispatchRowStatusRank(row)
+  };
+  keys.forEach((key) => {
+    const existing = lookup.get(key);
+    if (isPreferredDispatchDateCandidate(candidate, existing)) lookup.set(key, candidate);
+  });
+}
+
+async function orderDispatchLoadInfoLookup() {
+  const lookup = new Map();
+  const plans = await db.prepare("SELECT plan_date, rows_json FROM dispatch_plans").all();
+  for (const plan of plans) {
+    parseDispatchPlanRowsJson(plan.rows_json).forEach((row) =>
+      recordOrderDispatchLoadInfoCandidate(lookup, row, plan.plan_date, 2)
+    );
+  }
+
+  const recycleRows = await db.prepare(`
+    SELECT plan_date, row_json
+    FROM dispatch_plan_recycle
+    ORDER BY restored_at NULLS FIRST, deleted_at DESC, id DESC
+  `).all();
+  for (const recycle of recycleRows) {
+    const row = parseDispatchPlanRowJson(recycle.row_json);
+    if (dispatchRowHasReference(row)) recordOrderDispatchLoadInfoCandidate(lookup, row, recycle.plan_date, 1);
+  }
+  return lookup;
+}
+
+async function hydrateOrderDispatchLoadInfo(orders = []) {
+  if (!orders.length) return orders;
+  const lookup = await orderDispatchLoadInfoLookup();
+  return orders.map((order) => {
+    const candidates = [
+      order?.no && lookup.get(`order:${order.no}`),
+      order?.dispatchNo && lookup.get(`dispatch:${order.dispatchNo}`)
+    ].filter(Boolean);
+    const matched = candidates.reduce((best, candidate) =>
+      isPreferredDispatchDateCandidate(candidate, best) ? candidate : best
+    , null);
+    return {
+      ...order,
+      dispatchLoadDate: matched?.date || String(order?.date || "").trim().slice(0, 10),
+      dispatchLoadTime: matched?.loadTime || ""
+    };
+  });
+}
+
+async function hydrateOrderRowsForApi(orders = []) {
+  return hydrateOrderDispatchLoadInfo(await hydrateOrderFees(orders));
+}
+
 function dedupeDispatchPlanRows(rows = []) {
   const dedupedRows = [];
   const seenKeys = new Set();
@@ -5492,31 +5765,31 @@ function normalizeDispatchPlanRow(row = {}, existingRow = null, requestCreator =
     dispatchNo: String(item.dispatchNo || ""),
     orderNo: String(item.orderNo || ""),
     customerId: dispatchRowStringField(item, existingRow, "customerId", "customer_id"),
-    customer: String(item.customer || ""),
+    customer: userTextValue(item.customer),
     businessType: dispatchRowStringField(item, existingRow, "businessType", "business_type"),
     currency: dispatchRowStringField(item, existingRow, "currency"),
-    plate: String(item.plate || ""),
-    port: String(item.port || ""),
+    plate: normalizePlateText(item.plate),
+    port: userTextValue(item.port),
     needsWeighing: dispatchRowBooleanField(item, existingRow, "needsWeighing", "needs_weighing", false),
-    direction: String(item.direction || ""),
-    tonnage: String(item.tonnage || ""),
-    quantity: item.quantity ?? "",
-    weight: String(item.weight || ""),
-    loading: String(item.loading || ""),
-    unloading: String(item.unloading || ""),
-    loadTime: String(item.loadTime || item.load_time || ""),
-    vehicleSource: String(item.vehicleSource || item.vehicle_source || ""),
-    supplier: String(item.supplier || ""),
-    transportMode: String(item.transportMode || item.transport_mode || ""),
-    driver: String(item.driver || ""),
-    hkDriver: String(item.hkDriver || item.hk_driver || ""),
-    mainlandDriver: String(item.mainlandDriver || item.mainland_driver || ""),
-    status: String(item.status || ""),
-    previousStatus: String(item.previousStatus || item.previous_status || ""),
+    direction: userTextValue(item.direction),
+    tonnage: userTextValue(item.tonnage),
+    quantity: userTextValue(item.quantity ?? ""),
+    weight: userTextValue(item.weight),
+    loading: userRawMultilineTextValue(item.loading),
+    unloading: userRawMultilineTextValue(item.unloading),
+    loadTime: userTextValue(item.loadTime || item.load_time),
+    vehicleSource: normalizeVehicleSource(item.vehicleSource || item.vehicle_source),
+    supplier: userTextValue(item.supplier),
+    transportMode: userTextValue(item.transportMode || item.transport_mode),
+    driver: userTextValue(item.driver),
+    hkDriver: userTextValue(item.hkDriver || item.hk_driver),
+    mainlandDriver: userTextValue(item.mainlandDriver || item.mainland_driver),
+    status: userTextValue(item.status),
+    previousStatus: userTextValue(item.previousStatus || item.previous_status),
     createdByAccountId: creator.createdByAccountId,
     createdByUsername: creator.createdByUsername,
     createdByName: creator.createdByName,
-    note: String(item.note || ""),
+    note: userTextValue(item.note),
     tripNoEnabled: dispatchRowBooleanField(item, existingRow, "tripNoEnabled", "trip_no_enabled", false) ? 1 : 0,
     tripNo: dispatchRowStringField(item, existingRow, "tripNo", "trip_no"),
     sixSheetEnabled: dispatchRowBooleanField(item, existingRow, "sixSheetEnabled", "six_sheet_enabled", false) ? 1 : 0,
@@ -5560,6 +5833,7 @@ function dispatchExportShortCustomer(row = {}, customerShortNames = new Map()) {
 }
 
 function dispatchExportShortSupplier(row = {}, supplierShortNames = new Map()) {
+  if (!dispatchExportIsOutsourced(row)) return OWN_VEHICLE_SOURCE;
   const order = dispatchExportNestedRow(row.order);
   const supplierId = dispatchExportText(order.supplierId, row.supplierId);
   const supplierName = dispatchExportOptionalText(order.supplier, row.supplier);
@@ -5583,19 +5857,17 @@ function dispatchExportFirstLocation(value = "") {
 function dispatchExportShortLocation(value = "") {
   const text = dispatchExportFirstLocation(value);
   if (!text) return "";
-  const slashParts = text.split(/\s*\/\s*/).map((item) => item.trim()).filter(Boolean);
-  if (slashParts.length >= 2) return slashParts.slice(0, 2).join(" / ");
-  if (slashParts.length === 1) return slashParts[0];
-  const matched = text.match(/((?:[\u4e00-\u9fa5A-Za-z0-9]+?[市区县镇乡街道])|香港|九龙|新界|元朗|屯门|沙田|粉岭|葵涌|荃湾|观塘|湾仔|赤鱲角|大埔|将军澳)/g);
-  if (matched?.length) return matched.slice(0, 2).join(" / ");
-  return text.length > 8 ? text.slice(0, 8) : text;
+  const slashParts = text.split(/\s*\/\s*/).map((item) => item.trim());
+  if (slashParts.length >= 2 && slashParts[1]) {
+    return [slashParts[0], slashParts[1]].filter(Boolean).join(" / ");
+  }
+  return "";
 }
 
 function dispatchExportRoute(row = {}) {
-  const route = dispatchExportText(row.route);
-  if (route) return route;
-  const loading = dispatchExportShortLocation(row.loading);
-  const unloading = dispatchExportShortLocation(row.unloading);
+  const order = dispatchExportNestedRow(row.order);
+  const loading = dispatchExportShortLocation(dispatchExportText(row.loading, order.loading));
+  const unloading = dispatchExportShortLocation(dispatchExportText(row.unloading, order.unloading));
   return [loading, unloading].filter(Boolean).join(" → ") || "-";
 }
 
@@ -5671,28 +5943,53 @@ function dispatchExportComparableTime(row = {}) {
 
 function dispatchExportVehicleSourceRank(row = {}) {
   const order = dispatchExportNestedRow(row.order);
-  const vehicleSource = dispatchExportText(order.vehicleSource, row.vehicleSource);
-  if (vehicleSource === "本公司车辆") return 0;
+  const vehicleSource = normalizeVehicleSource(dispatchExportText(order.vehicleSource, row.vehicleSource));
+  if (vehicleSource === "汉业物流") return 0;
   if (vehicleSource === "外派车辆") return 1;
   return 2;
+}
+
+function dispatchExportIsOutsourced(row = {}) {
+  return dispatchExportVehicleSourceRank(row) === 1;
+}
+
+function dispatchExportSupplierGroup(row = {}) {
+  if (!dispatchExportIsOutsourced(row)) return OWN_VEHICLE_SOURCE;
+  const order = dispatchExportNestedRow(row.order);
+  return dispatchExportText(order.supplier, row.supplier) || OWN_VEHICLE_SOURCE;
 }
 
 function compareDispatchExportRows(left = {}, right = {}) {
   const leftPlate = dispatchExportPlateGroup(left);
   const rightPlate = dispatchExportPlateGroup(right);
-  if (!leftPlate && rightPlate) return 1;
-  if (!rightPlate && leftPlate) return -1;
-  const plateCompare = String(leftPlate || "").localeCompare(String(rightPlate || ""), "zh-Hans-CN", { numeric: true, sensitivity: "base" });
-  if (plateCompare !== 0) return plateCompare;
+  const leftOutsourced = dispatchExportIsOutsourced(left);
+  const rightOutsourced = dispatchExportIsOutsourced(right);
+  if (leftOutsourced !== rightOutsourced) return leftOutsourced ? -1 : 1;
 
-  const dateCompare = dispatchExportComparableDate(left) - dispatchExportComparableDate(right);
-  if (dateCompare !== 0) return dateCompare;
+  const leftSupplier = dispatchExportSupplierGroup(left);
+  const rightSupplier = dispatchExportSupplierGroup(right);
 
-  const timeCompare = dispatchExportComparableTime(left) - dispatchExportComparableTime(right);
-  if (timeCompare !== 0) return timeCompare;
+  if (leftOutsourced) {
+    const supplierCompare = String(leftSupplier || "").localeCompare(String(rightSupplier || ""), "zh-Hans-CN", { numeric: true, sensitivity: "base" });
+    if (supplierCompare !== 0) return supplierCompare;
 
-  const sourceCompare = dispatchExportVehicleSourceRank(left) - dispatchExportVehicleSourceRank(right);
-  if (sourceCompare !== 0) return sourceCompare;
+    const timeCompare = dispatchExportComparableTime(left) - dispatchExportComparableTime(right);
+    if (timeCompare !== 0) return timeCompare;
+
+    const dateCompare = dispatchExportComparableDate(left) - dispatchExportComparableDate(right);
+    if (dateCompare !== 0) return dateCompare;
+  } else {
+    if (!leftPlate && rightPlate) return 1;
+    if (!rightPlate && leftPlate) return -1;
+    const plateCompare = String(leftPlate || "").localeCompare(String(rightPlate || ""), "zh-Hans-CN", { numeric: true, sensitivity: "base" });
+    if (plateCompare !== 0) return plateCompare;
+
+    const dateCompare = dispatchExportComparableDate(left) - dispatchExportComparableDate(right);
+    if (dateCompare !== 0) return dateCompare;
+
+    const timeCompare = dispatchExportComparableTime(left) - dispatchExportComparableTime(right);
+    if (timeCompare !== 0) return timeCompare;
+  }
 
   const noCompare = dispatchExportText(left.dispatchNo, left.order?.dispatchNo).localeCompare(
     dispatchExportText(right.dispatchNo, right.order?.dispatchNo),
@@ -5718,14 +6015,17 @@ function dispatchExportRowsForWorkbook(rows = [], fallbackDate = "", customerSho
     .map((row, index) => ({ ...row, __exportIndex: index }))
     .sort(compareDispatchExportRows);
   const bodyRows = [];
-  let previousPlate = "";
+  let previousGroupKey = "";
   let serialNumber = 0;
   sortedRows.forEach((row) => {
     const plate = dispatchExportPlateGroup(row);
-    if (bodyRows.length && plate !== previousPlate) {
+    const outsourced = dispatchExportIsOutsourced(row);
+    const supplierGroup = dispatchExportSupplierGroup(row);
+    const groupKey = outsourced ? `outsourced:${supplierGroup}` : `own:${plate}`;
+    if (bodyRows.length && groupKey !== previousGroupKey) {
       bodyRows.push(null, null);
     }
-    previousPlate = plate;
+    previousGroupKey = groupKey;
     serialNumber += 1;
     const order = dispatchExportNestedRow(row.order);
     const vehicleSource = dispatchExportText(order.vehicleSource, row.vehicleSource);
@@ -6029,7 +6329,7 @@ function dispatchRowCreatorFields(row = {}, existingRow = null, requestCreator =
 function mapDispatchPlanRecord(row = {}) {
   return {
     date: row.plan_date,
-    rows: dedupeDispatchPlanRows(parseDispatchPlanRowsJson(row.rows_json)),
+    rows: dedupeDispatchPlanRows(parseDispatchPlanRowsJson(row.rows_json).map((item) => normalizeDispatchPlanRow(item, null, {}, row.plan_date))),
     createdByAccountId: row.created_by_account_id || null,
     createdByUsername: row.created_by_username || "",
     createdByName: row.created_by_display_name || row.created_by_username || "",
@@ -6047,31 +6347,31 @@ function normalizeDispatchRecycleRow(row = {}, planDate = todayInputValue()) {
     dispatchNo: String(item.dispatchNo || item.dispatch_no || ""),
     orderNo: String(item.orderNo || item.order_no || ""),
     customerId: String(item.customerId || item.customer_id || ""),
-    customer: String(item.customer || ""),
-    businessType: String(item.businessType || item.business_type || ""),
-    currency: String(item.currency || ""),
-    plate: String(item.plate || ""),
-    port: String(item.port || ""),
+    customer: userTextValue(item.customer),
+    businessType: userTextValue(item.businessType || item.business_type),
+    currency: userTextValue(item.currency),
+    plate: normalizePlateText(item.plate),
+    port: userTextValue(item.port),
     needsWeighing: booleanFlag(item.needsWeighing ?? item.needs_weighing, false),
-    direction: String(item.direction || ""),
-    tonnage: String(item.tonnage || ""),
-    quantity: item.quantity ?? "",
-    weight: String(item.weight || ""),
-    loading: String(item.loading || ""),
-    unloading: String(item.unloading || ""),
-    loadTime: String(item.loadTime || item.load_time || ""),
-    vehicleSource: String(item.vehicleSource || item.vehicle_source || ""),
-    supplier: String(item.supplier || ""),
-    transportMode: String(item.transportMode || item.transport_mode || ""),
-    driver: String(item.driver || ""),
-    hkDriver: String(item.hkDriver || item.hk_driver || ""),
-    mainlandDriver: String(item.mainlandDriver || item.mainland_driver || ""),
-    status: String(item.status || ""),
-    previousStatus: String(item.previousStatus || item.previous_status || ""),
+    direction: userTextValue(item.direction),
+    tonnage: userTextValue(item.tonnage),
+    quantity: userTextValue(item.quantity ?? ""),
+    weight: userTextValue(item.weight),
+    loading: userRawMultilineTextValue(item.loading),
+    unloading: userRawMultilineTextValue(item.unloading),
+    loadTime: userTextValue(item.loadTime || item.load_time),
+    vehicleSource: normalizeVehicleSource(item.vehicleSource || item.vehicle_source),
+    supplier: userTextValue(item.supplier),
+    transportMode: userTextValue(item.transportMode || item.transport_mode),
+    driver: userTextValue(item.driver),
+    hkDriver: userTextValue(item.hkDriver || item.hk_driver),
+    mainlandDriver: userTextValue(item.mainlandDriver || item.mainland_driver),
+    status: userTextValue(item.status),
+    previousStatus: userTextValue(item.previousStatus || item.previous_status),
     createdByAccountId: creator.createdByAccountId,
     createdByUsername: creator.createdByUsername,
     createdByName: creator.createdByName,
-    note: String(item.note || ""),
+    note: userTextValue(item.note),
     tripNoEnabled: booleanFlag(item.tripNoEnabled ?? item.trip_no_enabled, false) ? 1 : 0,
     tripNo: String(item.tripNo || item.trip_no || ""),
     sixSheetEnabled: booleanFlag(item.sixSheetEnabled ?? item.six_sheet_enabled, false) ? 1 : 0,
@@ -6335,8 +6635,8 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = []) {
       no: order.no,
       dispatchNo: dispatchNo || order.dispatch_no || "",
       needsWeighing: booleanFlag(row.needsWeighing ?? order.needs_weighing, false) ? 1 : 0,
-      vehicleSource: dispatchRowText(row, "vehicleSource") || order.vehicle_source || "",
-      supplier: dispatchRowText(row, "vehicleSource") === "外派车辆" ? dispatchRowText(row, "supplier") : "",
+      vehicleSource: normalizeVehicleSource(dispatchRowText(row, "vehicleSource") || order.vehicle_source || ""),
+      supplier: normalizeVehicleSource(dispatchRowText(row, "vehicleSource")) === "外派车辆" ? dispatchRowText(row, "supplier") : "",
       plate: dispatchRowText(row, "plate"),
       driver,
       hkDriver: isSingleDriver ? "" : (rowHkDriver || rowDriver),
@@ -6628,7 +6928,7 @@ app.post("/api/dispatch-plans/recycle/:id/restore", async (req, res) => {
       const updateOrder = await db.prepare("UPDATE orders SET deleted_at = NULL WHERE no = ? AND deleted_at IS NOT NULL").run(recycleRow.order_no);
       if (updateOrder.changes > 0) {
         const order = await db.prepare("SELECT * FROM orders WHERE no = ?").get(recycleRow.order_no);
-        restoredOrder = (await hydrateOrderFees([mapOrder(order)]))[0];
+        restoredOrder = (await hydrateOrderRowsForApi([mapOrder(order)]))[0];
       }
     }
     const restoredDispatch = await restoreDispatchRecycleRecord(id);
@@ -6737,7 +7037,7 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
 
 app.get("/api/orders/recycle", async (_req, res) => {
   const rows = await db.prepare("SELECT * FROM orders WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, order_date DESC").all();
-  const mappedRows = await hydrateOrderFees(rows.map(mapOrder));
+  const mappedRows = await hydrateOrderRowsForApi(rows.map(mapOrder));
   const customerShortNames = await loadCustomerShortNameMap();
   const rowsWithOperator = await Promise.all(mappedRows.map(async (row) => ({
     ...row,
@@ -6885,7 +7185,7 @@ app.post("/api/orders/audit", async (req, res) => {
   });
 
   await transaction(orderNos);
-  res.json(updated);
+  res.json(await hydrateOrderRowsForApi(updated));
 });
 
 function pickBody(body, camelKey, snakeKey, fallback) {
@@ -6896,7 +7196,7 @@ function pickBody(body, camelKey, snakeKey, fallback) {
 
 async function readOrderPayload(body, existing = null) {
   const submittedDate = pickBody(body, "date", "order_date", existing?.order_date || todayInputValue());
-  const dispatchNo = String(pickBody(body, "dispatchNo", "dispatch_no", existing?.dispatch_no || "") || "").trim();
+  const dispatchNo = userTextValue(pickBody(body, "dispatchNo", "dispatch_no", existing?.dispatch_no || ""));
   const initialLinkedDate = await orderDateFromLinkedDispatchRow(existing?.no || body.no || "", dispatchNo, submittedDate);
   const dateForNewNumbers = initialLinkedDate || submittedDate;
   const no = existing?.no || body.no || (await nextOrderNo(dateForNewNumbers));
@@ -6913,33 +7213,33 @@ async function readOrderPayload(body, existing = null) {
     no,
     dispatchNo: resolvedDispatchNo,
     customerId: pickBody(body, "customerId", "customer_id", existing?.customer_id || null),
-    customer: String(pickBody(body, "customer", "customer_name", existing?.customer || "") || "").trim(),
-    businessType: String(pickBody(body, "businessType", "business_type", existing?.business_type || "运输") || "运输").trim(),
-    port: String(pickBody(body, "port", null, existing?.port || "") || "").trim(),
+    customer: userTextValue(pickBody(body, "customer", "customer_name", existing?.customer || "")),
+    businessType: userTextValue(pickBody(body, "businessType", "business_type", existing?.business_type || "运输") || "运输"),
+    port: userTextValue(pickBody(body, "port", null, existing?.port || "")),
     needsWeighing: booleanFlag(pickBody(body, "needsWeighing", "needs_weighing", existing?.needs_weighing || false), false) ? 1 : 0,
-    direction: String(pickBody(body, "direction", null, existing?.direction || "") || "").trim(),
-    tonnage: String(pickBody(body, "tonnage", null, existing?.tonnage || "") || "").trim(),
-    currency: String(pickBody(body, "currency", null, existing?.currency || "") || "").trim(),
-    quantity: String(pickBody(body, "quantity", null, existing?.quantity || "") || "").trim(),
-    weight: String(pickBody(body, "weight", null, existing?.weight || "") || "").trim(),
-    vehicleSource: String(pickBody(body, "vehicleSource", "vehicle_source", existing?.vehicle_source || "") || "").trim(),
-    supplier: String(pickBody(body, "supplier", null, existing?.supplier || "-") || "-").trim(),
-    plate: String(pickBody(body, "plate", null, existing?.plate || "") || "").trim(),
-    driver: String(pickBody(body, "driver", null, existing?.driver || "") || "").trim(),
-    hkDriver: String(pickBody(body, "hkDriver", "hk_driver", existing?.hk_driver || "") || "").trim(),
-    mainlandDriver: String(pickBody(body, "mainlandDriver", "mainland_driver", existing?.mainland_driver || "") || "").trim(),
-    transportMode: String(pickBody(body, "transportMode", "transport_mode", existing?.transport_mode || "") || "").trim(),
-    loading: String(pickBody(body, "loading", "loading_place", existing?.loading || "") || "").trim(),
-    unloading: String(pickBody(body, "unloading", "unloading_place", existing?.unloading || "") || "").trim(),
+    direction: userTextValue(pickBody(body, "direction", null, existing?.direction || "")),
+    tonnage: userTextValue(pickBody(body, "tonnage", null, existing?.tonnage || "")),
+    currency: userTextValue(pickBody(body, "currency", null, existing?.currency || "")),
+    quantity: userTextValue(pickBody(body, "quantity", null, existing?.quantity || "")),
+    weight: userTextValue(pickBody(body, "weight", null, existing?.weight || "")),
+    vehicleSource: normalizeVehicleSource(pickBody(body, "vehicleSource", "vehicle_source", existing?.vehicle_source || "")),
+    supplier: userTextValue(pickBody(body, "supplier", null, existing?.supplier || "-") || "-"),
+    plate: normalizePlateText(pickBody(body, "plate", null, existing?.plate || "")),
+    driver: userTextValue(pickBody(body, "driver", null, existing?.driver || "")),
+    hkDriver: userTextValue(pickBody(body, "hkDriver", "hk_driver", existing?.hk_driver || "")),
+    mainlandDriver: userTextValue(pickBody(body, "mainlandDriver", "mainland_driver", existing?.mainland_driver || "")),
+    transportMode: userTextValue(pickBody(body, "transportMode", "transport_mode", existing?.transport_mode || "")),
+    loading: userRawMultilineTextValue(pickBody(body, "loading", "loading_place", existing?.loading || "")),
+    unloading: userRawMultilineTextValue(pickBody(body, "unloading", "unloading_place", existing?.unloading || "")),
     date: dispatchDate || dateForNewNumbers,
     receivableHKD: Number(pickBody(body, "receivableHKD", "hkd_receivable", existing?.receivable_hkd || 0) || 0),
     receivableRMB: Number(pickBody(body, "receivableRMB", "rmb_receivable", existing?.receivable_rmb || 0) || 0),
     status,
-    remark: String(pickBody(body, "remark", null, existing?.remark || "") || "").trim(),
+    remark: userMultilineTextValue(pickBody(body, "remark", null, existing?.remark || "")),
     tripNoEnabled: pickBody(body, "tripNoEnabled", "trip_no_enabled", existing?.trip_no_enabled || 0) ? 1 : 0,
-    tripNo: String(pickBody(body, "tripNo", "trip_no", existing?.trip_no || "") || "").trim(),
+    tripNo: userTextValue(pickBody(body, "tripNo", "trip_no", existing?.trip_no || "")),
     sixSheetEnabled: pickBody(body, "sixSheetEnabled", "six_sheet_enabled", existing?.six_sheet_enabled || 0) ? 1 : 0,
-    sixSheetNo: String(pickBody(body, "sixSheetNo", "six_sheet_no", existing?.six_sheet_no || "") || "").trim(),
+    sixSheetNo: userTextValue(pickBody(body, "sixSheetNo", "six_sheet_no", existing?.six_sheet_no || "")),
     fees: Array.isArray(body.fees) ? body.fees : null
   };
 }
@@ -7050,11 +7350,11 @@ app.post("/api/orders", async (req, res) => {
   }
   await writeAudit("create", "order", item.no, item.customer);
   const created = await db.prepare("SELECT * FROM orders WHERE no = ?").get(item.no);
-  res.status(201).json((await hydrateOrderFees([mapOrder(created)]))[0]);
+  res.status(201).json((await hydrateOrderRowsForApi([mapOrder(created)]))[0]);
 });
 
 function normalizeOrderFee(fee, fallbackCurrency) {
-  const driverRole = String(fee.driverRole || fee.driver_role || "").trim();
+  const driverRole = userTextValue(fee.driverRole || fee.driver_role);
   const rawQuantity = Number(fee.quantity);
   const quantity = Number.isFinite(rawQuantity) && rawQuantity > 0 ? rawQuantity : 1;
   const rawUnitPrice = Number(fee.unitPrice ?? fee.unit_price ?? 0);
@@ -7067,6 +7367,10 @@ function normalizeOrderFee(fee, fallbackCurrency) {
     ? rawAmount
     : calculatedAmount;
   const rawCost = fee.cost ?? fee.costValue ?? fee.cost_value ?? fee.costAmount ?? fee.cost_amount;
+  const costCurrency = normalizeCostCenterCurrency(
+    (fee.costCurrency ?? fee.cost_currency ?? fee._costCurrency ?? fee.currency ?? fallbackCurrency) || "港币",
+    fallbackCurrency || "港币"
+  );
   const rawCostManual = fee.costManual ?? fee.cost_manual ?? fee.manualCost ?? fee._manualCost;
   const costNumber = rawCost === undefined || rawCost === null || String(rawCost).trim() === ""
     ? null
@@ -7074,18 +7378,19 @@ function normalizeOrderFee(fee, fallbackCurrency) {
   const cost = Number.isFinite(costNumber) && costNumber >= 0 ? costNumber : null;
   return {
     category: normalizeOrderFeeCategory(fee.category),
-    name: String(fee.name || "").trim(),
+    name: userTextValue(fee.name),
     quantity,
     unitPrice,
     unitPriceManual,
-    currency: String(fee.currency || fallbackCurrency || "港币").trim(),
+    currency: userTextValue(fee.currency || fallbackCurrency || "港币"),
     amount,
     amountManual,
     cost,
+    costCurrency,
     costManual: cost == null ? false : booleanFlag(rawCostManual, false),
-    remark: String(fee.remark || "").trim(),
+    remark: userTextValue(fee.remark),
     driverRole: ["香港司机", "大陆骑师", "跟随订单司机", "手动指定"].includes(driverRole) ? driverRole : "",
-    driverName: String(fee.driverName || fee.driver_name || "").trim()
+    driverName: userTextValue(fee.driverName || fee.driver_name)
   };
 }
 
@@ -7104,9 +7409,10 @@ function calculateOrderReceivables(fees, fallbackCurrency) {
 }
 
 async function saveOrderFees(orderNo, fees, fallbackCurrency) {
+  await ensureOrderFeeCostCurrencyColumn();
   const insert = await db.prepare(`
-    INSERT INTO order_fees (order_no, category, name, quantity, unit_price, unit_price_manual, currency, amount, amount_manual, cost, cost_manual, remark, driver_role, driver_name)
-    VALUES (@orderNo, @category, @name, @quantity, @unitPrice, @unitPriceManual, @currency, @amount, @amountManual, @cost, @costManual, @remark, @driverRole, @driverName)
+    INSERT INTO order_fees (order_no, category, name, quantity, unit_price, unit_price_manual, currency, amount, amount_manual, cost, cost_currency, cost_manual, remark, driver_role, driver_name)
+    VALUES (@orderNo, @category, @name, @quantity, @unitPrice, @unitPriceManual, @currency, @amount, @amountManual, @cost, @costCurrency, @costManual, @remark, @driverRole, @driverName)
   `);
   await db.prepare("DELETE FROM order_fees WHERE order_no = ?").run(orderNo);
   const normalizedFees = fees
@@ -7162,7 +7468,7 @@ app.patch("/api/orders/:no", async (req, res) => {
   await transaction();
   await writeAudit("update", "order", no, item.customer);
   const updated = await db.prepare("SELECT * FROM orders WHERE no = ?").get(no);
-  res.json((await hydrateOrderFees([mapOrder(updated)]))[0]);
+  res.json((await hydrateOrderRowsForApi([mapOrder(updated)]))[0]);
 });
 
 app.patch("/api/orders/:no/status", async (req, res) => {
@@ -7209,7 +7515,7 @@ app.patch("/api/orders/:no/status", async (req, res) => {
   if (dispatchStatus) {
     await syncDispatchPlanRowsStatusForOrder(row, dispatchStatus);
   }
-  res.json((await hydrateOrderFees([mapOrder(row)]))[0]);
+  res.json((await hydrateOrderRowsForApi([mapOrder(row)]))[0]);
 });
 
 app.delete("/api/orders/:no", async (req, res) => {
@@ -7252,7 +7558,7 @@ app.post("/api/orders/:no/restore", async (req, res) => {
   await transaction();
   await writeAudit("restore", "order", no, "从回收站恢复");
   const restored = await db.prepare("SELECT * FROM orders WHERE no = ?").get(no);
-  const restoredOrder = (await hydrateOrderFees([mapOrder(restored)]))[0];
+  const restoredOrder = (await hydrateOrderRowsForApi([mapOrder(restored)]))[0];
   res.json({
     order: restoredOrder,
     dispatchRows: restoredDispatchRows,
@@ -7267,21 +7573,21 @@ app.get("/api/vehicles", async (_req, res) => {
 
 app.post("/api/vehicles", async (req, res) => {
   const item = {
-    plate: String(req.body.plate || "").trim(),
-    brand: String(req.body.brand || "").trim(),
-    model: String(req.body.model || "").trim(),
-    type: String(req.body.type || "").trim(),
+    plate: normalizePlateText(req.body.plate),
+    brand: userTextValue(req.body.brand),
+    model: userTextValue(req.body.model),
+    type: userTextValue(req.body.type),
     purchaseDate: String(req.body.purchaseDate || "").trim(),
     factoryDate: String(req.body.factoryDate || "").trim(),
     mainlandReviewDate: String(req.body.mainlandReviewDate || "").trim(),
     hkReviewDate: String(req.body.hkReviewDate || "").trim(),
     mainlandInsuranceDate: String(req.body.mainlandInsuranceDate || "").trim(),
     hkInsuranceDate: String(req.body.hkInsuranceDate || "").trim(),
-    insuranceReminder: String(req.body.insuranceReminder || "提前30天").trim(),
-    maintenanceReminder: String(req.body.maintenanceReminder || "").trim(),
-    status: String(req.body.status || "正常").trim(),
+    insuranceReminder: userTextValue(req.body.insuranceReminder || "提前30天"),
+    maintenanceReminder: userTextValue(req.body.maintenanceReminder),
+    status: userTextValue(req.body.status || "正常"),
     monthlyCost: Number(req.body.monthlyCost || 0),
-    note: String(req.body.note || "").trim()
+    note: userTextValue(req.body.note)
   };
   if (!item.plate) {
     res.status(400).json({ message: "车牌不能为空" });
@@ -7315,21 +7621,21 @@ app.patch("/api/vehicles/:plate", async (req, res) => {
   }
   const item = {
     originalPlate,
-    plate: String(req.body.plate || originalPlate).trim(),
-    brand: String(req.body.brand ?? current.brand ?? "").trim(),
-    model: String(req.body.model ?? current.model ?? "").trim(),
-    type: String(req.body.type ?? current.vehicle_type ?? "").trim(),
+    plate: normalizePlateText(req.body.plate || originalPlate),
+    brand: userTextValue(req.body.brand ?? current.brand ?? ""),
+    model: userTextValue(req.body.model ?? current.model ?? ""),
+    type: userTextValue(req.body.type ?? current.vehicle_type ?? ""),
     purchaseDate: String(req.body.purchaseDate ?? current.purchase_date ?? "").trim(),
     factoryDate: String(req.body.factoryDate ?? current.factory_date ?? "").trim(),
     mainlandReviewDate: String(req.body.mainlandReviewDate ?? current.mainland_review_date ?? "").trim(),
     hkReviewDate: String(req.body.hkReviewDate ?? current.hk_review_date ?? "").trim(),
     mainlandInsuranceDate: String(req.body.mainlandInsuranceDate ?? current.mainland_insurance_date ?? "").trim(),
     hkInsuranceDate: String(req.body.hkInsuranceDate ?? current.hk_insurance_date ?? "").trim(),
-    insuranceReminder: String(req.body.insuranceReminder ?? current.insurance_reminder ?? "提前30天").trim(),
-    maintenanceReminder: String(req.body.maintenanceReminder ?? current.maintenance_reminder ?? "").trim(),
-    status: String(req.body.status ?? current.status ?? "正常").trim(),
+    insuranceReminder: userTextValue(req.body.insuranceReminder ?? current.insurance_reminder ?? "提前30天"),
+    maintenanceReminder: userTextValue(req.body.maintenanceReminder ?? current.maintenance_reminder ?? ""),
+    status: userTextValue(req.body.status ?? current.status ?? "正常"),
     monthlyCost: Number(req.body.monthlyCost ?? current.monthly_cost ?? 0),
-    note: String(req.body.note ?? current.note ?? "").trim()
+    note: userTextValue(req.body.note ?? current.note ?? "")
   };
   if (!item.plate) {
     res.status(400).json({ message: "车牌不能为空" });
@@ -7536,11 +7842,11 @@ app.get("/api/drivers", async (_req, res) => {
 
 app.post("/api/drivers", async (req, res) => {
   const item = {
-    type: String(req.body.type || "香港司机").trim(),
-    name: String(req.body.name || "").trim(),
-    phone: String(req.body.phone || "").trim(),
-    idNo: String(req.body.idNo || "").trim(),
-    license: String(req.body.license || "").trim(),
+    type: userTextValue(req.body.type || "香港司机"),
+    name: userTextValue(req.body.name),
+    phone: userTextValue(req.body.phone),
+    idNo: userTextValue(req.body.idNo),
+    license: userTextValue(req.body.license),
     birthday: String(req.body.birthday || "").trim(),
     hireDate: String(req.body.hireDate || "").trim(),
     leaveDate: String(req.body.leaveDate || "").trim(),
@@ -7548,9 +7854,9 @@ app.post("/api/drivers", async (req, res) => {
       ? String(req.body.employmentStatus || "").trim()
       : "在职",
     expireAt: String(req.body.expireAt || "").trim(),
-    status: String(req.body.status || "正常").trim(),
+    status: userTextValue(req.body.status || "正常"),
     defaultWage: Number(req.body.defaultWage || 0),
-    note: String(req.body.note || "").trim()
+    note: userTextValue(req.body.note)
   };
   if (!item.name) {
     res.status(400).json({ message: "司机姓名不能为空" });
@@ -7578,11 +7884,11 @@ app.patch("/api/drivers/:id", async (req, res) => {
   }
   const item = {
     id,
-    type: String(req.body.type ?? current.type ?? "香港司机").trim() || "香港司机",
-    name: String(req.body.name ?? current.name ?? "").trim(),
-    phone: String(req.body.phone ?? current.phone ?? "").trim(),
-    idNo: String(req.body.idNo ?? current.id_no ?? "").trim(),
-    license: String(req.body.license ?? current.license ?? "").trim(),
+    type: userTextValue(req.body.type ?? current.type ?? "香港司机") || "香港司机",
+    name: userTextValue(req.body.name ?? current.name ?? ""),
+    phone: userTextValue(req.body.phone ?? current.phone ?? ""),
+    idNo: userTextValue(req.body.idNo ?? current.id_no ?? ""),
+    license: userTextValue(req.body.license ?? current.license ?? ""),
     birthday: String(req.body.birthday ?? current.birthday ?? "").trim(),
     hireDate: String(req.body.hireDate ?? current.hire_date ?? "").trim(),
     leaveDate: String(req.body.leaveDate ?? current.leave_date ?? "").trim(),
@@ -7590,9 +7896,9 @@ app.patch("/api/drivers/:id", async (req, res) => {
       ? String(req.body.employmentStatus ?? current.employment_status ?? "在职").trim()
       : "在职",
     expireAt: String(req.body.expireAt ?? current.expire_at ?? "").trim(),
-    status: String(req.body.status ?? current.status ?? "正常").trim(),
+    status: userTextValue(req.body.status ?? current.status ?? "正常"),
     defaultWage: Number(req.body.defaultWage ?? current.default_wage ?? 0),
-    note: String(req.body.note ?? current.note ?? "").trim()
+    note: userTextValue(req.body.note ?? current.note ?? "")
   };
   if (!item.name) {
     res.status(400).json({ message: "司机姓名不能为空" });

@@ -68,12 +68,12 @@
       </view>
       <view class="field-row">
         <text class="field-label">车牌</text>
-        <picker wx:if="{{form.vehicleSource === '本公司车辆' && plateOptions.length}}" range="{{plateOptions}}" data-field="plate" data-options-key="plateOptions" bindchange="onPickerChange">
+        <picker wx:if="{{form.vehicleSource === '汉业物流' && plateOptions.length}}" range="{{plateOptions}}" data-field="plate" data-options-key="plateOptions" bindchange="onPickerChange">
           <view class="picker-box">{{form.plate || '请选择车牌'}}</view>
         </picker>
         <input wx:else placeholder="输入车牌/待定" placeholder-class="placeholder" value="{{form.plate}}" data-field="plate" bindinput="onFieldInput" />
       </view>
-      <view wx:if="{{form.vehicleSource === '本公司车辆' && (!form.transportMode || form.transportMode === '单司机')}}" class="field-row driver-field">
+      <view wx:if="{{form.vehicleSource === '汉业物流' && (!form.transportMode || form.transportMode === '单司机')}}" class="field-row driver-field">
         <text class="field-label">司机</text>
         <input placeholder="搜索并选择本公司司机" placeholder-class="placeholder" value="{{form.driver}}" data-field="driver" bindfocus="onDriverFocus" bindinput="onFieldInput" bindblur="scheduleCloseDriverSuggestion" />
         <view wx:if="{{driverPickerOpen}}" class="suggestion-box driver-suggestion-box">
@@ -173,7 +173,7 @@
       </view>
     </view>
 
-    <view wx:if="{{form.vehicleSource === '本公司车辆'}}" class="panel form-panel">
+    <view wx:if="{{form.vehicleSource === '汉业物流'}}" class="panel form-panel">
       <view class="section-title">运输模式</view>
       <view class="field-row">
         <text class="field-label">运输模式</text>

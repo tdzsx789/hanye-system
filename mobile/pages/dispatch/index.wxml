@@ -138,7 +138,7 @@
         </view>
         <view class="route-line">{{item.routeText}}</view>
         <view class="tag-row">
-          <text class="source-tag {{item.vehicleSource === '外派车辆' ? 'source-outsourced' : item.vehicleSource === '本公司车辆' ? 'source-own' : 'source-empty'}}">{{item.vehicleSource || '-'}}</text>
+          <text class="source-tag {{item.vehicleSource === '外派车辆' ? 'source-outsourced' : item.vehicleSource === '汉业物流' ? 'source-own' : 'source-empty'}}">{{item.vehicleSource || '-'}}</text>
           <text class="driver-tag">司机 {{item.driverText}}</text>
           <text class="order-status-tag">应收 {{item.amountText}}</text>
         </view>

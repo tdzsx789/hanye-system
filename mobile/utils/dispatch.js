@@ -15,7 +15,153 @@ const {
 const { currentTimestampInputValue, daysUntilInputDate, todayInputValue } = require("./date");
 
 function valueText(value) {
-  return value === undefined || value === null ? "" : String(value).trim();
+  return normalizeUserText(value, { compactCjkSpacing: true });
+}
+
+const USER_TEXT_COMPAT_CHAR_MAP = {
+  "⺅": "亻",
+  "⺆": "冂",
+  "⺈": "刀",
+  "⺉": "刂",
+  "⺊": "卜",
+  "⺋": "卩",
+  "⺌": "小",
+  "⺍": "小",
+  "⺎": "兀",
+  "⺏": "尢",
+  "⺐": "尢",
+  "⺑": "彐",
+  "⺒": "巳",
+  "⺓": "幺",
+  "⺔": "彑",
+  "⺕": "彐",
+  "⺖": "忄",
+  "⺗": "心",
+  "⺘": "扌",
+  "⺙": "攵",
+  "⺛": "旡",
+  "⺜": "日",
+  "⺝": "月",
+  "⺞": "歹",
+  "⺟": "母",
+  "⺠": "民",
+  "⺡": "氵",
+  "⺢": "氺",
+  "⺣": "灬",
+  "⺤": "爫",
+  "⺥": "爫",
+  "⺦": "丬",
+  "⺧": "牛",
+  "⺨": "犭",
+  "⺩": "王",
+  "⺪": "疋",
+  "⺫": "目",
+  "⺬": "礻",
+  "⺭": "礻",
+  "⺮": "竹",
+  "⺯": "糹",
+  "⺰": "纟",
+  "⺱": "罒",
+  "⺲": "罒",
+  "⺳": "罒",
+  "⺴": "罒",
+  "⺵": "罒",
+  "⺶": "羊",
+  "⺷": "羊",
+  "⺸": "羊",
+  "⺹": "老",
+  "⺺": "聿",
+  "⺻": "聿",
+  "⺼": "月",
+  "⺽": "臼",
+  "⺾": "艹",
+  "⺿": "艹",
+  "⻀": "艹",
+  "⻁": "虎",
+  "⻂": "衤",
+  "⻃": "西",
+  "⻄": "西",
+  "⻅": "见",
+  "⻆": "角",
+  "⻇": "角",
+  "⻈": "讠",
+  "⻉": "贝",
+  "⻊": "足",
+  "⻋": "车",
+  "⻌": "辶",
+  "⻍": "辶",
+  "⻎": "辶",
+  "⻏": "阝",
+  "⻐": "钅",
+  "⻑": "長",
+  "⻒": "镸",
+  "⻓": "长",
+  "⻔": "门",
+  "⻕": "阝",
+  "⻖": "阝",
+  "⻗": "雨",
+  "⻘": "青",
+  "⻙": "韦",
+  "⻚": "页",
+  "⻛": "风",
+  "⻜": "飞",
+  "⻝": "食",
+  "⻞": "食",
+  "⻟": "食",
+  "⻠": "饣",
+  "⻢": "马",
+  "⻣": "骨",
+  "⻥": "鱼",
+  "⻦": "鸟",
+  "⻧": "卤",
+  "⻨": "麦",
+  "⻩": "黄",
+  "⻪": "黾",
+  "⻫": "齐",
+  "⻬": "齐",
+  "⻭": "齿",
+  "⻮": "齿",
+  "⻯": "龙",
+  "⻰": "龙",
+  "⻱": "龟",
+  "⻲": "龟",
+  "⻳": "龟"
+};
+const USER_TEXT_COMPAT_CHAR_RE = new RegExp(`[${Object.keys(USER_TEXT_COMPAT_CHAR_MAP).join("")}]`, "g");
+const USER_TEXT_CJK = "\\u3400-\\u9fff\\uf900-\\ufaff";
+
+function normalizeUserText(value = "", options = {}) {
+  const source = String(value === undefined || value === null ? "" : value);
+  let text = typeof source.normalize === "function" ? source.normalize("NFKC") : source;
+  text = text
+    .replace(USER_TEXT_COMPAT_CHAR_RE, (char) => USER_TEXT_COMPAT_CHAR_MAP[char] || char)
+    .replace(/\u00a0/g, " ")
+    .replace(/[\u200b-\u200d\ufeff]/g, "")
+    .replace(/\r\n?/g, "\n");
+  if (options.singleLine) text = text.replace(/\n+/g, " ");
+  if (options.compactCjkSpacing) {
+    text = text
+      .replace(new RegExp(`([${USER_TEXT_CJK}])[\\t ]+(?=[${USER_TEXT_CJK}])`, "g"), "$1")
+      .replace(new RegExp(`([${USER_TEXT_CJK}])[\\t ]+(?=\\d)`, "g"), "$1")
+      .replace(new RegExp(`(\\d)[\\t ]+(?=[${USER_TEXT_CJK}])`, "g"), "$1")
+      .replace(/(\d)[\t ]+(?=\d)/g, "$1")
+      .replace(/(\d)\s*-\s*(?=\d)/g, "$1-")
+      .replace(new RegExp(`([${USER_TEXT_CJK}])\\s*([:：])\\s*`, "g"), "$1$2")
+      .replace(new RegExp(`([:：])\\s*(?=[${USER_TEXT_CJK}\\d])`, "g"), "$1");
+  }
+  text = text.replace(/[ \t]{2,}/g, " ");
+  return options.trim === false ? text : text.trim();
+}
+
+function normalizePlateText(value = "") {
+  return normalizeUserText(value, { singleLine: true, compactCjkSpacing: true })
+    .replace(/\s+/g, "")
+    .toUpperCase();
+}
+
+function normalizeVehicleSource(value) {
+  const text = valueText(value);
+  return text === "本公司车辆" ? "汉业物流" : text;
 }
 
 function booleanFlag(value, fallback = false) {
@@ -148,8 +294,8 @@ function dispatchOrderStatusForPlanStatus(status) {
 }
 
 function sourceClass(source) {
-  const text = valueText(source);
-  if (text === "本公司车辆") return "source-own";
+  const text = normalizeVehicleSource(source);
+  if (text === "汉业物流") return "source-own";
   if (text === "外派车辆") return "source-outsourced";
   return "source-empty";
 }
@@ -168,7 +314,7 @@ function sanitizeDispatchRow(row) {
     customer: valueText(item.customer),
     businessType: valueText(item.businessType || item.business_type),
     currency: valueText(item.currency),
-    plate: valueText(item.plate),
+    plate: normalizePlateText(item.plate),
     port: valueText(item.port),
     needsWeighing: booleanFlag(item.needsWeighing ?? item.needs_weighing, false),
     direction: valueText(item.direction),
@@ -178,7 +324,7 @@ function sanitizeDispatchRow(row) {
     loading: valueText(item.loading),
     unloading: valueText(item.unloading),
     loadTime: valueText(item.loadTime || item.load_time),
-    vehicleSource: valueText(item.vehicleSource || item.vehicle_source),
+    vehicleSource: normalizeVehicleSource(item.vehicleSource || item.vehicle_source),
     supplier: valueText(item.supplier),
     transportMode: normalizeTransportMode(item.transportMode || item.transport_mode),
     driver: valueText(item.driver),
@@ -244,7 +390,7 @@ function rowWithOrder(row, orders, date) {
       unloading: row.unloading || "",
       loadTime: row.loadTime || "",
       loadingTime: row.loadTime || "",
-      vehicleSource: row.vehicleSource || "",
+      vehicleSource: normalizeVehicleSource(row.vehicleSource || ""),
       supplier: row.supplier || "",
       status: row.status || "",
       remark: row.note || "",
@@ -263,8 +409,8 @@ function dispatchPlanTimeRank(value) {
 }
 
 function dispatchPlanSourceRank(row) {
-  const source = valueText((row && row.vehicleSource) || (row && row.order && row.order.vehicleSource));
-  if (source === "本公司车辆") return 0;
+  const source = normalizeVehicleSource((row && row.vehicleSource) || (row && row.order && row.order.vehicleSource));
+  if (source === "汉业物流") return 0;
   if (source === "外派车辆") return 1;
   return 2;
 }
@@ -366,9 +512,9 @@ function dispatchMessageLocationDetail(value) {
 
 function dispatchVehicleSourceText(row) {
   const order = row && row.order ? row.order : {};
-  const source = valueText(order.vehicleSource || (row && row.vehicleSource));
+  const source = normalizeVehicleSource(order.vehicleSource || (row && row.vehicleSource));
   if (source === "外派车辆") return valueText(order.supplier || (row && row.supplier)) || "外派供应商";
-  if (source === "本公司车辆") return "本公司";
+  if (source === "汉业物流") return "汉业物流";
   return source || "-";
 }
 
@@ -654,7 +800,7 @@ function createDispatchRowFromOrder(order, date, existingRows) {
     weight: order.weight || "",
     loading: order.loading || "",
     unloading: order.unloading || "",
-    vehicleSource: order.vehicleSource || "",
+    vehicleSource: normalizeVehicleSource(order.vehicleSource || ""),
     supplier: order.supplier || "",
     transportMode: mode,
     driver: "",
@@ -689,7 +835,7 @@ function formFromDispatchRow(row, date) {
     loading: order.loading || source.loading || "",
     unloading: order.unloading || source.unloading || "",
     loadTime: source.loadTime || order.loadTime || "",
-    vehicleSource: order.vehicleSource || source.vehicleSource || "本公司车辆",
+    vehicleSource: normalizeVehicleSource(order.vehicleSource || source.vehicleSource || "汉业物流"),
     supplier: order.supplier === "-" ? "" : (order.supplier || source.supplier || ""),
     transportMode: normalizeTransportMode(source.transportMode || order.transportMode || ""),
     driver: source.driver || order.driver || "",
@@ -720,7 +866,7 @@ function rowFromForm(form, orderNo) {
     customerId: source.customerId,
     businessType: source.businessType || "运输",
     currency: source.currency || "",
-    plate: source.plate,
+    plate: normalizePlateText(source.plate),
     port: source.port,
     needsWeighing: booleanFlag(source.needsWeighing, false),
     direction: source.direction,
@@ -730,8 +876,8 @@ function rowFromForm(form, orderNo) {
     loading: source.loading,
     unloading: source.unloading,
     loadTime: source.loadTime,
-    vehicleSource: source.vehicleSource,
-    supplier: source.vehicleSource === "外派车辆" ? source.supplier : "",
+    vehicleSource: normalizeVehicleSource(source.vehicleSource),
+    supplier: normalizeVehicleSource(source.vehicleSource) === "外派车辆" ? source.supplier : "",
     transportMode: source.transportMode,
     driver: source.driver,
     hkDriver: source.hkDriver,
@@ -763,9 +909,9 @@ function orderPayloadFromForm(form, customer, includeFees) {
     currency: source.currency || "",
     quantity: source.quantity,
     weight: source.weight,
-    vehicleSource: source.vehicleSource,
-    supplier: source.vehicleSource === "外派车辆" ? source.supplier : "",
-    plate: source.plate,
+    vehicleSource: normalizeVehicleSource(source.vehicleSource),
+    supplier: normalizeVehicleSource(source.vehicleSource) === "外派车辆" ? source.supplier : "",
+    plate: normalizePlateText(source.plate),
     driver: source.driver,
     hkDriver: source.hkDriver,
     mainlandDriver: source.mainlandDriver,
@@ -824,7 +970,9 @@ module.exports = {
   hasDispatchAccess,
   normalizeDispatchPlanStatus,
   normalizeDispatchRows,
+  normalizePlateText,
   normalizeTransportMode,
+  normalizeUserText,
   orderPayloadFromForm,
   presentDispatchRows,
   presentUnplannedOrders,

@@ -11,6 +11,8 @@ const {
   VEHICLE_SOURCE_OPTIONS,
   formFromDispatchRow,
   generateDispatchNo,
+  normalizePlateText,
+  normalizeUserText,
   normalizeDispatchRows,
   normalizeTransportMode,
   orderPayloadFromForm,
@@ -56,14 +58,14 @@ function createOrderFeeRow(fee = {}) {
   const amount = Number(fee.amount ?? 0);
   const costValue = fee.cost === undefined || fee.cost === null || fee.cost === "" ? "" : Number(fee.cost);
   return {
-    category: String(fee.category || "正常").trim() || "正常",
-    name: String(fee.name || "").trim(),
+    category: normalizeUserText(fee.category || "正常", { singleLine: true, compactCjkSpacing: true }) || "正常",
+    name: normalizeUserText(fee.name, { singleLine: true, compactCjkSpacing: true }),
     quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
     unitPrice: Number.isFinite(unitPrice) && unitPrice >= 0 ? unitPrice : 0,
-    currency: String(fee.currency || "港币").trim() || "港币",
+    currency: normalizeUserText(fee.currency || "港币", { singleLine: true, compactCjkSpacing: true }) || "港币",
     amount: Number.isFinite(amount) && amount >= 0 ? amount : 0,
     cost: Number.isFinite(costValue) && costValue >= 0 ? costValue : "",
-    remark: String(fee.remark || "").trim()
+    remark: normalizeUserText(fee.remark, { singleLine: true, compactCjkSpacing: true })
   };
 }
 
@@ -195,9 +197,9 @@ function createLocationEntry(value) {
   const hasStructuredParts = value && typeof value === "object"
     && (value.city !== undefined || value.district !== undefined || value.detail !== undefined);
   const parts = hasStructuredParts ? null : splitLocationParts(value && typeof value === "object" ? value.value : value);
-  const city = hasStructuredParts ? String(value.city || "").trim() : parts.city;
-  const district = hasStructuredParts ? String(value.district || "").trim() : parts.district;
-  const detail = hasStructuredParts ? String(value.detail || "").trim() : parts.detail;
+  const city = hasStructuredParts ? normalizeUserText(value.city, { singleLine: true, compactCjkSpacing: true }) : parts.city;
+  const district = hasStructuredParts ? normalizeUserText(value.district, { singleLine: true, compactCjkSpacing: true }) : parts.district;
+  const detail = hasStructuredParts ? normalizeUserText(value.detail, { singleLine: true, compactCjkSpacing: true }) : parts.detail;
   return {
     id: nextLocationEntryId(),
     city,
@@ -213,7 +215,7 @@ function locationEntryValue(entry) {
 }
 
 function splitLocationEntries(value) {
-  const text = value === undefined || value === null ? "" : String(value).replace(/\r/g, "\n");
+  const text = normalizeUserText(value, { compactCjkSpacing: true });
   if (!text.trim()) return [createLocationEntry("")];
   const entries = text
     .split(/[\n；;]+/)
@@ -227,9 +229,9 @@ function normalizeLocationEntries(entries) {
       if (item && typeof item === "object") {
         const hasStructuredParts = item.city !== undefined || item.district !== undefined || item.detail !== undefined;
         const parts = hasStructuredParts ? null : splitLocationParts(item.value);
-        const city = hasStructuredParts ? String(item.city || "").trim() : parts.city;
-        const district = hasStructuredParts ? String(item.district || "").trim() : parts.district;
-        const detail = hasStructuredParts ? String(item.detail || "").trim() : parts.detail;
+        const city = hasStructuredParts ? normalizeUserText(item.city, { singleLine: true, compactCjkSpacing: true }) : parts.city;
+        const district = hasStructuredParts ? normalizeUserText(item.district, { singleLine: true, compactCjkSpacing: true }) : parts.district;
+        const detail = hasStructuredParts ? normalizeUserText(item.detail, { singleLine: true, compactCjkSpacing: true }) : parts.detail;
         return {
           id: item.id || nextLocationEntryId(),
           city,
@@ -282,7 +284,7 @@ function loadTimeTextFromPicker(value) {
 }
 
 function normalizeLocationText(value = "") {
-  return String(value || "")
+  return normalizeUserText(value, { compactCjkSpacing: true })
     .replace(/\r/g, "\n")
     .replace(/[；;]/g, "\n")
     .replace(/\s+/g, "")
@@ -304,7 +306,7 @@ function cityNameMatches(left = "", right = "") {
 }
 
 function splitLocationParts(value = "") {
-  const text = String(value || "").trim();
+  const text = normalizeUserText(value, { singleLine: true, compactCjkSpacing: true });
   if (!text) return { city: "", district: "", detail: "" };
   const normalized = text
     .replace(/[／｜|]+/g, "/")
@@ -332,13 +334,13 @@ function splitLocationParts(value = "") {
 
 function composeLocationParts(city = "", district = "", detail = "") {
   return [city, district, detail]
-    .map((part) => String(part || "").trim())
+    .map((part) => normalizeUserText(part, { singleLine: true, compactCjkSpacing: true }))
     .filter(Boolean)
     .join(" / ");
 }
 
 function normalizeLocationPartValue(value = "", part = "") {
-  const text = String(value || "").trim();
+  const text = normalizeUserText(value, { singleLine: true, compactCjkSpacing: true });
   if (!text || part === "detail") return text;
   const parsed = splitLocationParts(text);
   if (part === "city") return parsed.city || text;
@@ -413,10 +415,11 @@ function normalizeDispatchFormForDisplay(form) {
 
 function normalizeDispatchFormForSave(form) {
   if (!form || typeof form !== "object") return form;
-  const vehicleSource = String(form.vehicleSource || "").trim();
+  const vehicleSource = String(form.vehicleSource || "").trim() === "本公司车辆" ? "汉业物流" : String(form.vehicleSource || "").trim();
   form.vehicleSource = vehicleSource;
+  form.plate = normalizePlateText(form.plate);
   form.transportMode = normalizeTransportMode(form.transportMode || "");
-  if (vehicleSource === "本公司车辆") {
+  if (vehicleSource === "汉业物流") {
     if (form.transportMode === "双司机" || form.transportMode === "口岸转国内车") {
       form.driver = [form.hkDriver, form.mainlandDriver].filter(Boolean).join(" / ");
     } else {
@@ -1077,7 +1080,7 @@ Page({
 
   handleVehicleSourceChange(value) {
     const form = Object.assign({}, this.data.form, { vehicleSource: value });
-    if (value === "本公司车辆") {
+    if (value === "汉业物流") {
       form.supplier = "";
     } else if (value === "外派车辆") {
       form.driver = "";

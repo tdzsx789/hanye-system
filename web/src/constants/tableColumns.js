@@ -12,7 +12,7 @@ export const CUSTOMER_ORDER_COLUMN_ORDER_KEY = "hanye_customer_order_column_orde
 export const ORDER_COLUMN_ORDER_KEY = "hanye_order_column_order";
 export const CUSTOMER_ORDER_COLUMN_LOCKED_KEY = "hanye_customer_order_column_locked";
 export const ORDER_COLUMN_LOCKED_KEY = "hanye_order_column_locked";
-export const ORDER_LEFT_STICKY_KEYS = ["sequence", "date", "plate"];
+export const ORDER_LEFT_STICKY_KEYS = ["sequence", "date", "plate", "direction"];
 export const ORDER_RIGHT_STICKY_KEYS = ["status", "actions"];
 export const DISPATCH_LEFT_STICKY_KEYS = ["sequence", "loadTime", "plate"];
 
@@ -45,8 +45,9 @@ export function createOrderColumns() {
   return withDefaultIndex([
     { key: "select", label: "选择", width: 32, min: 30, locked: true },
     { key: "sequence", label: "序号", width: 66, min: 62, locked: true, leftPinned: true },
-    { key: "date", label: "日期", width: 112, min: 104, leftPinned: true },
+    { key: "date", label: "装车日期/时间", width: 168, min: 152, leftPinned: true },
     { key: "plate", label: "车牌", width: 118, min: 108, leftPinned: true },
+    { key: "direction", label: "进出口", width: 58, min: 44, leftPinned: true },
     { key: "no", label: "订单号", width: 128, min: 104 },
     { key: "dispatchNo", label: "排车单号", width: 118, min: 88 },
     { key: "createdByName", label: "创建者", width: 82, min: 64 },
@@ -55,7 +56,6 @@ export function createOrderColumns() {
     { key: "supplier", label: "供应商", width: 144, min: 96 },
     { key: "businessType", label: "业务类型", width: 70, min: 52 },
     { key: "port", label: "口岸", width: 86, min: 58 },
-    { key: "direction", label: "进出口", width: 58, min: 44 },
     { key: "tonnage", label: "吨位", width: 54, min: 42 },
     { key: "currency", label: "币种", width: 58, min: 44 },
     { key: "quantity", label: "件数/板数", width: 76, min: 54 },
@@ -150,6 +150,8 @@ export function createCustomerListDetailColumns() {
     { key: "customsPageItemCount", label: "续页品名项", width: 104, min: 86 },
     { key: "customsImportHomeFee", label: "进口主页费用", width: 116, min: 96 },
     { key: "customsExportHomeFee", label: "出口主页费用", width: 116, min: 96 },
+    { key: "customsImportDeclarationFee", label: "进口报关费", width: 116, min: 96 },
+    { key: "customsExportDeclarationFee", label: "出口报关费", width: 116, min: 96 },
     { key: "customsImportPageFee", label: "进口续页费用", width: 116, min: 96 },
     { key: "customsExportPageFee", label: "出口续页费用", width: 116, min: 96 },
     { key: "customsVerificationFee", label: "核注费", width: 96, min: 78 },

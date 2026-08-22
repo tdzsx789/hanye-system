@@ -138,6 +138,147 @@ import { BOSS_COMPANY_PROFIT_ROWS } from "./constants/mockData.js";
 
 const DATE_FILTER_MODE_QUICK = "quick";
 const DATE_FILTER_MODE_PERIOD = "period";
+
+const USER_TEXT_COMPAT_CHAR_MAP = {
+  "⺅": "亻",
+  "⺆": "冂",
+  "⺈": "刀",
+  "⺉": "刂",
+  "⺊": "卜",
+  "⺋": "卩",
+  "⺌": "小",
+  "⺍": "小",
+  "⺎": "兀",
+  "⺏": "尢",
+  "⺐": "尢",
+  "⺑": "彐",
+  "⺒": "巳",
+  "⺓": "幺",
+  "⺔": "彑",
+  "⺕": "彐",
+  "⺖": "忄",
+  "⺗": "心",
+  "⺘": "扌",
+  "⺙": "攵",
+  "⺛": "旡",
+  "⺜": "日",
+  "⺝": "月",
+  "⺞": "歹",
+  "⺟": "母",
+  "⺠": "民",
+  "⺡": "氵",
+  "⺢": "氺",
+  "⺣": "灬",
+  "⺤": "爫",
+  "⺥": "爫",
+  "⺦": "丬",
+  "⺧": "牛",
+  "⺨": "犭",
+  "⺩": "王",
+  "⺪": "疋",
+  "⺫": "目",
+  "⺬": "礻",
+  "⺭": "礻",
+  "⺮": "竹",
+  "⺯": "糹",
+  "⺰": "纟",
+  "⺱": "罒",
+  "⺲": "罒",
+  "⺳": "罒",
+  "⺴": "罒",
+  "⺵": "罒",
+  "⺶": "羊",
+  "⺷": "羊",
+  "⺸": "羊",
+  "⺹": "老",
+  "⺺": "聿",
+  "⺻": "聿",
+  "⺼": "月",
+  "⺽": "臼",
+  "⺾": "艹",
+  "⺿": "艹",
+  "⻀": "艹",
+  "⻁": "虎",
+  "⻂": "衤",
+  "⻃": "西",
+  "⻄": "西",
+  "⻅": "见",
+  "⻆": "角",
+  "⻇": "角",
+  "⻈": "讠",
+  "⻉": "贝",
+  "⻊": "足",
+  "⻋": "车",
+  "⻌": "辶",
+  "⻍": "辶",
+  "⻎": "辶",
+  "⻏": "阝",
+  "⻐": "钅",
+  "⻑": "長",
+  "⻒": "镸",
+  "⻓": "长",
+  "⻔": "门",
+  "⻕": "阝",
+  "⻖": "阝",
+  "⻗": "雨",
+  "⻘": "青",
+  "⻙": "韦",
+  "⻚": "页",
+  "⻛": "风",
+  "⻜": "飞",
+  "⻝": "食",
+  "⻞": "食",
+  "⻟": "食",
+  "⻠": "饣",
+  "⻢": "马",
+  "⻣": "骨",
+  "⻥": "鱼",
+  "⻦": "鸟",
+  "⻧": "卤",
+  "⻨": "麦",
+  "⻩": "黄",
+  "⻪": "黾",
+  "⻫": "齐",
+  "⻬": "齐",
+  "⻭": "齿",
+  "⻮": "齿",
+  "⻯": "龙",
+  "⻰": "龙",
+  "⻱": "龟",
+  "⻲": "龟",
+  "⻳": "龟"
+};
+const USER_TEXT_COMPAT_CHAR_RE = new RegExp(`[${Object.keys(USER_TEXT_COMPAT_CHAR_MAP).join("")}]`, "g");
+const USER_TEXT_CJK = "\\u3400-\\u9fff\\uf900-\\ufaff";
+
+function normalizeUserText(value = "", options = {}) {
+  const source = String(value ?? "");
+  let text = typeof source.normalize === "function" ? source.normalize("NFKC") : source;
+  text = text
+    .replace(USER_TEXT_COMPAT_CHAR_RE, (char) => USER_TEXT_COMPAT_CHAR_MAP[char] || char)
+    .replace(/\u00a0/g, " ")
+    .replace(/[\u200b-\u200d\ufeff]/g, "")
+    .replace(/\r\n?/g, "\n");
+  if (options.singleLine) text = text.replace(/\n+/g, " ");
+  if (options.compactCjkSpacing) {
+    text = text
+      .replace(new RegExp(`([${USER_TEXT_CJK}])[\\t ]+(?=[${USER_TEXT_CJK}])`, "gu"), "$1")
+      .replace(new RegExp(`([${USER_TEXT_CJK}])[\\t ]+(?=\\d)`, "gu"), "$1")
+      .replace(new RegExp(`(\\d)[\\t ]+(?=[${USER_TEXT_CJK}])`, "gu"), "$1")
+      .replace(/(\d)[\t ]+(?=\d)/g, "$1")
+      .replace(/(\d)\s*-\s*(?=\d)/g, "$1-")
+      .replace(new RegExp(`([${USER_TEXT_CJK}])\\s*([:：])\\s*`, "gu"), "$1$2")
+      .replace(new RegExp(`([:：])\\s*(?=[${USER_TEXT_CJK}\\d])`, "gu"), "$1");
+  }
+  text = text.replace(/[ \t]{2,}/g, " ");
+  return options.trim === false ? text : text.trim();
+}
+
+function normalizePlateText(value = "") {
+  return normalizeUserText(value, { singleLine: true, compactCjkSpacing: true })
+    .replace(/\s+/g, "")
+    .toUpperCase();
+}
 const DISPATCH_STATUS_ALL = "全部";
 const ORDER_QUICK_DATE_FILTERS = ORDER_DATE_FILTERS.filter((item) => item.key !== "custom");
 const DISPATCH_DATE_FILTERS = ORDER_QUICK_DATE_FILTERS;
@@ -206,6 +347,8 @@ const sortTemplateColumnsBySavedOrder = (columns = []) => {
 const bossCompanyProfitRows = BOSS_COMPANY_PROFIT_ROWS;
 const COMPANY_EXPENSE_CATEGORY_OPTIONS = ["员工工资", "办公室租金", "管理费用", "系统服务"];
 const COMPANY_INCOME_CATEGORY_OPTIONS = ["其他收入", "利息收入", "补贴收入", "赔偿收入", "返利收入"];
+const OWN_VEHICLE_SOURCE = "汉业物流";
+const LEGACY_OWN_VEHICLE_SOURCE = "本公司车辆";
 const COMPANY_ENTRY_TYPE_OPTIONS = [
   { value: "expense", label: "支出" },
   { value: "income", label: "收入" }
@@ -213,13 +356,21 @@ const COMPANY_ENTRY_TYPE_OPTIONS = [
 const COMPANY_EXPENSE_CUSTOM_CATEGORY_VALUE = "__custom_company_expense_category__";
 const DRIVER_EMPLOYMENT_STATUS_OPTIONS = ["在职", "离职"];
 const CUSTOMER_CATEGORY_OPTIONS = ["运输客户", "报关客户"];
+const CUSTOMER_CUSTOMS_FEE_FIELD_NAMES = {
+  customsImportDeclarationFee: "进口报关费",
+  customsExportDeclarationFee: "出口报关费"
+};
+const CUSTOMER_CUSTOMS_FEE_FIELD_NAME_SET = new Set(["舱单费", ...Object.values(CUSTOMER_CUSTOMS_FEE_FIELD_NAMES)]);
 const DEFAULT_CUSTOMS_CUSTOMER_CONFIG = {
   customsHomeItemCount: 6,
   customsPageItemCount: 14,
   customsImportHomeFee: 100,
   customsExportHomeFee: 150,
+  customsImportDeclarationFee: 0,
+  customsExportDeclarationFee: 0,
   customsImportPageFee: 30,
   customsExportPageFee: 30,
+  customsManifestFee: 0,
   customsVerificationFee: 0
 };
 const bossCompanyExpenseRows = ref([]);
@@ -235,6 +386,7 @@ const driverListDetailColumns = reactive(createDriverListDetailColumns());
 const dataTableDensityOptions = DATA_TABLE_DENSITY_OPTIONS;
 const CUSTOMS_BUSINESS_TABLE_ID = "customs_business";
 const CUSTOMS_BUSINESS_COLUMN_ORDER_KEY = dataTableStorageKey(CUSTOMS_BUSINESS_TABLE_ID, "order");
+const CUSTOMS_BUSINESS_FIXED_FEE_NAME = "法检/3C商检";
 const CUSTOMS_BUSINESS_PREFIX_COLUMNS = [
   { key: "date", label: "日期", width: 96 },
   { key: "declarationNo", label: "报关单号", width: 136 },
@@ -245,6 +397,7 @@ const CUSTOMS_BUSINESS_PREFIX_COLUMNS = [
   { key: "pageCount", label: "续页", width: 72 },
   { key: "pageFee", label: "续页费", width: 92, amount: true },
   { key: "customsFee", label: "报关费", width: 92, amount: true },
+  { key: "manifestFee", label: "舱单费", width: 92, amount: true },
   { key: "inspectionFee", label: "报检费", width: 92, amount: true },
   { key: "checkFee", label: "查验费", width: 92, amount: true },
   { key: "verificationFee", label: "核注费", width: 92, amount: true },
@@ -298,7 +451,8 @@ pinColumnAfter(customerOrderColumns, "date", "select", CUSTOMER_ORDER_COLUMN_ORD
 pinColumnAfter(orderColumns, "sequence", "select", ORDER_COLUMN_ORDER_KEY);
 pinColumnAfter(orderColumns, "date", "sequence", ORDER_COLUMN_ORDER_KEY);
 pinColumnAfter(orderColumns, "plate", "date", ORDER_COLUMN_ORDER_KEY);
-pinColumnAfter(orderColumns, "no", "plate", ORDER_COLUMN_ORDER_KEY);
+pinColumnAfter(orderColumns, "direction", "plate", ORDER_COLUMN_ORDER_KEY);
+pinColumnAfter(orderColumns, "no", "direction", ORDER_COLUMN_ORDER_KEY);
 pinColumnAfter(orderColumns, "dispatchNo", "no", ORDER_COLUMN_ORDER_KEY);
 pinColumnAfter(orderColumns, "createdByName", "dispatchNo", ORDER_COLUMN_ORDER_KEY);
 
@@ -633,8 +787,18 @@ function normalizeCustomerCategory(value = "") {
   return value === "报关客户" ? "报关客户" : "运输客户";
 }
 
+function normalizeVehicleSource(value = "") {
+  const text = String(value || "").trim();
+  if (text === LEGACY_OWN_VEHICLE_SOURCE) return OWN_VEHICLE_SOURCE;
+  return text;
+}
+
 function customerCategoryValue(customer = {}) {
   return customer?.type === "客户" ? normalizeCustomerCategory(customer.customerCategory || customer.customer_category) : "";
+}
+
+function activePartnerTypeValue() {
+  return activePartnerType.value === "供应商" ? "供应商" : "客户";
 }
 
 function customerMatchesCategory(customer = {}, category = "运输客户") {
@@ -654,8 +818,29 @@ function customerNameMatchesCategory(value = "", category = "运输客户") {
   );
 }
 
+function normalizeCustomerCustomsConfig(source = {}) {
+  const customsCustomFields = normalizeCustomsBusinessCustomFields(source.customsCustomFields || source.customs_custom_fields);
+  const customsCustomFieldMap = new Map(
+    customsCustomFields.map((field) => [customsBusinessCustomFieldName(field), customsBusinessIntegerValue(field.value)])
+  );
+  const customsImportDeclarationFee = customerConfigNumber(
+    source.customsImportDeclarationFee ?? source.customs_import_declaration_fee ?? customsCustomFieldMap.get(CUSTOMER_CUSTOMS_FEE_FIELD_NAMES.customsImportDeclarationFee),
+    DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportDeclarationFee
+  );
+  const customsExportDeclarationFee = customerConfigNumber(
+    source.customsExportDeclarationFee ?? source.customs_export_declaration_fee ?? customsCustomFieldMap.get(CUSTOMER_CUSTOMS_FEE_FIELD_NAMES.customsExportDeclarationFee),
+    DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportDeclarationFee
+  );
+  return {
+    customsImportDeclarationFee,
+    customsExportDeclarationFee,
+    customsCustomFields: customsCustomFields.filter((field) => !CUSTOMER_CUSTOMS_FEE_FIELD_NAME_SET.has(customsBusinessCustomFieldName(field)))
+  };
+}
+
 function normalizeCustomerRecord(customer = {}) {
   const row = customer || {};
+  const customsConfig = normalizeCustomerCustomsConfig(row);
   return {
     ...row,
     customerCategory: row.type === "客户" ? customerCategoryValue(row) : "",
@@ -664,10 +849,13 @@ function normalizeCustomerRecord(customer = {}) {
     customsPageItemCount: Number(row.customsPageItemCount ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsPageItemCount),
     customsImportHomeFee: Number(row.customsImportHomeFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportHomeFee),
     customsExportHomeFee: Number(row.customsExportHomeFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportHomeFee),
+    customsImportDeclarationFee: customsConfig.customsImportDeclarationFee,
+    customsExportDeclarationFee: customsConfig.customsExportDeclarationFee,
     customsImportPageFee: Number(row.customsImportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee),
     customsExportPageFee: Number(row.customsExportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee),
+    customsManifestFee: Number(row.customsManifestFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsManifestFee),
     customsVerificationFee: Number(row.customsVerificationFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee),
-    customsCustomFields: normalizeCustomsBusinessCustomFields(row.customsCustomFields || row.customs_custom_fields)
+    customsCustomFields: customsConfig.customsCustomFields
   };
 }
 
@@ -1081,7 +1269,7 @@ let syncedHash = "";
 const activePartnerType = ref(partnerTypeForCustomerRoute(location.hash) || "客户");
 const activeCustomerCategory = ref("运输客户");
 const activeCustomerListLabel = computed(() =>
-  partnerDisplayName(activePartnerType.value, activeCustomerCategory.value)
+  partnerDisplayName(activePartnerTypeValue(), activeCustomerCategory.value)
 );
 const storedVehicleTab = localStorage.getItem("hanye_vehicle_tab");
 const initialRouteKey = String(location.hash || "").replace("#", "").split("?")[0];
@@ -1124,7 +1312,7 @@ const bossCompanyExpenseEditForm = reactive({
   amount: "",
   note: ""
 });
-const customsBusinessPeriodFilter = ref(currentPeriodMonthKey());
+const customsBusinessPeriodFilter = ref(normalizePeriodFilter(localStorage.getItem("hanye_customs_business_period_filter") || currentPeriodMonthKey()));
 const otherBusinessPeriodFilter = ref(normalizePeriodFilter(localStorage.getItem("hanye_other_business_period_filter") || currentPeriodMonthKey()));
 const customsStatementPeriodFilter = ref(normalizePeriodFilter(localStorage.getItem("hanye_customs_statement_period_filter") || currentPeriodMonthKey()));
 const customsStatementCompanySearch = ref("");
@@ -1500,6 +1688,7 @@ function blankCustomsBusinessForm() {
     checkFee: 0,
     verificationFee: 0,
     otherFee: 0,
+    fajian3cFee: 0,
     customFields: [],
     remark: ""
   };
@@ -1507,8 +1696,10 @@ function blankCustomsBusinessForm() {
 
 const customsBusinessForm = reactive(blankCustomsBusinessForm());
 const customsBusinessAutoCharges = reactive({
+  customsFee: 0,
   pageCount: 0,
   pageFee: 0,
+  manifestFee: 0,
   verificationFee: 0
 });
 
@@ -1557,8 +1748,11 @@ const customerForm = reactive({
   customsPageItemCount: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsPageItemCount,
   customsImportHomeFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportHomeFee,
   customsExportHomeFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportHomeFee,
+  customsImportDeclarationFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportDeclarationFee,
+  customsExportDeclarationFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportDeclarationFee,
   customsImportPageFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee,
   customsExportPageFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee,
+  customsManifestFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsManifestFee,
   customsVerificationFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee,
   customsCustomFields: [],
   invoicePasteText: ""
@@ -1872,7 +2066,8 @@ function restoreOrderColumnsFromPreferences() {
   pinColumnAfter(orderColumns, "sequence", "select", ORDER_COLUMN_ORDER_KEY);
   pinColumnAfter(orderColumns, "date", "sequence", ORDER_COLUMN_ORDER_KEY);
   pinColumnAfter(orderColumns, "plate", "date", ORDER_COLUMN_ORDER_KEY);
-  pinColumnAfter(orderColumns, "no", "plate", ORDER_COLUMN_ORDER_KEY);
+  pinColumnAfter(orderColumns, "direction", "plate", ORDER_COLUMN_ORDER_KEY);
+  pinColumnAfter(orderColumns, "no", "direction", ORDER_COLUMN_ORDER_KEY);
   pinColumnAfter(orderColumns, "dispatchNo", "no", ORDER_COLUMN_ORDER_KEY);
   pinColumnAfter(orderColumns, "createdByName", "dispatchNo", ORDER_COLUMN_ORDER_KEY);
 }
@@ -2469,9 +2664,14 @@ const groupedModules = computed(() =>
 );
 
 function partnerMatchesActiveView(item = {}) {
-  if (item.type !== activePartnerType.value) return false;
-  if (activePartnerType.value !== "客户") return true;
-  return customerCategoryValue(item) === normalizeCustomerCategory(activeCustomerCategory.value);
+  const partnerType = activePartnerTypeValue();
+  if (item.type !== partnerType) return false;
+  if (partnerType !== "客户") return true;
+  const targetCategory = normalizeCustomerCategory(activeCustomerCategory.value);
+  if (targetCategory !== "报关客户") return true;
+  const customsRows = customerRows.value.filter((row) => row.type === "客户" && customerCategoryValue(row) === "报关客户");
+  if (customsRows.length === 0) return true;
+  return customerCategoryValue(item) === "报关客户";
 }
 
 const visibleCustomers = computed(() => {
@@ -2500,7 +2700,7 @@ const homeMonthlyNewCustomers = computed(() =>
 );
 
 const homeDispatchOwnVehicleCount = computed(() =>
-  dispatchPlanRows.value.filter((row) => row.vehicleSource === "本公司车辆").length
+  dispatchPlanRows.value.filter((row) => normalizeVehicleSource(row.vehicleSource) === OWN_VEHICLE_SOURCE).length
 );
 
 const homeDispatchOutsourceCount = computed(() =>
@@ -2589,8 +2789,8 @@ const generalDriverOptions = computed(() => {
 const orderIsCustomsOnly = computed(() => orderForm.businessType === "报关");
 const orderHasTransportFields = computed(() => orderForm.businessType !== "报关");
 const orderHasCustomsFields = computed(() => ["报关", "运输+报关"].includes(orderForm.businessType));
-const orderUsesOwnVehicle = computed(() => orderForm.vehicleSource === "本公司车辆");
-const orderUsesOutsourcedVehicle = computed(() => orderForm.vehicleSource === "外派车辆");
+const orderUsesOwnVehicle = computed(() => normalizeVehicleSource(orderForm.vehicleSource) === OWN_VEHICLE_SOURCE);
+const orderUsesOutsourcedVehicle = computed(() => normalizeVehicleSource(orderForm.vehicleSource) === "外派车辆");
 const orderUsesDomesticTransfer = computed(() => orderUsesOwnVehicle.value && isDomesticTransferMode(orderForm.transportMode));
 const orderUsesRelayDrivers = computed(() => orderUsesOwnVehicle.value && ["双司机", "口岸转国内车"].includes(normalizeTransportMode(orderForm.transportMode)));
 const CUSTOMS_REMARK_PREFIX = "报关信息：";
@@ -3674,7 +3874,9 @@ function applyDispatchRowsToLocalOrders(rows = dispatchPlanRows.value) {
         : [rowHkDriver || rowDriver, rowMainlandDriver].filter(Boolean).join(" / "),
       hkDriver: isSingleDriver ? "" : (rowHkDriver || rowDriver),
       mainlandDriver: isSingleDriver ? "" : rowMainlandDriver,
-      date: dispatchPlanDate(row)
+      date: dispatchPlanDate(row),
+      dispatchLoadDate: dispatchPlanDate(row),
+      dispatchLoadTime: row.loadTime || currentOrder.dispatchLoadTime || ""
     });
   });
   if (!patches.size) return;
@@ -3857,7 +4059,7 @@ function handleDispatchFormLoadTimeChange() {
 
 function dispatchPlanSourceRank(row = {}) {
   const source = dispatchPlanVehicleSource(row);
-  if (source === "本公司车辆") return 0;
+  if (source === "汉业物流") return 0;
   if (source === "外派车辆") return 1;
   return 2;
 }
@@ -4094,7 +4296,7 @@ async function syncDispatchDriverToOrder(row, driverName) {
   }
   const item = await ordersApi.updateOrder(currentOrder.no, {
     transportMode: "单司机",
-    vehicleSource: currentOrder.vehicleSource || row.vehicleSource || "本公司车辆",
+    vehicleSource: currentOrder.vehicleSource || row.vehicleSource || "汉业物流",
     driver: driverName,
     hkDriver: "",
     mainlandDriver: ""
@@ -4209,7 +4411,7 @@ function closeDispatchModal(options = {}) {
 
 function dispatchFormOwnSingleDriverMode() {
   const mode = normalizeTransportMode(dispatchForm.transportMode || "");
-  return dispatchForm.vehicleSource === "本公司车辆" && (!mode || mode === "单司机");
+  return normalizeVehicleSource(dispatchForm.vehicleSource) === OWN_VEHICLE_SOURCE && (!mode || mode === "单司机");
 }
 
 function dispatchSingleDriverNameFromRow(row = {}, order = row.order || {}) {
@@ -4219,7 +4421,7 @@ function dispatchSingleDriverNameFromRow(row = {}, order = row.order || {}) {
 }
 
 function dispatchFormDriverFields(fallback = {}) {
-  if (dispatchForm.vehicleSource !== "本公司车辆") {
+  if (normalizeVehicleSource(dispatchForm.vehicleSource) !== OWN_VEHICLE_SOURCE) {
     return {
       transportMode: "",
       driver: "",
@@ -4259,7 +4461,7 @@ function resetDispatchForm() {
     loading: "",
     unloading: "",
     loadTime: "",
-    vehicleSource: "本公司车辆",
+    vehicleSource: "汉业物流",
     supplier: "",
     transportMode: "",
     driver: "",
@@ -4301,7 +4503,7 @@ function fillDispatchFormFromPlanRow(row, fallbackDate = dispatchDate.value || o
     loading: order.loading || row.loading || "",
     unloading: order.unloading || row.unloading || "",
     loadTime: row.loadTime || order.loadTime || "",
-    vehicleSource: order.vehicleSource || row.vehicleSource || "本公司车辆",
+    vehicleSource: normalizeVehicleSource(order.vehicleSource || row.vehicleSource || OWN_VEHICLE_SOURCE),
     supplier: order.supplier || row.supplier || "",
     transportMode,
     driver: dispatchSingleDriverNameFromRow(row, order),
@@ -4317,6 +4519,7 @@ function fillDispatchFormFromPlanRow(row, fallbackDate = dispatchDate.value || o
 async function openEditDispatchPlanRow(row) {
   if (!row?.id) return;
   await ensureReferenceDataLoaded();
+  closeDispatchDetail();
   fillDispatchFormFromPlanRow(row);
   editingDispatchRowId.value = row.id;
   copyingDispatchRowId.value = "";
@@ -4398,6 +4601,7 @@ function createManualDispatchPlanRow() {
 async function saveEditedDispatchPlanRow() {
   commitDispatchFormLoadHourInput();
   normalizeDispatchLocationFormValuesForSave();
+  normalizeDispatchFormTextValuesForSave();
   const targetIndex = dispatchPlanRows.value.findIndex((row) => row.id === editingDispatchRowId.value);
   if (targetIndex < 0) {
     notify("找不到要编辑的排车单");
@@ -4509,6 +4713,7 @@ async function saveEditedDispatchPlanRow() {
 async function saveManualDispatchPlanRow() {
   commitDispatchFormLoadHourInput();
   normalizeDispatchLocationFormValuesForSave();
+  normalizeDispatchFormTextValuesForSave();
   if (editingDispatchRowId.value) {
     await saveEditedDispatchPlanRow();
     return;
@@ -4818,7 +5023,7 @@ function applyDispatchRowToOrderForm(row) {
     remark: [orderForm.remark, row.note ? `排车备注：${row.note}` : ""].filter(Boolean).join("\n")
   });
   ensureOrderFreightCurrency();
-  if (row.vehicleSource === "本公司车辆") {
+  if (normalizeVehicleSource(row.vehicleSource) === OWN_VEHICLE_SOURCE) {
     orderForm.supplier = "";
   }
   if (row.vehicleSource === "外派车辆") {
@@ -4919,21 +5124,45 @@ function removeDispatchRowsByOrderRefs(orderRefs = []) {
 }
 
 function dispatchShortLocation(value = "") {
-  const firstAddress = String(value || "")
+  const [firstAddress = ""] = splitDispatchLocationEntriesText(value);
+  const firstLine = String(firstAddress || "")
     .replace(/\r/g, "\n")
-    .split(/[\n；;]/)
+    .split(/\n+/)
     .map((part) => part.trim())
     .find(Boolean) || "";
-  if (!firstAddress) return "";
-  if (!firstAddress.includes("/")) return firstAddress;
-  const parts = firstAddress.split("/").map((part) => part.trim()).filter(Boolean);
-  return parts.slice(0, 2).join(" / ") || firstAddress.replace(/[\/\s]+/g, " ").trim();
+  if (!firstLine) return "";
+  const parts = splitDispatchLocationParts(firstLine);
+  if (parts.city && parts.district) return [parts.city, parts.district].join(" / ");
+  if (parts.city) return parts.city;
+  return firstLine;
 }
 
 function dispatchOrderRouteText(order) {
   const loading = dispatchShortLocation(order?.loading);
   const unloading = dispatchShortLocation(order?.unloading);
   return [loading, unloading].filter(Boolean).join(" → ") || "-";
+}
+
+function dispatchExportShortLocation(value = "") {
+  const [firstAddress = ""] = splitDispatchLocationEntriesText(value);
+  const firstLine = String(firstAddress || "")
+    .replace(/\r/g, "\n")
+    .split(/\n+/)
+    .map((part) => part.trim())
+    .find(Boolean) || "";
+  if (!firstLine) return "";
+  const parts = splitDispatchLocationParts(firstLine);
+  const city = String(parts.city || "").trim();
+  const district = String(parts.district || "").trim();
+  if (!district) return "";
+  return [city, district].filter(Boolean).join(" / ");
+}
+
+function dispatchExportRouteSummary(row = {}) {
+  const order = row.order || {};
+  const loading = dispatchExportShortLocation(order.loading || row.loading);
+  const unloading = dispatchExportShortLocation(order.unloading || row.unloading);
+  return [loading, unloading].filter(Boolean).join(" → ");
 }
 
 function spreadsheetHardWrapLine(value = "", maxWidth = 34) {
@@ -4986,7 +5215,7 @@ function spreadsheetWrappedRowHeight(value = "", base = 20, perLine = 18, max = 
 function dispatchVehicleSourceText(row) {
   const order = row?.order || {};
   if (order.vehicleSource === "外派车辆") return supplierDisplayLabel(order.supplier) || "外派供应商";
-  if (order.vehicleSource === "本公司车辆") return "本公司";
+  if (normalizeVehicleSource(order.vehicleSource) === OWN_VEHICLE_SOURCE) return OWN_VEHICLE_SOURCE;
   return order.vehicleSource || "-";
 }
 
@@ -5069,7 +5298,7 @@ async function exportDispatchPlanRows() {
           direction: row.direction,
           tonnage: row.tonnage,
           quantity: row.quantity,
-          route: dispatchOrderRouteText(row),
+          route: dispatchExportRouteSummary(row),
           loading: row.loading,
           unloading: row.unloading,
           loadTime: row.loadTime,
@@ -5107,7 +5336,7 @@ async function applyDispatchPlanToOrders() {
       const order = dispatchRowLiveOrder(row);
       if (!order) continue;
       const normalizedMode = normalizeTransportMode(row.transportMode || order.transportMode || "单司机") || "单司机";
-      const nextVehicleSource = order.vehicleSource || (row.plate ? "本公司车辆" : "");
+      const nextVehicleSource = order.vehicleSource || (row.plate ? "汉业物流" : "");
       const nextOrder = {
         ...order,
         dispatchNo: row.dispatchNo || order.dispatchNo || "",
@@ -5153,7 +5382,7 @@ function orderIsDoubleDriverMode(order = {}) {
 
 function orderHasMainlandRiderCostAndWage(order = {}, driver = null) {
   if (!isMainlandRiderDriver(driver)) return false;
-  return order?.vehicleSource === "本公司车辆"
+  return normalizeVehicleSource(order?.vehicleSource) === OWN_VEHICLE_SOURCE
     && orderIsDoubleDriverMode(order)
     && String(order?.mainlandDriver || "").trim() === String(driver?.name || "").trim();
 }
@@ -5219,7 +5448,7 @@ function driverBaseTripFee(order, driver = selectedDriver.value) {
 }
 
 function driverRouteAdjustMatches(order, rule, driver = selectedDriver.value) {
-  if (!order || !rule || order.vehicleSource !== "本公司车辆") return false;
+  if (!order || !rule || normalizeVehicleSource(order.vehicleSource) !== OWN_VEHICLE_SOURCE) return false;
   const ruleDriverIds = Array.isArray(rule.driverIds)
     ? rule.driverIds.map((id) => Number(id)).filter(Boolean)
     : [];
@@ -5830,7 +6059,7 @@ function orderFeeDriverRoleTitle(fee = {}) {
 function orderFeeAssigneeNames(fee = {}, order = orderForm) {
   if (isCompanyCoveredFee(fee)) return ["公司承担"];
   if (order?.vehicleSource === "外派车辆") return uniqueOrderCostNames([order.supplier]);
-  if (order?.vehicleSource !== "本公司车辆") return [];
+  if (normalizeVehicleSource(order?.vehicleSource) !== OWN_VEHICLE_SOURCE) return [];
   const mode = normalizeTransportMode(order.transportMode || "单司机") || "单司机";
   const driver = String(order.driver || "").trim();
   const hkDriver = String(order.hkDriver || driver || "").trim();
@@ -5849,7 +6078,7 @@ function orderFeeAssigneeTitle(fee = {}) {
   const names = orderFeeAssigneeNames(fee);
   if (isCompanyCoveredFee(fee)) return names.length ? names.join("、") : "公司承担";
   if (orderForm.vehicleSource === "外派车辆") return names.length ? `外派供应商：${names.join("、")}` : "未选择外派供应商";
-  if (orderForm.vehicleSource === "本公司车辆") return names.length ? `归属：${names.join("、")}` : "未选择香港司机";
+  if (normalizeVehicleSource(orderForm.vehicleSource) === OWN_VEHICLE_SOURCE) return names.length ? `归属：${names.join("、")}` : "未选择香港司机";
   return "";
 }
 
@@ -5901,7 +6130,7 @@ function orderAdvanceFeeRMB(order) {
 }
 
 function orderAdvanceFeeBelongsToDriver(order) {
-  return order?.vehicleSource === "本公司车辆";
+  return normalizeVehicleSource(order?.vehicleSource) === OWN_VEHICLE_SOURCE;
 }
 
 function orderAdvanceFeeBelongsToDriverRow(order, driver) {
@@ -5941,6 +6170,15 @@ function customsBusinessCustomFieldName(field = {}) {
   return String(field?.name ?? field?.label ?? field?.key ?? "").trim();
 }
 
+function isFixedCustomsBusinessFieldName(name = "") {
+  return ["舱单费", ...Object.values(CUSTOMER_CUSTOMS_FEE_FIELD_NAMES)].includes(String(name || "").trim());
+}
+
+function normalizeCustomsCustomerDefaultFields(fields = []) {
+  return normalizeCustomsBusinessCustomFields(fields)
+    .filter((field) => !isFixedCustomsBusinessFieldName(field.name));
+}
+
 function customsBusinessIntegerValue(value) {
   const number = Number(value || 0);
   if (!Number.isFinite(number) || number < 0) return 0;
@@ -5973,9 +6211,11 @@ function normalizeCustomsBusinessFormIntegers() {
     "pageCount",
     "customsFee",
     "pageFee",
+    "manifestFee",
     "inspectionFee",
     "checkFee",
     "verificationFee",
+    "fajian3cFee",
     "otherFee"
   ].forEach((key) => {
     customsBusinessForm[key] = customsBusinessIntegerValue(customsBusinessForm[key]);
@@ -5990,6 +6230,18 @@ function normalizeCustomsBusinessFormIntegers() {
 function customsBusinessCustomFieldAmount(field = {}) {
   const amount = Number(field?.value ?? field?.amount ?? field?.fee ?? 0);
   return Number.isFinite(amount) ? amount : 0;
+}
+
+function customsBusinessCustomFieldsForSave(fields = [], fixedFee = 0) {
+  const normalizedFields = normalizeCustomsBusinessCustomFields(fields)
+    .filter((field) => customsBusinessCustomFieldName(field) !== CUSTOMS_BUSINESS_FIXED_FEE_NAME);
+  return normalizeCustomsBusinessCustomFields([
+    {
+      name: CUSTOMS_BUSINESS_FIXED_FEE_NAME,
+      value: customsBusinessIntegerValue(fixedFee)
+    },
+    ...normalizedFields
+  ]);
 }
 
 function normalizeCustomsBusinessCustomFields(fields = []) {
@@ -6047,9 +6299,11 @@ function removeCustomerCustomsCustomField(index) {
 const customsBusinessFormTotal = computed(() =>
   Number(customsBusinessForm.pageFee || 0)
   + Number(customsBusinessForm.customsFee || 0)
+  + Number(customsBusinessForm.manifestFee || 0)
   + Number(customsBusinessForm.inspectionFee || 0)
   + Number(customsBusinessForm.checkFee || 0)
   + (customsBusinessShowsVerificationFee.value ? Number(customsBusinessForm.verificationFee || 0) : 0)
+  + Number(customsBusinessForm.fajian3cFee || 0)
   + normalizeCustomsBusinessCustomFields(customsBusinessForm.customFields)
     .reduce((sum, field) => sum + customsBusinessCustomFieldAmount(field), 0)
 );
@@ -6134,7 +6388,7 @@ function selectCustomsBusinessCompany(customer) {
 
 function applyCustomsBusinessCustomerDefaultFields(customer = customsBusinessSelectedCustomer.value) {
   if (!customer || editingCustomsBusinessId.value || copyingCustomsBusinessId.value) return;
-  const defaults = normalizeCustomsBusinessCustomFields(customer.customsCustomFields);
+  const defaults = normalizeCustomsCustomerDefaultFields(customer.customsCustomFields);
   customsBusinessForm.customFields = defaults.map((field) => ({
     name: field.name,
     value: customsBusinessIntegerValue(field.value)
@@ -6189,10 +6443,23 @@ const customsBusinessPageUnitFee = computed(() => {
   return Number(customer[key] ?? 0) || 0;
 });
 
+const customsBusinessDeclarationUnitFee = computed(() => {
+  const customer = customsBusinessSelectedCustomer.value;
+  const feeType = customsBusinessDirectionFeeType();
+  if (!customer || !feeType) return 0;
+  const key = feeType === "import" ? "customsImportDeclarationFee" : "customsExportDeclarationFee";
+  return Number(customer[key] ?? 0) || 0;
+});
+
 function customsBusinessConfiguredVerificationFee() {
   if (!customsBusinessShowsVerificationFee.value) return 0;
   const customer = customsBusinessSelectedCustomer.value;
   return customsBusinessIntegerValue(customer?.customsVerificationFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee);
+}
+
+function customsBusinessConfiguredManifestFee() {
+  const customer = customsBusinessSelectedCustomer.value;
+  return customsBusinessIntegerValue(customer?.customsManifestFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsManifestFee);
 }
 
 const calculatedCustomsBusinessPageCount = computed(() => {
@@ -6212,15 +6479,19 @@ const calculatedCustomsBusinessPageFee = computed(() =>
 function calculatedCustomsBusinessChargeValues() {
   const feeType = customsBusinessDirectionFeeType();
   return {
+    customsFee: feeType ? customsBusinessDeclarationUnitFee.value : 0,
     pageCount: feeType ? calculatedCustomsBusinessPageCount.value : 0,
     pageFee: feeType ? calculatedCustomsBusinessPageFee.value : 0,
+    manifestFee: customsBusinessConfiguredManifestFee(),
     verificationFee: customsBusinessConfiguredVerificationFee()
   };
 }
 
 function setCustomsBusinessAutoChargeBaseline(values = {}) {
+  customsBusinessAutoCharges.customsFee = customsBusinessIntegerValue(values.customsFee);
   customsBusinessAutoCharges.pageCount = customsBusinessIntegerValue(values.pageCount);
   customsBusinessAutoCharges.pageFee = customsBusinessIntegerValue(values.pageFee);
+  customsBusinessAutoCharges.manifestFee = customsBusinessIntegerValue(values.manifestFee);
   customsBusinessAutoCharges.verificationFee = customsBusinessIntegerValue(values.verificationFee);
 }
 
@@ -6239,6 +6510,8 @@ function maybeApplyCustomsBusinessAutoCharge(key, value, options = {}) {
 
 function syncCalculatedCustomsBusinessCharges(options = {}) {
   const calculated = calculatedCustomsBusinessChargeValues();
+  maybeApplyCustomsBusinessAutoCharge("customsFee", calculated.customsFee, options);
+  maybeApplyCustomsBusinessAutoCharge("manifestFee", calculated.manifestFee, options);
   maybeApplyCustomsBusinessAutoCharge("verificationFee", calculated.verificationFee, options);
   const feeType = customsBusinessDirectionFeeType();
   if (!feeType) {
@@ -6259,8 +6532,11 @@ watch(
     () => customsBusinessForm.itemCount,
     () => customsBusinessSelectedCustomer.value?.customsHomeItemCount,
     () => customsBusinessSelectedCustomer.value?.customsPageItemCount,
+    () => customsBusinessSelectedCustomer.value?.customsImportDeclarationFee,
+    () => customsBusinessSelectedCustomer.value?.customsExportDeclarationFee,
     () => customsBusinessSelectedCustomer.value?.customsImportPageFee,
     () => customsBusinessSelectedCustomer.value?.customsExportPageFee,
+    () => customsBusinessSelectedCustomer.value?.customsManifestFee,
     () => customsBusinessSelectedCustomer.value?.customsVerificationFee
   ],
   syncCalculatedCustomsBusinessCharges,
@@ -6406,6 +6682,7 @@ function customsBusinessCellText(row = {}, column = {}) {
     pageCount: row.pageCount || "",
     customsFee: money(row.customsFee),
     pageFee: money(row.pageFee),
+    manifestFee: money(row.manifestFee),
     inspectionFee: money(row.inspectionFee),
     checkFee: money(row.checkFee),
     verificationFee: money(row.verificationFee),
@@ -6921,7 +7198,8 @@ const ORDER_DISPATCH_PERIOD_MODES = [
   { key: "month", label: "按月查看" },
   { key: "day", label: "按天查看" },
   { key: "year", label: "按年查看" },
-  { key: "all", label: "全部" }
+  { key: "all", label: "全部" },
+  { key: "range", label: "自定义范围" }
 ];
 const STATEMENT_RECONCILIATION_PERIOD_MODES = [
   ...PERIOD_FILTER_MODES,
@@ -6932,12 +7210,14 @@ const CUSTOMS_BUSINESS_PERIOD_FILTER_MODES = [
   { key: "month", label: "按月查看" },
   { key: "day", label: "按天查看" },
   { key: "year", label: "按年查看" },
-  { key: "all", label: "全部" }
+  { key: "all", label: "全部" },
+  { key: "range", label: "自定义范围" }
 ];
 const OTHER_BUSINESS_PERIOD_FILTER_MODES = [
   { key: "month", label: "按月查看" },
   { key: "year", label: "按年查看" },
-  { key: "all", label: "全部" }
+  { key: "all", label: "全部" },
+  { key: "range", label: "自定义范围" }
 ];
 const statementMonthOptions = PERIOD_MONTH_OPTIONS;
 
@@ -7202,7 +7482,7 @@ function periodFilterDateValue(filterKey) {
 }
 
 function periodSourceDates(scope) {
-  if (scope === "orders") return orderRows.value.map((item) => String(item.date || "").trim().slice(0, 10));
+  if (scope === "orders") return orderRows.value.map((item) => orderDispatchLoadDate(item));
   if (scope === "finance") return [
     ...orderRows.value.map((item) => item.date),
     ...driverAdjustmentRows.value.map((item) => item.date)
@@ -7424,6 +7704,7 @@ function resetPeriodFiltersForModuleNavigation() {
   dispatchRangePeriodFilter.value = currentMonth;
   localStorage.setItem("hanye_order_period_filter", currentMonth);
   localStorage.setItem("hanye_finance_period_filter", currentMonth);
+  localStorage.setItem("hanye_customs_business_period_filter", currentMonth);
   localStorage.setItem("hanye_other_business_period_filter", currentMonth);
   localStorage.setItem("hanye_customs_statement_period_filter", currentMonth);
   localStorage.setItem("hanye_vehicle_expense_period_filter", currentMonth);
@@ -8782,7 +9063,7 @@ function bossVehicleProfitOrdersForPlate(plate = "") {
   if (!targetPlate) return [];
   return bossOrderRows.value
     .filter((order) =>
-      order.vehicleSource === "本公司车辆"
+      normalizeVehicleSource(order.vehicleSource) === OWN_VEHICLE_SOURCE
       && String(order.plate || "").trim() === targetPlate
       && isBossCompanyVehiclePlate(order.plate)
       && bossVehicleSingleDriverMode(order)
@@ -8855,7 +9136,7 @@ const bossVehicleProfitDisplayRows = computed(() => {
   const groups = new Map();
   bossOrderRows.value
     .filter((order) =>
-      order.vehicleSource === "本公司车辆"
+      normalizeVehicleSource(order.vehicleSource) === OWN_VEHICLE_SOURCE
       && isBossCompanyVehiclePlate(order.plate)
       && bossVehicleSingleDriverMode(order)
     )
@@ -9540,7 +9821,7 @@ function bossVehicleCostForOrders(sourceOrders, filterKey) {
     };
   }, { hkd: 0, rmb: 0 });
   const fixedCostRMB = Array.from(new Set(sourceOrders
-    .filter((order) => order.vehicleSource === "本公司车辆" && order.plate)
+    .filter((order) => normalizeVehicleSource(order.vehicleSource) === OWN_VEHICLE_SOURCE && order.plate)
     .map((order) => order.plate)))
     .reduce((sum, plate) => {
       const vehicle = vehicleRows.value.find((item) => item.plate === plate) || null;
@@ -9808,7 +10089,7 @@ const bossDashboardTransportRevenueRows = computed(() =>
       const rmbEquivalent = bossCompanyRmbEquivalent(amount.hkd, amount.rmb, period);
       return {
         no: order.no,
-        date: order.date,
+	    date: orderDispatchLoadDateTimeText(order),
         customer: partnerDisplayLabel(order.customer || "", "客户") || order.customer || "-",
         businessType: order.businessType || "-",
         plate: order.plate || "-",
@@ -9847,6 +10128,7 @@ const bossDashboardCustomsRevenueRows = computed(() =>
       direction: row.direction || "-",
       customsFee: moneyRmbDisplay(row.customsFee || 0),
       pageFee: moneyRmbDisplay(row.pageFee || 0),
+      manifestFee: moneyRmbDisplay(row.manifestFee || 0),
       verificationFee: moneyRmbDisplay(row.verificationFee || 0),
       otherFee: moneyRmbDisplay(Number(row.inspectionFee || 0) + Number(row.checkFee || 0) + Number(row.otherFee || 0)),
       total: moneyRmbDisplay(row.total || 0),
@@ -10132,6 +10414,7 @@ function buildCustomsStatementRows(sourceRows = []) {
       declarationCount: 0,
       customsFee: 0,
       pageFee: 0,
+      manifestFee: 0,
       inspectionFee: 0,
       checkFee: 0,
       verificationFee: 0,
@@ -10142,6 +10425,7 @@ function buildCustomsStatementRows(sourceRows = []) {
     if (item.declarationNo || item.sixSheetNo) row.declarationCount += 1;
     row.customsFee += Number(item.customsFee || 0);
     row.pageFee += Number(item.pageFee || 0);
+    row.manifestFee += Number(item.manifestFee || 0);
     row.inspectionFee += Number(item.inspectionFee || 0);
     row.checkFee += Number(item.checkFee || 0);
     row.verificationFee += Number(item.verificationFee || 0);
@@ -10861,6 +11145,30 @@ function orderDispatchPlanRow(order = {}) {
   return dispatchPlanRows.value.find((row) => dispatchRowLiveOrder(row)?.no === order.no);
 }
 
+function orderDispatchLoadDate(order = {}) {
+  const dispatchRow = orderDispatchPlanRow(order);
+  return String((dispatchRow ? dispatchPlanDate(dispatchRow) : order.dispatchLoadDate) || order.date || "").trim().slice(0, 10);
+}
+
+function orderDispatchLoadTime(order = {}) {
+  const dispatchRow = orderDispatchPlanRow(order);
+  return String((dispatchRow?.loadTime || order.dispatchLoadTime || "")).trim();
+}
+
+function orderDispatchLoadDateTimeText(order = {}) {
+  const date = orderDispatchLoadDate(order);
+  if (!date) return "-";
+  const time = orderDispatchLoadTime(order);
+  return `${date} ${time || "-"}`;
+}
+
+function orderDispatchLoadSortValue(order = {}) {
+  const date = orderDispatchLoadDate(order);
+  if (!date) return "";
+  const time = orderDispatchLoadTime(order);
+  return `${date} ${time || "99:99"}`;
+}
+
 function isOrderVisibleInOrderManagement(order = {}) {
   if (order.status === "预排") return false;
   const dispatchRow = orderDispatchPlanRow(order);
@@ -10914,10 +11222,11 @@ const customerPageColumns = computed(() => {
       ...baseColumns,
       { key: "customsHomeItemCount", label: "主页品名项" },
       { key: "customsPageItemCount", label: "续页品名项" },
-      { key: "customsImportHomeFee", label: "进口主页费用" },
-      { key: "customsExportHomeFee", label: "出口主页费用" },
+      { key: "customsImportDeclarationFee", label: "进口报关费" },
+      { key: "customsExportDeclarationFee", label: "出口报关费" },
       { key: "customsImportPageFee", label: "进口续页费用" },
       { key: "customsExportPageFee", label: "出口续页费用" },
+      { key: "customsManifestFee", label: "舱单费" },
       { key: "customsVerificationFee", label: "核注费" },
       { key: "createdAt", label: "创建日期" }
     ];
@@ -11048,6 +11357,7 @@ function orderRowSearchValues(order = {}) {
     order.loading,
     order.unloading,
     relatedOrderRouteText(order),
+    orderDispatchLoadDateTimeText(order),
     order.status,
     order.remark,
     order.tripNo,
@@ -11066,7 +11376,7 @@ function matchesOrderSearchKeyword(order = {}) {
 const orderFilterBaseRows = computed(() =>
   orderRows.value.filter((item) =>
     isOrderVisibleInOrderManagement(item)
-    && isOrderDateFilterMatch(String(item.date || "").trim().slice(0, 10))
+    && isOrderDateFilterMatch(orderDispatchLoadDate(item))
   )
 );
 
@@ -11148,7 +11458,7 @@ function handleDispatchCustomerInput() {
 }
 
 function handleDispatchVehicleSourceChange() {
-  if (dispatchForm.vehicleSource === "本公司车辆") {
+  if (normalizeVehicleSource(dispatchForm.vehicleSource) === OWN_VEHICLE_SOURCE) {
     dispatchForm.supplier = "";
   } else if (dispatchForm.vehicleSource === "外派车辆") {
     dispatchForm.plate = "";
@@ -11232,8 +11542,7 @@ function cleanDispatchExcelCellText(value = "") {
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
     return timestampInputValueFromDate(value).slice(0, 16);
   }
-  return String(value ?? "")
-    .replace(/\u00a0/g, " ")
+  return normalizeUserText(value, { singleLine: true, compactCjkSpacing: true })
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -12280,10 +12589,9 @@ const dispatchDriverPickerOptions = computed(() => {
 const CUSTOMS_CUSTOMER_DETAIL_KEYS = new Set([
   "customsHomeItemCount",
   "customsPageItemCount",
-  "customsImportHomeFee",
-  "customsExportHomeFee",
   "customsImportPageFee",
   "customsExportPageFee",
+  "customsManifestFee",
   "customsVerificationFee"
 ]);
 const CUSTOMS_CUSTOMER_HIDDEN_FINANCE_KEYS = new Set(["receivableRMB", "receivableHKD", "recentOrderDate"]);
@@ -12327,6 +12635,7 @@ function createBlankFeeRow() {
     amount: 0,
     _manualAmount: false,
     cost: 0,
+    costCurrency: "",
     _manualCost: false,
     remark: ""
   };
@@ -12366,6 +12675,13 @@ function markFeeAmountManual(fee) {
   if (!fee) return;
   fee._manualAmount = true;
   if (isFreightFeeRow(fee)) fee._manualFreightAmount = true;
+}
+
+function syncFeeAmountFromQuantityOrUnitPrice(fee) {
+  if (!fee) return;
+  fee._manualAmount = false;
+  if (isFreightFeeRow(fee)) fee._manualFreightAmount = false;
+  syncFeeAmountFromUnitPrice(fee);
 }
 
 function rawFeeUnitPrice(fee = {}) {
@@ -12411,7 +12727,7 @@ function normalizeFeeCost(fee = {}) {
 
 function orderFeeCostCurrencyDisplay(fee = {}) {
   if (fee._costMultiCurrency) return "多币种";
-  return currencyCodeDisplay(fee._costCurrency || fee.currency || orderForm.currency || "港币") || "HKD";
+  return currencyCodeDisplay(fee.costCurrency || fee._costCurrency || fee.currency || orderForm.currency || "港币") || "HKD";
 }
 
 function orderFeeCostBreakdownDisplay(fee = {}) {
@@ -12443,10 +12759,21 @@ function feeCostQuantity(fee = {}) {
 function setOrderFeeCost(fee, value = 0) {
   const number = Number(value);
   fee.cost = Number.isFinite(number) && number >= 0 ? number : 0;
-  fee._costCurrency = fee.currency || orderForm.currency || "港币";
-  fee._costSourceCurrency = fee._costCurrency;
+  const currency = normalizeCostCenterCurrency(fee.costCurrency || fee._costCurrency || fee.currency || orderForm.currency || "港币");
+  fee.costCurrency = currency;
+  fee._costCurrency = currency;
+  fee._costSourceCurrency = currency;
   fee._costMultiCurrency = false;
   fee._costBreakdownText = "";
+  fee._manualCost = true;
+}
+
+function setOrderFeeCostCurrency(fee, value = "港币") {
+  if (!fee) return;
+  const currency = normalizeCostCenterCurrency(value, fee.costCurrency || fee._costCurrency || fee.currency || orderForm.currency || "港币");
+  fee.costCurrency = currency;
+  fee._costCurrency = currency;
+  fee._costSourceCurrency = currency;
   fee._manualCost = true;
 }
 
@@ -12478,6 +12805,8 @@ function normalizeOrderFeeRow(fee = {}) {
   row.amount = row._manualAmount
     ? normalizeFeeAmount(row)
     : calculateFeeAmountFromUnitPrice(row);
+  row.costCurrency = normalizeCostCenterCurrency(row.costCurrency || row._costCurrency || row.currency || orderForm.currency || "港币");
+  row._costCurrency = row.costCurrency;
   syncCrossBorderFreightDriverRole(row);
   return row;
 }
@@ -12490,6 +12819,13 @@ function normalizeLocationText(value) {
   return String(value || "")
     .replace(/[市区县镇街道\s/｜|,，-]/g, "")
     .toLowerCase();
+}
+
+function locationNameMatches(left = "", right = "") {
+  const normalizedLeft = normalizeLocationText(left);
+  const normalizedRight = normalizeLocationText(right);
+  if (!normalizedLeft || !normalizedRight) return false;
+  return normalizedLeft === normalizedRight;
 }
 
 function normalizeFreightLabel(value) {
@@ -13508,7 +13844,7 @@ function orderCostEntityNamesForSource(source = "", order = orderForm, fee = {})
   if (normalizedSource === "供应商") return uniqueOrderCostNames([order.supplier]);
   if (normalizedSource === "香港司机") return uniqueOrderCostNames([order.hkDriver || order.driver, order.driver]);
   if (normalizedSource === "大陆骑师") {
-    if (order?.vehicleSource !== "本公司车辆" || !orderIsDoubleDriverMode(order)) return [];
+    if (normalizeVehicleSource(order?.vehicleSource) !== OWN_VEHICLE_SOURCE || !orderIsDoubleDriverMode(order)) return [];
     return uniqueOrderCostNames([order.mainlandDriver]);
   }
   if (normalizedSource === "公司自费") return uniqueOrderCostNames([fee.name, item.name, "公司自费"]);
@@ -13715,8 +14051,10 @@ function assignOrderFeeCostSnapshot(fee, matched) {
   if (Number(fee.cost || 0) !== cost) fee.cost = cost;
   if (fee._costMatched !== matchedFlag) fee._costMatched = matchedFlag;
   if (fee._costSourceText !== sourceText) fee._costSourceText = sourceText;
-  fee._costCurrency = matched.currency || fee.currency || orderForm.currency || "港币";
-  fee._costSourceCurrency = matched.sourceCurrency || fee._costCurrency;
+  const currency = normalizeCostCenterCurrency(matched.currency || fee.costCurrency || fee._costCurrency || fee.currency || orderForm.currency || "港币");
+  fee.costCurrency = currency;
+  fee._costCurrency = currency;
+  fee._costSourceCurrency = matched.sourceCurrency || currency;
   fee._costMultiCurrency = Boolean(matched.multiCurrency);
   fee._costBreakdownText = matched.breakdownText || "";
 }
@@ -13735,8 +14073,8 @@ function refreshOrderFeeCost(fee, options = {}) {
       amount: Number(fee._savedCost || 0),
       matched: false,
       label: "已保存成本",
-      currency: fee.currency || orderForm.currency || "港币",
-      sourceCurrency: fee.currency || orderForm.currency || "港币"
+      currency: fee.costCurrency || fee._costCurrency || fee.currency || orderForm.currency || "港币",
+      sourceCurrency: fee.costCurrency || fee._costCurrency || fee.currency || orderForm.currency || "港币"
     });
     return;
   }
@@ -13766,6 +14104,7 @@ function orderFeeCostDependencySignature() {
     fee.name,
     fee.quantity,
     fee.currency,
+    fee.costCurrency,
     fee.driverRole,
     fee.driverName
   ]);
@@ -14400,7 +14739,7 @@ const addressBookAreaLevel2Options = computed(() => {
   const city = String(addressBookForm.city || "").trim();
   if (!city) return [];
   return uniqueSorted(templateLocationGroups.value
-    .filter((group) => group.level1 === city)
+    .filter((group) => locationNameMatches(group.level1, city))
     .map((group) => group.level2));
 });
 
@@ -14439,7 +14778,7 @@ function locationDistrictOptions(city = "") {
   const selectedCity = String(city || "").trim();
   if (!selectedCity) return [];
   return uniqueSorted(templateLocationGroups.value
-    .filter((group) => group.level1 === selectedCity)
+    .filter((group) => locationNameMatches(group.level1, selectedCity))
     .map((group) => group.level2)
     .filter(Boolean));
 }
@@ -15398,6 +15737,7 @@ function tableSortLabel(tableId, column = {}) {
 
 function tableSortValue(row = {}, key = "") {
   if (!key) return "";
+  if (key === "date" && (row.no || row.order?.no)) return orderDispatchLoadSortValue(row.order || row);
   if (key === "driver" && row.driver) return row.driver.name || "";
   if (key === "type" && row.driver) return row.driver.type || "";
   if (key === "status" && row.driver) return row.driver.status || "";
@@ -15422,6 +15762,18 @@ function normalizeSortValue(value) {
   if (value === null || value === undefined) return { type: "empty", value: "" };
   const text = String(value).trim();
   if (!text) return { type: "empty", value: "" };
+  const dateTimeMatch = text.match(/^(\d{4}-\d{2}-\d{2})(?:\s+(\d{1,2}):(\d{2}))?/);
+  if (dateTimeMatch) {
+    const date = parseInputDate(dateTimeMatch[1]);
+    if (date) {
+      const hour = Number(dateTimeMatch[2] || 0);
+      const minute = Number(dateTimeMatch[3] || 0);
+      const timeOffset = Number.isFinite(hour) && Number.isFinite(minute)
+        ? (hour * 60 + minute) * 60000
+        : 0;
+      return { type: "date", value: date.getTime() + timeOffset };
+    }
+  }
   const date = parseInputDate(text);
   if (date && /^\d{4}-\d{2}-\d{2}/.test(text)) return { type: "date", value: date.getTime() };
   const numeric = Number(text.replace(/,/g, "").match(/-?\d+(?:\.\d+)?/)?.[0]);
@@ -15453,14 +15805,11 @@ function compareOrderRowsForDefaultSort(left = {}, right = {}) {
   const groupCompare = leftGroup.localeCompare(rightGroup, "zh-Hans-CN", { numeric: true, sensitivity: "base" });
   if (groupCompare !== 0) return groupCompare;
 
-  const leftDate = parseInputDate(left.date || left.order?.date || "");
-  const rightDate = parseInputDate(right.date || right.order?.date || "");
-  if (leftDate && rightDate) {
-    const dateCompare = leftDate.getTime() - rightDate.getTime();
-    if (dateCompare !== 0) return dateCompare;
-  } else if (leftDate || rightDate) {
-    return leftDate ? -1 : 1;
-  }
+  const dateCompare = compareSortValues(
+    orderDispatchLoadSortValue(left.order || left) || left.date || left.order?.date || "",
+    orderDispatchLoadSortValue(right.order || right) || right.date || right.order?.date || ""
+  );
+  if (dateCompare !== 0) return dateCompare;
 
   const noCompare = String(left.no || "").localeCompare(String(right.no || ""), "zh-Hans-CN", { numeric: true, sensitivity: "base" });
   if (noCompare !== 0) return noCompare;
@@ -15561,21 +15910,15 @@ function dispatchLocationContactLines(record = {}, target, location = "", index 
 function dispatchMessageLocationDetail(value = "") {
   const text = String(value || "").trim();
   if (!text) return "";
-  if (text.includes("/")) {
-    const parts = text.split("/").map((part) => part.trim()).filter(Boolean);
-    if (parts.length >= 3) return parts.slice(2).join(" / ");
-    if (parts.length === 2) return parts[1];
-    return parts[0] || "";
+  const parts = splitDispatchLocationParts(text);
+  if (parts.city || parts.district) {
+    return parts.detail || [parts.city, parts.district].filter(Boolean).join(" / ");
   }
-  return text
-    .replace(/^(?:[\u4e00-\u9fa5]{2,16}?(?:省|自治区|特别行政区))/, "")
-    .replace(/^(?:北京市|上海市|天津市|重庆市|香港|澳门|[\u4e00-\u9fa5]{2,16}?市)/, "")
-    .replace(/^(?:[\u4e00-\u9fa5]{1,16}?(?:区|县))/, "")
-    .trim();
+  return text;
 }
 
 function dispatchLocationBlock(label, record = {}, target) {
-  const locations = splitAddressBookLocationValue(record[target]);
+  const locations = splitDispatchLocationEntriesText(record[target]);
   const entries = locations.length ? locations : [""];
   if (entries.length <= 1) {
     const location = entries[0] || "-";
@@ -15738,6 +16081,7 @@ watch(bossPeriodFilter, () => {
 });
 
 watch(customsBusinessPeriodFilter, () => {
+  localStorage.setItem("hanye_customs_business_period_filter", customsBusinessPeriodFilter.value);
   if (loggedIn.value && activeModule.value === "customsBusiness") {
     loadCustomsBusinesses().catch((error) => notify(error.message || "报关业务加载失败"));
   }
@@ -15859,7 +16203,7 @@ function handleAddressBookCityChange() {
   const city = String(addressBookForm.city || "").trim();
   const validDistricts = new Set(
     templateLocationGroups.value
-      .filter((group) => group.level1 === city)
+      .filter((group) => locationNameMatches(group.level1, city))
       .map((group) => group.level2)
       .filter(Boolean)
   );
@@ -16183,6 +16527,8 @@ function startModalDrag(event) {
   if (isModalDragInteractiveTarget(target)) return;
   const card = target instanceof Element ? target.closest(".modal-card") : null;
   if (!card) return;
+  const head = target instanceof Element ? target.closest(".modal-head") : null;
+  if (!head || !card.contains(head)) return;
   if (isModalDragScrollbarTarget(event, target, card)) return;
   const backdrop = card.closest(".modal-backdrop");
   if (!backdrop) return;
@@ -16296,7 +16642,7 @@ function isCustomerOrderColumnVisible(key) {
 }
 
 function isOrderColumnVisible(key) {
-  if (ORDER_RIGHT_STICKY_KEYS.includes(key)) return true;
+  if (ORDER_LEFT_STICKY_KEYS.includes(key) || ORDER_RIGHT_STICKY_KEYS.includes(key)) return true;
   return orderColumnVisibility[key] !== false;
 }
 
@@ -16315,7 +16661,7 @@ function setCustomerOrderColumnVisible(column, visible) {
 }
 
 function setOrderColumnVisible(column, visible) {
-  if (column.locked || isOrderRightStickyColumn(column)) return;
+  if (column.locked || isOrderLeftStickyColumn(column) || isOrderRightStickyColumn(column)) return;
   orderColumnVisibility[column.key] = visible;
   localStorage.setItem(ORDER_COLUMN_VISIBILITY_KEY, JSON.stringify({ ...orderColumnVisibility }));
   saveAccountTablePreferencesSoon();
@@ -16503,7 +16849,7 @@ function customerOrderCellText(order, key) {
     transportMode: normalizeTransportMode(order.transportMode || ""),
     loading: relatedOrderLocationText(order.loading),
     unloading: relatedOrderLocationText(order.unloading),
-    date: order.date,
+    date: orderDispatchLoadDateTimeText(order),
     receivableHKD: `港币 ${Number(order.receivableHKD || 0).toLocaleString()}`,
     receivableRMB: `人民币 ${Number(order.receivableRMB || 0).toLocaleString()}`
   };
@@ -16531,7 +16877,7 @@ function orderCellText(order, key, index = -1) {
     supplier: supplierDisplayLabel(order.supplier),
     loading: relatedOrderLocationText(order.loading),
     unloading: relatedOrderLocationText(order.unloading),
-    date: order.date,
+    date: orderDispatchLoadDateTimeText(order),
     receivableHKD: `港币 ${Number(order.receivableHKD || 0).toLocaleString()}`,
     receivableRMB: `人民币 ${Number(order.receivableRMB || 0).toLocaleString()}`
   };
@@ -16568,10 +16914,11 @@ function customerListDetailCellText(item = {}, key = "") {
     recentOrderDate: partnerRecentOrderDate(item) || "-",
     customsHomeItemCount: `${Number(item.customsHomeItemCount ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsHomeItemCount)} 个`,
     customsPageItemCount: `${Number(item.customsPageItemCount ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsPageItemCount)} 个`,
-    customsImportHomeFee: `人民币 ${Number(item.customsImportHomeFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportHomeFee).toLocaleString()}`,
-    customsExportHomeFee: `人民币 ${Number(item.customsExportHomeFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportHomeFee).toLocaleString()}`,
+    customsImportDeclarationFee: `人民币 ${Number(item.customsImportDeclarationFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportDeclarationFee).toLocaleString()}`,
+    customsExportDeclarationFee: `人民币 ${Number(item.customsExportDeclarationFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportDeclarationFee).toLocaleString()}`,
     customsImportPageFee: `人民币 ${Number(item.customsImportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee).toLocaleString()}`,
     customsExportPageFee: `人民币 ${Number(item.customsExportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee).toLocaleString()}`,
+    customsManifestFee: `人民币 ${Number(item.customsManifestFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsManifestFee).toLocaleString()}`,
     customsVerificationFee: `人民币 ${Number(item.customsVerificationFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee).toLocaleString()}`,
     createdAt: item.createdAt || "-"
   };
@@ -16829,11 +17176,50 @@ function composeLocationParts(city = "", district = "", detail = "") {
     .join(" / ");
 }
 
-function splitDispatchLocationParts(value = "") {
+function isLikelyDispatchLocationCity(value = "") {
   const text = String(value || "").trim();
-  if (!text) return { city: "", district: "", detail: "" };
+  if (!text) return false;
+  const normalized = normalizeLocationText(text);
+  return locationCityCandidates().some((city) => normalizeLocationText(city) === normalized) ||
+    /(?:市|盟|地区|自治州|特别行政区)$/.test(text) ||
+    text === "香港" ||
+    text === "澳门";
+}
+
+function isLikelyDispatchLocationDistrict(value = "") {
+  const text = String(value || "").trim();
+  return Boolean(text && /(?:区|區|县|縣|镇|鎮|乡|鄉|街道|开发区|工業區|工业区|新区)$/.test(text));
+}
+
+function isStructuredDispatchLocationParts(parts = []) {
+  const [city = "", district = "", ...detailParts] = parts;
+  const hasDetail = detailParts.some((part) => String(part || "").trim());
+  if (!city && !district && hasDetail) return true;
+  if (!city && isLikelyDispatchLocationDistrict(district)) return true;
+  if (isLikelyDispatchLocationCity(city)) return true;
+  return false;
+}
+
+function splitDispatchLocationParts(value = "") {
+  const rawText = String(value || "").replace(/\r/g, "\n");
+  const text = rawText.replace(/^\n+|\n+$/g, "");
+  if (!text.trim()) return { city: "", district: "", detail: "" };
+  if (text.includes("\n")) {
+    return {
+      city: "",
+      district: "",
+      detail: text
+    };
+  }
   if (text.includes("/")) {
     const parts = text.split("/").map((part) => part.trim());
+    if (!isStructuredDispatchLocationParts(parts)) {
+      return {
+        city: "",
+        district: "",
+        detail: text
+      };
+    }
     if (!parts[0] && !parts[1] && parts.slice(2).some(Boolean)) {
       return {
         city: "",
@@ -16849,6 +17235,13 @@ function splitDispatchLocationParts(value = "") {
       district: parts[1] || "",
       detail: parts.slice(2).join(" / ")
     };
+    if (parsed.district) {
+      const districtParts = splitLocationParts(parsed.district);
+      if (!districtParts.city && districtParts.district && districtParts.district !== parsed.district) {
+        parsed.district = districtParts.district;
+        parsed.detail = [districtParts.detail, parsed.detail].filter(Boolean).join(" / ");
+      }
+    }
     if (!parsed.city && parsed.detail) {
       return splitLocationParts(parsed.detail);
     }
@@ -16860,20 +17253,39 @@ function splitDispatchLocationParts(value = "") {
     }
     return parsed;
   }
-  return splitLocationParts(text);
+  return {
+    city: "",
+    district: "",
+    detail: text
+  };
 }
 
 function composeDispatchLocationParts(city = "", district = "", detail = "") {
-  const values = [city, district, detail].map((part) => String(part || "").trim());
-  if (!values.some(Boolean)) return "";
-  if (values[0] && !values[1] && !values[2]) return values[0];
-  if (values[0] && values[1] && !values[2]) return [values[0], values[1]].join(" / ");
-  if (values[0] && !values[1] && values[2]) return [values[0], "", values[2]].join(" / ");
-  return values.join(" / ");
+  const cityText = String(city || "").trim();
+  const districtText = String(district || "").trim();
+  const detailText = String(detail ?? "").replace(/\r\n?/g, "\n");
+  if (!cityText && !districtText) return detailText;
+  if (cityText && !districtText && !detailText) return cityText;
+  if (cityText && districtText && !detailText) return [cityText, districtText].join(" / ");
+  if (cityText && !districtText && detailText) return [cityText, "", detailText].join(" / ");
+  return [cityText, districtText, detailText].join(" / ");
+}
+
+function normalizeDispatchLocationText(value = "", options = {}) {
+  return normalizeUserText(value, {
+    singleLine: options.singleLine,
+    compactCjkSpacing: true
+  });
+}
+
+function normalizeDispatchLocationDetailText(value = "") {
+  return String(value ?? "").replace(/\r\n?/g, "\n");
 }
 
 function normalizeDispatchLocationPartValue(value = "", part = "") {
-  const text = String(value || "").trim();
+  const text = part === "detail"
+    ? normalizeDispatchLocationDetailText(value)
+    : normalizeDispatchLocationText(value, { singleLine: true });
   if (!text || part === "detail") return text;
   const parsed = splitDispatchLocationParts(text);
   if (part === "city") return parsed.city || text;
@@ -16889,10 +17301,27 @@ function splitAddressBookLocationValue(value = "") {
     .filter(Boolean);
 }
 
+// Keep wrapped pasted address blocks intact; only split obvious multi-address input.
+function splitDispatchLocationEntriesText(value = "") {
+  const raw = String(value || "").replace(/\r/g, "\n");
+  if (!raw.trim()) return [""];
+  const text = raw.replace(/^\n+|\n+$/g, "");
+  const lines = raw.split(/\n+/).map((item) => item.trim()).filter(Boolean);
+  const hasLabelLine = lines.some((line) => /^(?:联系人|聯絡人|聯繫人|电话|電話|手机|手機|备注|備注|注意事项|注意事項|司机|司機|仓库|倉庫|货好|貨好|请|請|温馨提示|提示|说明|說明|限高)\b/.test(line));
+  const hasLongLabeledLine = lines.some((line) => /[:：]/.test(line)) && lines.some((line) => line.length >= 24);
+  if (hasLabelLine || hasLongLabeledLine) return [text];
+  if (lines.length <= 1) {
+    if (/[；;]/.test(text)) {
+      const semicolonEntries = text.split(/[；;]+/).map((item) => item.trim()).filter(Boolean);
+      if (semicolonEntries.length > 1) return semicolonEntries;
+    }
+    return [text];
+  }
+  return lines;
+}
+
 function dispatchLocationEntries(target) {
-  const raw = String(dispatchForm[target] || "").replace(/\r/g, "\n");
-  if (!raw.trim() && !/[\n；;]/.test(raw)) return [""];
-  return raw.split(/[\n；;]/).map((item) => item.trim());
+  return splitDispatchLocationEntriesText(dispatchForm[target] || "");
 }
 
 function dispatchLocationEntryCount(target) {
@@ -16900,7 +17329,7 @@ function dispatchLocationEntryCount(target) {
 }
 
 function setDispatchLocationEntries(target, entries) {
-  const normalized = entries.map((item) => String(item || "").trim());
+  const normalized = entries.map((item) => String(item || ""));
   dispatchForm[target] = normalized.length > 1 || normalized.some(Boolean) ? normalized.join("\n") : "";
 }
 
@@ -16982,7 +17411,10 @@ function isDispatchLocationInputComposing(target, index, part) {
 
 function handleDispatchLocationTextInput(target, index, part, event) {
   if (event?.isComposing || isDispatchLocationInputComposing(target, index, part)) return;
-  const value = event?.target?.value || "";
+  const value = part === "detail"
+    ? normalizeDispatchLocationDetailText(event?.target?.value || "")
+    : normalizeDispatchLocationText(event?.target?.value || "", { singleLine: true });
+  if (event?.target && event.target.value !== value) event.target.value = value;
   setDispatchLocationDraftPart(target, index, part, value);
   if (part === "district") {
     dispatchLocationDistrictPicker.key = dispatchLocationDistrictKey(target, index);
@@ -16996,7 +17428,10 @@ function handleDispatchLocationTextCompositionStart(target, index, part) {
 
 function handleDispatchLocationTextCompositionEnd(target, index, part, event) {
   setDispatchLocationInputComposing(target, index, part, false);
-  const value = event?.target?.value || "";
+  const value = part === "detail"
+    ? normalizeDispatchLocationDetailText(event?.target?.value || "")
+    : normalizeDispatchLocationText(event?.target?.value || "", { singleLine: true });
+  if (event?.target && event.target.value !== value) event.target.value = value;
   setDispatchLocationDraftPart(target, index, part, value);
   if (part === "district") {
     dispatchLocationDistrictPicker.key = dispatchLocationDistrictKey(target, index);
@@ -17120,6 +17555,76 @@ function normalizeDispatchLocationFormValuesForSave() {
     const entries = dispatchLocationEntries(target).filter((item) => String(item || "").trim());
     setDispatchLocationEntries(target, entries.length ? entries : [""]);
   });
+}
+
+function normalizeDispatchFormTextValuesForSave() {
+  [
+    "customer",
+    "port",
+    "direction",
+    "tonnage",
+    "quantity",
+    "weight",
+    "loadTime",
+    "vehicleSource",
+    "supplier",
+    "transportMode",
+    "driver",
+    "hkDriver",
+    "mainlandDriver",
+    "note"
+  ].forEach((key) => {
+    dispatchForm[key] = normalizeUserText(dispatchForm[key], { singleLine: true, compactCjkSpacing: true });
+  });
+  dispatchForm.plate = normalizePlateText(dispatchForm.plate);
+  ["loading", "unloading"].forEach((key) => {
+    dispatchForm[key] = normalizeDispatchLocationDetailText(dispatchForm[key]);
+  });
+}
+
+function normalizedOrderPayloadTextValue(value, options = {}) {
+  return normalizeUserText(value, {
+    singleLine: options.singleLine !== false,
+    compactCjkSpacing: true
+  });
+}
+
+function buildNormalizedOrderPayload() {
+  const payload = { ...orderForm };
+  [
+    "customer",
+    "businessType",
+    "port",
+    "direction",
+    "tonnage",
+    "currency",
+    "quantity",
+    "weight",
+    "vehicleSource",
+    "supplier",
+    "driver",
+    "hkDriver",
+    "mainlandDriver",
+    "transportMode",
+    "loadingContact",
+    "loadingPhone",
+    "unloadingContact",
+    "unloadingPhone",
+    "status",
+    "tripNo",
+    "sixSheetNo",
+    "customsNo",
+    "customsUnit",
+    "customsItemCount",
+    "customsPageCount"
+  ].forEach((key) => {
+    payload[key] = normalizedOrderPayloadTextValue(payload[key]);
+  });
+  payload.plate = normalizePlateText(payload.plate);
+  payload.loading = normalizeDispatchLocationDetailText(payload.loading).trim();
+  payload.unloading = normalizeDispatchLocationDetailText(payload.unloading).trim();
+  payload.remark = normalizedOrderPayloadTextValue(mergeCustomsRemark(orderForm.remark), { singleLine: false });
+  return payload;
 }
 
 function removeDispatchLocationEntry(target, index) {
@@ -17574,6 +18079,8 @@ function resetCustomsBusinessForm() {
 }
 
 function assignCustomsBusinessForm(row = {}) {
+  const normalizedCustomFields = normalizeCustomsBusinessCustomFields(row.customFields);
+  const fixedFeeField = normalizedCustomFields.find((field) => customsBusinessCustomFieldName(field) === CUSTOMS_BUSINESS_FIXED_FEE_NAME);
   Object.assign(customsBusinessForm, {
     date: row.date || todayInputValue(),
     declarationNo: row.declarationNo || "",
@@ -17584,11 +18091,14 @@ function assignCustomsBusinessForm(row = {}) {
     pageCount: customsBusinessIntegerValue(row.pageCount),
     customsFee: customsBusinessIntegerValue(row.customsFee),
     pageFee: customsBusinessIntegerValue(row.pageFee),
+    manifestFee: customsBusinessIntegerValue(row.manifestFee),
     inspectionFee: customsBusinessIntegerValue(row.inspectionFee),
     checkFee: customsBusinessIntegerValue(row.checkFee),
     verificationFee: customsBusinessIntegerValue(row.verificationFee),
     otherFee: customsBusinessIntegerValue(row.otherFee),
-    customFields: normalizeCustomsBusinessCustomFields(row.customFields)
+    fajian3cFee: customsBusinessIntegerValue(fixedFeeField?.value),
+    customFields: normalizedCustomFields
+      .filter((field) => customsBusinessCustomFieldName(field) !== CUSTOMS_BUSINESS_FIXED_FEE_NAME)
       .map((field) => ({ name: field.name, value: customsBusinessIntegerValue(field.value) })),
     remark: row.remark || ""
   });
@@ -17673,7 +18183,7 @@ async function saveCustomsBusiness() {
     return;
   }
   normalizeCustomsBusinessFormIntegers();
-  const customFields = normalizeCustomsBusinessCustomFields(customsBusinessForm.customFields);
+  const customFields = customsBusinessCustomFieldsForSave(customsBusinessForm.customFields, customsBusinessForm.fajian3cFee);
   try {
     customsBusinessSaving.value = true;
     const isCopying = Boolean(copyingCustomsBusinessId.value);
@@ -18778,6 +19288,7 @@ function customerConfigNumber(value, fallback) {
 }
 
 function buildCustomerPayload() {
+  const customsConfig = normalizeCustomerCustomsConfig(customerForm);
   return {
     ...customerForm,
     shortName: String(customerForm.shortName || "").trim(),
@@ -18788,10 +19299,23 @@ function buildCustomerPayload() {
     customsPageItemCount: customerConfigNumber(customerForm.customsPageItemCount, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsPageItemCount),
     customsImportHomeFee: customerConfigNumber(customerForm.customsImportHomeFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportHomeFee),
     customsExportHomeFee: customerConfigNumber(customerForm.customsExportHomeFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportHomeFee),
+    customsImportDeclarationFee: customsConfig.customsImportDeclarationFee,
+    customsExportDeclarationFee: customsConfig.customsExportDeclarationFee,
     customsImportPageFee: customerConfigNumber(customerForm.customsImportPageFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee),
     customsExportPageFee: customerConfigNumber(customerForm.customsExportPageFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee),
+    customsManifestFee: customerConfigNumber(customerForm.customsManifestFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsManifestFee),
     customsVerificationFee: customerConfigNumber(customerForm.customsVerificationFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee),
-    customsCustomFields: normalizeCustomsBusinessCustomFields(customerForm.customsCustomFields),
+    customsCustomFields: [
+      {
+        name: CUSTOMER_CUSTOMS_FEE_FIELD_NAMES.customsImportDeclarationFee,
+        value: customsConfig.customsImportDeclarationFee
+      },
+      {
+        name: CUSTOMER_CUSTOMS_FEE_FIELD_NAMES.customsExportDeclarationFee,
+        value: customsConfig.customsExportDeclarationFee
+      },
+      ...customsConfig.customsCustomFields
+    ],
     invoice: {
       title: customerForm.invoiceTitle || customerForm.name,
       taxNo: customerForm.invoiceTax,
@@ -18882,36 +19406,41 @@ function openCustomerModal(customer = null, createType = activePartnerType.value
   editingCustomerId.value = customer?.id || "";
   customerModalTab.value = "客户资料";
   const type = customer?.type || (createType === "供应商" ? "供应商" : "客户");
+  const normalizedCustomer = customer ? normalizeCustomerRecord(customer) : null;
   const customerCategory = type === "客户"
-    ? (customer ? customerCategoryValue(customer) : normalizeCustomerCategory(activeCustomerCategory.value))
+    ? (normalizedCustomer ? customerCategoryValue(normalizedCustomer) : normalizeCustomerCategory(activeCustomerCategory.value))
     : "";
+  const customsConfig = normalizeCustomerCustomsConfig(normalizedCustomer || {});
   Object.assign(customerForm, {
     type,
     customerCategory,
-    name: customer?.name || "",
-    shortName: customer?.shortName || "",
-    province: customer?.province || "",
-    city: customer?.city || "",
-    address: customer?.address || "",
-    term: customer?.term || "",
-    settlementCurrency: type === "客户" ? (customer?.settlementCurrency || "人民币结算") : "",
-    taxNo: customer?.taxNo || invoiceValue(customer, "taxNo"),
-    contact: customer?.contact || "",
-    mobile: customer?.mobile || "",
-    defaultTemplateId: customer?.defaultTemplateId || "",
-    invoiceTitle: invoiceValue(customer, "title") || customer?.name || "",
-    invoiceTax: invoiceValue(customer, "taxNo") || customer?.taxNo || "",
-    invoiceBank: invoiceValue(customer, "bank"),
-    invoiceAccount: invoiceValue(customer, "account"),
-    invoiceAddressPhone: invoiceValue(customer, "addressPhone"),
-    customsHomeItemCount: Number(customer?.customsHomeItemCount ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsHomeItemCount),
-    customsPageItemCount: Number(customer?.customsPageItemCount ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsPageItemCount),
-    customsImportHomeFee: Number(customer?.customsImportHomeFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportHomeFee),
-    customsExportHomeFee: Number(customer?.customsExportHomeFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportHomeFee),
-    customsImportPageFee: Number(customer?.customsImportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee),
-    customsExportPageFee: Number(customer?.customsExportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee),
-    customsVerificationFee: Number(customer?.customsVerificationFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee),
-    customsCustomFields: normalizeCustomsBusinessCustomFields(customer?.customsCustomFields)
+    name: normalizedCustomer?.name || "",
+    shortName: normalizedCustomer?.shortName || "",
+    province: normalizedCustomer?.province || "",
+    city: normalizedCustomer?.city || "",
+    address: normalizedCustomer?.address || "",
+    term: normalizedCustomer?.term || "",
+    settlementCurrency: type === "客户" ? (normalizedCustomer?.settlementCurrency || "人民币结算") : "",
+    taxNo: normalizedCustomer?.taxNo || invoiceValue(normalizedCustomer, "taxNo"),
+    contact: normalizedCustomer?.contact || "",
+    mobile: normalizedCustomer?.mobile || "",
+    defaultTemplateId: normalizedCustomer?.defaultTemplateId || "",
+    invoiceTitle: invoiceValue(normalizedCustomer, "title") || normalizedCustomer?.name || "",
+    invoiceTax: invoiceValue(normalizedCustomer, "taxNo") || normalizedCustomer?.taxNo || "",
+    invoiceBank: invoiceValue(normalizedCustomer, "bank"),
+    invoiceAccount: invoiceValue(normalizedCustomer, "account"),
+    invoiceAddressPhone: invoiceValue(normalizedCustomer, "addressPhone"),
+    customsHomeItemCount: Number(normalizedCustomer?.customsHomeItemCount ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsHomeItemCount),
+    customsPageItemCount: Number(normalizedCustomer?.customsPageItemCount ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsPageItemCount),
+    customsImportHomeFee: Number(normalizedCustomer?.customsImportHomeFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportHomeFee),
+    customsExportHomeFee: Number(normalizedCustomer?.customsExportHomeFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportHomeFee),
+    customsImportDeclarationFee: customsConfig.customsImportDeclarationFee,
+    customsExportDeclarationFee: customsConfig.customsExportDeclarationFee,
+    customsImportPageFee: Number(normalizedCustomer?.customsImportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee),
+    customsExportPageFee: Number(normalizedCustomer?.customsExportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee),
+    customsManifestFee: Number(normalizedCustomer?.customsManifestFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsManifestFee),
+    customsVerificationFee: Number(normalizedCustomer?.customsVerificationFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee),
+    customsCustomFields: customsConfig.customsCustomFields
       .map((field) => ({ name: field.name, value: customsBusinessIntegerValue(field.value) })),
     invoicePasteText: ""
   });
@@ -19199,6 +19728,7 @@ function normalizeOrderDriversForSave() {
 
 async function openOrderModal(customer = null, order = null, options = {}) {
   await ensureReferenceDataLoaded();
+  closeOrderDetail();
   orderAuditMode.value = Boolean(options.audit && order);
   orderViewMode.value = Boolean(order && !orderAuditMode.value && (options.view || !canEditOrder(order)));
   editingOrderNo.value = order?.no || "";
@@ -19220,7 +19750,7 @@ async function openOrderModal(customer = null, order = null, options = {}) {
       currency: order.currency || "",
       quantity: String(order.quantity || ""),
       weight: order.weight || "",
-      vehicleSource: order.vehicleSource || "",
+      vehicleSource: normalizeVehicleSource(order.vehicleSource || ""),
       supplier: order.supplier || "",
       plate: order.plate || "",
       driver: order.driver || "",
@@ -19266,6 +19796,7 @@ async function openOrderModal(customer = null, order = null, options = {}) {
         amount: 0,
         _manualUnitPrice: false,
         _manualAmount: false,
+        costCurrency: order.currency || "港币",
         remark: ""
       }
     ]).map((fee) => {
@@ -19298,6 +19829,7 @@ async function openOrderModal(customer = null, order = null, options = {}) {
         _manualAmount: manualAmount,
         cost: savedCost ?? 0,
         _savedCost: savedCost,
+        costCurrency: fee.costCurrency || fee.cost_currency || fee._costCurrency || fee.currency || orderForm.currency || "港币",
         remark: fee.remark || "",
         driverRole: fee.driverRole || fee.driver_role || "",
         driverName: fee.driverName || fee.driver_name || "",
@@ -19373,14 +19905,20 @@ async function saveOrder(options = {}) {
     normalizeOrderFeeRows();
     syncOrderFeeCosts();
     const payload = {
-      ...orderForm,
-      remark: mergeCustomsRemark(orderForm.remark),
+      ...buildNormalizedOrderPayload(),
       fees: orderFees.value
         .map((fee) => {
           const normalized = normalizeOrderFeeRow(fee);
           return {
             ...normalized,
+            name: normalizeUserText(normalized.name, { singleLine: true, compactCjkSpacing: true }),
+            category: normalizeUserText(normalized.category, { singleLine: true, compactCjkSpacing: true }),
+            currency: normalizeUserText(normalized.currency, { singleLine: true, compactCjkSpacing: true }),
+            remark: normalizeUserText(normalized.remark, { singleLine: true, compactCjkSpacing: true }),
+            driverRole: normalizeUserText(normalized.driverRole, { singleLine: true, compactCjkSpacing: true }),
+            driverName: normalizeUserText(normalized.driverName, { singleLine: true, compactCjkSpacing: true }),
             cost: normalizeFeeCost(fee) ?? 0,
+            costCurrency: normalizeCostCenterCurrency(fee.costCurrency || fee._costCurrency || fee.currency || orderForm.currency || "港币"),
             unitPriceManual: Boolean(fee._manualUnitPrice),
             amountManual: Boolean(fee._manualAmount),
             costManual: Boolean(fee._manualCost)
@@ -19822,6 +20360,7 @@ function uploadDriverFile(event) {
 function addFeeRow() {
   const row = createBlankFeeRow();
   row.currency = orderForm.currency || "";
+  row.costCurrency = orderForm.currency || "港币";
   orderFees.value.push(row);
 }
 
@@ -20415,12 +20954,13 @@ function customerOrderExportScope() {
 }
 
 function supplierOrderFeeCostSnapshot(fee = {}, order = {}) {
+  const savedCostCurrency = normalizeCostCenterCurrency(fee.costCurrency || fee._costCurrency || fee.currency || order.currency || "港币", order.currency || "港币");
   if (isAdvanceFee(fee)) {
     return {
       amount: Number(fee.amount || 0),
       matched: true,
       label: "代垫实报实销",
-      currency: fee.currency || order.currency || "港币"
+      currency: savedCostCurrency
     };
   }
   const savedCost = normalizeFeeCost(fee);
@@ -20433,7 +20973,7 @@ function supplierOrderFeeCostSnapshot(fee = {}, order = {}) {
       amount: savedCost,
       matched: true,
       label: "手动成本",
-      currency: fee.currency || order.currency || "港币"
+      currency: savedCostCurrency
     };
   }
   const matched = matchedOrderFeeCost(fee, order);
@@ -20442,8 +20982,8 @@ function supplierOrderFeeCostSnapshot(fee = {}, order = {}) {
       amount: Number(matched.sourceAmount ?? matched.amount ?? 0),
       matched: true,
       label: matched.label || "自动成本",
-      currency: matched.sourceCurrency || fee.currency || order.currency || "港币",
-      sourceCurrency: matched.sourceCurrency || fee.currency || order.currency || "港币",
+      currency: savedCostCurrency || matched.sourceCurrency || fee.currency || order.currency || "港币",
+      sourceCurrency: matched.sourceCurrency || savedCostCurrency || fee.currency || order.currency || "港币",
       displayAmount: Number(matched.amount || 0),
       displayCurrency: matched.currency || fee.currency || order.currency || "港币"
     };
@@ -20453,7 +20993,7 @@ function supplierOrderFeeCostSnapshot(fee = {}, order = {}) {
     amount: savedCost ?? 0,
     matched: hasSavedCost,
     label: hasSavedCost ? "已保存成本" : (matched.label || "未匹配到成本"),
-    currency: fee.currency || order.currency || "港币"
+    currency: savedCostCurrency
   };
 }
 
@@ -21784,6 +22324,7 @@ const CUSTOMS_STATEMENT_EXPORT_HEADERS = [
   "续页",
   "续页费",
   "报关费",
+  "舱单费",
   "报检费",
   "查验费",
   "核注费",
@@ -21804,6 +22345,7 @@ function customsStatementExportRow(item = {}, index = 0) {
     item.pageCount || "",
     money(item.pageFee),
     money(item.customsFee),
+    money(item.manifestFee),
     money(item.inspectionFee),
     money(item.checkFee),
     money(item.verificationFee),
@@ -23159,6 +23701,7 @@ function loadFeeTemplate() {
         amount: Number(item.defaultAmount || 0),
         _manualAmount: false,
         cost: 0,
+        costCurrency: item.currency || orderForm.currency || "港币",
         costManual: false,
         _manualCost: false,
         remark: ""
@@ -23236,7 +23779,7 @@ function applyOrderTemplateFields(order = {}) {
     currency: order.currency || orderForm.currency,
     quantity: order.quantity || orderForm.quantity,
     weight: order.weight || orderForm.weight,
-    vehicleSource: order.vehicleSource || order.vehicle_source || orderForm.vehicleSource,
+    vehicleSource: normalizeVehicleSource(order.vehicleSource || order.vehicle_source || orderForm.vehicleSource),
     supplier: order.supplier || orderForm.supplier,
     plate: order.plate || orderForm.plate,
     driver: order.driver || orderForm.driver,
@@ -25376,7 +25919,7 @@ function orderDetailFeeRows(order = {}) {
           <button class="home-kpi-card" type="button" @click="openModule('dispatchBoard')">
             <span>车辆来源</span>
             <strong>{{ homeDispatchOwnVehicleCount }} / {{ homeDispatchOutsourceCount }}</strong>
-            <small>本公司 / 外派</small>
+            <small>汉业物流 / 外派</small>
           </button>
           <button v-if="canAccessModule('vehicleDriver')" class="home-kpi-card home-kpi-reminder-card" type="button" @click="scrollToExpiryReminderCenter">
             <span>证件提醒</span>
@@ -26222,6 +26765,20 @@ function orderDetailFeeRows(order = {}) {
                 @change="setPeriodFilterDay('orders', $event.target.value)"
               />
             </label>
+            <label v-if="orderDateFilterMode === DATE_FILTER_MODE_PERIOD && orderPeriodMode === 'range'">开始日期
+              <input
+                type="date"
+                :value="periodFilterRangeStart('orders')"
+                @change="setPeriodFilterRangeStart('orders', $event.target.value)"
+              />
+            </label>
+            <label v-if="orderDateFilterMode === DATE_FILTER_MODE_PERIOD && orderPeriodMode === 'range'">结束日期
+              <input
+                type="date"
+                :value="periodFilterRangeEnd('orders')"
+                @change="setPeriodFilterRangeEnd('orders', $event.target.value)"
+              />
+            </label>
           </div>
           <div class="order-top-actions">
             <button class="primary-btn" type="button" :disabled="loading" @click="openOrderModal()"><IconSvg name="plus" />新建订单</button>
@@ -26290,17 +26847,17 @@ function orderDetailFeeRows(order = {}) {
                     <span>列 {{ visibleOrderColumns.length }}/{{ orderColumns.length }}</span>
                   </summary>
                   <div class="data-table-column-popover">
-                    <label
-                      v-for="column in orderColumns.filter((item) => !isOrderRightStickyColumn(item))"
-                      :key="column.key"
-                      :class="{ disabled: column.locked }"
-                    >
-                      <input
-                        type="checkbox"
-                        :checked="isOrderColumnVisible(column.key)"
-                        :disabled="column.locked"
-                        @change="setOrderColumnVisible(column, $event.target.checked)"
-                      />
+	                    <label
+	                      v-for="column in orderColumns.filter((item) => !isOrderRightStickyColumn(item))"
+	                      :key="column.key"
+	                      :class="{ disabled: isOrderColumnLocked(column) }"
+	                    >
+	                      <input
+	                        type="checkbox"
+	                        :checked="isOrderColumnVisible(column.key)"
+	                        :disabled="isOrderColumnLocked(column)"
+	                        @change="setOrderColumnVisible(column, $event.target.checked)"
+	                      />
                       {{ column.label }}
                     </label>
                   </div>
@@ -26375,7 +26932,7 @@ function orderDetailFeeRows(order = {}) {
                   :key="order.no"
                   :class="{ selected: selectedOrderRowNo === order.no }"
                   @click="selectedOrderRowNo = selectedOrderRowNo === order.no ? '' : order.no"
-                  @dblclick="openOrderDetail(order)"
+                  @dblclick="openOrderModal(null, order)"
                 >
                   <td
                     v-for="(column, index) in visibleOrderColumns"
@@ -26457,6 +27014,20 @@ function orderDetailFeeRows(order = {}) {
                 type="date"
                 :value="periodFilterDay('dispatchRange')"
                 @change="setPeriodFilterDay('dispatchRange', $event.target.value)"
+              />
+            </label>
+            <label v-if="dispatchDateFilterMode === DATE_FILTER_MODE_PERIOD && dispatchRangePeriodMode === 'range'">开始日期
+              <input
+                type="date"
+                :value="periodFilterRangeStart('dispatchRange')"
+                @change="setPeriodFilterRangeStart('dispatchRange', $event.target.value)"
+              />
+            </label>
+            <label v-if="dispatchDateFilterMode === DATE_FILTER_MODE_PERIOD && dispatchRangePeriodMode === 'range'">结束日期
+              <input
+                type="date"
+                :value="periodFilterRangeEnd('dispatchRange')"
+                @change="setPeriodFilterRangeEnd('dispatchRange', $event.target.value)"
               />
             </label>
           </div>
@@ -26648,7 +27219,7 @@ function orderDetailFeeRows(order = {}) {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="row in searchedDispatchPlanRows" :key="row.id" @dblclick="openDispatchDetail(row)">
+                  <tr v-for="row in searchedDispatchPlanRows" :key="row.id" @dblclick="openEditDispatchPlanRow(row)">
                     <td
                       v-for="(column, index) in visibleDispatchTableColumns"
                       :key="column.key"
@@ -27414,7 +27985,7 @@ function orderDetailFeeRows(order = {}) {
           <div class="table-card-head">
             <div>
               <strong>司机路线扣减规则</strong>
-              <span>本公司车辆命中指定客户、司机和路线时，趟费自动调整</span>
+              <span>汉业物流命中指定客户、司机和路线时，趟费自动调整</span>
             </div>
           </div>
           <form class="route-adjust-form" @submit.prevent="addDriverRouteAdjustRule">
@@ -28396,7 +28967,7 @@ function orderDetailFeeRows(order = {}) {
                     <div class="boss-dashboard-detail-section-head">
                       <div>
                         <strong>车辆营收汇总</strong>
-                        <span>按本公司车辆汇总收入、成本和利润，可继续下钻查看订单费用</span>
+                        <span>按汉业物流汇总收入、成本和利润，可继续下钻查看订单费用</span>
                       </div>
                     </div>
                     <div class="boss-dashboard-detail-table-wrap">
@@ -28533,20 +29104,21 @@ function orderDetailFeeRows(order = {}) {
                   </div>
                   <div class="boss-dashboard-detail-table-wrap">
                     <table class="data-table compact">
-                      <thead><tr><th>日期</th><th>单号</th><th>客户</th><th>进出口</th><th>报关费</th><th>续页费</th><th>核注费</th><th>其他报关费用</th><th>合计</th></tr></thead>
+	                      <thead><tr><th>日期</th><th>单号</th><th>客户</th><th>进出口</th><th>报关费</th><th>舱单费</th><th>续页费</th><th>核注费</th><th>其他报关费用</th><th>合计</th></tr></thead>
                       <tbody>
                         <tr v-for="row in bossDashboardCustomsRevenueRows" :key="row.id">
                           <td>{{ row.date }}</td>
                           <td>{{ row.no }}</td>
                     <td>{{ partnerDisplayLabel(row.company || '', '客户') || row.company }}</td>
-                          <td>{{ row.direction }}</td>
-                          <td>{{ row.customsFee }}</td>
-                          <td>{{ row.pageFee }}</td>
+	                          <td>{{ row.direction }}</td>
+	                          <td>{{ row.customsFee }}</td>
+	                          <td>{{ row.manifestFee }}</td>
+	                          <td>{{ row.pageFee }}</td>
                           <td>{{ row.verificationFee }}</td>
                           <td>{{ row.otherFee }}</td>
                           <td><strong>{{ row.total }}</strong></td>
                         </tr>
-                        <tr v-if="bossDashboardCustomsRevenueRows.length === 0"><td colspan="9">暂无报关利润</td></tr>
+	                        <tr v-if="bossDashboardCustomsRevenueRows.length === 0"><td colspan="10">暂无报关利润</td></tr>
                       </tbody>
                     </table>
                   </div>
@@ -29038,6 +29610,20 @@ function orderDetailFeeRows(order = {}) {
                 @change="setPeriodFilterDay('customsBusiness', $event.target.value)"
               />
             </label>
+            <label v-if="periodFilterMode('customsBusiness') === 'range'">开始日期
+              <input
+                type="date"
+                :value="periodFilterRangeStart('customsBusiness')"
+                @change="setPeriodFilterRangeStart('customsBusiness', $event.target.value)"
+              />
+            </label>
+            <label v-if="periodFilterMode('customsBusiness') === 'range'">结束日期
+              <input
+                type="date"
+                :value="periodFilterRangeEnd('customsBusiness')"
+                @change="setPeriodFilterRangeEnd('customsBusiness', $event.target.value)"
+              />
+            </label>
           </div>
           <div class="customs-business-top-actions">
             <button class="primary-btn" type="button" @click="openCustomsBusinessModal"><IconSvg name="plus" />新增报关业务</button>
@@ -29116,7 +29702,7 @@ function orderDetailFeeRows(order = {}) {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="row in filteredCustomsBusinessRows" :key="row.id">
+              <tr v-for="row in filteredCustomsBusinessRows" :key="row.id" @dblclick="openEditCustomsBusinessModal(row)">
                 <td
                   v-for="column in orderedCustomsBusinessColumns"
                   :key="`${row.id}-${column.key}`"
@@ -29160,6 +29746,20 @@ function orderDetailFeeRows(order = {}) {
               <select :value="periodFilterMonth('otherBusiness')" @change="setPeriodFilterMonth('otherBusiness', $event.target.value)">
                 <option v-for="item in PERIOD_MONTH_OPTIONS" :key="item.value" :value="item.value">{{ item.label }}</option>
               </select>
+            </label>
+            <label v-if="periodFilterMode('otherBusiness') === 'range'">开始日期
+              <input
+                type="date"
+                :value="periodFilterRangeStart('otherBusiness')"
+                @change="setPeriodFilterRangeStart('otherBusiness', $event.target.value)"
+              />
+            </label>
+            <label v-if="periodFilterMode('otherBusiness') === 'range'">结束日期
+              <input
+                type="date"
+                :value="periodFilterRangeEnd('otherBusiness')"
+                @change="setPeriodFilterRangeEnd('otherBusiness', $event.target.value)"
+              />
             </label>
           </div>
           <div class="customs-business-top-actions">
@@ -29235,7 +29835,7 @@ function orderDetailFeeRows(order = {}) {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="row in filteredOtherBusinessRows" :key="row.id">
+              <tr v-for="row in filteredOtherBusinessRows" :key="row.id" @dblclick="openEditOtherBusinessModal(row)">
                 <td
                   v-for="column in orderedOtherBusinessColumns"
                   :key="`${row.id}-${column.key}`"
@@ -29993,7 +30593,7 @@ function orderDetailFeeRows(order = {}) {
             <div class="boss-vehicle-profit-detail-section">
               <div class="boss-vehicle-profit-detail-section-head">
                 <strong>订单来源明细</strong>
-                <span>{{ periodFilterLabelByScope('boss') }} · 本公司车辆 · 单司机订单 · 默认展开收费项目</span>
+                <span>{{ periodFilterLabelByScope('boss') }} · 汉业物流 · 单司机订单 · 默认展开收费项目</span>
               </div>
               <div class="boss-vehicle-profit-order-list">
                 <details
@@ -30256,17 +30856,17 @@ function orderDetailFeeRows(order = {}) {
                   <span>{{ orderListDetailColumns.length }}/{{ orderListDetailManageColumns.length }}</span>
                 </summary>
                 <div class="data-table-column-popover finance-wage-detail-column-popover order-list-detail-column-popover">
-                  <label
-                    v-for="column in orderListDetailManageColumns"
-                    :key="column.key"
-                    :class="{ disabled: column.locked || isOrderRightStickyColumn(column) }"
-                  >
-                    <input
-                      type="checkbox"
-                      :checked="isOrderColumnVisible(column.key)"
-                      :disabled="column.locked || isOrderRightStickyColumn(column)"
-                      @change="toggleOrderColumnVisible(column)"
-                    />
+	                  <label
+	                    v-for="column in orderListDetailManageColumns"
+	                    :key="column.key"
+	                    :class="{ disabled: isOrderColumnLocked(column) }"
+	                  >
+	                    <input
+	                      type="checkbox"
+	                      :checked="isOrderColumnVisible(column.key)"
+	                      :disabled="isOrderColumnLocked(column)"
+	                      @change="toggleOrderColumnVisible(column)"
+	                    />
                     <span>{{ column.label }}</span>
                     <button
                       :class="['icon-btn', 'icon-only', { active: isOrderColumnLocked(column) }]"
@@ -30311,7 +30911,7 @@ function orderDetailFeeRows(order = {}) {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="(order, orderIndex) in orderListDetailRows" :key="order.no" @dblclick="openOrderDetail(order)">
+                  <tr v-for="(order, orderIndex) in orderListDetailRows" :key="order.no" @dblclick="openOrderModal(null, order)">
                     <td
                       v-for="(column, index) in orderListDetailColumns"
                       :key="column.key"
@@ -31204,17 +31804,20 @@ function orderDetailFeeRows(order = {}) {
                 <label>续页品名项
                   <input v-model.number="customerForm.customsPageItemCount" type="number" min="0" step="1" />
                 </label>
-                <label>进口主页费用
-                  <input v-model.number="customerForm.customsImportHomeFee" type="number" min="0" step="0.01" />
+                <label>进口报关费
+                  <input v-model.number="customerForm.customsImportDeclarationFee" type="number" min="0" step="0.01" />
                 </label>
-                <label>出口主页费用
-                  <input v-model.number="customerForm.customsExportHomeFee" type="number" min="0" step="0.01" />
+                <label>出口报关费
+                  <input v-model.number="customerForm.customsExportDeclarationFee" type="number" min="0" step="0.01" />
                 </label>
                 <label>进口续页费用
                   <input v-model.number="customerForm.customsImportPageFee" type="number" min="0" step="0.01" />
                 </label>
                 <label>出口续页费用
                   <input v-model.number="customerForm.customsExportPageFee" type="number" min="0" step="0.01" />
+                </label>
+                <label>舱单费
+                  <input v-model.number="customerForm.customsManifestFee" type="number" min="0" step="0.01" />
                 </label>
                 <label>核注费
                   <input v-model.number="customerForm.customsVerificationFee" type="number" min="0" step="0.01" />
@@ -31338,8 +31941,8 @@ function orderDetailFeeRows(order = {}) {
                   </div>
                 </span>
               </label>
-              <label>车辆来源<select v-model="dispatchForm.vehicleSource" @change="handleDispatchVehicleSourceChange"><option value=""></option><option>本公司车辆</option><option>外派车辆</option></select></label>
-              <label v-if="dispatchForm.vehicleSource === '本公司车辆'">车牌
+              <label>车辆来源<select v-model="dispatchForm.vehicleSource" @change="handleDispatchVehicleSourceChange"><option value=""></option><option>汉业物流</option><option>外派车辆</option></select></label>
+              <label v-if="dispatchForm.vehicleSource === '汉业物流'">车牌
                 <select v-model="dispatchForm.plate">
                   <option value=""></option>
                   <option v-for="vehicle in vehicleRows" :key="vehicle.plate" :value="vehicle.plate">
@@ -31864,7 +32467,7 @@ function orderDetailFeeRows(order = {}) {
               <label v-if="orderHasCustomsFields" class="order-compact-field">消费使用单位<input v-model.trim="orderForm.customsUnit" placeholder="消费使用单位" /></label>
               <label v-if="orderHasCustomsFields" class="order-compact-field">品名项数<input v-model.number="orderForm.customsItemCount" type="number" min="0" placeholder="例如：5" /></label>
               <label v-if="orderHasCustomsFields" class="order-compact-field">续页数量<input v-model.number="orderForm.customsPageCount" type="number" min="0" placeholder="例如：1" /></label>
-              <label v-if="orderHasTransportFields" class="order-compact-field">车辆来源<select v-model="orderForm.vehicleSource" @change="handleOrderVehicleSourceChange"><option value=""></option><option>本公司车辆</option><option>外派车辆</option></select></label>
+              <label v-if="orderHasTransportFields" class="order-compact-field">车辆来源<select v-model="orderForm.vehicleSource" @change="handleOrderVehicleSourceChange"><option value=""></option><option>汉业物流</option><option>外派车辆</option></select></label>
               <label v-if="orderHasTransportFields && orderUsesOwnVehicle" class="order-compact-field">运输模式
                 <select v-model="orderForm.transportMode" @change="handleOrderTransportModeChange">
                   <option value=""></option>
@@ -32171,8 +32774,8 @@ function orderDetailFeeRows(order = {}) {
                         :class="orderFeeBadgeClass(fee)"
                       >{{ orderFeeBadgeLabel(fee) }}</span>
                     </td>
-                    <td><input v-model.number="fee.quantity" type="number" min="0" :disabled="orderReadOnlyMode" @input="syncFeeAmountFromUnitPrice(fee)" /></td>
-                    <td class="invoice-price-cell"><input v-model.number="fee.unitPrice" type="number" min="0" step="0.01" :disabled="orderReadOnlyMode" @input="markFeeUnitPriceManual(fee); syncFeeAmountFromUnitPrice(fee)" /></td>
+                    <td><input v-model.number="fee.quantity" type="number" min="0" :disabled="orderReadOnlyMode" @input="syncFeeAmountFromQuantityOrUnitPrice(fee)" /></td>
+                    <td class="invoice-price-cell"><input v-model.number="fee.unitPrice" type="number" min="0" step="0.01" :disabled="orderReadOnlyMode" @input="markFeeUnitPriceManual(fee); syncFeeAmountFromQuantityOrUnitPrice(fee)" /></td>
 	                    <td class="invoice-amount-cell">
 	                      <label class="fee-money-input">
 	                        <input v-model.number="fee.amount" type="number" min="0" step="0.01" :disabled="orderReadOnlyMode" @input="markFeeAmountManual(fee)" />
@@ -32201,7 +32804,15 @@ function orderDetailFeeRows(order = {}) {
                           :disabled="orderReadOnlyMode"
                           @input="setOrderFeeCost(fee, $event.target.value)"
                         />
-                        <span>{{ orderFeeCostCurrencyDisplay(fee) }}</span>
+                        <select
+                          v-model="fee.costCurrency"
+                          :disabled="orderReadOnlyMode"
+                          :title="orderFeeCostTitle(fee)"
+                          @change="setOrderFeeCostCurrency(fee, $event.target.value)"
+                        >
+                          <option value="港币">HKD</option>
+                          <option value="人民币">RMB</option>
+                        </select>
                       </label>
                     </td>
 		                    <td class="invoice-remark-cell">
@@ -33079,9 +33690,11 @@ function orderDetailFeeRows(order = {}) {
 	          <label>续页<input v-model.number="customsBusinessForm.pageCount" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'pageCount', $event)" /></label>
 	          <label>续页费<input v-model.number="customsBusinessForm.pageFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'pageFee', $event)" /></label>
 	          <label>报关费<input v-model.number="customsBusinessForm.customsFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'customsFee', $event)" /></label>
+	          <label>舱单费<input v-model.number="customsBusinessForm.manifestFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'manifestFee', $event)" /></label>
 	          <label>报检费<input v-model.number="customsBusinessForm.inspectionFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'inspectionFee', $event)" /></label>
 	          <label>查验费<input v-model.number="customsBusinessForm.checkFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'checkFee', $event)" /></label>
 	          <label v-if="customsBusinessShowsVerificationFee">核注费<input v-model.number="customsBusinessForm.verificationFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'verificationFee', $event)" /></label>
+	          <label>法检/3C商检<input v-model.number="customsBusinessForm.fajian3cFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'fajian3cFee', $event)" /></label>
 	          <label>其他费用<input v-model.number="customsBusinessForm.otherFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'otherFee', $event)" /></label>
 	          <div class="span-4 customs-business-custom-fields">
 	            <div class="customs-business-custom-head">

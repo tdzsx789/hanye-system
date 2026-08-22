@@ -1239,8 +1239,8 @@ body.is-modal-dragging .modal-head {
 }
 
 .invoice-fee-table {
-  width: max(100%, 1220px);
-  min-width: 1220px;
+  width: max(100%, 1240px);
+  min-width: 1240px;
   table-layout: fixed;
 }
 
@@ -1265,7 +1265,7 @@ body.is-modal-dragging .modal-head {
 }
 
 .invoice-cost-col {
-  width: 150px;
+  width: 166px;
 }
 
 .invoice-amount-col {
@@ -1458,17 +1458,21 @@ body.is-modal-dragging .modal-head {
 
 .invoice-cost-money-input {
   display: grid;
-  grid-template-columns: minmax(76px, 1fr) 42px;
+  grid-template-columns: minmax(76px, 1fr) 68px;
   align-items: center;
   gap: 4px;
   min-width: 0;
 }
 
-.invoice-cost-money-input span {
+.invoice-cost-money-input select {
+  min-width: 0;
+  width: 68px;
+  padding-left: 6px;
+  padding-right: 24px;
   color: #075985;
   font-size: 11px;
   font-weight: 900;
-  text-align: center;
+  text-align: left;
 }
 
 .invoice-cost-breakdown {
@@ -11726,6 +11730,7 @@ tr.selected {
 
 .dispatch-address-detail-input {
   text-align: left;
+  white-space: pre-wrap;
 }
 
 .dispatch-address-remove.icon-only {
