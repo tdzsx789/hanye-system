@@ -22,6 +22,10 @@ defineProps({
     type: Boolean,
     default: false
   },
+  submitDisabled: {
+    type: Boolean,
+    default: false
+  },
   title: {
     type: String,
     default: ""
@@ -60,7 +64,7 @@ const emit = defineEmits(["close", "submit", "panelClick"]);
           <slot name="actionsLeading" />
         </div>
         <button type="button" class="ghost-btn" @click="emit('close')">{{ showSubmit ? '取消' : '关闭' }}</button>
-        <button v-if="showSubmit" class="primary-btn" type="submit" :disabled="loading"><IconSvg :name="submitIcon" />{{ submitLabel }}</button>
+        <button v-if="showSubmit" class="primary-btn" type="submit" :disabled="loading || submitDisabled"><IconSvg :name="submitIcon" />{{ submitLabel }}</button>
       </div>
     </form>
     <slot name="after" />

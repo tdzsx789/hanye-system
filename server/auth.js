@@ -83,7 +83,7 @@ const MODULE_LABELS = {
   bossCompanyProfit: "公司利润",
   bossVehicleProfit: "车辆利润",
   bossSupplierProfit: "供应商利润",
-  bossCompanyExpenses: "公司级收支",
+  bossCompanyExpenses: "办公室支出",
   freight: "运费模板",
   templates: "模板中心",
   master: "基础数据",

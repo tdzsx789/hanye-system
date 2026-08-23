@@ -626,6 +626,7 @@ async function initializeSchema() {
     CREATE TABLE IF NOT EXISTS order_fees (
       id BIGSERIAL PRIMARY KEY,
       order_no TEXT NOT NULL REFERENCES orders(no) ON DELETE CASCADE,
+      client_key TEXT NOT NULL DEFAULT '',
       category TEXT NOT NULL DEFAULT '正常' CHECK (category IN ('正常', '代垫', '公司自费')),
       name TEXT NOT NULL,
       quantity DOUBLE PRECISION NOT NULL DEFAULT 1,
@@ -637,6 +638,7 @@ async function initializeSchema() {
       cost DOUBLE PRECISION DEFAULT NULL,
       cost_currency TEXT NOT NULL DEFAULT '港币',
       cost_manual BOOLEAN NOT NULL DEFAULT false,
+      advance_address TEXT NOT NULL DEFAULT '',
       remark TEXT NOT NULL DEFAULT '',
       driver_role TEXT NOT NULL DEFAULT '',
       driver_name TEXT NOT NULL DEFAULT ''
@@ -1101,6 +1103,7 @@ async function initializeSchema() {
       "cost_source TEXT NOT NULL DEFAULT '供应商'"
     ],
     order_fees: [
+      "client_key TEXT NOT NULL DEFAULT ''",
       "quantity DOUBLE PRECISION NOT NULL DEFAULT 1",
       "unit_price DOUBLE PRECISION NOT NULL DEFAULT 0",
       "unit_price_manual BOOLEAN NOT NULL DEFAULT false",
@@ -1108,6 +1111,7 @@ async function initializeSchema() {
       "cost DOUBLE PRECISION DEFAULT NULL",
       "cost_currency TEXT NOT NULL DEFAULT '港币'",
       "cost_manual BOOLEAN NOT NULL DEFAULT false",
+      "advance_address TEXT NOT NULL DEFAULT ''",
       "driver_role TEXT NOT NULL DEFAULT ''",
       "driver_name TEXT NOT NULL DEFAULT ''"
     ],

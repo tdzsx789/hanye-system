@@ -20,6 +20,7 @@ services:
       retries: 10
 
   server:
+    image: hanye-system-server:latest
     build:
       context: ./server
     container_name: hanye-server
@@ -57,6 +58,7 @@ services:
       retries: 10
 
   server-standby:
+    image: hanye-system-server:latest
     build:
       context: ./server
     container_name: hanye-server-standby
@@ -94,6 +96,7 @@ services:
       retries: 10
 
   web:
+    image: hanye-system-web:latest
     build:
       context: ./web
     container_name: hanye-web

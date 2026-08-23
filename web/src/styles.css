@@ -9,6 +9,9 @@
   --muted: #64748b;
   --bg: #f4f7fb;
   --danger: #d92d20;
+  --row-hover-bg: #d8eaff;
+  --row-selected-bg: #c7ddff;
+  --list-hover-bg: #dcecff;
 }
 
 * {
@@ -180,7 +183,12 @@ body.is-modal-dragging .modal-head {
 }
 
 .fee-item-manager-modal {
-  width: min(900px, calc(100vw - 48px));
+  width: min(1360px, calc(100vw - 24px));
+  height: min(900px, calc(100vh - 24px));
+  max-height: calc(100vh - 24px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .finance-wage-detail-backdrop {
@@ -354,7 +362,7 @@ body.is-modal-dragging .modal-head {
 }
 
 .former-driver-table tbody tr:hover .former-driver-actions-cell {
-  background: #f8fbff;
+  background: var(--row-hover-bg);
 }
 
 .former-driver-actions-cell .icon-btn {
@@ -417,18 +425,18 @@ body.is-modal-dragging .modal-head {
 }
 
 .finance-wage-detail-table tbody tr:hover td {
-  background: #eaf4ff;
+  background: var(--row-hover-bg);
 }
 
 .finance-wage-detail-table tbody tr:hover .sticky-first-column {
-  background: #eaf4ff;
+  background: var(--row-hover-bg);
 }
 
 .finance-wage-detail-table tbody tr.selected td,
 .finance-wage-detail-table tbody tr.selected .sticky-first-column,
 .finance-wage-detail-table tbody tr.selected:hover td,
 .finance-wage-detail-table tbody tr.selected:hover .sticky-first-column {
-  background: #d8ebff;
+  background: var(--row-selected-bg);
 }
 
 .finance-wage-detail-table tfoot td {
@@ -441,13 +449,20 @@ body.is-modal-dragging .modal-head {
   font-weight: 800;
 }
 
-.fee-item-manager-body {
-  display: grid;
+.modal-body.fee-item-manager-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
+  padding: 12px 14px 14px;
+  overflow: hidden;
 }
 
 .modal-fee-item-table-wrap {
-  max-height: min(420px, 48vh);
+  flex: 1;
+  min-height: 0;
+  max-height: none;
 }
 
 .empty-action-cell {
@@ -816,7 +831,7 @@ body.is-modal-dragging .modal-head {
 
 .searchable-select-dropdown button:hover,
 .searchable-select-dropdown button.active {
-  background: #eef6ff;
+  background: var(--list-hover-bg);
   color: #075fc4;
 }
 
@@ -973,7 +988,7 @@ body.is-modal-dragging .modal-head {
 
 .route-tree-node:hover,
 .route-tree-node.checked {
-  background: #eef6ff;
+  background: var(--list-hover-bg);
   color: #075fc4;
 }
 
@@ -1232,15 +1247,15 @@ body.is-modal-dragging .modal-head {
 
 .fee-table-wrap {
   height: clamp(260px, 38vh, 430px);
-  overflow-x: auto;
+  overflow-x: hidden;
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: 8px;
 }
 
 .invoice-fee-table {
-  width: max(100%, 1240px);
-  min-width: 1240px;
+  width: 100%;
+  min-width: 0;
   table-layout: fixed;
 }
 
@@ -1249,35 +1264,35 @@ body.is-modal-dragging .modal-head {
 }
 
 .invoice-name-col {
-  width: 190px;
+  width: 238px;
 }
 
 .invoice-category-col {
-  width: 66px;
+  width: 72px;
 }
 
 .invoice-qty-col {
-  width: 74px;
+  width: 62px;
 }
 
 .invoice-price-col {
-  width: 112px;
+  width: 88px;
 }
 
 .invoice-cost-col {
-  width: 166px;
+  width: 168px;
 }
 
 .invoice-amount-col {
-  width: 176px;
-}
-
-.invoice-driver-col {
   width: 156px;
 }
 
+.invoice-driver-col {
+  width: 132px;
+}
+
 .invoice-remark-col {
-  width: 160px;
+  width: 120px;
 }
 
 .invoice-actions-col {
@@ -1397,7 +1412,7 @@ body.is-modal-dragging .modal-head {
 }
 
 .invoice-fee-table tbody tr.company-self-pay-row:hover > td {
-  background: #ffe8e8;
+  background: #ffdada;
 }
 
 .invoice-fee-table tbody tr.other-expense-cost-row > td {
@@ -1405,7 +1420,7 @@ body.is-modal-dragging .modal-head {
 }
 
 .invoice-fee-table tbody tr.other-expense-cost-row:hover > td {
-  background: #fef3c7;
+  background: #fde68a;
 }
 
 .invoice-fee-table .invoice-category-col,
@@ -1417,6 +1432,7 @@ body.is-modal-dragging .modal-head {
 }
 
 .invoice-fee-table .invoice-category-cell,
+.invoice-fee-table .invoice-qty-cell,
 .invoice-fee-table .invoice-price-cell,
 .invoice-fee-table .invoice-driver-cell,
 .invoice-fee-table .invoice-cost-cell,
@@ -1426,18 +1442,143 @@ body.is-modal-dragging .modal-head {
   padding-left: 6px;
 }
 
+.invoice-fee-table .invoice-category-cell {
+  min-width: 0;
+  text-align: center;
+}
+
+.fee-inline-tools {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  max-width: 100%;
+  margin-top: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.fee-inline-tools.has-address {
+  grid-template-columns: minmax(0, 114px) minmax(0, 1fr);
+}
+
+.fee-inline-tools .fee-address-input {
+  width: 100%;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid #fb923c;
+  border-radius: 7px;
+  background: #fff7ed;
+  box-shadow: inset 0 0 0 1px rgb(251 146 60 / 12%);
+  color: #7c2d12;
+  font-size: 12px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+}
+
+.fee-inline-tools .fee-address-input::placeholder {
+  color: #c08457;
+}
+
+.fee-inline-tools .fee-address-input:focus {
+  border-color: #fb923c;
+  background: #fff;
+  box-shadow: 0 0 0 3px rgb(251 146 60 / 14%);
+}
+
+.fee-inline-tools .fee-row-attachments {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.fee-inline-tools .fee-row-file-chip {
+  flex: 0 1 100%;
+  width: 100%;
+  max-width: 100%;
+}
+
+.fee-inline-tools.has-address .fee-row-file-chip {
+  flex: 0 1 100%;
+  max-width: 100%;
+}
+
+.fee-inline-tools .fee-row-file-chip .file-chip-name {
+  flex: 1 1 auto;
+  max-width: none;
+}
+
+.fee-inline-tools.has-address .fee-row-file-chip .file-chip-name {
+  max-width: none;
+}
+
+.fee-inline-tools .fee-row-file-chip button {
+  width: 14px;
+  height: 14px;
+}
+
+.fee-inline-tools .fee-row-file-chip .ui-icon {
+  width: 12px;
+  height: 12px;
+}
+
 .invoice-driver-cell {
   color: #20324d;
   font-size: 12px;
   font-weight: 800;
 }
 
-.fee-driver-display {
-  display: block;
+.fee-assignee-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
   min-width: 0;
-  overflow: hidden;
+}
+
+.fee-assignee-editor input {
+  min-width: 0;
+  height: 28px;
+  padding: 0 5px;
+  color: #20324d;
   text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+.fee-assignee-editor input:disabled {
+  opacity: 1;
+  color: #20324d;
+}
+
+.fee-assignee-reset {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid #d7e2f4;
+  border-radius: 6px;
+  background: #fff;
+  color: #64748b;
+  cursor: pointer;
+}
+
+.fee-assignee-reset:hover {
+  border-color: #9cc5ff;
+  background: #eaf4ff;
+  color: #075fc4;
+}
+
+.fee-assignee-reset .ui-icon {
+  width: 13px;
+  height: 13px;
 }
 
 .invoice-price-cell input,
@@ -1447,7 +1588,7 @@ body.is-modal-dragging .modal-head {
 }
 
 .invoice-price-cell input,
-.invoice-fee-table td:nth-child(4) input {
+.invoice-qty-cell input {
   height: 28px;
   padding-left: 4px;
 }
@@ -1458,7 +1599,7 @@ body.is-modal-dragging .modal-head {
 
 .invoice-cost-money-input {
   display: grid;
-  grid-template-columns: minmax(76px, 1fr) 68px;
+  grid-template-columns: minmax(56px, 1fr) 70px;
   align-items: center;
   gap: 4px;
   min-width: 0;
@@ -1466,9 +1607,9 @@ body.is-modal-dragging .modal-head {
 
 .invoice-cost-money-input select {
   min-width: 0;
-  width: 68px;
+  width: 70px;
   padding-left: 6px;
-  padding-right: 24px;
+  padding-right: 16px;
   color: #075985;
   font-size: 11px;
   font-weight: 900;
@@ -1893,14 +2034,14 @@ body.is-modal-dragging .modal-head {
   align-items: center;
   gap: 2px;
   min-width: 0;
-  max-width: 220px;
-  min-height: 22px;
-  padding: 0 4px 0 6px;
+  max-width: 156px;
+  min-height: 20px;
+  padding: 0 3px 0 5px;
   border: 1px solid #dbeafe;
   border-radius: 6px;
   background: #eff6ff;
   color: #1f3b5f;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
 }
 
@@ -1908,8 +2049,8 @@ body.is-modal-dragging .modal-head {
 .vehicle-expense-receipt-name {
   display: block;
   min-width: 0;
-  max-width: 88px;
-  flex: 1 1 88px;
+  max-width: 72px;
+  flex: 1 1 72px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1925,8 +2066,8 @@ body.is-modal-dragging .modal-head {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   border: 0;
   border-radius: 4px;
   background: transparent;
@@ -1940,9 +2081,9 @@ body.is-modal-dragging .modal-head {
 
 .fee-money-input {
   display: grid;
-  grid-template-columns: minmax(82px, 1fr) 76px;
+  grid-template-columns: minmax(64px, 1fr) 88px;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
 }
 
@@ -1951,7 +2092,13 @@ body.is-modal-dragging .modal-head {
 }
 
 .fee-money-input select {
-  min-width: 72px;
+  min-width: 0;
+  width: 88px;
+  padding-left: 6px;
+  padding-right: 18px;
+  color: #20324d;
+  font-size: 12px;
+  font-weight: 900;
   text-align: left;
 }
 
@@ -2379,12 +2526,12 @@ select {
 }
 
 .account-table tbody tr:hover .account-actions {
-  background: #eaf4ff;
+  background: var(--row-hover-bg);
 }
 
 .account-table tbody tr.selected .account-actions,
 .account-table tbody tr.selected:hover .account-actions {
-  background: #e7f1ff;
+  background: var(--row-selected-bg);
 }
 
 .user-role {
@@ -2645,7 +2792,7 @@ select {
 }
 
 .vehicle-expense-table.is-fuel {
-  min-width: 1520px;
+  min-width: 1760px;
 }
 
 .vehicle-expense-table.is-fuel th,
@@ -2670,48 +2817,56 @@ select {
 
 .vehicle-expense-table.is-fuel th:nth-child(3),
 .vehicle-expense-table.is-fuel td:nth-child(3) {
-  width: 118px;
+  width: 104px;
 }
 
 .vehicle-expense-table.is-fuel th:nth-child(4),
 .vehicle-expense-table.is-fuel td:nth-child(4) {
-  width: 160px;
+  width: 82px;
 }
 
 .vehicle-expense-table.is-fuel th:nth-child(5),
-.vehicle-expense-table.is-fuel td:nth-child(5),
+.vehicle-expense-table.is-fuel td:nth-child(5) {
+  width: 108px;
+}
+
 .vehicle-expense-table.is-fuel th:nth-child(6),
 .vehicle-expense-table.is-fuel td:nth-child(6) {
-  width: 120px;
+  width: 126px;
 }
 
 .vehicle-expense-table.is-fuel th:nth-child(7),
 .vehicle-expense-table.is-fuel td:nth-child(7) {
-  width: 86px;
+  width: 150px;
 }
 
 .vehicle-expense-table.is-fuel th:nth-child(8),
 .vehicle-expense-table.is-fuel td:nth-child(8) {
-  width: 112px;
+  width: 120px;
 }
 
 .vehicle-expense-table.is-fuel th:nth-child(9),
 .vehicle-expense-table.is-fuel td:nth-child(9) {
-  width: 240px;
+  width: 116px;
 }
 
 .vehicle-expense-table.is-fuel th:nth-child(10),
 .vehicle-expense-table.is-fuel td:nth-child(10) {
-  width: 260px;
+  width: 240px;
 }
 
 .vehicle-expense-table.is-fuel th:nth-child(11),
 .vehicle-expense-table.is-fuel td:nth-child(11) {
+  width: 260px;
+}
+
+.vehicle-expense-table.is-fuel th:nth-child(12),
+.vehicle-expense-table.is-fuel td:nth-child(12) {
   width: 108px;
 }
 
-.vehicle-expense-table.is-fuel td:nth-child(9),
-.vehicle-expense-table.is-fuel td:nth-child(10) {
+.vehicle-expense-table.is-fuel td:nth-child(10),
+.vehicle-expense-table.is-fuel td:nth-child(11) {
   line-height: 1.35;
 }
 
@@ -3093,8 +3248,9 @@ select {
 
 .home-reminder-row:hover,
 .home-reminder-row:focus-visible {
-  border-color: #8bbcff;
-  box-shadow: 0 0 0 3px rgb(11 116 222 / 8%);
+  border-color: #6ea8ff;
+  background: var(--list-hover-bg);
+  box-shadow: 0 0 0 3px rgb(11 116 222 / 12%);
   outline: none;
 }
 
@@ -3301,7 +3457,8 @@ select {
 
 .home-customer-row:hover,
 .home-customer-row:focus {
-  border-color: var(--primary);
+  border-color: #6ea8ff;
+  background: var(--list-hover-bg);
   outline: none;
 }
 
@@ -3864,7 +4021,7 @@ select {
 
 .customer-order-export-menu button:hover,
 .order-export-menu button:hover {
-  background: #eef5ff;
+  background: var(--list-hover-bg);
   color: var(--blue);
 }
 
@@ -4378,8 +4535,8 @@ select {
 }
 
 .cost-center-supplier-card:hover {
-  border-color: #93c5fd;
-  background: #f8fbff;
+  border-color: #6ea8ff;
+  background: var(--list-hover-bg);
 }
 
 .cost-center-supplier-card.active {
@@ -4769,7 +4926,7 @@ select {
 }
 
 .customs-business-table tbody tr:hover .customs-business-actions-col {
-  background: #f8fbff;
+  background: var(--row-hover-bg);
 }
 
 .customs-business-table td.customs-business-actions-col {
@@ -5292,7 +5449,7 @@ select {
 
 .statement-export-template-row button:hover {
   border-color: #8ab7ff;
-  background: #eef6ff;
+  background: var(--list-hover-bg);
 }
 
 .finance-tool-card .table-card-head {
@@ -5530,7 +5687,7 @@ select {
 .boss-vehicle-profit-row:hover .sticky-profit-col,
 .boss-vehicle-profit-row:hover .sticky-profit-hkd-col,
 .boss-vehicle-profit-row:hover .sticky-margin-col {
-  background: #f8fbff;
+  background: var(--row-hover-bg);
 }
 
 .boss-vehicle-profit-actions {
@@ -6557,23 +6714,23 @@ select {
 
 .customer-order-table tbody tr:hover .sticky-managed-column,
 .order-table tbody tr:hover .sticky-managed-column {
-  background: #eaf4ff;
+  background: var(--row-hover-bg);
 }
 
 .order-table tbody tr:hover .sticky-order-right-column {
-  background: #eaf4ff;
+  background: var(--row-hover-bg);
 }
 
 .customer-order-table tbody tr.selected .sticky-managed-column,
 .customer-order-table tbody tr.selected:hover .sticky-managed-column,
 .order-table tbody tr.selected .sticky-managed-column,
 .order-table tbody tr.selected:hover .sticky-managed-column {
-  background: #e7f1ff;
+  background: var(--row-selected-bg);
 }
 
 .order-table tbody tr.selected .sticky-order-right-column,
 .order-table tbody tr.selected:hover .sticky-order-right-column {
-  background: #e7f1ff;
+  background: var(--row-selected-bg);
 }
 
 .customer-order-table .row-actions,
@@ -6757,7 +6914,7 @@ body.is-column-resizing .column-resize-handle::after {
 }
 
 .column-manager-menu button:hover {
-  background: #eef5ff;
+  background: var(--list-hover-bg);
   color: var(--blue);
 }
 
@@ -7050,20 +7207,23 @@ body.is-column-resizing {
   min-height: 0;
   padding: 12px;
   background: #f8fafc;
-  overflow: auto;
+  overflow: hidden;
 }
 
 .file-preview-stage {
   width: 100%;
+  height: 100%;
   min-height: 0;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: center;
-  overflow: visible;
+  overflow: hidden;
 }
 
 .file-preview-stage.is-image {
   width: 100%;
+  height: 100%;
+  min-height: 280px;
 }
 
 .file-preview-stage.is-frame {
@@ -7081,11 +7241,12 @@ body.is-column-resizing {
 .file-preview-image {
   display: block;
   max-width: 100%;
-  max-height: none;
+  max-height: 100%;
   width: auto;
   height: auto;
   margin: 0 auto;
   object-fit: contain;
+  object-position: center;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: #fff;
@@ -7316,16 +7477,20 @@ tfoot td {
 }
 
 tbody tr:hover td {
-  background: #eaf4ff;
+  background: var(--row-hover-bg);
+}
+
+tbody tr:hover {
+  background: var(--row-hover-bg);
 }
 
 tbody tr.selected:hover td,
 tbody tr.selected td {
-  background: #e7f1ff;
+  background: var(--row-selected-bg);
 }
 
 tr.selected {
-  background: #e7f1ff;
+  background: var(--row-selected-bg);
 }
 
 .table-link-btn {
@@ -9132,7 +9297,7 @@ tr.selected {
 }
 
 .freight-customer-template-row:hover td {
-  background: #f8fbff;
+  background: var(--row-hover-bg);
 }
 
 .freight-customer-template-table th:last-child,
@@ -9173,11 +9338,16 @@ tr.selected {
 }
 
 .fee-item-toolbar {
-  grid-template-columns: 110px minmax(220px, 1fr) minmax(150px, 180px) 100px 120px 130px auto auto;
+  grid-template-columns: 110px minmax(200px, 1fr) minmax(160px, 220px) 100px 120px 130px auto auto;
 }
 
 .fee-item-toolbar .wide {
-  min-width: 220px;
+  min-width: 200px;
+}
+
+.fee-item-toolbar .primary-btn,
+.fee-item-toolbar .ghost-btn {
+  white-space: nowrap;
 }
 
 .driver-wage-rules-panel {
@@ -10867,8 +11037,8 @@ tr.selected {
 
 .dispatch-status-pool button:not(.active):hover {
   border-color: var(--dispatch-status-active-border, var(--primary));
-  background: var(--dispatch-status-soft-bg, #f8fbff);
-  box-shadow: 0 3px 10px rgb(15 23 42 / 8%);
+  background: var(--dispatch-status-soft-bg, var(--list-hover-bg));
+  box-shadow: 0 3px 10px rgb(15 23 42 / 12%);
 }
 
 .dispatch-status-pool button.active {
@@ -10921,13 +11091,13 @@ tr.selected {
 }
 
 .dispatch-status-dispatched {
-  --dispatch-status-soft-bg: #f0fdff;
-  --dispatch-status-active-bg: #ddf7fb;
-  --dispatch-status-border: #c7eef6;
-  --dispatch-status-active-border: #0891b2;
-  --dispatch-status-dot-bg: rgb(8 145 178 / 13%);
-  --dispatch-status-text: #0e7490;
-  --dispatch-status-count-bg: #ecfeff;
+  --dispatch-status-soft-bg: #f7f3ff;
+  --dispatch-status-active-bg: #eee5ff;
+  --dispatch-status-border: #ddd0fe;
+  --dispatch-status-active-border: #7c3aed;
+  --dispatch-status-dot-bg: rgb(124 58 237 / 14%);
+  --dispatch-status-text: #6d28d9;
+  --dispatch-status-count-bg: #f5f0ff;
 }
 
 .dispatch-status-crossing {
@@ -10941,13 +11111,13 @@ tr.selected {
 }
 
 .dispatch-status-signed {
-  --dispatch-status-soft-bg: #f2fbf6;
-  --dispatch-status-active-bg: #e1f7eb;
-  --dispatch-status-border: #c6ead7;
-  --dispatch-status-active-border: #059669;
-  --dispatch-status-dot-bg: rgb(5 150 105 / 13%);
-  --dispatch-status-text: #047857;
-  --dispatch-status-count-bg: #ecfdf5;
+  --dispatch-status-soft-bg: #effdf5;
+  --dispatch-status-active-bg: #d8f8e6;
+  --dispatch-status-border: #a7f3c6;
+  --dispatch-status-active-border: #16a34a;
+  --dispatch-status-dot-bg: rgb(22 163 74 / 14%);
+  --dispatch-status-text: #15803d;
+  --dispatch-status-count-bg: #dcfce7;
 }
 
 .dispatch-status-exception {
@@ -11054,7 +11224,7 @@ tr.selected {
 
 .dispatch-order-card:hover {
   border-color: var(--primary);
-  background: #f0f7ff;
+  background: var(--list-hover-bg);
 }
 
 .dispatch-order-card span,
@@ -11125,7 +11295,7 @@ tr.selected {
 
 .dispatch-table tbody tr:hover .sticky-data-table-column,
 .order-list-detail-table tbody tr:hover .sticky-data-table-column {
-  background: #eaf4ff;
+  background: var(--row-hover-bg);
 }
 
 .dispatch-table td {
@@ -11156,6 +11326,17 @@ tr.selected {
   height: 30px;
 }
 
+.dispatch-table .dispatch-driver-cell input,
+.dispatch-table .dispatch-driver-cell select {
+  min-width: 0;
+}
+
+.dispatch-table .dispatch-driver-cell {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .dispatch-table .dispatch-plate-input {
   min-width: 0;
   height: 32px;
@@ -11164,7 +11345,23 @@ tr.selected {
 }
 
 .dispatch-driver-cell {
-  min-width: 124px;
+  min-width: 160px;
+}
+
+.dispatch-table .dispatch-driver-manual-field {
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
+
+.dispatch-table .dispatch-driver-manual-field .dispatch-driver-search-input {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 0 9px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dispatch-table .dispatch-driver-select {
@@ -11174,7 +11371,7 @@ tr.selected {
   width: 100%;
   min-width: 0;
   height: 30px;
-  padding: 0 2px 0 8px;
+  padding: 0 2px 0 7px;
   border: 1px solid var(--border);
   border-radius: 7px;
   background: #fff;
@@ -11209,7 +11406,7 @@ tr.selected {
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  width: 24px;
+  width: 22px;
   height: 24px;
   padding: 0;
   border: 0;
@@ -11229,18 +11426,32 @@ tr.selected {
 }
 
 .dispatch-table .dispatch-status-select {
-  border-color: var(--border);
-  background: #fff;
-  color: var(--text);
   min-width: 92px;
-  font-weight: 800;
 }
 
 .dispatch-status-select {
-  border-color: var(--border);
-  background: #fff;
-  color: var(--text);
-  font-weight: 800;
+  border-color: var(--dispatch-status-border, var(--border));
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 82%), rgb(255 255 255 / 42%)),
+    var(--dispatch-status-soft-bg, #fff);
+  color: var(--dispatch-status-text, var(--text));
+  font-weight: 900;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 60%);
+}
+
+.dispatch-status-select:hover:not(:disabled),
+.dispatch-status-select:focus {
+  border-color: var(--dispatch-status-active-border, var(--primary));
+  background: var(--dispatch-status-active-bg, #eaf4ff);
+  color: var(--dispatch-status-text, var(--primary));
+  outline: none;
+}
+
+.dispatch-status-select:disabled {
+  border-color: var(--dispatch-status-border, #dbe7f5);
+  background: var(--dispatch-status-soft-bg, #f8fafc);
+  color: var(--dispatch-status-text, #64748b);
+  opacity: 0.82;
 }
 
 .dispatch-sequence-cell {

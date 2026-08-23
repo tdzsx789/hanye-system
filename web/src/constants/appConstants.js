@@ -99,7 +99,7 @@ export const MODULES = [
   { id: "bossCompanyProfit", label: "公司利润", group: "老板中心" },
   { id: "bossVehicleProfit", label: "车辆利润", group: "老板中心" },
   { id: "bossSupplierProfit", label: "供应商利润", group: "老板中心" },
-  { id: "bossCompanyExpenses", label: "公司级收支", group: "老板中心" },
+  { id: "bossCompanyExpenses", label: "办公室支出", group: "老板中心" },
   { id: "freight", label: "运费模板", group: "系统配置" },
   { id: "templates", label: "模板中心", group: "系统配置" },
   { id: "master", label: "基础数据", group: "系统配置" },

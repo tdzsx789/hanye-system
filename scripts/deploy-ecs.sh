@@ -70,7 +70,9 @@ else
   printf '\nSEED_DEMO_DATA=0\n' >> .env
 fi
 
-docker compose up -d --build --no-deps server server-standby web
+export COMPOSE_PARALLEL_LIMIT=1
+docker compose build server web
+docker compose up -d --no-build --no-deps server server-standby web
 
 docker compose ps server server-standby web
 REMOTE

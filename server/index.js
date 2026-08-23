@@ -417,12 +417,18 @@ async function ensureOrderFeeCostCurrencyColumn() {
   if (orderFeeCostCurrencyColumnReady) return;
   await db.exec(`
     ALTER TABLE order_fees
+    ADD COLUMN IF NOT EXISTS client_key TEXT NOT NULL DEFAULT '';
+    ALTER TABLE order_fees
     ADD COLUMN IF NOT EXISTS cost_currency TEXT NOT NULL DEFAULT '港币';
+    ALTER TABLE order_fees
+    ADD COLUMN IF NOT EXISTS advance_address TEXT NOT NULL DEFAULT '';
     UPDATE order_fees
     SET cost_currency = COALESCE(NULLIF(cost_currency, ''), currency, '港币')
     WHERE cost_currency IS NULL OR cost_currency = '';
   `);
+  customerColumnAvailability.set("order_fees.client_key", true);
   customerColumnAvailability.set("order_fees.cost_currency", true);
+  customerColumnAvailability.set("order_fees.advance_address", true);
   orderFeeCostCurrencyColumnReady = true;
 }
 
@@ -1080,10 +1086,129 @@ function shortLocationValue(value) {
   return parts.length > 2 ? parts.slice(0, 2).join(" / ") : textValue(value);
 }
 
+function firstExportLocationLine(value) {
+  const text = textValue(value).replace(/\r/g, "\n").trim();
+  if (!text) return "";
+  const parts = text
+    .split(/[\n；;]+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts[0] || text;
+}
+
+function exportLocationCityDistrict(value) {
+  const text = firstExportLocationLine(value);
+  if (!text) return "";
+  if (text.includes("/")) {
+    const parts = text
+      .split("/")
+      .map((part) => part.trim())
+      .filter(Boolean);
+    if (parts.length >= 3 && /省|自治区|自治州|特别行政区|特別行政區/.test(parts[0])) {
+      return parts.slice(1, 3).join("");
+    }
+    if (parts.length >= 2) return parts.slice(0, 2).join("");
+    return parts[0] || "";
+  }
+  const compact = text.replace(/\s+/g, "");
+  const cityMatch = compact.match(/^(.+?(?:市|盟|州|地区|特別行政區|特别行政区))/);
+  if (cityMatch) {
+    const city = cityMatch[1] || "";
+    const rest = compact.slice(city.length);
+    const districtMatch = rest.match(/^(.+?(?:区|區|县|縣|镇|鎮|乡|鄉|街道))/);
+    return `${city}${districtMatch?.[1] || ""}`;
+  }
+  return shortLocationValue(text).replace(/\s*\/\s*/g, "");
+}
+
+function exportFeeColumnComparableName(column = {}) {
+  return exportFeeColumnName(column)
+    .replace(/\s*(?:RMB|HKD|人民币|港币)$/i, "")
+    .trim();
+}
+
+function exportLocationFeeType(column = {}) {
+  const feeName = exportFeeColumnComparableName(column);
+  if (feeName.includes("装货费")) return "loading";
+  if (feeName.includes("卸货费")) return "unloading";
+  return "";
+}
+
+function formatFeeMathNumber(value) {
+  const rawText = textValue(value).trim();
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return rawText;
+  if (Number.isInteger(amount)) return String(amount);
+  return amount.toFixed(2).replace(/\.?0+$/, "");
+}
+
+function exportFeeCalculationText(fee = {}) {
+  const unitPriceValue = fee.unitPrice ?? fee.unit_price ?? fee.price;
+  const amountValue = fee.amount ?? 0;
+  const amountNumber = Number(amountValue || 0);
+  const unitPriceText = textValue(unitPriceValue).trim();
+  const unitPriceNumber = Number(unitPriceValue);
+  const hasUsefulUnitPrice = unitPriceText
+    && Number.isFinite(unitPriceNumber)
+    && (unitPriceNumber !== 0 || amountNumber === 0);
+  const quantityValue = fee.quantity ?? fee.qty ?? (hasUsefulUnitPrice ? 1 : "");
+  const quantityText = textValue(quantityValue).trim();
+  if (quantityText && hasUsefulUnitPrice) {
+    return `${formatFeeMathNumber(quantityValue)}*${formatFeeMathNumber(unitPriceValue)}=${formatFeeMathNumber(amountValue)}`;
+  }
+  return formatFeeMathNumber(amountValue);
+}
+
+function locationFeeDetailForColumn(order, column) {
+  const locationType = exportLocationFeeType(column);
+  if (!locationType) return "";
+  const locationText = exportLocationCityDistrict(order?.[locationType]);
+  const rows = feeRowsForColumn(order, column)
+    .filter((fee) => Number(fee.amount || 0) !== 0);
+  return rows
+    .map((fee) => [locationText, exportFeeCalculationText(fee)].filter(Boolean).join(" "))
+    .filter(Boolean)
+    .join("；");
+}
+
+function exportFeeAdvanceAddress(fee = {}) {
+  return textValue(fee.advanceAddress || fee.advance_address).trim();
+}
+
+function exportFeeAdvanceAddressDisplay(fee = {}) {
+  const text = exportFeeAdvanceAddress(fee);
+  if (!text) return "";
+  return text
+    .replace(/\r/g, "\n")
+    .split(/\n+/)
+    .map((line) => shortLocationValue(line.trim()))
+    .filter(Boolean)
+    .join("；");
+}
+
+function isAdvanceExportFee(fee = {}) {
+  return textValue(fee.category).trim() === "代垫";
+}
+
 function formatExportAmount(value, emptyZero = true) {
   const amount = Number(value || 0);
   if (!amount && emptyZero) return "";
   return amount ? amount.toLocaleString("zh-Hans-CN") : "0";
+}
+
+function duplicateFeeDisplayForColumn(rows = []) {
+  const detailRows = rows.filter((fee) => Number(fee.amount || 0) !== 0);
+  if (detailRows.length <= 1) return "";
+  const parts = detailRows
+    .map((fee) => {
+      const amountText = formatExportAmount(Number(fee.amount || 0), false);
+      const address = isAdvanceExportFee(fee) ? exportFeeAdvanceAddressDisplay(fee) : "";
+      return `${address}${amountText}`;
+    })
+    .filter(Boolean);
+  if (parts.length <= 1) return "";
+  const total = detailRows.reduce((sum, fee) => sum + Number(fee.amount || 0), 0);
+  return `${parts.join("+")}=${formatExportAmount(total, false)}`;
 }
 
 function exportFeeItemCurrencyForColumn(column = {}) {
@@ -1111,8 +1236,24 @@ function feeAmountForColumn(order, column) {
     .reduce((sum, fee) => sum + Number(fee.amount || 0), 0);
 }
 
-function feeDisplayForColumn(order, column) {
+function feeDisplayForColumn(order, column, options = {}) {
   const rows = feeRowsForColumn(order, column);
+  const duplicateDetail = duplicateFeeDisplayForColumn(rows);
+  if (duplicateDetail) return duplicateDetail;
+  const locationDetail = locationFeeDetailForColumn(order, column);
+  if (locationDetail) return locationDetail;
+  if (options.includeAdvanceAddress) {
+    const detailRows = rows
+      .filter((fee) => Number(fee.amount || 0) !== 0 || exportFeeAdvanceAddress(fee))
+      .map((fee) => {
+        const amountText = formatExportAmount(Number(fee.amount || 0));
+        if (!amountText) return "";
+        const address = isAdvanceExportFee(fee) ? exportFeeAdvanceAddressDisplay(fee) : "";
+        return address ? `${address}：${amountText}` : amountText;
+      })
+      .filter(Boolean);
+    if (detailRows.length) return detailRows.join("；");
+  }
   const amount = rows.reduce((sum, fee) => sum + Number(fee.amount || 0), 0);
   const amountText = formatExportAmount(amount);
   if (amountText) return amountText;
@@ -1141,16 +1282,17 @@ function feeHasRecordedValue(fee) {
 function feeRowsForColumn(order, column) {
   const fees = Array.isArray(order?.fees) ? order.fees : [];
   const feeItemId = textValue(column?.feeItemId).trim();
-  const feeName = textValue(column?.feeName || column?.label).trim();
+  const rawFeeName = textValue(column?.feeName || column?.label).trim();
+  const feeName = exportFeeColumnComparableName(column);
   const feeCurrency = exportFeeItemCurrencyForColumn(column);
   const normalizedColumnCurrency = normalizeFeeCurrency(feeCurrency);
-  if (!feeItemId && !feeName) return [];
+  if (!feeItemId && !rawFeeName && !feeName) return [];
   return fees.filter((fee) => {
     const name = textValue(fee.name).trim();
     const itemId = textValue(fee.feeItemId || fee.fee_item_id).trim();
     const currencyMatches = !feeCurrency || normalizeFeeCurrency(fee.currency) === normalizedColumnCurrency;
     if (feeItemId && itemId) return itemId === feeItemId && currencyMatches;
-    return name === feeName && currencyMatches;
+    return (name === rawFeeName || name === feeName) && currencyMatches;
   });
 }
 
@@ -1179,13 +1321,13 @@ function exportOrderColumnAmount(order, column) {
   return Number(order?.[key] || 0);
 }
 
-function exportOrderColumnValue(order, column, rowIndex = 0) {
+function exportOrderColumnValue(order, column, rowIndex = 0, options = {}) {
   const key = textValue(column?.key);
   if (key === "__sequence") return rowIndex + 1;
   if (key === "__hkdTotal") return formatExportAmount(order?.receivableHKD);
   if (key === "__rmbTotal") return formatExportAmount(order?.receivableRMB);
   if (key === "loading" || key === "unloading") return shortLocationValue(order?.[key]);
-  if (key.startsWith("fee-item-")) return feeDisplayForColumn(order, column);
+  if (key.startsWith("fee-item-")) return feeDisplayForColumn(order, column, options);
   if (key === "receivableHKD" || key === "receivableRMB") return formatExportAmount(order?.[key]);
   const value = order?.[key];
   if (value !== undefined && value !== null && value !== "" && Number(value) === 0) return "";
@@ -1201,26 +1343,92 @@ function normalizeExportExchange(input = null) {
   return { mode, rate };
 }
 
-function exportTotalAmountForColumn(orders, column, exchange = null) {
+function exportTotalAmountForColumn(orders, column, exchange = null, options = {}) {
   const key = textValue(column?.key);
   const hkdTotal = orders.reduce((sum, order) => sum + Number(order?.receivableHKD || 0), 0);
   const rmbTotal = orders.reduce((sum, order) => sum + Number(order?.receivableRMB || 0), 0);
-  if (exchange?.mode === "hkd-to-rmb" && (key === "__rmbTotal" || key === "receivableRMB")) {
+  if (!options.rawCurrencyTotals && exchange?.mode === "hkd-to-rmb" && (key === "__rmbTotal" || key === "receivableRMB")) {
     return rmbTotal + (hkdTotal * exchange.rate);
   }
-  if (exchange?.mode === "rmb-to-hkd" && (key === "__hkdTotal" || key === "receivableHKD")) {
+  if (!options.rawCurrencyTotals && exchange?.mode === "rmb-to-hkd" && (key === "__hkdTotal" || key === "receivableHKD")) {
     return hkdTotal + (rmbTotal / exchange.rate);
   }
   return orders.reduce((sum, order) => sum + exportOrderColumnAmount(order, column), 0);
 }
 
-function exportTotalRow(orders, columns, exchangeInput = null) {
+function exportTotalRow(orders, columns, exchangeInput = null, options = {}) {
   const exchange = normalizeExportExchange(exchangeInput);
   return columns.map((column, index) => {
     if (index === 0) return "合计";
     if (!isExportAmountColumn(column)) return "";
-    return formatExportAmount(exportTotalAmountForColumn(orders, column, exchange), false);
+    return formatExportAmount(exportTotalAmountForColumn(orders, column, exchange, options), false);
   });
+}
+
+function exportSettlementTotalSummary(orders = [], exchangeInput = null) {
+  const exchange = normalizeExportExchange(exchangeInput);
+  if (!exchange) return null;
+  const hkd = orders.reduce((sum, order) => sum + Number(order?.receivableHKD || 0), 0);
+  const rmb = orders.reduce((sum, order) => sum + Number(order?.receivableRMB || 0), 0);
+  if (exchange.mode === "rmb-to-hkd") {
+    return {
+      currency: "港币",
+      label: "总计港币合计：",
+      amount: hkd + (rmb / exchange.rate),
+      hkd,
+      rmb,
+      rate: exchange.rate,
+      targetKeys: ["__hkdTotal", "receivableHKD"]
+    };
+  }
+  return {
+    currency: "人民币",
+    label: "总计人民币合计：",
+    amount: rmb + (hkd * exchange.rate),
+    hkd,
+    rmb,
+    rate: exchange.rate,
+    targetKeys: ["__rmbTotal", "receivableRMB"]
+  };
+}
+
+function exportPreferredColumnIndex(columns = [], keys = []) {
+  for (const key of keys) {
+    const index = columns.findIndex((column) => textValue(column?.key) === key);
+    if (index >= 0) return index;
+  }
+  return -1;
+}
+
+function exportSettlementTotalTargetIndex(columns = [], summary = null) {
+  const keys = Array.isArray(summary?.targetKeys) ? summary.targetKeys : [];
+  const index = exportPreferredColumnIndex(columns, keys);
+  return index >= 0 ? index : Math.max(0, columns.length - 1);
+}
+
+function exportSettlementTotalRow(orders, columns, exchangeInput = null) {
+  const summary = exportSettlementTotalSummary(orders, exchangeInput);
+  if (!summary) return null;
+  const targetIndex = exportSettlementTotalTargetIndex(columns, summary);
+  const labelIndex = Math.max(0, targetIndex - 1);
+  const values = columns.map(() => "");
+  values[labelIndex] = summary.label;
+  values[targetIndex] = formatExportAmount(summary.amount, false);
+  return {
+    kind: "settlementTotal",
+    values,
+    summary,
+    labelIndex,
+    targetIndex
+  };
+}
+
+function isCustomerStatementExportTitle(title = "") {
+  return textValue(title).trim().startsWith("客户对账单");
+}
+
+function shouldIncludeSettlementTotal(title = "", exchangeInput = null) {
+  return isCustomerStatementExportTitle(title) && Boolean(normalizeExportExchange(exchangeInput));
 }
 
 function exportOrderNoForSort(order = {}) {
@@ -1231,10 +1439,30 @@ function sortOrdersForExport(orders = []) {
   return [...orders];
 }
 
-function exportTableRows(orders, columns, exchange = null) {
+function exportTableRowData(orders, columns, exchange = null, options = {}) {
   const sortedOrders = sortOrdersForExport(orders);
-  const rows = sortedOrders.map((order, rowIndex) => columns.map((column) => exportOrderColumnValue(order, column, rowIndex)));
-  return [...rows, exportTotalRow(sortedOrders, columns, exchange)];
+  const includeSettlementTotal = Boolean(options.includeSettlementTotal);
+  const valueOptions = {
+    includeAdvanceAddress: Boolean(options.includeAdvanceAddress)
+  };
+  const rows = sortedOrders.map((order, rowIndex) => ({
+    kind: "order",
+    order,
+    values: columns.map((column) => exportOrderColumnValue(order, column, rowIndex, valueOptions))
+  }));
+  rows.push({
+    kind: "total",
+    values: exportTotalRow(sortedOrders, columns, exchange, { rawCurrencyTotals: includeSettlementTotal })
+  });
+  if (includeSettlementTotal) {
+    const settlementRow = exportSettlementTotalRow(sortedOrders, columns, exchange);
+    if (settlementRow) rows.push(settlementRow);
+  }
+  return { sortedOrders, rows };
+}
+
+function exportTableRows(orders, columns, exchange = null, options = {}) {
+  return exportTableRowData(orders, columns, exchange, options).rows.map((row) => row.values);
 }
 
 function exportFilenamePart(value, fallback = "未填写") {
@@ -1481,7 +1709,10 @@ function exportTemplateTextRows(templatePayload = null, title = "订单导出") 
 function renderOrdersCsv(orders, title = "订单导出", templatePayload = null, exchange = null) {
   const columns = exportColumnsForOrders(templatePayload, orders);
   const headers = columns.map(exportColumnHeaderText);
-  const rows = exportTableRows(orders, columns, exchange);
+  const rows = exportTableRows(orders, columns, exchange, {
+    includeSettlementTotal: shouldIncludeSettlementTotal(title, exchange),
+    includeAdvanceAddress: isCustomerStatementExportTitle(title)
+  });
   const { headerRows, footerRows } = exportTemplateTextRows(templatePayload, title);
   const csvBodyRows = [
     ...headerRows.map((text) => [text]),
@@ -1541,6 +1772,7 @@ function exportColumnMaxWidth(column = {}) {
   if (["customer", "supplier"].includes(key)) return 138;
   if (["loading", "unloading"].includes(key)) return 132;
   if (key === "__hkdTotal" || key === "__rmbTotal" || key === "receivableHKD" || key === "receivableRMB") return 76;
+  if (exportLocationFeeType(column)) return 150;
   if (isExportFeeItemColumn(column)) return 112;
   return 118;
 }
@@ -1552,6 +1784,7 @@ function exportColumnFluidMaxWidth(column = {}) {
   if (key === "date") return 76;
   if (key === "customer" || key === "supplier") return 240;
   if (key === "loading" || key === "unloading") return 260;
+  if (exportLocationFeeType(column)) return 240;
   if (isExportFeeItemColumn(column)) return 180;
   return 180;
 }
@@ -1608,6 +1841,31 @@ function excelSingleLineValue(value) {
   return value.replace(/\s*[\r\n]+\s*/g, " ").replace(/[ \t]{2,}/g, " ").trim();
 }
 
+function excelColumnLetter(columnNumber = 1) {
+  let n = Math.max(1, Number(columnNumber || 1));
+  let text = "";
+  while (n > 0) {
+    const remainder = (n - 1) % 26;
+    text = String.fromCharCode(65 + remainder) + text;
+    n = Math.floor((n - 1) / 26);
+  }
+  return text;
+}
+
+function exportSettlementTotalExcelFormula(summary, columns = [], totalRowNumber = 1) {
+  if (!summary?.rate) return "";
+  const hkdIndex = exportPreferredColumnIndex(columns, ["__hkdTotal", "receivableHKD"]);
+  const rmbIndex = exportPreferredColumnIndex(columns, ["__rmbTotal", "receivableRMB"]);
+  if (hkdIndex < 0 || rmbIndex < 0) return "";
+  const hkdCell = `${excelColumnLetter(hkdIndex + 1)}${totalRowNumber}`;
+  const rmbCell = `${excelColumnLetter(rmbIndex + 1)}${totalRowNumber}`;
+  const rate = Number(summary.rate || 0);
+  if (!Number.isFinite(rate) || rate <= 0) return "";
+  return summary.currency === "港币"
+    ? `${hkdCell}+${rmbCell}/${rate}`
+    : `${rmbCell}+${hkdCell}*${rate}`;
+}
+
 function applyExcelTemplateLogo(workbook, worksheet, template, headerBlockRows, columnWidths = []) {
   const image = template?.logo ? dataUrlImage(template.logo) : null;
   if (!image) return;
@@ -1643,13 +1901,81 @@ function statementReceiptImageExtension(file = {}) {
   return "";
 }
 
+let receiptSharpPromise = null;
+
+function loadReceiptSharp() {
+  if (!receiptSharpPromise) {
+    receiptSharpPromise = import("sharp")
+      .then((module) => module.default || module)
+      .catch(() => null);
+  }
+  return receiptSharpPromise;
+}
+
+async function trimReceiptImageBuffer(buffer, extension = "") {
+  const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || []);
+  const normalizedExtension = String(extension || "").toLowerCase();
+  if (!bytes.length || !["png", "jpeg"].includes(normalizedExtension)) return bytes;
+  const sharp = await loadReceiptSharp();
+  if (!sharp) return bytes;
+  try {
+    const image = sharp(bytes, { failOn: "none" }).rotate();
+    const { data } = await image.trim({ threshold: 12 }).toBuffer({ resolveWithObject: true });
+    return data?.length ? data : bytes;
+  } catch {
+    return bytes;
+  }
+}
+
 function statementReceiptImageLabel(file = {}) {
+  const fee = file.fee && typeof file.fee === "object" ? file.fee : null;
+  if (fee?.name) {
+    const name = userTextValue(fee.name);
+    const address = normalizeOrderFeeCategory(fee.category) === "代垫"
+      ? statementReceiptAddressSummary(fee.advanceAddress || fee.advance_address)
+      : "";
+    return address ? `${name}：${address}` : name;
+  }
   const category = String(file.category || "").trim();
   if (category.startsWith("收费项目-")) {
     const name = category.replace(/^收费项目-/, "").trim();
     if (name) return name;
   }
   return "订单附件";
+}
+
+function statementReceiptCategoryFeeName(category = "") {
+  const text = String(category || "").trim();
+  if (!text.startsWith("收费项目-")) return "";
+  return text.replace(/^收费项目-/, "").trim();
+}
+
+function statementReceiptCategoryClientKey(category = "") {
+  const text = String(category || "").trim();
+  if (!text.startsWith("收费项目行-")) return "";
+  return text.replace(/^收费项目行-/, "").trim();
+}
+
+function truncateDisplayText(value = "", maxWidth = 28) {
+  const text = userTextValue(value);
+  if (!text || stringDisplayWidth(text) <= maxWidth) return text;
+  let output = "";
+  let width = 0;
+  const limit = Math.max(1, Number(maxWidth || 1) - 1);
+  for (const char of Array.from(text)) {
+    const charWidth = stringDisplayWidth(char);
+    if (width + charWidth > limit) break;
+    output += char;
+    width += charWidth;
+  }
+  return `${output}…`;
+}
+
+function statementReceiptAddressSummary(value = "") {
+  const text = userTextValue(value)
+    .replace(/^(发生)?地址[:：\s]*/u, "")
+    .trim();
+  return truncateDisplayText(text, 20);
 }
 
 function statementImageDimensions(buffer, extension = "") {
@@ -1689,14 +2015,27 @@ function statementImageDimensions(buffer, extension = "") {
   return null;
 }
 
-function fitImageBox(imageWidth, imageHeight, maxWidth = 160, maxHeight = 140) {
+function fitImageBox(imageWidth, imageHeight, maxWidth = 160, maxHeight = 140, options = {}) {
   const width = Math.max(1, Number(imageWidth || 1));
   const height = Math.max(1, Number(imageHeight || 1));
-  const ratio = Math.min(maxWidth / width, maxHeight / height, 1);
+  const maxScale = options.allowUpscale ? Math.max(1, Number(options.maxScale || 1.8)) : 1;
+  const ratio = Math.min(maxWidth / width, maxHeight / height, maxScale);
   return {
     width: Math.round(width * ratio),
     height: Math.round(height * ratio)
   };
+}
+
+function excelColumnWidthToPixels(width = 10) {
+  return Math.max(1, Math.floor(Number(width || 10) * 7 + 5));
+}
+
+function imagePixelHeightToExcelRowHeight(pixelHeight = 1, padding = 16) {
+  return Math.ceil(Math.max(1, Number(pixelHeight || 1)) * 0.75 + padding);
+}
+
+function excelRowHeightToPixels(rowHeight = 22) {
+  return Math.max(1, Number(rowHeight || 22) / 0.75);
 }
 
 function statementReceiptDateLabel(value = "") {
@@ -1718,6 +2057,29 @@ async function loadOrderReceiptImageRows(orders = []) {
       customer: String(order.customer || "").trim()
     }
   ]));
+  const feeRows = await db.prepare(`
+    SELECT order_no, client_key, category, name, advance_address
+    FROM order_fees
+    WHERE order_no IN (${placeholders})
+    ORDER BY order_no ASC, id ASC
+  `).all(...orderNos);
+  const feesByClientKey = new Map();
+  const feesByLegacyName = new Map();
+  feeRows.forEach((row) => {
+    const orderNo = String(row.order_no || "").trim();
+    const name = userTextValue(row.name);
+    const clientKey = String(row.client_key || "").trim();
+    const fee = {
+      clientKey,
+      category: normalizeOrderFeeCategory(row.category),
+      name,
+      advanceAddress: userTextValue(row.advance_address)
+    };
+    if (orderNo && clientKey) feesByClientKey.set(`${orderNo}::${clientKey}`, fee);
+    if (orderNo && name && !feesByLegacyName.has(`${orderNo}::${name}`)) {
+      feesByLegacyName.set(`${orderNo}::${name}`, fee);
+    }
+  });
   const rows = await db.prepare(`
     SELECT *
     FROM files
@@ -1727,7 +2089,20 @@ async function loadOrderReceiptImageRows(orders = []) {
     ORDER BY entity_id ASC, created_at ASC, id ASC
   `).all(...orderNos);
   return rows
-    .map((row) => ({ ...row, extension: statementReceiptImageExtension(row), order: orderMeta.get(String(row.entity_id || "").trim()) || null }))
+    .map((row) => {
+      const orderNo = String(row.entity_id || "").trim();
+      const clientKey = statementReceiptCategoryClientKey(row.category);
+      const legacyFeeName = statementReceiptCategoryFeeName(row.category);
+      const fee = (clientKey ? feesByClientKey.get(`${orderNo}::${clientKey}`) : null)
+        || (legacyFeeName ? feesByLegacyName.get(`${orderNo}::${legacyFeeName}`) : null)
+        || null;
+      return {
+        ...row,
+        extension: statementReceiptImageExtension(row),
+        order: orderMeta.get(orderNo) || null,
+        fee
+      };
+    })
     .filter((row) => row.extension && row.order);
 }
 
@@ -1743,7 +2118,7 @@ async function fetchReceiptImageBuffer(file = {}) {
     const arrayBuffer = await response.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
     if (!buffer.length || buffer.length > MAX_UPLOAD_BYTES) return null;
-    return buffer;
+    return trimReceiptImageBuffer(buffer, file.extension);
   } catch {
     return null;
   } finally {
@@ -1754,6 +2129,11 @@ async function fetchReceiptImageBuffer(file = {}) {
 async function addStatementReceiptSheet(workbook, orders = []) {
   const receiptRows = await loadOrderReceiptImageRows(orders);
   const worksheet = workbook.addWorksheet("票据");
+  const receiptColumnWidth = 46;
+  const receiptColumnPixelWidth = excelColumnWidthToPixels(receiptColumnWidth);
+  const receiptImageCellPadding = 1;
+  const receiptColumnImageWidth = Math.max(320, receiptColumnPixelWidth - receiptImageCellPadding * 2);
+  const receiptImageMaxHeight = 560;
   worksheet.properties.defaultRowHeight = 22;
   worksheet.pageSetup = {
     paperSize: 9,
@@ -1764,9 +2144,9 @@ async function addStatementReceiptSheet(workbook, orders = []) {
     margins: { left: 0.35, right: 0.35, top: 0.35, bottom: 0.35, header: 0.1, footer: 0.1 }
   };
   worksheet.columns = [
-    { width: 26 },
-    { width: 26 },
-    { width: 26 }
+    { width: receiptColumnWidth },
+    { width: receiptColumnWidth },
+    { width: receiptColumnWidth }
   ];
   const border = { style: "thin", color: { argb: excelArgb("#d9e3f2") } };
   let cursorRow = 1;
@@ -1791,7 +2171,7 @@ async function addStatementReceiptSheet(workbook, orders = []) {
   for (const [date, files] of sortedGroups) {
     if (files.length > worksheet.columnCount) {
       for (let index = worksheet.columnCount + 1; index <= files.length; index += 1) {
-        worksheet.getColumn(index).width = 26;
+        worksheet.getColumn(index).width = receiptColumnWidth;
       }
     }
     const lastColumn = Math.max(1, files.length);
@@ -1808,21 +2188,27 @@ async function addStatementReceiptSheet(workbook, orders = []) {
     const titleRowNumber = cursorRow;
     const imageRowNumber = cursorRow + 1;
     const rowHeights = [];
+    const titleHeights = [];
     files.forEach((file, itemIndex) => {
       const startColumn = 1 + itemIndex;
       const titleCell = worksheet.getCell(titleRowNumber, startColumn);
-      titleCell.value = statementReceiptImageLabel(file);
+      const label = statementReceiptImageLabel(file);
+      titleCell.value = label;
       titleCell.font = { name: "Microsoft YaHei", size: 10, bold: true, color: { argb: excelArgb("#334155") } };
       titleCell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
       titleCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: excelArgb("#f8fafc") } };
       titleCell.border = { top: border, left: border, bottom: border, right: border };
+      titleHeights.push(Math.min(48, excelRowHeightForText(label, 10, receiptColumnWidth, 26)));
     });
     for (let itemIndex = 0; itemIndex < files.length; itemIndex += 1) {
       const file = files[itemIndex];
       const startColumn = 1 + itemIndex;
+      const imageCell = worksheet.getCell(imageRowNumber, startColumn);
+      imageCell.alignment = { vertical: "middle", horizontal: "center" };
+      imageCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: excelArgb("#ffffff") } };
+      imageCell.border = { top: border, left: border, bottom: border, right: border };
       const imageBuffer = await fetchReceiptImageBuffer(file);
       if (!imageBuffer) {
-        const imageCell = worksheet.getCell(imageRowNumber, startColumn);
         imageCell.value = "图片读取失败";
         imageCell.font = { name: "Microsoft YaHei", size: 10, color: { argb: excelArgb("#dc2626") } };
         imageCell.alignment = { vertical: "middle", horizontal: "center" };
@@ -1832,20 +2218,34 @@ async function addStatementReceiptSheet(workbook, orders = []) {
         continue;
       }
       const dims = statementImageDimensions(imageBuffer, file.extension) || { width: 4, height: 3 };
-      const box = fitImageBox(dims.width, dims.height, 180, 160);
+      const box = fitImageBox(dims.width, dims.height, receiptColumnImageWidth, receiptImageMaxHeight, { allowUpscale: true, maxScale: 8 });
       const imageId = workbook.addImage({
         buffer: imageBuffer,
         extension: file.extension
       });
+      rowHeights.push(imagePixelHeightToExcelRowHeight(box.height, 2));
+      file._receiptImage = { imageId, box, startColumn };
+    }
+    worksheet.getRow(titleRowNumber).height = Math.max(26, ...titleHeights);
+    const imageRowHeight = Math.max(120, ...rowHeights);
+    worksheet.getRow(imageRowNumber).height = imageRowHeight;
+    const imageRowPixelHeight = excelRowHeightToPixels(imageRowHeight);
+    for (const file of files) {
+      if (!file._receiptImage) continue;
+      const { imageId, box, startColumn } = file._receiptImage;
+      const columnPixelWidth = excelColumnWidthToPixels(worksheet.getColumn(startColumn).width || receiptColumnWidth);
+      const horizontalOffset = Math.max(receiptImageCellPadding, (columnPixelWidth - box.width) / 2);
+      const verticalOffset = Math.max(receiptImageCellPadding, (imageRowPixelHeight - box.height) / 2);
       worksheet.addImage(imageId, {
-        tl: { col: startColumn - 1 + 0.08, row: imageRowNumber - 1 + 0.12 },
+        tl: {
+          col: startColumn - 1 + horizontalOffset / columnPixelWidth,
+          row: imageRowNumber - 1 + verticalOffset / imageRowPixelHeight
+        },
         ext: { width: box.width, height: box.height },
         editAs: "oneCell"
       });
-      rowHeights.push(box.height + 18);
+      delete file._receiptImage;
     }
-    worksheet.getRow(titleRowNumber).height = 22;
-    worksheet.getRow(imageRowNumber).height = Math.max(88, ...rowHeights);
     cursorRow += 2;
     cursorRow += 1;
   }
@@ -1889,7 +2289,12 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
   const template = normalizeExportTemplate(templatePayload);
   const columns = exportColumnsForOrders(templatePayload, orders);
   const headers = columns.map(exportColumnHeaderText);
-  const rows = exportTableRows(orders, columns, exchange);
+  const includeSettlementTotal = shouldIncludeSettlementTotal(title, exchange);
+  const tableData = exportTableRowData(orders, columns, exchange, {
+    includeSettlementTotal,
+    includeAdvanceAddress: isCustomerStatementExportTitle(title)
+  });
+  const rows = tableData.rows.map((row) => row.values);
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "汉业管理系统";
   workbook.created = new Date();
@@ -1926,6 +2331,19 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
       template
     )
   );
+  const settlementTotalRow = includeSettlementTotal ? tableData.rows.find((row) => row.kind === "settlementTotal") || null : null;
+  if (settlementTotalRow) {
+    const settlementDisplayValue = formatExportAmount(settlementTotalRow.summary?.amount, false);
+    const settlementWidth = Math.min(
+      24,
+      Math.max(
+        excelColumnWidths[settlementTotalRow.targetIndex] || 0,
+        cellDisplayWidth(settlementDisplayValue) + 4,
+        16
+      )
+    );
+    excelColumnWidths[settlementTotalRow.targetIndex] = settlementWidth;
+  }
   excelColumnWidths.forEach((width, index) => {
     worksheet.getColumn(index + 1).width = width;
   });
@@ -2007,19 +2425,30 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
     cell.border = tableBorder;
   });
 
-  const sortedOrders = sortOrdersForExport(orders);
+  const sortedOrders = tableData.sortedOrders;
+  const totalRowOffset = tableData.rows.findIndex((row) => row.kind === "total");
+  const totalRowNumber = totalRowOffset >= 0 ? tableStartRow + 1 + totalRowOffset : 0;
   rows.forEach((rowValues, rowIndex) => {
-    const isTotalRow = rowIndex === rows.length - 1;
-    const sourceOrder = sortedOrders[rowIndex] || null;
+    const rowMeta = tableData.rows[rowIndex] || {};
+    const isTotalRow = rowMeta.kind === "total";
+    const isSettlementTotalRow = rowMeta.kind === "settlementTotal";
+    const isSummaryRow = isTotalRow || isSettlementTotalRow;
+    const sourceOrder = rowMeta.kind === "order" ? rowMeta.order : null;
     const row = worksheet.getRow(tableStartRow + 1 + rowIndex);
     const excelRowValues = rowValues.map(excelSingleLineValue);
     row.values = excelRowValues;
-    row.height = Math.max(22, tableFontSize * 1.9 + 12);
+    row.height = Math.max(isSettlementTotalRow ? 24 : 22, tableFontSize * 1.9 + 12);
     row.eachCell((cell, columnNumber) => {
       const column = columns[columnNumber - 1] || {};
-      if (isExportAmountColumn(column)) {
+      if (isSettlementTotalRow && columnNumber - 1 === rowMeta.targetIndex) {
+        const formula = exportSettlementTotalExcelFormula(rowMeta.summary, columns, totalRowNumber);
+        cell.value = formula
+          ? { formula, result: Number(rowMeta.summary?.amount || 0) }
+          : Number(rowMeta.summary?.amount || 0);
+        cell.numFmt = "#,##0.00";
+      } else if (!isSettlementTotalRow && isExportAmountColumn(column) && (isTotalRow || !exportLocationFeeType(column))) {
         const amount = isTotalRow
-          ? exportTotalAmountForColumn(sortedOrders, column, exchange)
+          ? exportTotalAmountForColumn(sortedOrders, column, exchange, { rawCurrencyTotals: includeSettlementTotal })
           : exportOrderColumnAmount(sourceOrder, column);
         if (isTotalRow || Number(amount || 0) !== 0) {
           cell.value = Number(amount || 0);
@@ -2031,7 +2460,7 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
       cell.font = {
         name: "Microsoft YaHei",
         size: Number(column.fontSize || tableFontSize),
-        bold: isTotalRow || Boolean(template?.tableBold),
+        bold: isSummaryRow || Boolean(template?.tableBold),
         color: { argb: excelArgb(template?.tableTextColor || "#17233c") }
       };
       if (isTotalRow) {
@@ -2041,8 +2470,18 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
           fgColor: { argb: excelArgb(template?.tableHeaderBgColor || "#f1f5f9") }
         };
       }
-      cell.alignment = { vertical: "middle", horizontal: excelAlignment(template?.tableAlign), wrapText: false };
-      if (!isTotalRow && sourceOrder) {
+      if (isSettlementTotalRow && columnNumber - 1 === rowMeta.labelIndex) {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFFFFF00" }
+        };
+      }
+      const horizontal = isSettlementTotalRow
+        ? (columnNumber - 1 === rowMeta.targetIndex ? "right" : "center")
+        : excelAlignment(template?.tableAlign);
+      cell.alignment = { vertical: "middle", horizontal, wrapText: false };
+      if (!isSummaryRow && sourceOrder) {
         const comment = exportOrderColumnComment(sourceOrder, column);
         if (comment) {
           cell.note = comment;
@@ -2474,10 +2913,13 @@ function renderOrdersExcelHtml(orders, title = "订单导出", templatePayload =
   const tableAlign = template?.tableAlign || "left";
   const tablePixelWidth = columns.reduce((sum, column) => sum + Number(column.width || 76), 0);
   const tableWidthCss = template?.orientation === "fluid" ? `${Math.max(1, tablePixelWidth)}px` : "100%";
-  const tableRows = exportTableRows(orders, columns, exchange);
-  const rowsHtml = tableRows.map((row, rowIndex) => `
-    <tr${rowIndex === tableRows.length - 1 ? ' class="total-row"' : ""}>
-      ${row.map((value) => `<td>${htmlEscape(value)}</td>`).join("")}
+  const tableData = exportTableRowData(orders, columns, exchange, {
+    includeSettlementTotal: shouldIncludeSettlementTotal(title, exchange),
+    includeAdvanceAddress: isCustomerStatementExportTitle(title)
+  });
+  const rowsHtml = tableData.rows.map((rowData) => `
+    <tr${rowData.kind === "total" || rowData.kind === "settlementTotal" ? ' class="total-row"' : ""}>
+      ${rowData.values.map((value, columnIndex) => `<td${rowData.kind === "settlementTotal" && columnIndex === rowData.labelIndex ? ' class="settlement-total-label"' : ""}>${htmlEscape(value)}</td>`).join("")}
     </tr>
   `).join("");
   return `<!doctype html>
@@ -2501,6 +2943,7 @@ function renderOrdersExcelHtml(orders, title = "订单导出", templatePayload =
     .data-table .table-header-currency { margin-top: 2px; color: ${headerColor}; font-size: 0.86em; }
     .data-table td { font-weight: ${tableFontWeight}; }
     .data-table .total-row td { background: ${headerBg}; font-weight: 700; }
+    .data-table .settlement-total-label { background: #ffff00 !important; text-align: center; }
     .footer { margin-top: 14px; color: #64748b; }
   </style>
 </head>
@@ -2552,10 +2995,13 @@ function normalizeExportOrderFee(fee = {}) {
     name,
     currency: String(fee.currency || "港币").trim() || "港币",
     amount,
+    quantity: fee.quantity ?? fee.qty ?? "",
+    unitPrice: fee.unitPrice ?? fee.unit_price ?? fee.price ?? "",
     category: String(fee.category || "正常").trim() || "正常",
     feeItemId: String(fee.feeItemId || fee.fee_item_id || "").trim(),
     driverRole: String(fee.driverRole || fee.driver_role || "").trim(),
     driverName: String(fee.driverName || fee.driver_name || "").trim(),
+    advanceAddress: String(fee.advanceAddress || fee.advance_address || "").trim(),
     note: String(fee.note || "").trim()
   };
 }
@@ -2757,11 +3203,11 @@ function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = 
     return y + tableHeaderHeight;
   }
 
-  const sortedOrders = sortOrdersForExport(orders);
-  const pdfRows = [
-    ...sortedOrders.map((order, rowIndex) => ({ total: false, values: columns.map((column) => exportOrderColumnValue(order, column, rowIndex)) })),
-    { total: true, values: exportTotalRow(sortedOrders, columns, exchange) }
-  ];
+  const includeSettlementTotal = shouldIncludeSettlementTotal(title, exchange);
+  const { rows: pdfRows } = exportTableRowData(orders, columns, exchange, {
+    includeSettlementTotal,
+    includeAdvanceAddress: isCustomerStatementExportTitle(title)
+  });
   let y = drawHeader();
   pdfRows.forEach((rowData) => {
     usePdfFont();
@@ -2775,8 +3221,12 @@ function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = 
     columns.forEach((column, columnIndex) => {
       usePdfFont();
       doc.fontSize(column.fontSize || template?.tableFontSize || 7.3);
-      if (rowData.total) {
+      if (rowData.kind === "total" || rowData.kind === "settlementTotal") {
         doc.rect(x, y, column.width, currentRowHeight).fill(template?.tableHeaderBgColor || "#f1f5f9");
+        doc.fillColor(template?.tableTextColor || "#17233c");
+      }
+      if (rowData.kind === "settlementTotal" && columnIndex === rowData.labelIndex) {
+        doc.rect(x, y, column.width, currentRowHeight).fill("#ffff00");
         doc.fillColor(template?.tableTextColor || "#17233c");
       }
       doc.lineWidth(template?.tableBorderWidth ?? 1).rect(x, y, column.width, currentRowHeight).strokeColor(template?.tableBorderColor || "#e9eef6").stroke();
@@ -2835,6 +3285,7 @@ function mapOrderFee(row) {
   const quantity = Number(row.quantity || 0) > 0 ? Number(row.quantity) : 1;
   return {
     id: row.id,
+    clientKey: userTextValue(row.client_key),
     category: userTextValue(row.category),
     name: userTextValue(row.name),
     quantity,
@@ -2846,6 +3297,7 @@ function mapOrderFee(row) {
     cost: row.cost == null ? null : Number(row.cost || 0),
     costCurrency: userTextValue(row.cost_currency || row.currency || "港币"),
     costManual: Boolean(row.cost_manual),
+    advanceAddress: userTextValue(row.advance_address),
     remark: userTextValue(row.remark),
     driverRole: userTextValue(row.driver_role),
     driverName: userTextValue(row.driver_name)
@@ -3958,7 +4410,7 @@ async function renderCustomsStatementXlsxBuffer(rows = [], context = {}) {
       cell.font = { name: "Microsoft YaHei", size: 10, bold: isTotalRow, color: { argb: "FF17233C" } };
       cell.alignment = {
         vertical: "middle",
-        horizontal: column.amount ? "right" : (column.align || "left"),
+        horizontal: "center",
         wrapText: false
       };
       if (isTotalRow) {
@@ -5933,6 +6385,14 @@ function dispatchExportComparableDate(row = {}) {
   return date ? date.getTime() : Number.POSITIVE_INFINITY;
 }
 
+function dispatchExportDateGroupKey(row = {}, fallbackDate = "") {
+  const order = dispatchExportNestedRow(row.order);
+  const dateText = dispatchExportText(row.date, order.date, fallbackDate);
+  const date = parseInputDate(dateText);
+  if (!date) return String(dateText || fallbackDate || "").trim();
+  return dateInputFromDate(date);
+}
+
 function dispatchExportComparableTime(row = {}) {
   const order = dispatchExportNestedRow(row.order);
   const timeText = dispatchExportText(row.loadTime, order.loadTime, order.loadingTime);
@@ -5962,6 +6422,9 @@ function dispatchExportSupplierGroup(row = {}) {
 function compareDispatchExportRows(left = {}, right = {}) {
   const leftPlate = dispatchExportPlateGroup(left);
   const rightPlate = dispatchExportPlateGroup(right);
+  const leftIsLastPlate = leftPlate === "粤ZEJ59港";
+  const rightIsLastPlate = rightPlate === "粤ZEJ59港";
+  if (leftIsLastPlate !== rightIsLastPlate) return leftIsLastPlate ? 1 : -1;
   const leftOutsourced = dispatchExportIsOutsourced(left);
   const rightOutsourced = dispatchExportIsOutsourced(right);
   if (leftOutsourced !== rightOutsourced) return leftOutsourced ? -1 : 1;
@@ -6001,6 +6464,17 @@ function compareDispatchExportRows(left = {}, right = {}) {
   return (left.__exportIndex ?? 0) - (right.__exportIndex ?? 0);
 }
 
+function compareDispatchExportRowsByDate(left = {}, right = {}, fallbackDate = "") {
+  const leftDate = dispatchExportDateGroupKey(left, fallbackDate);
+  const rightDate = dispatchExportDateGroupKey(right, fallbackDate);
+  const leftDateValue = parseInputDate(leftDate)?.getTime() ?? Number.POSITIVE_INFINITY;
+  const rightDateValue = parseInputDate(rightDate)?.getTime() ?? Number.POSITIVE_INFINITY;
+  if (leftDateValue !== rightDateValue) return leftDateValue - rightDateValue;
+  const textCompare = String(leftDate || "").localeCompare(String(rightDate || ""), "zh-Hans-CN", { numeric: true, sensitivity: "base" });
+  if (textCompare !== 0) return textCompare;
+  return compareDispatchExportRows(left, right);
+}
+
 function dispatchExportWorkbookTitle(rows = [], fallbackDate = todayInputValue()) {
   const first = rows.find((row) => dispatchExportText(row?.plate, row?.order?.plate) || dispatchExportText(row?.dispatchNo, row?.order?.dispatchNo)) || rows[0] || {};
   const order = dispatchExportNestedRow(first.order);
@@ -6010,22 +6484,39 @@ function dispatchExportWorkbookTitle(rows = [], fallbackDate = todayInputValue()
   return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日汉业公司跟单表`;
 }
 
-function dispatchExportRowsForWorkbook(rows = [], fallbackDate = "", customerShortNames = new Map(), supplierShortNames = new Map()) {
+function dispatchExportRowsForWorkbook(rows = [], fallbackDate = "", customerShortNames = new Map(), supplierShortNames = new Map(), options = {}) {
+  const dateGroupKeys = new Set(rows.map((row) => dispatchExportDateGroupKey(row, fallbackDate)).filter(Boolean));
+  const multiDayExport = dateGroupKeys.size > 1;
   const sortedRows = [...rows]
     .map((row, index) => ({ ...row, __exportIndex: index }))
-    .sort(compareDispatchExportRows);
+    .sort((left, right) => multiDayExport
+      ? compareDispatchExportRowsByDate(left, right, fallbackDate)
+      : compareDispatchExportRows(left, right)
+    );
   const bodyRows = [];
   let previousGroupKey = "";
+  let previousDateKey = "";
+  let previousOutsourced = false;
   let serialNumber = 0;
   sortedRows.forEach((row) => {
+    const dateKey = dispatchExportDateGroupKey(row, fallbackDate);
     const plate = dispatchExportPlateGroup(row);
     const outsourced = dispatchExportIsOutsourced(row);
     const supplierGroup = dispatchExportSupplierGroup(row);
     const groupKey = outsourced ? `outsourced:${supplierGroup}` : `own:${plate}`;
-    if (bodyRows.length && groupKey !== previousGroupKey) {
-      bodyRows.push(null, null);
+    if (bodyRows.length && (multiDayExport ? dateKey !== previousDateKey || groupKey !== previousGroupKey : groupKey !== previousGroupKey)) {
+      const blankRowCount = multiDayExport && dateKey !== previousDateKey
+        ? 2
+        : (options.spacingMode === "day" || multiDayExport)
+        ? (outsourced && previousOutsourced ? 0 : 1)
+        : 2;
+      for (let index = 0; index < blankRowCount; index += 1) {
+        bodyRows.push(null);
+      }
     }
     previousGroupKey = groupKey;
+    previousDateKey = dateKey;
+    previousOutsourced = outsourced;
     serialNumber += 1;
     const order = dispatchExportNestedRow(row.order);
     const vehicleSource = dispatchExportText(order.vehicleSource, row.vehicleSource);
@@ -6054,7 +6545,8 @@ function dispatchExportRowsForWorkbook(rows = [], fallbackDate = "", customerSho
   return bodyRows;
 }
 
-async function renderDispatchPlanXlsxBuffer(rows = [], title = "", fallbackDate = "") {
+async function renderDispatchPlanXlsxBuffer(rows = [], title = "", fallbackDate = "", options = {}) {
+  const spacingMode = String(options.exportSpacing || "").trim() || "default";
   const customerShortNameRows = await db.prepare(`
     SELECT id, name, short_name
     FROM customers
@@ -6130,7 +6622,7 @@ async function renderDispatchPlanXlsxBuffer(rows = [], title = "", fallbackDate 
   worksheet.getRow(2).height = 18;
   worksheet.getRow(3).height = 18;
 
-  const bodyRows = dispatchExportRowsForWorkbook(rows, fallbackDate, customerShortNames, supplierShortNames);
+  const bodyRows = dispatchExportRowsForWorkbook(rows, fallbackDate, customerShortNames, supplierShortNames, { spacingMode });
   bodyRows.forEach((values, rowIndex) => {
     const excelRow = worksheet.getRow(rowIndex + 4);
     if (!values) {
@@ -6902,7 +7394,9 @@ app.post("/api/dispatch-plans/export/xlsx", async (req, res) => {
   }
   try {
     const title = String(req.body?.title || "").trim() || dispatchExportWorkbookTitle(rows, String(req.body?.date || ""));
-    const buffer = await renderDispatchPlanXlsxBuffer(rows, title, String(req.body?.date || ""));
+    const buffer = await renderDispatchPlanXlsxBuffer(rows, title, String(req.body?.date || ""), {
+      exportSpacing: req.body?.exportSpacing
+    });
     const date = exportFilenamePart(String(req.body?.date || rows[0]?.order?.date || rows[0]?.date || todayInputValue()).replaceAll("-", ""));
     const scope = String(req.body?.scope || "全部").trim() || "全部";
     const filename = `排车表_${date}_${scope}${rows.length}单.xlsx`;
@@ -7209,6 +7703,11 @@ async function readOrderPayload(body, existing = null) {
   const status = existing && shouldPreventOrderStatusDowngrade(existing.status, submittedStatus)
     ? existing.status
     : submittedStatus;
+  const vehicleSource = normalizeVehicleSource(pickBody(body, "vehicleSource", "vehicle_source", existing?.vehicle_source || ""));
+  const currency = userTextValue(pickBody(body, "currency", null, existing?.currency || "港币")) || "港币";
+  const transportModeInput = userTextValue(pickBody(body, "transportMode", "transport_mode", existing?.transport_mode || ""));
+  const transportMode = normalizeTransportMode(transportModeInput || (vehicleSource === OWN_VEHICLE_SOURCE ? "单司机" : ""))
+    || (vehicleSource === OWN_VEHICLE_SOURCE ? "单司机" : "");
   return {
     no,
     dispatchNo: resolvedDispatchNo,
@@ -7219,16 +7718,16 @@ async function readOrderPayload(body, existing = null) {
     needsWeighing: booleanFlag(pickBody(body, "needsWeighing", "needs_weighing", existing?.needs_weighing || false), false) ? 1 : 0,
     direction: userTextValue(pickBody(body, "direction", null, existing?.direction || "")),
     tonnage: userTextValue(pickBody(body, "tonnage", null, existing?.tonnage || "")),
-    currency: userTextValue(pickBody(body, "currency", null, existing?.currency || "")),
+    currency,
     quantity: userTextValue(pickBody(body, "quantity", null, existing?.quantity || "")),
     weight: userTextValue(pickBody(body, "weight", null, existing?.weight || "")),
-    vehicleSource: normalizeVehicleSource(pickBody(body, "vehicleSource", "vehicle_source", existing?.vehicle_source || "")),
+    vehicleSource,
     supplier: userTextValue(pickBody(body, "supplier", null, existing?.supplier || "-") || "-"),
     plate: normalizePlateText(pickBody(body, "plate", null, existing?.plate || "")),
     driver: userTextValue(pickBody(body, "driver", null, existing?.driver || "")),
     hkDriver: userTextValue(pickBody(body, "hkDriver", "hk_driver", existing?.hk_driver || "")),
     mainlandDriver: userTextValue(pickBody(body, "mainlandDriver", "mainland_driver", existing?.mainland_driver || "")),
-    transportMode: userTextValue(pickBody(body, "transportMode", "transport_mode", existing?.transport_mode || "")),
+    transportMode,
     loading: userRawMultilineTextValue(pickBody(body, "loading", "loading_place", existing?.loading || "")),
     unloading: userRawMultilineTextValue(pickBody(body, "unloading", "unloading_place", existing?.unloading || "")),
     date: dispatchDate || dateForNewNumbers,
@@ -7355,6 +7854,7 @@ app.post("/api/orders", async (req, res) => {
 
 function normalizeOrderFee(fee, fallbackCurrency) {
   const driverRole = userTextValue(fee.driverRole || fee.driver_role);
+  const clientKey = userTextValue(fee.clientKey || fee.client_key || fee._clientKey);
   const rawQuantity = Number(fee.quantity);
   const quantity = Number.isFinite(rawQuantity) && rawQuantity > 0 ? rawQuantity : 1;
   const rawUnitPrice = Number(fee.unitPrice ?? fee.unit_price ?? 0);
@@ -7377,6 +7877,7 @@ function normalizeOrderFee(fee, fallbackCurrency) {
     : Number(rawCost);
   const cost = Number.isFinite(costNumber) && costNumber >= 0 ? costNumber : null;
   return {
+    clientKey,
     category: normalizeOrderFeeCategory(fee.category),
     name: userTextValue(fee.name),
     quantity,
@@ -7388,6 +7889,7 @@ function normalizeOrderFee(fee, fallbackCurrency) {
     cost,
     costCurrency,
     costManual: cost == null ? false : booleanFlag(rawCostManual, false),
+    advanceAddress: userTextValue(fee.advanceAddress || fee.advance_address),
     remark: userTextValue(fee.remark),
     driverRole: ["香港司机", "大陆骑师", "跟随订单司机", "手动指定"].includes(driverRole) ? driverRole : "",
     driverName: userTextValue(fee.driverName || fee.driver_name)
@@ -7411,8 +7913,8 @@ function calculateOrderReceivables(fees, fallbackCurrency) {
 async function saveOrderFees(orderNo, fees, fallbackCurrency) {
   await ensureOrderFeeCostCurrencyColumn();
   const insert = await db.prepare(`
-    INSERT INTO order_fees (order_no, category, name, quantity, unit_price, unit_price_manual, currency, amount, amount_manual, cost, cost_currency, cost_manual, remark, driver_role, driver_name)
-    VALUES (@orderNo, @category, @name, @quantity, @unitPrice, @unitPriceManual, @currency, @amount, @amountManual, @cost, @costCurrency, @costManual, @remark, @driverRole, @driverName)
+    INSERT INTO order_fees (order_no, client_key, category, name, quantity, unit_price, unit_price_manual, currency, amount, amount_manual, cost, cost_currency, cost_manual, advance_address, remark, driver_role, driver_name)
+    VALUES (@orderNo, @clientKey, @category, @name, @quantity, @unitPrice, @unitPriceManual, @currency, @amount, @amountManual, @cost, @costCurrency, @costManual, @advanceAddress, @remark, @driverRole, @driverName)
   `);
   await db.prepare("DELETE FROM order_fees WHERE order_no = ?").run(orderNo);
   const normalizedFees = fees
