@@ -5514,6 +5514,34 @@ select {
   gap: 12px;
 }
 
+.boss-unreceived-tabs {
+  justify-self: start;
+  width: fit-content;
+}
+
+.boss-unreceived-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.boss-unreceived-tabs button span {
+  display: inline-grid;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 6px;
+  place-items: center;
+  border-radius: 999px;
+  background: #e8eef9;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.boss-unreceived-tabs button.active span {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
 .boss-page .boss-unreceived-section {
   overflow: auto;
 }

@@ -64,6 +64,7 @@ const PREVIEW_MIMES = new Set(SAFE_FILE_TYPES.flatMap((item) => item.mimes));
 const AUTH_TOKEN_TTL_SECONDS = Number(process.env.AUTH_TOKEN_TTL_SECONDS || 7 * 24 * 60 * 60);
 const VEHICLE_PROFIT_EXCHANGE_RATE_MODULES = ["bossVehicleProfit", "bossSupplierProfit", "bossDashboard", "bossCompanyProfit", "financeWages", "financeSupplierStatements", "financeCustomsStatements"];
 const COMPANY_EXPENSE_MODULES = ["bossCompanyExpenses", "bossDashboard", "bossCompanyProfit"];
+const BOSS_CENTER_READ_MODULES = ["bossDashboard", "bossUnreceived", "bossCompanyProfit", "bossVehicleProfit", "bossSupplierProfit", "bossCompanyExpenses"];
 const ORDER_CREATE_LOCK_ID = 524460;
 const AUTH_SECRET = process.env.HANYE_AUTH_SECRET || process.env.AUTH_SECRET || "hanye-system-local-dev-secret";
 const VEHICLE_EXPENSE_TYPES = new Set(["fuel", "repair", "annual", "other"]);
@@ -541,6 +542,8 @@ function normalizeCustomerPayload(body, id = "") {
 
 function mapOrder(row) {
   const createdByName = row.created_by_display_name || row.created_by_username || "";
+  const loadingLocations = normalizeLocationEntries(row.loading_locations, row.loading);
+  const unloadingLocations = normalizeLocationEntries(row.unloading_locations, row.unloading);
   return {
     no: row.no,
     dispatchNo: row.dispatch_no || "",
@@ -561,8 +564,10 @@ function mapOrder(row) {
     hkDriver: userTextValue(row.hk_driver),
     mainlandDriver: userTextValue(row.mainland_driver),
     transportMode: normalizeTransportMode(row.transport_mode || ""),
-    loading: userRawMultilineTextValue(row.loading),
-    unloading: userRawMultilineTextValue(row.unloading),
+    loading: composeLocationEntriesText(loadingLocations) || userRawMultilineTextValue(row.loading),
+    loadingLocations,
+    unloading: composeLocationEntriesText(unloadingLocations) || userRawMultilineTextValue(row.unloading),
+    unloadingLocations,
     date: row.order_date,
     receivableHKD: row.receivable_hkd,
     receivableRMB: row.receivable_rmb,
@@ -1125,7 +1130,167 @@ function userMultilineTextValue(value) {
 }
 
 function userRawMultilineTextValue(value) {
-  return String(value ?? "").replace(/\r\n?/g, "\n").trim();
+  return String(value ?? "").replace(/\r\n?/g, "\n");
+}
+
+function normalizeLocationPartText(value = "") {
+  return userTextValue(value);
+}
+
+function normalizeLocationDetailText(value = "") {
+  return String(value ?? "").replace(/\r\n?/g, "\n");
+}
+
+function composeLocationEntryText(city = "", district = "", detail = "") {
+  const cityText = normalizeLocationPartText(city);
+  const districtText = normalizeLocationPartText(district);
+  const detailText = normalizeLocationDetailText(detail);
+  if (!cityText && !districtText) return detailText;
+  if (cityText && !districtText && !detailText) return cityText;
+  if (cityText && districtText && !detailText) return [cityText, districtText].join(" / ");
+  if (cityText && !districtText && detailText) return [cityText, "", detailText].join(" / ");
+  return [cityText, districtText, detailText].join(" / ");
+}
+
+function splitLegacyLocationEntry(value = "") {
+  const text = String(value ?? "").replace(/\r\n?/g, "\n").trim();
+  if (!text) return { city: "", district: "", detail: "" };
+  const normalized = text.replace(/[／｜|]/g, "/");
+  if (!normalized.includes("/")) {
+    return { city: "", district: "", detail: text };
+  }
+  const parts = normalized.split("/").map((part) => part.trim());
+  if (!looksLikeLegacyStructuredLocationParts(parts)) {
+    return { city: "", district: "", detail: text };
+  }
+  return {
+    city: normalizeLocationPartText(parts[0] || ""),
+    district: normalizeLocationPartText(parts[1] || ""),
+    detail: normalizeLocationDetailText(parts.slice(2).join(" / "))
+  };
+}
+
+function looksLikeLegacyStructuredLocationCity(value = "") {
+  const text = normalizeLocationPartText(value);
+  if (!text || text.length > 12) return false;
+  if (["香港", "澳门", "深圳", "东莞", "广州", "惠州", "佛山", "中山", "珠海", "江门", "肇庆"].includes(text)) return true;
+  return /(?:市|盟|地区|自治州|特别行政区|特別行政區)$/.test(text);
+}
+
+function looksLikeLegacyStructuredLocationDistrict(value = "") {
+  const text = normalizeLocationPartText(value);
+  if (!text || text.length > 18) return false;
+  if (["九龙", "九龍", "新界", "港岛", "港島", "柴湾", "柴灣", "荃湾", "荃灣", "沙田", "屯门", "屯門"].includes(text)) return true;
+  return /(?:区|區|县|縣|镇|鎮|乡|鄉|街道|开发区|工業區|工业区|新区)$/.test(text);
+}
+
+function looksLikeLegacyStructuredLocationParts(parts = []) {
+  const [city = "", district = ""] = parts;
+  if (!looksLikeLegacyStructuredLocationCity(city)) return false;
+  if (!district) return true;
+  return looksLikeLegacyStructuredLocationDistrict(district) || normalizeLocationPartText(district).length <= 12;
+}
+
+function parseLocationEntriesJson(value) {
+  if (Array.isArray(value)) return value;
+  if (value && typeof value === "object") return [value];
+  const text = String(value ?? "").trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && typeof parsed === "object") return [parsed];
+  } catch {
+    // Not JSON; callers may still treat the value as a legacy location string.
+  }
+  return [];
+}
+
+function normalizeLocationEntry(row) {
+  if (row && typeof row === "object" && !Array.isArray(row)) {
+    const hasStructuredParts = Object.prototype.hasOwnProperty.call(row, "city")
+      || Object.prototype.hasOwnProperty.call(row, "district")
+      || Object.prototype.hasOwnProperty.call(row, "detail");
+    if (hasStructuredParts) {
+      return {
+        city: normalizeLocationPartText(row.city),
+        district: normalizeLocationPartText(row.district),
+        detail: normalizeLocationDetailText(row.detail)
+      };
+    }
+    if (Object.prototype.hasOwnProperty.call(row, "value")) {
+      return splitLegacyLocationEntry(row.value);
+    }
+  }
+  return splitLegacyLocationEntry(row);
+}
+
+function locationEntryHasValue(row = {}) {
+  return Boolean(String(row.city || row.district || row.detail || "").trim());
+}
+
+function splitLegacyLocationEntries(value = "") {
+  const raw = String(value ?? "").replace(/\r\n?/g, "\n");
+  if (!raw.trim()) return [];
+  return raw
+    .split(/[；;]+/)
+    .map((entry) => normalizeLocationEntry(entry))
+    .filter(locationEntryHasValue);
+}
+
+function normalizeLocationEntries(value, fallbackText = "", options = {}) {
+  const parsed = parseLocationEntriesJson(value)
+    .map((entry) => normalizeLocationEntry(entry))
+    .filter(locationEntryHasValue);
+  if (parsed.length) return parsed;
+  const fallback = normalizeLocationDetailText(fallbackText || (typeof value === "string" ? value : ""));
+  if (options.fallbackAsDetail && fallback) {
+    return [{ city: "", district: "", detail: fallback }];
+  }
+  if (typeof value === "string" && options.parseLegacy !== false) {
+    return splitLegacyLocationEntries(fallback);
+  }
+  return [];
+}
+
+function hasOwnValue(row = {}, key = "") {
+  return row && typeof row === "object" && Object.prototype.hasOwnProperty.call(row, key);
+}
+
+function locationEntriesPayloadValue(row = {}, target = "", existingValue = "") {
+  const camelKey = `${target}Locations`;
+  const snakeKey = `${target}_locations`;
+  if (hasOwnValue(row, camelKey)) return { provided: true, value: row[camelKey] };
+  if (hasOwnValue(row, snakeKey)) return { provided: true, value: row[snakeKey] };
+  return { provided: false, value: existingValue };
+}
+
+function normalizeLocationEntriesFromPayload(row = {}, target = "", fallbackText = "", existingValue = "") {
+  const { provided, value } = locationEntriesPayloadValue(row, target, existingValue);
+  if (provided) {
+    return normalizeLocationEntries(value, fallbackText, {
+      parseLegacy: false,
+      fallbackAsDetail: true
+    });
+  }
+  return normalizeLocationEntries(value, fallbackText);
+}
+
+function composeLocationEntriesText(entries = []) {
+  return (Array.isArray(entries) ? entries : [])
+    .map((entry) => composeLocationEntryText(entry.city, entry.district, entry.detail))
+    .filter((entry) => String(entry || "").trim())
+    .join("；");
+}
+
+function locationEntriesJson(entries = []) {
+  return JSON.stringify((Array.isArray(entries) ? entries : [])
+    .map((entry) => ({
+      city: normalizeLocationPartText(entry.city),
+      district: normalizeLocationPartText(entry.district),
+      detail: normalizeLocationDetailText(entry.detail)
+    }))
+    .filter(locationEntryHasValue));
 }
 
 function normalizePlateText(value = "") {
@@ -1182,9 +1347,38 @@ function dispatchExportNormalizeLocationText(value = "") {
     .toLowerCase();
 }
 
+function dispatchExportLocationAnnotationIndex(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return -1;
+  const patterns = [
+    /\s*[+＋]/,
+    /\s*(?:联系人|聯絡人|联系电话|電話|手机|手機|备注|備注|客户要求|注意事项|注意事項|仓库|倉庫|货好|貨好|装货地址|卸货地址|进口交货地址|交货地址|提货地址)\s*[:：]?/i
+  ];
+  let index = -1;
+  patterns.forEach((pattern) => {
+    const matchIndex = text.search(pattern);
+    if (matchIndex >= 0 && (index < 0 || matchIndex < index)) {
+      index = matchIndex;
+    }
+  });
+  return index;
+}
+
+function dispatchExportTrimLocationAnnotation(value = "") {
+  const text = String(value || "").replace(/\r/g, "\n").trim();
+  if (!text) return "";
+  const cutIndex = dispatchExportLocationAnnotationIndex(text);
+  if (cutIndex === 0) return "";
+  if (cutIndex > 0) return text.slice(0, cutIndex).trim();
+  return text;
+}
+
 function dispatchExportLocationParts(value = "") {
-  const text = firstExportLocationLine(value);
+  const text = dispatchExportTrimLocationAnnotation(firstExportLocationLine(value));
   if (!text) return { city: "", district: "", detail: "" };
+  if (["香港", "澳门"].includes(text.trim())) {
+    return { city: text.trim(), district: "", detail: "" };
+  }
   if (text.includes("/")) {
     const parts = text.split("/").map((part) => part.trim()).filter(Boolean);
     if (parts.length >= 2) {
@@ -1215,24 +1409,49 @@ function dispatchExportLocationParts(value = "") {
   };
 }
 
-function dispatchExportLocationSummary(value = "") {
-  const entries = String(value || "")
+function dispatchExportLocationSummaryPart(value = "") {
+  const parts = dispatchExportLocationParts(value);
+  return {
+    city: dispatchExportTrimLocationAnnotation(parts.city),
+    district: dispatchExportTrimLocationAnnotation(parts.district),
+    source: dispatchExportTrimLocationAnnotation(firstExportLocationLine(value))
+  };
+}
+
+function dispatchExportLooksLikeDistrictOnly(value = "") {
+  const text = dispatchExportTrimLocationAnnotation(value).replace(/\s+/g, "");
+  if (!text) return false;
+  if (text.length > 8) return false;
+  if (/[0-9:：@#（）()]/.test(text)) return false;
+  return !/^(?:联系人|聯絡人|联系电话|電話|手机|手機|备注|備注|客户要求|注意事项|注意事項|仓库|倉庫|货好|貨好|装货地址|卸货地址|进口交货地址|交货地址|提货地址)/i.test(text);
+}
+
+function dispatchExportLocationSummarySegments(value = "") {
+  return String(value || "")
     .replace(/\r/g, "\n")
     .split(/[\n；;]+/)
+    .flatMap((item) => item.split(/[+＋]/))
     .map((item) => item.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .map((item) => dispatchExportLocationSummaryPart(item))
+    .filter((item) => item.city || item.district || item.source);
+}
+
+function dispatchExportLocationSummary(value = "") {
+  const entries = dispatchExportLocationSummarySegments(value);
   if (!entries.length) return "";
   const segments = [];
   let lastCity = "";
   entries.forEach((entry) => {
-    const parts = dispatchExportLocationParts(entry);
-    const city = String(parts.city || "").trim();
-    const district = String(parts.district || "").trim();
-    const detail = String(parts.detail || "").trim();
+    const city = String(entry.city || "").trim();
+    const district = String(entry.district || "").trim();
+    const source = String(entry.source || "").trim();
+    const inheritDistrict = !city && !district && lastCity && dispatchExportLooksLikeDistrictOnly(source);
     const text = city && district
       ? `${city} / ${district}`
-      : city || district || detail || entry;
-    if (city && lastCity && dispatchExportNormalizeLocationText(city) === dispatchExportNormalizeLocationText(lastCity)) {
+      : city || district || (inheritDistrict ? source : "");
+    if (!text) return;
+    if ((city && lastCity && dispatchExportNormalizeLocationText(city) === dispatchExportNormalizeLocationText(lastCity)) || inheritDistrict) {
       segments.push(district || text);
       return;
     }
@@ -5236,7 +5455,57 @@ function requiredModuleForRequest(req) {
   return "";
 }
 
+function canReadBossCenterData(account = null) {
+  return BOSS_CENTER_READ_MODULES.some((moduleId) => canAccessModule(account, moduleId));
+}
+
 function authorizeApiRequest(req, res, next) {
+  if (req.path.startsWith("/customers")) {
+    const canAccessCustomers = req.method === "GET"
+      ? canAccessModule(req.account, "customers") || canReadBossCenterData(req.account)
+      : canAccessModule(req.account, "customers");
+    if (!canAccessCustomers) {
+      res.status(403).json({ message: "当前账号无权访问该功能" });
+      return;
+    }
+    next();
+    return;
+  }
+  if (req.path.startsWith("/customer-contacts")) {
+    const canAccessCustomers = req.method === "GET"
+      ? canAccessModule(req.account, "customers") || canReadBossCenterData(req.account)
+      : canAccessModule(req.account, "customers");
+    if (!canAccessCustomers) {
+      res.status(403).json({ message: "当前账号无权访问该功能" });
+      return;
+    }
+    next();
+    return;
+  }
+  if (req.path.startsWith("/orders")) {
+    const canAccessOrders = req.method === "GET"
+      ? canAccessModule(req.account, "orders") || canReadBossCenterData(req.account)
+      : canAccessModule(req.account, "orders");
+    if (!canAccessOrders) {
+      res.status(403).json({ message: "当前账号无权访问该功能" });
+      return;
+    }
+    next();
+    return;
+  }
+  if (req.path.startsWith("/customs-businesses")) {
+    const canAccessCustomsBusiness = req.method === "GET"
+      ? canAccessModule(req.account, "customsBusiness")
+        || canAccessModule(req.account, "financeCustomsStatements")
+        || canReadBossCenterData(req.account)
+      : canAccessModule(req.account, "customsBusiness") || canAccessModule(req.account, "financeCustomsStatements");
+    if (!canAccessCustomsBusiness) {
+      res.status(403).json({ message: "当前账号无权访问该功能" });
+      return;
+    }
+    next();
+    return;
+  }
   if (req.path.startsWith("/reminders") && req.method === "GET") {
     const canReadReminders = canAccessModule(req.account, "vehicleDriver")
       || canAccessModule(req.account, "dispatchBoard");
@@ -5269,7 +5538,9 @@ function authorizeApiRequest(req, res, next) {
   }
   if (req.path.startsWith("/other-businesses")) {
     const canAccessOtherBusiness = req.method === "GET"
-      ? canAccessModule(req.account, "otherBusiness") || COMPANY_EXPENSE_MODULES.some((moduleId) => canAccessModule(req.account, moduleId))
+      ? canAccessModule(req.account, "otherBusiness")
+        || COMPANY_EXPENSE_MODULES.some((moduleId) => canAccessModule(req.account, moduleId))
+        || canReadBossCenterData(req.account)
       : canAccessModule(req.account, "otherBusiness");
     if (!canAccessOtherBusiness) {
       res.status(403).json({ message: "当前账号无权访问该功能" });
@@ -5279,8 +5550,11 @@ function authorizeApiRequest(req, res, next) {
     return;
   }
   if (req.path.startsWith("/statement-downloads")) {
-    const canAccessStatements = ["financeCosts", "financeSupplierStatements", "financeCustomsStatements"]
-      .some((moduleId) => canAccessModule(req.account, moduleId));
+    const canAccessStatements = req.method === "GET"
+      ? ["financeCosts", "financeSupplierStatements", "financeCustomsStatements"].some((moduleId) => canAccessModule(req.account, moduleId))
+        || canReadBossCenterData(req.account)
+      : ["financeCosts", "financeSupplierStatements", "financeCustomsStatements"]
+        .some((moduleId) => canAccessModule(req.account, moduleId));
     if (!canAccessStatements) {
       res.status(403).json({ message: "当前账号无权访问该功能" });
       return;
@@ -6444,6 +6718,18 @@ function dedupeDispatchPlanRows(rows = []) {
 function normalizeDispatchPlanRow(row = {}, existingRow = null, requestCreator = {}, fallbackDate = "") {
   const item = row && typeof row === "object" ? row : {};
   const creator = dispatchRowCreatorFields(item, existingRow, requestCreator);
+  const loadingLocations = normalizeLocationEntriesFromPayload(
+    item,
+    "loading",
+    item.loading,
+    existingRow?.loadingLocations || existingRow?.loading_locations || ""
+  );
+  const unloadingLocations = normalizeLocationEntriesFromPayload(
+    item,
+    "unloading",
+    item.unloading,
+    existingRow?.unloadingLocations || existingRow?.unloading_locations || ""
+  );
   return {
     id: String(item.id || ""),
     createdAt: dispatchRowCreatedAt(item.createdAt || item.created_at ? item : (existingRow || item), item.date || existingRow?.date || fallbackDate),
@@ -6461,8 +6747,10 @@ function normalizeDispatchPlanRow(row = {}, existingRow = null, requestCreator =
     tonnage: userTextValue(item.tonnage),
     quantity: userTextValue(item.quantity ?? ""),
     weight: userTextValue(item.weight),
-    loading: userRawMultilineTextValue(item.loading),
-    unloading: userRawMultilineTextValue(item.unloading),
+    loading: composeLocationEntriesText(loadingLocations) || userRawMultilineTextValue(item.loading),
+    loadingLocations,
+    unloading: composeLocationEntriesText(unloadingLocations) || userRawMultilineTextValue(item.unloading),
+    unloadingLocations,
     loadTime: userTextValue(item.loadTime || item.load_time),
     vehicleSource: normalizeVehicleSource(item.vehicleSource || item.vehicle_source),
     supplier: userTextValue(item.supplier),
@@ -6544,10 +6832,45 @@ function dispatchExportShortLocation(value = "") {
   return dispatchExportLocationSummary(value);
 }
 
+function dispatchExportLocationEntries(row = {}, target = "") {
+  const order = dispatchExportNestedRow(row.order);
+  const orderLocations = order[`${target}Locations`] || order[`${target}_locations`];
+  const rowLocations = row[`${target}Locations`] || row[`${target}_locations`];
+  const text = dispatchExportText(row[target], order[target]);
+  return normalizeLocationEntries(orderLocations && orderLocations.length ? orderLocations : rowLocations, text);
+}
+
+function dispatchExportLocationSummaryFromEntries(entries = []) {
+  const segments = [];
+  let lastCity = "";
+  normalizeLocationEntries(entries).forEach((entry) => {
+    const text = composeLocationEntryText(entry.city, entry.district, entry.detail);
+    dispatchExportLocationSummarySegments(text).forEach((item) => {
+      const city = String(item.city || "").trim();
+      const district = String(item.district || "").trim();
+      const source = String(item.source || "").trim();
+      const inheritDistrict = !city && !district && lastCity && dispatchExportLooksLikeDistrictOnly(source);
+      const summary = city && district
+        ? `${city} / ${district}`
+        : city || district || (inheritDistrict ? source : "");
+      if (!summary) return;
+      if ((city && lastCity && dispatchExportNormalizeLocationText(city) === dispatchExportNormalizeLocationText(lastCity)) || inheritDistrict) {
+        segments.push(district || summary);
+        return;
+      }
+      segments.push(summary);
+      lastCity = city || "";
+    });
+  });
+  return segments.join(" + ");
+}
+
 function dispatchExportRoute(row = {}) {
   const order = dispatchExportNestedRow(row.order);
-  const loading = dispatchExportShortLocation(dispatchExportText(row.loading, order.loading));
-  const unloading = dispatchExportShortLocation(dispatchExportText(row.unloading, order.unloading));
+  const loading = dispatchExportLocationSummaryFromEntries(dispatchExportLocationEntries(row, "loading"))
+    || dispatchExportShortLocation(dispatchExportText(row.loading, order.loading));
+  const unloading = dispatchExportLocationSummaryFromEntries(dispatchExportLocationEntries(row, "unloading"))
+    || dispatchExportShortLocation(dispatchExportText(row.unloading, order.unloading));
   return [loading, unloading].filter(Boolean).join(" → ") || "-";
 }
 
@@ -7030,10 +7353,14 @@ function dispatchRowOrderSyncKey(row = {}) {
     "transportMode",
     "driver",
     "hkDriver",
-    "mainlandDriver",
-    "status",
-    "previousStatus"
-  ].map((key) => `${key}:${dispatchRowText(row, key)}`).join("|");
+	    "mainlandDriver",
+	    "loading",
+	    "unloading",
+	    "loadingLocations",
+	    "unloadingLocations",
+	    "status",
+	    "previousStatus"
+	  ].map((key) => `${key}:${key.endsWith("Locations") ? locationEntriesJson(row[key]) : dispatchRowText(row, key)}`).join("|");
 }
 
 function dispatchRowNeedsOrderSync(row = {}, existingRow = null) {
@@ -7067,6 +7394,8 @@ function mapDispatchPlanRecord(row = {}) {
 function normalizeDispatchRecycleRow(row = {}, planDate = todayInputValue()) {
   const item = row && typeof row === "object" ? row : {};
   const creator = creatorFieldsFromRecord(item);
+  const loadingLocations = normalizeLocationEntriesFromPayload(item, "loading", item.loading);
+  const unloadingLocations = normalizeLocationEntriesFromPayload(item, "unloading", item.unloading);
   return {
     id: String(item.id || item.dispatchNo || item.dispatch_no || `dispatch-restored-${Date.now()}`),
     createdAt: dispatchRowCreatedAt(item, planDate),
@@ -7083,8 +7412,10 @@ function normalizeDispatchRecycleRow(row = {}, planDate = todayInputValue()) {
     tonnage: userTextValue(item.tonnage),
     quantity: userTextValue(item.quantity ?? ""),
     weight: userTextValue(item.weight),
-    loading: userRawMultilineTextValue(item.loading),
-    unloading: userRawMultilineTextValue(item.unloading),
+    loading: composeLocationEntriesText(loadingLocations) || userRawMultilineTextValue(item.loading),
+    loadingLocations,
+    unloading: composeLocationEntriesText(unloadingLocations) || userRawMultilineTextValue(item.unloading),
+    unloadingLocations,
     loadTime: userTextValue(item.loadTime || item.load_time),
     vehicleSource: normalizeVehicleSource(item.vehicleSource || item.vehicle_source),
     supplier: userTextValue(item.supplier),
@@ -7286,9 +7617,11 @@ function dispatchRecycleRowFromOrder(order = {}) {
     direction: mapped.direction || "",
     tonnage: mapped.tonnage || "",
     quantity: mapped.quantity || "",
-    weight: mapped.weight || "",
-    loading: mapped.loading || "",
-    unloading: mapped.unloading || "",
+	    weight: mapped.weight || "",
+	    loading: mapped.loading || "",
+	    loadingLocations: mapped.loadingLocations || [],
+	    unloading: mapped.unloading || "",
+	    unloadingLocations: mapped.unloadingLocations || [],
     loadTime: "",
     vehicleSource: mapped.vehicleSource || "",
     supplier: mapped.supplier || "",
@@ -7328,12 +7661,16 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = []) {
         vehicle_source = @vehicleSource,
         supplier = @supplier,
         plate = @plate,
-        driver = @driver,
-        hk_driver = @hkDriver,
-        mainland_driver = @mainlandDriver,
-        transport_mode = @transportMode,
-        status = @status,
-        order_date = @orderDate
+	        driver = @driver,
+	        hk_driver = @hkDriver,
+	        mainland_driver = @mainlandDriver,
+	        transport_mode = @transportMode,
+	        loading = @loading,
+	        loading_locations = @loadingLocationsJson,
+	        unloading = @unloading,
+	        unloading_locations = @unloadingLocationsJson,
+	        status = @status,
+	        order_date = @orderDate
     WHERE no = @no AND deleted_at IS NULL
   `);
 
@@ -7366,9 +7703,13 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = []) {
       plate: dispatchRowText(row, "plate"),
       driver,
       hkDriver: isSingleDriver ? "" : (rowHkDriver || rowDriver),
-      mainlandDriver: isSingleDriver ? "" : rowMainlandDriver,
-      transportMode,
-      status: orderStatus,
+	      mainlandDriver: isSingleDriver ? "" : rowMainlandDriver,
+	      transportMode,
+	      loading: dispatchRowText(row, "loading"),
+	      loadingLocationsJson: locationEntriesJson(row.loadingLocations),
+	      unloading: dispatchRowText(row, "unloading"),
+	      unloadingLocationsJson: locationEntriesJson(row.unloadingLocations),
+	      status: orderStatus,
       orderDate: dispatchRowBusinessDate(row, planDate || order.order_date)
     });
     synced += 1;
@@ -7942,6 +8283,10 @@ async function readOrderPayload(body, existing = null) {
   const transportModeInput = userTextValue(pickBody(body, "transportMode", "transport_mode", existing?.transport_mode || ""));
   const transportMode = normalizeTransportMode(transportModeInput || (vehicleSource === OWN_VEHICLE_SOURCE ? "单司机" : ""))
     || (vehicleSource === OWN_VEHICLE_SOURCE ? "单司机" : "");
+  const loadingText = pickBody(body, "loading", "loading_place", existing?.loading || "");
+  const unloadingText = pickBody(body, "unloading", "unloading_place", existing?.unloading || "");
+  const loadingLocations = normalizeLocationEntriesFromPayload(body, "loading", loadingText, existing?.loading_locations || "");
+  const unloadingLocations = normalizeLocationEntriesFromPayload(body, "unloading", unloadingText, existing?.unloading_locations || "");
   return {
     no,
     dispatchNo: resolvedDispatchNo,
@@ -7962,8 +8307,12 @@ async function readOrderPayload(body, existing = null) {
     hkDriver: userTextValue(pickBody(body, "hkDriver", "hk_driver", existing?.hk_driver || "")),
     mainlandDriver: userTextValue(pickBody(body, "mainlandDriver", "mainland_driver", existing?.mainland_driver || "")),
     transportMode,
-    loading: userRawMultilineTextValue(pickBody(body, "loading", "loading_place", existing?.loading || "")),
-    unloading: userRawMultilineTextValue(pickBody(body, "unloading", "unloading_place", existing?.unloading || "")),
+    loading: composeLocationEntriesText(loadingLocations) || userRawMultilineTextValue(loadingText),
+    loadingLocations,
+    loadingLocationsJson: locationEntriesJson(loadingLocations),
+    unloading: composeLocationEntriesText(unloadingLocations) || userRawMultilineTextValue(unloadingText),
+    unloadingLocations,
+    unloadingLocationsJson: locationEntriesJson(unloadingLocations),
     date: dispatchDate || dateForNewNumbers,
     receivableHKD: Number(pickBody(body, "receivableHKD", "hkd_receivable", existing?.receivable_hkd || 0) || 0),
     receivableRMB: Number(pickBody(body, "receivableRMB", "rmb_receivable", existing?.receivable_rmb || 0) || 0),
@@ -8077,16 +8426,16 @@ app.post("/api/orders", async (req, res) => {
       throw createDispatchPlanConflictError(conflict);
     }
     await db.prepare(`
-      INSERT INTO orders
-        (no, dispatch_no, customer_id, customer, business_type, port, direction, tonnage, currency, quantity,
-         needs_weighing, weight, vehicle_source, supplier, plate, driver, hk_driver, mainland_driver, transport_mode, loading, unloading, order_date, receivable_hkd,
-         receivable_rmb, status, created_by_account_id, created_by_username, created_by_display_name, remark,
-         trip_no_enabled, trip_no, six_sheet_enabled, six_sheet_no)
-      VALUES
-        (@no, @dispatchNo, @customerId, @customer, @businessType, @port, @direction, @tonnage, @currency,
-         @quantity, @needsWeighing, @weight, @vehicleSource, @supplier, @plate, @driver, @hkDriver, @mainlandDriver, @transportMode, @loading, @unloading, @date,
-         @receivableHKD, @receivableRMB, @status, @createdByAccountId, @createdByUsername, @createdByName, @remark, @tripNoEnabled, @tripNo,
-         @sixSheetEnabled, @sixSheetNo)
+	      INSERT INTO orders
+	        (no, dispatch_no, customer_id, customer, business_type, port, direction, tonnage, currency, quantity,
+	         needs_weighing, weight, vehicle_source, supplier, plate, driver, hk_driver, mainland_driver, transport_mode, loading, loading_locations, unloading, unloading_locations, order_date, receivable_hkd,
+	         receivable_rmb, status, created_by_account_id, created_by_username, created_by_display_name, remark,
+	         trip_no_enabled, trip_no, six_sheet_enabled, six_sheet_no)
+	      VALUES
+	        (@no, @dispatchNo, @customerId, @customer, @businessType, @port, @direction, @tonnage, @currency,
+	         @quantity, @needsWeighing, @weight, @vehicleSource, @supplier, @plate, @driver, @hkDriver, @mainlandDriver, @transportMode, @loading, @loadingLocationsJson, @unloading, @unloadingLocationsJson, @date,
+	         @receivableHKD, @receivableRMB, @status, @createdByAccountId, @createdByUsername, @createdByName, @remark, @tripNoEnabled, @tripNo,
+	         @sixSheetEnabled, @sixSheetNo)
     `).run(item);
     await saveOrderFees(item.no, item.fees, item.currency);
   });
@@ -8215,7 +8564,8 @@ app.patch("/api/orders/:no", async (req, res) => {
           quantity = @quantity, weight = @weight, vehicle_source = @vehicleSource,
           supplier = @supplier, plate = @plate, driver = @driver, hk_driver = @hkDriver,
           mainland_driver = @mainlandDriver, transport_mode = @transportMode,
-          loading = @loading, unloading = @unloading,
+	          loading = @loading, loading_locations = @loadingLocationsJson,
+	          unloading = @unloading, unloading_locations = @unloadingLocationsJson,
           order_date = @date, receivable_hkd = @receivableHKD, receivable_rmb = @receivableRMB,
           status = @status, remark = @remark, trip_no_enabled = @tripNoEnabled,
           trip_no = @tripNo, six_sheet_enabled = @sixSheetEnabled, six_sheet_no = @sixSheetNo
@@ -10219,15 +10569,132 @@ app.get("/api/audit-logs", async (_req, res) => {
   res.json(rows.map(mapAuditLog));
 });
 
+function normalizeLocationEntriesForBackfill(currentValue, fallbackText = "") {
+  const currentEntries = normalizeLocationEntries(currentValue, "", { parseLegacy: false });
+  if (currentEntries.length) return currentEntries;
+  return splitLegacyLocationEntries(fallbackText);
+}
+
+function backfillDispatchRowLocation(row = {}, target = "") {
+  const camelKey = `${target}Locations`;
+  const snakeKey = `${target}_locations`;
+  const currentValue = hasOwnValue(row, camelKey) ? row[camelKey] : row[snakeKey];
+  const entries = normalizeLocationEntriesForBackfill(currentValue, row[target]);
+  if (!entries.length) return { row, changed: false };
+  const nextText = composeLocationEntriesText(entries) || userRawMultilineTextValue(row[target]);
+  const next = {
+    ...row,
+    [target]: nextText,
+    [camelKey]: entries
+  };
+  if (hasOwnValue(next, snakeKey)) delete next[snakeKey];
+  const changed = JSON.stringify(row[camelKey] || []) !== JSON.stringify(entries)
+    || String(row[target] || "") !== nextText
+    || hasOwnValue(row, snakeKey);
+  return { row: next, changed };
+}
+
+function backfillDispatchRowLocations(row = {}) {
+  let changed = false;
+  let next = row && typeof row === "object" && !Array.isArray(row) ? { ...row } : {};
+  ["loading", "unloading"].forEach((target) => {
+    const result = backfillDispatchRowLocation(next, target);
+    next = result.row;
+    changed = changed || result.changed;
+  });
+  return { row: next, changed };
+}
+
+async function backfillOrderLocationColumns() {
+  const rows = await db.prepare(`
+    SELECT no, loading, loading_locations, unloading, unloading_locations
+    FROM orders
+    WHERE deleted_at IS NULL
+      AND (
+        (COALESCE(loading, '') <> '' AND COALESCE(NULLIF(loading_locations, ''), '[]') = '[]')
+        OR (COALESCE(unloading, '') <> '' AND COALESCE(NULLIF(unloading_locations, ''), '[]') = '[]')
+      )
+  `).all();
+  if (!rows.length) return 0;
+
+  const update = await db.prepare(`
+    UPDATE orders
+    SET loading = @loading,
+        loading_locations = @loadingLocationsJson,
+        unloading = @unloading,
+        unloading_locations = @unloadingLocationsJson
+    WHERE no = @no
+  `);
+  let changed = 0;
+  const transaction = db.transaction(async (items) => {
+    for (const row of items) {
+      const loadingLocations = normalizeLocationEntriesForBackfill(row.loading_locations, row.loading);
+      const unloadingLocations = normalizeLocationEntriesForBackfill(row.unloading_locations, row.unloading);
+      const loading = composeLocationEntriesText(loadingLocations) || userRawMultilineTextValue(row.loading);
+      const unloading = composeLocationEntriesText(unloadingLocations) || userRawMultilineTextValue(row.unloading);
+      await update.run({
+        no: row.no,
+        loading,
+        loadingLocationsJson: locationEntriesJson(loadingLocations),
+        unloading,
+        unloadingLocationsJson: locationEntriesJson(unloadingLocations)
+      });
+      changed += 1;
+    }
+  });
+  await transaction(rows);
+  return changed;
+}
+
+async function backfillDispatchPlanLocationRows() {
+  const plans = await db.prepare("SELECT plan_date, rows_json FROM dispatch_plans").all();
+  if (!plans.length) return 0;
+  const update = await db.prepare(`
+    UPDATE dispatch_plans
+    SET rows_json = @rowsJson,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE plan_date = @planDate
+  `);
+  let changed = 0;
+  const transaction = db.transaction(async (items) => {
+    for (const plan of items) {
+      const rows = parseDispatchPlanRowsJson(plan.rows_json);
+      let planChanged = false;
+      const nextRows = rows.map((row) => {
+        const result = backfillDispatchRowLocations(row);
+        planChanged = planChanged || result.changed;
+        return result.row;
+      });
+      if (!planChanged) continue;
+      await update.run({
+        planDate: plan.plan_date,
+        rowsJson: JSON.stringify(nextRows)
+      });
+      changed += 1;
+    }
+  });
+  await transaction(plans);
+  return changed;
+}
+
+async function backfillStructuredLocationData() {
+  const orderCount = await backfillOrderLocationColumns();
+  const planCount = await backfillDispatchPlanLocationRows();
+  if (orderCount || planCount) {
+    console.log(`Backfilled structured loading/unloading locations: orders=${orderCount}, dispatch_plans=${planCount}`);
+  }
+}
+
 if (startupDatabaseMaintenanceEnabled) {
   try {
+    await backfillStructuredLocationData();
     await migrateDatabaseFilesToOss();
   } catch (error) {
-    console.error("Database file OSS migration failed", error);
+    console.error("Startup database maintenance failed", error);
     process.exit(1);
   }
 } else {
-  console.log("Startup database maintenance is disabled; skipping database file OSS migration.");
+  console.log("Startup database maintenance is disabled; skipping database backfills and file OSS migration.");
 }
 
 const server = http.createServer(app);

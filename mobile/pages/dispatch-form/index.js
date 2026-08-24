@@ -298,8 +298,12 @@ function locationEntryCount(entries) {
 }
 
 function locationEntriesPatchFromForm(form) {
-  const loadingEntries = splitLocationEntries(form && form.loading);
-  const unloadingEntries = splitLocationEntries(form && form.unloading);
+  const loadingEntries = normalizeLocationEntries(
+    form && Array.isArray(form.loadingLocations) && form.loadingLocations.length ? form.loadingLocations : splitLocationEntries(form && form.loading)
+  );
+  const unloadingEntries = normalizeLocationEntries(
+    form && Array.isArray(form.unloadingLocations) && form.unloadingLocations.length ? form.unloadingLocations : splitLocationEntries(form && form.unloading)
+  );
   return {
     loadingEntries,
     unloadingEntries,
@@ -1574,9 +1578,15 @@ Page({
       return;
     }
     if (!form.date) form.date = todayInputValue();
-    if (!form.customer) form.customer = customer.name;
-    form.loading = joinLocationEntries(this.data.loadingEntries);
-    form.unloading = joinLocationEntries(this.data.unloadingEntries);
+	    if (!form.customer) form.customer = customer.name;
+	    form.loadingLocations = normalizeLocationEntries(this.data.loadingEntries)
+	      .filter((entry) => entry.value)
+	      .map((entry) => ({ city: entry.city, district: entry.district, detail: entry.detail }));
+	    form.unloadingLocations = normalizeLocationEntries(this.data.unloadingEntries)
+	      .filter((entry) => entry.value)
+	      .map((entry) => ({ city: entry.city, district: entry.district, detail: entry.detail }));
+	    form.loading = joinLocationEntries(form.loadingLocations);
+	    form.unloading = joinLocationEntries(form.unloadingLocations);
     this.applyOrderRequiredFieldDefaults(form, customer);
     if (isOrderEditMode(this.data.mode) && form.status === "已签收") {
       const signMissingLabels = missingOrderSignRequiredFieldLabels(form, customer);

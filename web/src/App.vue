@@ -1408,6 +1408,7 @@ const bossVehicleExchangeRate = ref(BOSS_VEHICLE_DEFAULT_EXCHANGE_RATE);
 const bossVehicleExchangeRateInputMonth = ref(currentPeriodMonthKey());
 const bossVehicleExchangeRateSaving = ref(false);
 const bossDashboardDetailType = ref("");
+const bossUnreceivedActiveCategory = ref("customer");
 const monthlyExchangeRateDrafts = reactive({});
 const bossCompanyExpenseSaving = ref(false);
 const bossCompanyExpenseForm = reactive({
@@ -1475,8 +1476,10 @@ const driverRouteAdjustForm = reactive({
   customerName: "",
   driverIds: [],
   transportMode: "",
-  loading: "",
-  unloading: "",
+	  loading: "",
+	  loadingLocations: [],
+	  unloading: "",
+	  unloadingLocations: [],
   currency: "港币",
   amountHKD: -50,
   amountRMB: 0,
@@ -2045,9 +2048,11 @@ const dispatchForm = reactive({
   direction: "",
   tonnage: "",
   quantity: "",
-  weight: "",
-  loading: "",
-  unloading: "",
+	    weight: "",
+	    loading: "",
+	    loadingLocations: [],
+	    unloading: "",
+	    unloadingLocations: [],
   loadTime: "",
   vehicleSource: "",
   supplier: "",
@@ -2136,10 +2141,12 @@ const orderForm = reactive({
   hkDriver: "",
   mainlandDriver: "",
   transportMode: "单司机",
-  loading: "",
-  loadingContact: "",
-  loadingPhone: "",
-  unloading: "",
+	  loading: "",
+	  loadingLocations: [],
+	  loadingContact: "",
+	  loadingPhone: "",
+	  unloading: "",
+	  unloadingLocations: [],
   unloadingContact: "",
   unloadingPhone: "",
   date: "",
@@ -3926,9 +3933,11 @@ const dispatchPlanDisplayRows = computed(() =>
           needsWeighing: booleanFlag(row.needsWeighing, false),
           tonnage: row.tonnage || "",
           quantity: row.quantity || "",
-          weight: row.weight || "",
-          loading: row.loading || "",
-          unloading: row.unloading || "",
+	          weight: row.weight || "",
+	          loading: row.loading || "",
+	          loadingLocations: row.loadingLocations || [],
+	          unloading: row.unloading || "",
+	          unloadingLocations: row.unloadingLocations || [],
           vehicleSource: row.vehicleSource || "",
           supplier: row.supplier || ""
         },
@@ -4044,12 +4053,18 @@ function normalizeDispatchPlanRows(rows = [], date = dispatchDate.value) {
     const status = normalizeDispatchPlanStatus(row.status, row);
     const previousStatus = normalizeOptionalDispatchPlanStatus(row.previousStatus);
     const createdAt = dispatchRowCreatedAt(row) || timestampInputValueFromRowId(row) || normalizeTimestampInputValue(date);
+    const loadingLocations = normalizeStructuredDispatchLocationEntries("loading", row.loadingLocations, row.loading, { includeBlank: false });
+    const unloadingLocations = normalizeStructuredDispatchLocationEntries("unloading", row.unloadingLocations, row.unloading, { includeBlank: false });
     normalizedRows.push({
       ...row,
       date: row.date || date,
       createdAt,
       dispatchNo: row.dispatchNo || generateDispatchNo(date, normalizedRows),
       driver: row.driver || "",
+      loading: composeDispatchLocationEntriesText(loadingLocations) || row.loading || "",
+      loadingLocations,
+      unloading: composeDispatchLocationEntriesText(unloadingLocations) || row.unloading || "",
+      unloadingLocations,
       loadTime: row.loadTime || "",
       status,
       previousStatus: previousStatus && previousStatus !== status ? previousStatus : ""
@@ -4144,9 +4159,13 @@ function applyDispatchRowsToLocalOrders(rows = dispatchPlanRows.value) {
         : (isSingleDriver
           ? (rowDriver || rowHkDriver || currentOrder.driver || "")
           : [rowHkDriver || rowDriver, rowMainlandDriver].filter(Boolean).join(" / ")),
-      hkDriver: isOutsourced ? "" : (isSingleDriver ? "" : (rowHkDriver || rowDriver)),
-      mainlandDriver: isOutsourced ? "" : (isSingleDriver ? "" : rowMainlandDriver),
-      date: dispatchPlanDate(row),
+	      hkDriver: isOutsourced ? "" : (isSingleDriver ? "" : (rowHkDriver || rowDriver)),
+	      mainlandDriver: isOutsourced ? "" : (isSingleDriver ? "" : rowMainlandDriver),
+	      loading: row.loading || currentOrder.loading || "",
+	      loadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(row, "loading", currentOrder)),
+	      unloading: row.unloading || currentOrder.unloading || "",
+	      unloadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(row, "unloading", currentOrder)),
+	      date: dispatchPlanDate(row),
       dispatchLoadDate: dispatchPlanDate(row),
       dispatchLoadTime: row.loadTime || currentOrder.dispatchLoadTime || ""
     });
@@ -4760,7 +4779,7 @@ function dispatchFormDriverFields(fallback = {}) {
 
 function resetDispatchForm() {
   clearAllDispatchLocationDrafts();
-  Object.assign(dispatchForm, {
+	  Object.assign(dispatchForm, {
     date: dispatchDate.value || offsetDateInputValue(1),
     customerId: "",
     customer: "",
@@ -4772,7 +4791,9 @@ function resetDispatchForm() {
     quantity: "",
     weight: "",
     loading: "",
+    loadingLocations: [],
     unloading: "",
+    unloadingLocations: [],
     loadTime: "",
     vehicleSource: "汉业物流",
     supplier: "",
@@ -4823,9 +4844,11 @@ function fillDispatchFormFromPlanRow(row, fallbackDate = dispatchDate.value || o
     driver: dispatchSingleDriverNameFromRow(row, order),
     hkDriver: row.hkDriver || order.hkDriver || "",
     mainlandDriver: row.mainlandDriver || order.mainlandDriver || "",
-    note: row.note || order.remark || ""
-  });
-  dispatchCustomerKeyword.value = partnerDisplayLabel(customerName, "客户") || customerName;
+	    note: row.note || order.remark || ""
+	  });
+	  setDispatchFormLocationEntriesFromRecord("loading", row, order);
+	  setDispatchFormLocationEntriesFromRecord("unloading", row, order);
+	  dispatchCustomerKeyword.value = partnerDisplayLabel(customerName, "客户") || customerName;
   syncDispatchLoadHourDraft();
   dispatchCustomerPickerOpen.value = false;
 }
@@ -4883,6 +4906,8 @@ function generateDispatchNo(date = dispatchDate.value, extraRows = []) {
 function createManualDispatchPlanRow() {
   const isOutsourced = dispatchForm.vehicleSource === "外派车辆";
   const driverFields = dispatchFormDriverFields();
+  const loadingPayload = dispatchLocationPayload("loading");
+  const unloadingPayload = dispatchLocationPayload("unloading");
   const planDate = dispatchForm.date || dispatchDate.value;
   const createdAt = currentTimestampInputValue();
   return {
@@ -4899,8 +4924,8 @@ function createManualDispatchPlanRow() {
     tonnage: dispatchForm.tonnage,
     quantity: dispatchForm.quantity,
     weight: dispatchForm.weight,
-    loading: dispatchForm.loading,
-    unloading: dispatchForm.unloading,
+    ...loadingPayload,
+    ...unloadingPayload,
     loadTime: dispatchForm.loadTime,
     vehicleSource: dispatchForm.vehicleSource,
     supplier: isOutsourced ? dispatchForm.supplier : "",
@@ -4940,16 +4965,18 @@ async function saveEditedDispatchPlanRow() {
   const originalRow = dispatchPlanRows.value[targetIndex];
   const originalPlanDate = dispatchPlanDate(originalRow);
   const planDate = dispatchForm.date || originalPlanDate || dispatchDate.value;
-  const isOutsourced = dispatchForm.vehicleSource === "外派车辆";
-  const originalOrder = dispatchRowLiveOrder(originalRow) || {};
-  const driverFields = dispatchFormDriverFields({
+	  const isOutsourced = dispatchForm.vehicleSource === "外派车辆";
+	  const originalOrder = dispatchRowLiveOrder(originalRow) || {};
+	  const driverFields = dispatchFormDriverFields({
     ...originalRow,
     transportMode: originalRow.transportMode || originalOrder.transportMode || "",
     driver: originalRow.driver || originalOrder.driver || "",
     hkDriver: originalRow.hkDriver || originalOrder.hkDriver || "",
-    mainlandDriver: originalRow.mainlandDriver || originalOrder.mainlandDriver || ""
-  });
-  const updatedRow = {
+	    mainlandDriver: originalRow.mainlandDriver || originalOrder.mainlandDriver || ""
+	  });
+	  const loadingPayload = dispatchLocationPayload("loading");
+	  const unloadingPayload = dispatchLocationPayload("unloading");
+	  const updatedRow = {
     ...originalRow,
     date: planDate,
     customer: matchedCustomer.name,
@@ -4960,8 +4987,8 @@ async function saveEditedDispatchPlanRow() {
     tonnage: dispatchForm.tonnage,
     quantity: dispatchForm.quantity,
     weight: dispatchForm.weight,
-    loading: dispatchForm.loading,
-    unloading: dispatchForm.unloading,
+	    ...loadingPayload,
+	    ...unloadingPayload,
     loadTime: dispatchForm.loadTime,
     vehicleSource: dispatchForm.vehicleSource,
     supplier: isOutsourced ? dispatchForm.supplier : "",
@@ -4990,9 +5017,11 @@ async function saveEditedDispatchPlanRow() {
           transportMode: updatedRow.transportMode,
           driver: updatedRow.driver,
           hkDriver: updatedRow.hkDriver,
-          mainlandDriver: updatedRow.mainlandDriver,
-          loading: updatedRow.loading,
-          unloading: updatedRow.unloading,
+	          mainlandDriver: updatedRow.mainlandDriver,
+	          loading: updatedRow.loading,
+	          loadingLocations: updatedRow.loadingLocations || [],
+	          unloading: updatedRow.unloading,
+	          unloadingLocations: updatedRow.unloadingLocations || [],
           date: planDate,
           remark: updatedRow.note
         });
@@ -5073,9 +5102,11 @@ async function saveManualDispatchPlanRow() {
       transportMode: row.transportMode,
       driver: row.driver,
       hkDriver: row.hkDriver,
-      mainlandDriver: row.mainlandDriver,
-      loading: row.loading,
-      unloading: row.unloading,
+	      mainlandDriver: row.mainlandDriver,
+	      loading: row.loading,
+	      loadingLocations: row.loadingLocations || [],
+	      unloading: row.unloading,
+	      unloadingLocations: row.unloadingLocations || [],
       date: planDate,
       status: DISPATCH_STATUS_TO_ORDER_STATUS[row.status] || "预排",
       remark: row.note,
@@ -5122,9 +5153,11 @@ function createDispatchPlanRow(order) {
     direction: order.direction || "",
     tonnage: order.tonnage || "",
     quantity: order.quantity || "",
-    weight: order.weight || "",
-    loading: order.loading || "",
-    unloading: order.unloading || "",
+	    weight: order.weight || "",
+	    loading: order.loading || "",
+	    loadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(order, "loading")),
+	    unloading: order.unloading || "",
+	    unloadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(order, "unloading")),
     vehicleSource: order.vehicleSource || "",
     supplier: order.supplier || "",
     transportMode: mode,
@@ -5164,9 +5197,11 @@ function createDispatchDuplicateDraftRow(sourceRow, index) {
     direction: sourceOrder.direction || sourceRow.direction || "",
     tonnage: sourceOrder.tonnage || sourceRow.tonnage || "",
     quantity: sourceOrder.quantity || sourceRow.quantity || "",
-    weight: sourceOrder.weight || sourceRow.weight || "",
-    loading: sourceOrder.loading || sourceRow.loading || "",
-    unloading: sourceOrder.unloading || sourceRow.unloading || "",
+	    weight: sourceOrder.weight || sourceRow.weight || "",
+	    loading: sourceOrder.loading || sourceRow.loading || "",
+	    loadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(sourceOrder, "loading", sourceRow)),
+	    unloading: sourceOrder.unloading || sourceRow.unloading || "",
+	    unloadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(sourceOrder, "unloading", sourceRow)),
     vehicleSource: sourceOrder.vehicleSource || sourceRow.vehicleSource || "",
     supplier: sourceOrder.supplier || sourceRow.supplier || "",
     transportMode: sourceRow.transportMode || sourceOrder.transportMode || "",
@@ -5251,9 +5286,11 @@ async function saveDuplicateDispatchRows() {
         transportMode: draft.transportMode || sourceRow.transportMode || sourceOrder.transportMode || "",
         driver: draft.driver || sourceRow.driver || sourceOrder.driver || "",
         hkDriver: draft.hkDriver || sourceRow.hkDriver || sourceOrder.hkDriver || "",
-        mainlandDriver: draft.mainlandDriver || sourceRow.mainlandDriver || sourceOrder.mainlandDriver || "",
-        loading: draft.loading || sourceOrder.loading || sourceRow.loading || "",
-        unloading: draft.unloading || sourceOrder.unloading || sourceRow.unloading || "",
+	        mainlandDriver: draft.mainlandDriver || sourceRow.mainlandDriver || sourceOrder.mainlandDriver || "",
+	        loading: draft.loading || sourceOrder.loading || sourceRow.loading || "",
+	        loadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(draft, "loading", sourceOrder)),
+	        unloading: draft.unloading || sourceOrder.unloading || sourceRow.unloading || "",
+	        unloadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(draft, "unloading", sourceOrder)),
         loadTime: draft.loadTime || sourceRow.loadTime || sourceOrder.loadTime || "",
         date: dispatchDate.value,
         status: "预排",
@@ -5277,8 +5314,12 @@ async function saveDuplicateDispatchRows() {
         transportMode: draft.transportMode || sourceRow.transportMode || "",
         driver: draft.driver || sourceRow.driver || "",
         hkDriver: draft.hkDriver || sourceRow.hkDriver || "",
-        mainlandDriver: draft.mainlandDriver || sourceRow.mainlandDriver || "",
-        needsWeighing: booleanFlag(draft.needsWeighing ?? sourceRow.needsWeighing, false),
+	        mainlandDriver: draft.mainlandDriver || sourceRow.mainlandDriver || "",
+	        loading: draft.loading || sourceOrder.loading || sourceRow.loading || "",
+	        loadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(draft, "loading", sourceOrder)),
+	        unloading: draft.unloading || sourceOrder.unloading || sourceRow.unloading || "",
+	        unloadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(draft, "unloading", sourceOrder)),
+	        needsWeighing: booleanFlag(draft.needsWeighing ?? sourceRow.needsWeighing, false),
         loadTime: draft.loadTime || sourceRow.loadTime || "",
         status: DISPATCH_PLAN_DEFAULT_STATUS,
         previousStatus: "",
@@ -5336,10 +5377,12 @@ function applyDispatchRowToOrderForm(row) {
     plate: row.plate || "",
     transportMode: normalizeTransportMode(row.transportMode || orderForm.transportMode || (rowVehicleSource === OWN_VEHICLE_SOURCE ? "单司机" : "")),
     driver: row.driver || row.hkDriver || orderForm.driver,
-    hkDriver: row.hkDriver || "",
-    mainlandDriver: row.mainlandDriver || "",
-    loading: row.loading || "",
-    unloading: row.unloading || "",
+	    hkDriver: row.hkDriver || "",
+	    mainlandDriver: row.mainlandDriver || "",
+	    loading: row.loading || "",
+	    loadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(row, "loading")),
+	    unloading: row.unloading || "",
+	    unloadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(row, "unloading")),
     date: dispatchPlanDate(row),
     status: DISPATCH_STATUS_TO_ORDER_STATUS[row.status] || orderForm.status,
     remark: [orderForm.remark, row.note ? `排车备注：${row.note}` : ""].filter(Boolean).join("\n")
@@ -5475,13 +5518,45 @@ function dispatchSummarizeLocationEntries(value = "") {
   return segments.join(" + ");
 }
 
+function dispatchSummarizeStructuredLocationEntries(entries = []) {
+  const normalized = normalizeStructuredDispatchLocationEntries("", entries, "", { includeBlank: false })
+    .map((entry) => {
+      const city = String(entry.city || "").trim();
+      const district = String(entry.district || "").trim();
+      const detail = String(entry.detail || "").trim();
+      const text = city && district
+        ? [city, district].join(" / ")
+        : city || district || detail;
+      return { city, district, text };
+    })
+    .filter((item) => item.text);
+  if (!normalized.length) return "";
+  const segments = [];
+  let lastCity = "";
+  normalized.forEach((item) => {
+    const city = item.city;
+    if (city && lastCity && normalizeLocationText(city) === normalizeLocationText(lastCity)) {
+      segments.push(item.district || item.text);
+      return;
+    }
+    segments.push(item.text);
+    lastCity = city || "";
+  });
+  return segments.join(" + ");
+}
+
 function dispatchShortLocation(value = "") {
   return dispatchSummarizeLocationEntries(value);
 }
 
+function dispatchShortLocationForRecord(record = {}, target = "", fallbackRecord = {}) {
+  const entries = recordDispatchLocationEntries(record, target, fallbackRecord);
+  return dispatchSummarizeStructuredLocationEntries(entries) || dispatchShortLocation(record?.[target] || fallbackRecord?.[target]);
+}
+
 function dispatchOrderRouteText(order) {
-  const loading = dispatchShortLocation(order?.loading);
-  const unloading = dispatchShortLocation(order?.unloading);
+  const loading = dispatchShortLocationForRecord(order, "loading");
+  const unloading = dispatchShortLocationForRecord(order, "unloading");
   return [loading, unloading].filter(Boolean).join(" → ") || "-";
 }
 
@@ -5491,8 +5566,8 @@ function dispatchExportShortLocation(value = "") {
 
 function dispatchExportRouteSummary(row = {}) {
   const order = row.order || {};
-  const loading = dispatchExportShortLocation(order.loading || row.loading);
-  const unloading = dispatchExportShortLocation(order.unloading || row.unloading);
+  const loading = dispatchShortLocationForRecord(order, "loading", row) || dispatchExportShortLocation(order.loading || row.loading);
+  const unloading = dispatchShortLocationForRecord(order, "unloading", row) || dispatchExportShortLocation(order.unloading || row.unloading);
   return [loading, unloading].filter(Boolean).join(" → ");
 }
 
@@ -5530,11 +5605,13 @@ function spreadsheetHardWrapText(value = "", maxWidth = 34) {
 function dispatchExportRouteText(row = {}) {
   const order = row.order || {};
   const record = {
-    ...order,
-    loading: order.loading || row.loading || "",
-    loadingContact: order.loadingContact || row.loadingContact || "",
-    loadingPhone: order.loadingPhone || row.loadingPhone || "",
-    unloading: order.unloading || row.unloading || "",
+	    ...order,
+	    loading: order.loading || row.loading || "",
+	    loadingLocations: order.loadingLocations || row.loadingLocations || [],
+	    loadingContact: order.loadingContact || row.loadingContact || "",
+	    loadingPhone: order.loadingPhone || row.loadingPhone || "",
+	    unloading: order.unloading || row.unloading || "",
+	    unloadingLocations: order.unloadingLocations || row.unloadingLocations || [],
     unloadingContact: order.unloadingContact || row.unloadingContact || "",
     unloadingPhone: order.unloadingPhone || row.unloadingPhone || ""
   };
@@ -5577,7 +5654,13 @@ function dispatchMessageText(rows = dispatchPlanDisplayRows.value) {
   if (!rows.length) return "";
   return rows.map((row) => {
     const order = row.order || {};
-    const record = { ...order, loading: order.loading || row.loading, unloading: order.unloading || row.unloading };
+	    const record = {
+	      ...order,
+	      loading: order.loading || row.loading,
+	      loadingLocations: order.loadingLocations || row.loadingLocations || [],
+	      unloading: order.unloading || row.unloading,
+	      unloadingLocations: order.unloadingLocations || row.unloadingLocations || []
+	    };
     const date = dispatchPlanDate(row) || "-";
     const time = row.loadTime || order.loadingTime || "-";
     const direction = order.direction || row.direction || "";
@@ -5637,9 +5720,11 @@ async function exportDispatchPlanRows() {
           direction: row.direction,
           tonnage: row.tonnage,
           quantity: row.quantity,
-          route: dispatchExportRouteSummary(row),
-          loading: row.loading,
-          unloading: row.unloading,
+	          route: dispatchExportRouteSummary(row),
+	          loading: row.loading,
+	          loadingLocations: row.loadingLocations || row.order?.loadingLocations || [],
+	          unloading: row.unloading,
+	          unloadingLocations: row.unloadingLocations || row.order?.unloadingLocations || [],
           loadTime: row.loadTime,
           vehicleSource: row.vehicleSource,
           supplier: row.supplier,
@@ -5685,9 +5770,13 @@ async function applyDispatchPlanToOrders() {
         driver: normalizedMode === "单司机"
           ? (row.driver || row.hkDriver || order.driver || "")
           : [row.hkDriver || row.driver || "", row.mainlandDriver || ""].filter(Boolean).join(" / "),
-        hkDriver: normalizedMode === "单司机" ? "" : (row.hkDriver || row.driver || ""),
-        mainlandDriver: normalizedMode === "单司机" ? "" : (row.mainlandDriver || "")
-      };
+	        hkDriver: normalizedMode === "单司机" ? "" : (row.hkDriver || row.driver || ""),
+	        mainlandDriver: normalizedMode === "单司机" ? "" : (row.mainlandDriver || ""),
+	        loading: row.loading || order.loading || "",
+	        loadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(row, "loading", order)),
+	        unloading: row.unloading || order.unloading || "",
+	        unloadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(row, "unloading", order))
+	      };
       const item = await ordersApi.updateOrder(order.no, nextOrder);
       orderRows.value = orderRows.value.map((current) => current.no === item.no ? item : current);
     }
@@ -11099,9 +11188,56 @@ function buildBossUnreceivedSupplierRows(filterKey = bossPeriodFilter.value) {
   );
 }
 
+const BOSS_UNRECEIVED_ALL_FILTER = "all";
+const BOSS_UNRECEIVED_CATEGORY_OPTIONS = [
+  { key: "customer", label: "客户未收" },
+  { key: "customs", label: "报关未收" },
+  { key: "supplier", label: "供应商未付" }
+];
+
 const bossUnreceivedCustomerRows = computed(() => buildBossUnreceivedCustomerRows(bossPeriodFilter.value));
 const bossUnreceivedCustomsRows = computed(() => buildBossUnreceivedCustomsRows(bossPeriodFilter.value));
 const bossUnreceivedSupplierRows = computed(() => buildBossUnreceivedSupplierRows(bossPeriodFilter.value));
+const bossUnreceivedAllCustomerRows = computed(() => buildBossUnreceivedCustomerRows(BOSS_UNRECEIVED_ALL_FILTER));
+const bossUnreceivedAllCustomsRows = computed(() => buildBossUnreceivedCustomsRows(BOSS_UNRECEIVED_ALL_FILTER));
+const bossUnreceivedAllSupplierRows = computed(() => buildBossUnreceivedSupplierRows(BOSS_UNRECEIVED_ALL_FILTER));
+
+function bossUnreceivedRowsByCategory(category = bossUnreceivedActiveCategory.value) {
+  if (category === "customs") return bossUnreceivedAllCustomsRows.value;
+  if (category === "supplier") return bossUnreceivedAllSupplierRows.value;
+  return bossUnreceivedAllCustomerRows.value;
+}
+
+function bossUnreceivedSummaryForRows(rows = []) {
+  const hkd = rows.reduce((sum, row) => sum + Number(row.unreceivedHKD || 0), 0);
+  const rmb = rows.reduce((sum, row) => sum + Number(row.unreceivedRMB || 0), 0);
+  const equivalentRMB = rows.reduce((sum, row) => sum + Number(row.equivalentRMB || 0), 0);
+  return {
+    customerCount: new Set(rows.map((row) => String(row.fullName || row.name || "").trim()).filter(Boolean)).size,
+    recordCount: rows.reduce((sum, row) => sum + Number(row.orderCount || row.customsRecordCount || row.count || 0), 0),
+    rowCount: rows.length,
+    hkd,
+    rmb,
+    equivalentRMB,
+    equivalentRMBDisplay: moneyRmbDisplay(equivalentRMB)
+  };
+}
+
+const bossUnreceivedCategorySummaries = computed(() => ({
+  customer: bossUnreceivedSummaryForRows(bossUnreceivedAllCustomerRows.value),
+  customs: bossUnreceivedSummaryForRows(bossUnreceivedAllCustomsRows.value),
+  supplier: bossUnreceivedSummaryForRows(bossUnreceivedAllSupplierRows.value)
+}));
+
+const activeBossUnreceivedRows = computed(() => bossUnreceivedRowsByCategory());
+const activeBossUnreceivedSummary = computed(() =>
+  bossUnreceivedCategorySummaries.value[bossUnreceivedActiveCategory.value] || bossUnreceivedCategorySummaries.value.customer
+);
+
+const activeBossUnreceivedCategoryMeta = computed(() =>
+  BOSS_UNRECEIVED_CATEGORY_OPTIONS.find((item) => item.key === bossUnreceivedActiveCategory.value)
+  || BOSS_UNRECEIVED_CATEGORY_OPTIONS[0]
+);
 
 const bossUnreceivedSummary = computed(() => {
   const customerHKD = bossUnreceivedCustomerRows.value.reduce((sum, row) => sum + Number(row.unreceivedHKD || 0), 0);
@@ -13194,7 +13330,7 @@ function scheduleClearDispatchRecognitionStatus(delay = 4200) {
 
 function dispatchRecognitionDetailOnlyLocation(value = "") {
   const detail = cleanDispatchExcelCellText(value);
-  return detail ? composeDispatchLocationParts("", "", detail) : "";
+  return detail ? { city: "", district: "", detail } : "";
 }
 
 function dispatchImageTextAfterLabel(line = "", label = "") {
@@ -16524,7 +16660,7 @@ const orderFreightTemplateOptions = computed(() =>
 const latestOrderTemplateSource = computed(() => {
   const customerId = orderForm.customerId || selectedCustomer.value?.id || "";
   const customerName = orderForm.customer || selectedCustomer.value?.name || "";
-  return orderRows.value
+  const order = orderRows.value
     .filter((item) =>
       item.no !== editingOrderNo.value
       && Array.isArray(item.fees)
@@ -16535,6 +16671,11 @@ const latestOrderTemplateSource = computed(() => {
       )
     )
     .sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")) || String(b.no || "").localeCompare(String(a.no || "")))[0] || null;
+  if (!order) return null;
+  return {
+    ...order,
+    fees: Array.isArray(order.fees) ? order.fees.map((fee) => sanitizeOrderFreightTemplateFee(fee)) : []
+  };
 });
 const templateDesignerColumns = computed(() => visibleTemplateColumnsForOrders(templatePreviewDataRows.value));
 
@@ -17505,28 +17646,32 @@ function dispatchLocationContactLines(record = {}, target, location = "", index 
 }
 
 function dispatchMessageLocationDetail(value = "") {
-  const text = String(value || "").trim();
-  if (!text) return "";
-  const parts = splitDispatchLocationParts(text);
-  return parts.detail || "";
+  if (value && typeof value === "object") {
+    return String(value.detail ?? "");
+  }
+  return String(value ?? "");
 }
 
 function dispatchLocationBlock(label, record = {}, target) {
-  const locations = splitDispatchLocationEntriesText(record[target]);
-  const entries = locations.length ? locations : [""];
+  const locations = recordDispatchLocationEntries(record, target);
+  const entries = locations.length ? locations : [emptyDispatchLocationEntry()];
   if (entries.length <= 1) {
-    const location = entries[0] || "-";
+    const location = entries[0] || emptyDispatchLocationEntry();
+    const locationText = composeDispatchLocationParts(location.city, location.district, location.detail);
     const displayLocation = dispatchMessageLocationDetail(location) || "-";
     return [
       `${label}：${displayLocation}`,
-      ...dispatchLocationContactLines(record, target, location)
+      ...dispatchLocationContactLines(record, target, locationText)
     ].join("\n");
   }
   return entries
-    .flatMap((location, index) => [
+    .flatMap((location, index) => {
+      const locationText = composeDispatchLocationParts(location.city, location.district, location.detail);
+      return [
       `${label}${index + 1}：${dispatchMessageLocationDetail(location) || "-"}`,
-      ...dispatchLocationContactLines(record, target, location, index)
-    ])
+      ...dispatchLocationContactLines(record, target, locationText, index)
+    ];
+    })
     .join("\n");
 }
 
@@ -18716,8 +18861,13 @@ function confirmRouteTreeSelection() {
   const value = routeTreeValue.value;
   if (!value) {
     orderForm[routeTreeDropdown.target] = "";
+    orderForm[dispatchLocationEntriesKey(routeTreeDropdown.target)] = [];
   } else {
-    orderForm[routeTreeDropdown.target] = value;
+    setOrderLocationEntries(routeTreeDropdown.target, [{
+      city: routeTreeDropdown.level1,
+      district: routeTreeDropdown.level2,
+      detail: ""
+    }]);
   }
   closeRouteTreeDropdown();
   scheduleAutoFreightSync();
@@ -18755,6 +18905,7 @@ function locationCityCandidates() {
 function splitLocationParts(value = "") {
   const text = String(value || "")
     .replace(/\r/g, "\n")
+    .replace(/[／｜|]/g, "/")
     .split(/[；;]+/)
     .map((part) => part.trim())
     .filter(Boolean)[0] || "";
@@ -18814,7 +18965,7 @@ function isStructuredDispatchLocationParts(parts = []) {
 }
 
 function splitDispatchLocationParts(value = "") {
-  const rawText = String(value || "").replace(/\r/g, "\n");
+  const rawText = String(value || "").replace(/\r/g, "\n").replace(/[／｜|]/g, "/");
   const text = rawText.replace(/^\n+|\n+$/g, "");
   if (!text.trim()) return { city: "", district: "", detail: "" };
   if (["香港", "澳门"].includes(text.trim())) {
@@ -18822,13 +18973,6 @@ function splitDispatchLocationParts(value = "") {
       city: text.trim(),
       district: "",
       detail: ""
-    };
-  }
-  if (text.includes("\n")) {
-    return {
-      city: "",
-      district: "",
-      detail: text
     };
   }
   if (text.includes("/")) {
@@ -18872,6 +19016,13 @@ function splitDispatchLocationParts(value = "") {
       }
     }
     return parsed;
+  }
+  if (text.includes("\n")) {
+    return {
+      city: "",
+      district: "",
+      detail: text
+    };
   }
   return {
     city: "",
@@ -18934,6 +19085,111 @@ function normalizeDispatchLocationPartsForTarget(target = "", value = "") {
   return { city, district, detail };
 }
 
+function emptyDispatchLocationEntry() {
+  return { city: "", district: "", detail: "" };
+}
+
+function dispatchLocationEntriesKey(target = "") {
+  return target === "unloading" ? "unloadingLocations" : "loadingLocations";
+}
+
+function dispatchLocationEntryHasValue(entry = {}) {
+  return Boolean(String(entry.city || entry.district || entry.detail || "").trim());
+}
+
+function normalizeDispatchLocationEntryForTarget(target = "", entry = {}) {
+  if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+    const hasStructuredParts = Object.prototype.hasOwnProperty.call(entry, "city")
+      || Object.prototype.hasOwnProperty.call(entry, "district")
+      || Object.prototype.hasOwnProperty.call(entry, "detail");
+    if (hasStructuredParts) {
+      return {
+        city: normalizeDispatchLocationCityValue(target, entry.city),
+        district: normalizeDispatchLocationText(entry.district, { singleLine: true }),
+        detail: normalizeDispatchLocationDetailText(entry.detail)
+      };
+    }
+    if (Object.prototype.hasOwnProperty.call(entry, "value")) {
+      return normalizeDispatchLocationPartsForTarget(target, entry.value);
+    }
+  }
+  return normalizeDispatchLocationPartsForTarget(target, entry);
+}
+
+function parseDispatchLocationEntriesJson(value) {
+  if (Array.isArray(value)) return value;
+  if (value && typeof value === "object") return [value];
+  const text = String(value ?? "").trim();
+  if (!text || !text.startsWith("[")) return [];
+  try {
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeStructuredDispatchLocationEntries(target = "", entries = [], fallbackText = "", options = {}) {
+  const sourceEntries = parseDispatchLocationEntriesJson(entries);
+  let normalized = sourceEntries
+    .map((entry) => normalizeDispatchLocationEntryForTarget(target, entry))
+    .filter(options.preserveDraftEntries ? () => true : dispatchLocationEntryHasValue);
+  const legacyText = fallbackText || (typeof entries === "string" ? entries : "");
+  if (!normalized.length && legacyText) {
+    normalized = options.fallbackAsDetail
+      ? [{ city: "", district: "", detail: normalizeDispatchLocationDetailText(legacyText) }]
+      : (options.parseLegacy === false ? [] : splitDispatchLocationEntriesText(legacyText)
+        .map((entry) => normalizeDispatchLocationPartsForTarget(target, entry))
+        .filter(dispatchLocationEntryHasValue));
+  }
+  if (!normalized.length && options.includeBlank !== false) return [emptyDispatchLocationEntry()];
+  return normalized;
+}
+
+function cloneDispatchLocationEntries(entries = []) {
+  return (Array.isArray(entries) ? entries : [])
+    .map((entry) => ({
+      city: normalizeDispatchLocationCityValue("", entry.city),
+      district: normalizeDispatchLocationText(entry.district, { singleLine: true }),
+      detail: normalizeDispatchLocationDetailText(entry.detail)
+    }))
+    .filter(dispatchLocationEntryHasValue);
+}
+
+function composeDispatchLocationEntriesText(entries = []) {
+  return (Array.isArray(entries) ? entries : [])
+    .map((entry) => composeDispatchLocationParts(entry.city, entry.district, entry.detail))
+    .filter((entry) => String(entry || "").trim())
+    .join("；");
+}
+
+function recordDispatchLocationEntries(record = {}, target = "", fallbackRecord = {}) {
+  const key = dispatchLocationEntriesKey(target);
+  const entries = normalizeStructuredDispatchLocationEntries(
+    target,
+    record[key] && record[key].length ? record[key] : fallbackRecord[key],
+    record[target] || fallbackRecord[target] || "",
+    { includeBlank: false }
+  );
+  return entries;
+}
+
+function setDispatchFormLocationEntriesFromRecord(target = "", record = {}, fallbackRecord = {}) {
+  const entries = recordDispatchLocationEntries(record, target, fallbackRecord);
+  setDispatchLocationEntries(target, entries.length ? entries : [emptyDispatchLocationEntry()]);
+}
+
+function dispatchLocationPayload(target = "") {
+  const entries = dispatchLocationEntries(target)
+    .map((entry, index) => dispatchLocationPartsForEdit(target, index))
+    .filter(dispatchLocationEntryHasValue);
+  const normalized = entries.length ? entries : [];
+  return {
+    [target]: composeDispatchLocationEntriesText(normalized),
+    [dispatchLocationEntriesKey(target)]: cloneDispatchLocationEntries(normalized)
+  };
+}
+
 function splitAddressBookLocationValue(value = "") {
   return String(value || "")
     .replace(/\r/g, "\n")
@@ -18958,20 +19214,73 @@ function splitDispatchLocationEntriesText(value = "") {
 }
 
 function dispatchLocationEntries(target) {
-  return splitDispatchLocationEntriesText(dispatchForm[target] || "");
+  const key = dispatchLocationEntriesKey(target);
+  const entries = normalizeStructuredDispatchLocationEntries(target, dispatchForm[key], dispatchForm[target], {
+    preserveDraftEntries: true
+  });
+  return entries.length ? entries : [emptyDispatchLocationEntry()];
 }
 
 function dispatchLocationEntryCount(target) {
-  return dispatchLocationEntries(target).filter(Boolean).length;
+  return dispatchLocationEntries(target).filter(dispatchLocationEntryHasValue).length;
 }
 
 function setDispatchLocationEntries(target, entries) {
-  const normalized = entries.map((item) => String(item || ""));
-  dispatchForm[target] = normalized.length > 1 || normalized.some(Boolean) ? normalized.join("；") : "";
+  const key = dispatchLocationEntriesKey(target);
+  const normalized = normalizeStructuredDispatchLocationEntries(target, entries, "", {
+    includeBlank: true,
+    preserveDraftEntries: true
+  });
+  dispatchForm[key] = normalized;
+  dispatchForm[target] = composeDispatchLocationEntriesText(normalized);
+}
+
+function setOrderLocationEntries(target, entries = []) {
+  const key = dispatchLocationEntriesKey(target);
+  const normalized = normalizeStructuredDispatchLocationEntries(target, entries, "", { includeBlank: false });
+  orderForm[key] = cloneDispatchLocationEntries(normalized);
+  orderForm[target] = composeDispatchLocationEntriesText(normalized);
+}
+
+function setCurrentLocationEntries(target, entries = []) {
+  if (locationPicker.owner === "dispatch") {
+    setDispatchLocationEntries(target, entries);
+    return;
+  }
+  setOrderLocationEntries(target, entries);
+}
+
+function locationEntryFromAreaAndDetail(target = "", area = "", detail = "") {
+  const parts = splitLocationParts(area || "");
+  return normalizeDispatchLocationEntryForTarget(target, {
+    city: parts.city,
+    district: parts.district,
+    detail: normalizeDispatchLocationDetailText(detail)
+  });
+}
+
+function locationEntryFromOption(target = "", option = {}, detailOverride = "") {
+  const detailText = normalizeDispatchLocationDetailText(
+    detailOverride
+    || option.address
+    || option.detail
+    || ""
+  );
+  if (option.area) return locationEntryFromAreaAndDetail(target, option.area, detailText);
+  if (option.level1 || option.level2) {
+    return normalizeDispatchLocationEntryForTarget(target, {
+      city: option.level1 || "",
+      district: option.level2 || "",
+      detail: detailText
+    });
+  }
+  const parsed = normalizeDispatchLocationPartsForTarget(target, option.value || "");
+  if (detailText) parsed.detail = detailText;
+  return parsed;
 }
 
 function dispatchLocationPersistedParts(target, index) {
-  return normalizeDispatchLocationPartsForTarget(target, dispatchLocationEntries(target)[index] || "");
+  return normalizeDispatchLocationEntryForTarget(target, dispatchLocationEntries(target)[index] || emptyDispatchLocationEntry());
 }
 
 function dispatchLocationDraftHasPart(draft, part) {
@@ -18990,13 +19299,17 @@ function dispatchLocationPartsForEdit(target, index) {
 
 function persistDispatchLocationEntryParts(target, index, parts = {}) {
   const entries = dispatchLocationEntries(target);
-  entries[index] = composeDispatchLocationParts(parts.city, parts.district, parts.detail);
+  entries[index] = {
+    city: normalizeDispatchLocationCityValue(target, parts.city),
+    district: normalizeDispatchLocationText(parts.district, { singleLine: true }),
+    detail: normalizeDispatchLocationDetailText(parts.detail)
+  };
   setDispatchLocationEntries(target, entries);
 }
 
 function updateDispatchLocationEntry(target, index, value) {
   const entries = dispatchLocationEntries(target);
-  entries[index] = value;
+  entries[index] = normalizeDispatchLocationEntryForTarget(target, value);
   setDispatchLocationEntries(target, entries);
 }
 
@@ -19179,10 +19492,10 @@ function confirmFirstDispatchLocationDistrictOption(target, index) {
 
 function invalidDispatchLocationMessage(target) {
   const label = target === "unloading" ? "卸货地" : "装货地";
-  const entries = dispatchLocationEntries(target).filter((item) => String(item || "").trim());
+  const entries = dispatchLocationEntries(target).filter(dispatchLocationEntryHasValue);
   if (!entries.length) return `请填写${label}`;
   const invalidIndex = entries.findIndex((entry) => {
-    const parts = splitDispatchLocationParts(entry);
+    const parts = normalizeDispatchLocationEntryForTarget(target, entry);
     return !parts.city && !parts.detail;
   });
   return invalidIndex >= 0 ? `${label}第 ${invalidIndex + 1} 条需要填写市或详细地址` : "";
@@ -19190,7 +19503,7 @@ function invalidDispatchLocationMessage(target) {
 
 function addDispatchLocationEntry(target) {
   const entries = dispatchLocationEntries(target);
-  setDispatchLocationEntries(target, [...entries, ""]);
+  setDispatchLocationEntries(target, [...entries, emptyDispatchLocationEntry()]);
   dispatchLocationDistrictPicker.key = "";
   dispatchLocationDistrictPicker.keyword = "";
 }
@@ -19198,12 +19511,9 @@ function addDispatchLocationEntry(target) {
 function normalizeDispatchLocationFormValuesForSave() {
   ["loading", "unloading"].forEach((target) => {
     const entries = dispatchLocationEntries(target)
-      .map((item, index) => {
-        const parts = dispatchLocationPartsForEdit(target, index);
-        return composeDispatchLocationParts(parts.city, parts.district, parts.detail);
-      })
-      .filter((item) => String(item || "").trim());
-    setDispatchLocationEntries(target, entries.length ? entries : [""]);
+      .map((item, index) => dispatchLocationPartsForEdit(target, index))
+      .filter(dispatchLocationEntryHasValue);
+    setDispatchLocationEntries(target, entries.length ? entries : [emptyDispatchLocationEntry()]);
   });
 }
 
@@ -19274,10 +19584,16 @@ function buildNormalizedOrderPayload() {
   payload.transportMode = normalizeTransportMode(
     payload.transportMode || (normalizeVehicleSource(payload.vehicleSource) === OWN_VEHICLE_SOURCE ? "单司机" : "")
   );
-  payload.plate = normalizePlateText(payload.plate);
-  payload.loading = normalizeDispatchLocationDetailText(payload.loading).trim();
-  payload.unloading = normalizeDispatchLocationDetailText(payload.unloading).trim();
-  payload.remark = normalizedOrderPayloadTextValue(mergeCustomsRemark(orderForm.remark), { singleLine: false });
+		  payload.plate = normalizePlateText(payload.plate);
+		  const loadingText = normalizeDispatchLocationDetailText(payload.loading).trim();
+		  const unloadingText = normalizeDispatchLocationDetailText(payload.unloading).trim();
+		  const loadingLocations = normalizeStructuredDispatchLocationEntries("loading", payload.loadingLocations, loadingText, { includeBlank: false, parseLegacy: false, fallbackAsDetail: true });
+		  const unloadingLocations = normalizeStructuredDispatchLocationEntries("unloading", payload.unloadingLocations, unloadingText, { includeBlank: false, parseLegacy: false, fallbackAsDetail: true });
+		  payload.loadingLocations = cloneDispatchLocationEntries(loadingLocations);
+		  payload.unloadingLocations = cloneDispatchLocationEntries(unloadingLocations);
+		  payload.loading = composeDispatchLocationEntriesText(loadingLocations) || loadingText;
+		  payload.unloading = composeDispatchLocationEntriesText(unloadingLocations) || unloadingText;
+	  payload.remark = normalizedOrderPayloadTextValue(mergeCustomsRemark(orderForm.remark), { singleLine: false });
   return payload;
 }
 
@@ -19526,9 +19842,18 @@ function applySelectedAddressBookEntries() {
     notify("请选择有效地址");
     return;
   }
-  const form = currentLocationForm();
-  clearDispatchLocationDraftsForPickerTarget();
-  form[locationPicker.target] = locationPicker.owner === "dispatch" ? values.join("；") : values.join("\n");
+			  clearDispatchLocationDraftsForPickerTarget();
+		  if (locationPicker.owner === "dispatch") {
+		    setDispatchLocationEntries(
+		      locationPicker.target,
+		      selectedOptions.map((option) => locationEntryFromOption(locationPicker.target, option))
+		    );
+		  } else {
+		    setOrderLocationEntries(
+		      locationPicker.target,
+		      selectedOptions.map((option) => locationEntryFromOption(locationPicker.target, option))
+		    );
+		  }
   const firstOption = selectedOptions[0] || {};
   if (locationPicker.owner === "order" && locationPicker.target === "unloading") {
     orderForm.unloadingContact = firstOption.contact || "";
@@ -19607,12 +19932,8 @@ function handleLocationInput(target) {
 
 function applyLocationOption(option) {
   const detail = String(locationPicker.detail || "").trim();
-  const value = detail && !String(option.value).includes(detail)
-    ? `${option.value} / ${detail}`
-    : option.value;
-  const form = currentLocationForm();
   clearDispatchLocationDraftsForPickerTarget();
-  form[locationPicker.target] = value;
+  setCurrentLocationEntries(locationPicker.target, [locationEntryFromOption(locationPicker.target, option, detail)]);
   if (locationPicker.owner === "order" && locationPicker.target === "unloading") {
     orderForm.unloadingContact = option.contact || "";
     orderForm.unloadingPhone = option.phone || "";
@@ -19643,11 +19964,12 @@ function applyTemplateLocationSelection() {
     return;
   }
   const detail = String(locationPicker.detail || "").trim();
-  const form = currentLocationForm();
   clearDispatchLocationDraftsForPickerTarget();
-  form[locationPicker.target] = detail && !value.includes(detail)
-    ? `${value} / ${detail}`
-    : value;
+  setCurrentLocationEntries(locationPicker.target, [{
+    city: locationPicker.level1,
+    district: locationPicker.level2,
+    detail
+  }]);
   closeLocationPicker();
   if (locationPicker.owner === "order") {
     scheduleAutoFreightSync();
@@ -19664,9 +19986,8 @@ function applyCustomLocation() {
     notify("请输入地址或选择片区");
     return;
   }
-  const form = currentLocationForm();
   clearDispatchLocationDraftsForPickerTarget();
-  form[locationPicker.target] = value;
+  setCurrentLocationEntries(locationPicker.target, [{ city: "", district: "", detail: value }]);
   closeLocationPicker();
   if (locationPicker.owner === "order") {
     scheduleAutoFreightSync();
@@ -20519,9 +20840,10 @@ function keepSelection(previousValue, rows, key, fallback = "") {
 
 async function loadDatabaseData(options = {}) {
   const { preserveSelection = false, silent = false } = options;
-  const canLoadCustomers = canAccessModule("customers");
-  const canLoadOrders = canAccessModule("orders");
-  const canLoadCustomsBusiness = canAccessModule("customsBusiness") || canAccessModule("financeCustomsStatements");
+  const canLoadBossCenterData = BOSS_CENTER_MODULES.some((moduleId) => canAccessModule(moduleId));
+  const canLoadCustomers = canAccessModule("customers") || canLoadBossCenterData;
+  const canLoadOrders = canAccessModule("orders") || canLoadBossCenterData;
+  const canLoadCustomsBusiness = canAccessModule("customsBusiness") || canAccessModule("financeCustomsStatements") || canLoadBossCenterData;
   const customsBusinessLoadScope = activeModule.value === "financeCustomsStatements" ? "customsStatement" : "customsBusiness";
   const canLoadOtherBusiness = canAccessModule("otherBusiness") || BOSS_CENTER_MODULES.some((moduleId) => canAccessModule(moduleId));
   const canLoadVehicleDriver = canAccessModule("vehicleDriver");
@@ -20534,7 +20856,7 @@ async function loadDatabaseData(options = {}) {
   const canLoadAccounts = canAccessModule("accounts");
   const canLoadAuditLogs = canAccessModule("security");
   const canLoadDriverRouteAdjustRules = canAccessModule("financeWages");
-  const canLoadStatementDownloads = canAccessModule("financeCosts") || canAccessModule("financeSupplierStatements") || canAccessModule("financeCustomsStatements");
+  const canLoadStatementDownloads = canAccessModule("financeCosts") || canAccessModule("financeSupplierStatements") || canAccessModule("financeCustomsStatements") || canLoadBossCenterData;
   const previousSelection = {
     customerId: selectedCustomerId.value,
     vehiclePlate: selectedVehiclePlate.value,
@@ -21162,11 +21484,13 @@ function resetOrderForm() {
     driver: "",
     hkDriver: "",
     mainlandDriver: "",
-    transportMode: "单司机",
-    loading: "",
-    loadingContact: "",
-    loadingPhone: "",
-    unloading: "",
+	    transportMode: "单司机",
+	    loading: "",
+	    loadingLocations: [],
+	    loadingContact: "",
+	    loadingPhone: "",
+	    unloading: "",
+	    unloadingLocations: [],
     unloadingContact: "",
     unloadingPhone: "",
     date: todayInputValue(),
@@ -21232,11 +21556,11 @@ function isHongKongLocation(value = "") {
 function handleOrderDirectionChange() {
   if (orderHasTransportFields.value) {
     if (orderForm.direction === "出口") {
-      if (!orderForm.unloading) orderForm.unloading = "香港";
-      if (isHongKongLocation(orderForm.loading)) orderForm.loading = "";
+      if (!orderForm.unloading) setOrderLocationEntries("unloading", [{ city: "香港", district: "", detail: "" }]);
+      if (isHongKongLocation(orderForm.loading)) setOrderLocationEntries("loading", []);
     } else if (orderForm.direction === "进口") {
-      if (!orderForm.loading) orderForm.loading = "香港";
-      if (isHongKongLocation(orderForm.unloading)) orderForm.unloading = "";
+      if (!orderForm.loading) setOrderLocationEntries("loading", [{ city: "香港", district: "", detail: "" }]);
+      if (isHongKongLocation(orderForm.unloading)) setOrderLocationEntries("unloading", []);
     }
   }
   scheduleAutoFreightSync();
@@ -21250,7 +21574,7 @@ function handleDispatchFormDirectionChange() {
         parts.city = "香港";
         setDispatchLocationDraftPart(target, index, "city", "香港");
       }
-      return composeDispatchLocationParts(parts.city, parts.district, parts.detail);
+      return parts;
     });
     setDispatchLocationEntries(target, entries);
   });
@@ -21266,11 +21590,13 @@ function clearOrderTransportFields() {
     driver: "",
     hkDriver: "",
     mainlandDriver: "",
-    transportMode: "",
-    loading: "",
-    loadingContact: "",
-    loadingPhone: "",
-    unloading: "",
+	    transportMode: "",
+	    loading: "",
+	    loadingLocations: [],
+	    loadingContact: "",
+	    loadingPhone: "",
+	    unloading: "",
+	    unloadingLocations: [],
     unloadingContact: "",
     unloadingPhone: "",
     tripNoEnabled: false,
@@ -21448,11 +21774,13 @@ async function openOrderModal(customer = null, order = null, options = {}) {
       driver: order.driver || "",
       hkDriver: order.hkDriver || "",
       mainlandDriver: order.mainlandDriver || "",
-      transportMode: normalizeTransportMode(order.transportMode || (orderVehicleSource === OWN_VEHICLE_SOURCE ? "单司机" : "")),
-      loading: order.loading || "",
-      loadingContact: order.loadingContact || "",
-      loadingPhone: order.loadingPhone || "",
-      unloading: order.unloading || "",
+	      transportMode: normalizeTransportMode(order.transportMode || (orderVehicleSource === OWN_VEHICLE_SOURCE ? "单司机" : "")),
+	      loading: order.loading || "",
+	      loadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(order, "loading")),
+	      loadingContact: order.loadingContact || "",
+	      loadingPhone: order.loadingPhone || "",
+	      unloading: order.unloading || "",
+	      unloadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(order, "unloading")),
       unloadingContact: order.unloadingContact || "",
       unloadingPhone: order.unloadingPhone || "",
       date: order.date || "",
@@ -21661,9 +21989,11 @@ async function saveOrder(options = {}) {
         target.direction = item.direction || target.direction;
         target.tonnage = item.tonnage || target.tonnage;
         target.quantity = item.quantity || target.quantity;
-        target.weight = item.weight || target.weight;
-        target.loading = item.loading || target.loading;
-        target.unloading = item.unloading || target.unloading;
+	        target.weight = item.weight || target.weight;
+	        target.loading = item.loading || target.loading;
+	        target.loadingLocations = cloneDispatchLocationEntries(recordDispatchLocationEntries(item, "loading", target));
+	        target.unloading = item.unloading || target.unloading;
+	        target.unloadingLocations = cloneDispatchLocationEntries(recordDispatchLocationEntries(item, "unloading", target));
         target.vehicleSource = item.vehicleSource || target.vehicleSource;
         target.supplier = item.supplier || target.supplier;
         target.plate = item.plate || target.plate;
@@ -25506,26 +25836,33 @@ function loadFeeTemplate() {
 function parseOrderFreightTemplate(item) {
   try {
     const content = JSON.parse(item?.content || "{}");
-    return content?.type === "order-freight-template" ? content : null;
+    if (content?.type !== "order-freight-template") return null;
+    return {
+      ...content,
+      fees: Array.isArray(content.fees) ? content.fees.map((fee) => sanitizeOrderFreightTemplateFee(fee)) : []
+    };
   } catch {
     return null;
   }
 }
 
+function sanitizeOrderFreightTemplateFee(fee = {}) {
+  const row = { ...fee };
+  delete row.manualAssignee;
+  delete row.manual_assignee;
+  delete row._manualAssignee;
+  delete row.driverRole;
+  delete row.driver_role;
+  delete row.driverName;
+  delete row.driver_name;
+  return row;
+}
+
 function normalizeLoadedOrderFreightFee(fee = {}) {
   const row = { ...fee };
-  const manualAssignee = Boolean(row.manualAssignee || row.manual_assignee || row._manualAssignee)
-    || String(row.driverRole || row.driver_role || "").trim() === "手动指定";
   const feeItem = row.feeItemId
     ? feeItemRowsById.value.get(String(row.feeItemId || "").trim())
     : (row.name ? feeItemRowsByName.value.get(String(row.name || "").trim()) : null);
-  if (manualAssignee) {
-    row.manualAssignee = true;
-    row._manualAssignee = true;
-    row.driverRole = "手动指定";
-    row.driverName = normalizeOrderFeeAssigneeText(row.driverName || row.driver_name || "");
-    return row;
-  }
   row.manualAssignee = false;
   row._manualAssignee = false;
   row.driverName = "";
@@ -25561,8 +25898,8 @@ function applyFeeTemplateRows(fees, options = {}) {
       cost: savedCost ?? 0,
       _savedCost: savedCost,
       remark: fee.remark || "",
-      driverRole: fee.driverRole || "",
-      driverName: fee.driverName || "",
+      driverRole: "",
+      driverName: "",
       attachments: stripAttachments ? [] : (Array.isArray(fee.attachments) ? fee.attachments : [])
     });
     return {
@@ -25598,11 +25935,13 @@ function applyOrderTemplateFields(order = {}) {
     driver: order.driver || orderForm.driver,
     hkDriver: order.hkDriver || order.hk_driver || orderForm.hkDriver,
     mainlandDriver: order.mainlandDriver || order.mainland_driver || orderForm.mainlandDriver,
-    transportMode: normalizeTransportMode(order.transportMode || order.transport_mode || orderForm.transportMode || (nextVehicleSource === OWN_VEHICLE_SOURCE ? "单司机" : "")),
-    loading: order.loading || orderForm.loading,
-    loadingContact: order.loadingContact || order.loading_contact || orderForm.loadingContact,
-    loadingPhone: order.loadingPhone || order.loading_phone || orderForm.loadingPhone,
-    unloading: order.unloading || orderForm.unloading,
+	    transportMode: normalizeTransportMode(order.transportMode || order.transport_mode || orderForm.transportMode || (nextVehicleSource === OWN_VEHICLE_SOURCE ? "单司机" : "")),
+	    loading: order.loading || orderForm.loading,
+	    loadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(order, "loading", orderForm)),
+	    loadingContact: order.loadingContact || order.loading_contact || orderForm.loadingContact,
+	    loadingPhone: order.loadingPhone || order.loading_phone || orderForm.loadingPhone,
+	    unloading: order.unloading || orderForm.unloading,
+	    unloadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(order, "unloading", orderForm)),
     unloadingContact: order.unloadingContact || order.unloading_contact || orderForm.unloadingContact,
     unloadingPhone: order.unloadingPhone || order.unloading_phone || orderForm.unloadingPhone,
     tripNoEnabled: Boolean(order.tripNoEnabled ?? order.trip_no_enabled ?? orderForm.tripNoEnabled),
@@ -25619,7 +25958,10 @@ function loadSavedFeeTemplate(item) {
     notify("该模板暂无收费项目");
     return;
   }
-  applyFeeTemplateRows(fees.map((fee) => normalizeLoadedOrderFreightFee(fee)), { stripAttachments: true });
+  applyFeeTemplateRows(
+    fees.map((fee) => normalizeLoadedOrderFreightFee(sanitizeOrderFreightTemplateFee(fee))),
+    { stripAttachments: true }
+  );
   loadFeeTemplateMenuOpen.value = false;
   notify(`已载入模板：${item.name}`);
 }
@@ -25630,7 +25972,10 @@ function loadLatestOrderTemplate() {
     notify("暂无可载入的最近订单模板");
     return;
   }
-  applyFeeTemplateRows((Array.isArray(order.fees) ? order.fees : []).map((fee) => normalizeLoadedOrderFreightFee(fee)), { stripAttachments: true });
+  applyFeeTemplateRows(
+    (Array.isArray(order.fees) ? order.fees : []).map((fee) => normalizeLoadedOrderFreightFee(sanitizeOrderFreightTemplateFee(fee))),
+    { stripAttachments: true }
+  );
   loadFeeTemplateMenuOpen.value = false;
   notify(`已载入最近订单模板：${order.no}`);
 }
@@ -25701,10 +26046,7 @@ async function saveCurrentFeesAsTemplate() {
           amountManual: Boolean(fee._manualAmount),
           cost: normalizeFeeCost(fee) ?? 0,
           costManual: Boolean(fee._manualCost),
-          manualAssignee: Boolean(fee._manualAssignee || String(fee.driverRole || "").trim() === "手动指定"),
           remark: fee.remark || "",
-          driverRole: fee.driverRole || "",
-          driverName: fee.driverName || "",
           attachments: fee.attachments || []
         };
       });
@@ -25730,11 +26072,13 @@ async function saveCurrentFeesAsTemplate() {
         driver: orderForm.driver,
         hkDriver: orderForm.hkDriver,
         mainlandDriver: orderForm.mainlandDriver,
-        transportMode: orderForm.transportMode,
-        loading: orderForm.loading,
-        loadingContact: orderForm.loadingContact,
-        loadingPhone: orderForm.loadingPhone,
-        unloading: orderForm.unloading,
+	        transportMode: orderForm.transportMode,
+	        loading: orderForm.loading,
+	        loadingLocations: orderForm.loadingLocations || [],
+	        loadingContact: orderForm.loadingContact,
+	        loadingPhone: orderForm.loadingPhone,
+	        unloading: orderForm.unloading,
+	        unloadingLocations: orderForm.unloadingLocations || [],
         unloadingContact: orderForm.unloadingContact,
         unloadingPhone: orderForm.unloadingPhone,
         tripNoEnabled: orderForm.tripNoEnabled,
@@ -31095,85 +31439,47 @@ function orderDetailFeeRows(order = {}) {
             <h2>未收未付</h2>
           </div>
         </div>
-        <div class="finance-filter-bar">
-          <div class="statement-date-selects period-filter-controls">
-            <div class="segmented statement-mode-tabs">
-              <button
-                v-for="mode in PERIOD_FILTER_MODES"
-                :key="mode.key"
-                type="button"
-                :class="{ active: periodFilterMode('boss') === mode.key }"
-                @click="setPeriodFilterMode('boss', mode.key)"
-              >{{ mode.label }}</button>
-            </div>
-            <label v-if="periodFilterMode('boss') !== 'all'">年份
-              <select :value="periodFilterYear('boss')" @change="setPeriodFilterYear('boss', $event.target.value)">
-                <option v-for="year in periodYearOptions('boss')" :key="year" :value="year">{{ year }}年</option>
-              </select>
-            </label>
-            <label v-if="periodFilterMode('boss') === 'month'">月份
-              <select :value="periodFilterMonth('boss')" @change="setPeriodFilterMonth('boss', $event.target.value)">
-                <option v-for="item in PERIOD_MONTH_OPTIONS" :key="item.value" :value="item.value">{{ item.label }}</option>
-              </select>
-            </label>
-            <label class="monthly-exchange-rate-field">当月汇率
-              <input
-                class="boss-vehicle-rate-input monthly-exchange-rate-input"
-                type="number"
-                min="0"
-                step="0.0001"
-                :value="monthlyExchangeRateInputValue(monthlyExchangeRatePeriodMonth('boss'))"
-                @input="setMonthlyExchangeRate(monthlyExchangeRatePeriodMonth('boss'), $event.target.value)"
-                @change="flushMonthlyExchangeRateSave(monthlyExchangeRatePeriodMonth('boss'))"
-              />
-            </label>
-          </div>
-          <span class="finance-period-chip">当前范围：{{ periodFilterLabelByScope('boss') }}</span>
+        <div class="segmented boss-unreceived-tabs" role="tablist" aria-label="未收未付类别">
+          <button
+            v-for="option in BOSS_UNRECEIVED_CATEGORY_OPTIONS"
+            :key="option.key"
+            type="button"
+            :class="{ active: bossUnreceivedActiveCategory === option.key }"
+            @click="bossUnreceivedActiveCategory = option.key"
+          >
+            {{ option.label }}
+            <span>{{ bossUnreceivedCategorySummaries[option.key]?.rowCount || 0 }}</span>
+          </button>
         </div>
         <div class="finance-summary-grid boss-unreceived-summary-grid">
           <div class="finance-summary-card">
-            <span>客户未收</span>
-            <strong>{{ bossUnreceivedSummary.customerAmountDisplay }}</strong>
-            <span>{{ bossUnreceivedSummary.customerCount }} 条账单 · {{ bossUnreceivedSummary.customerOrderCount }} 单</span>
-          </div>
-          <div class="finance-summary-card">
-            <span>报关未收</span>
-            <strong>{{ bossUnreceivedSummary.customsAmountDisplay }}</strong>
-            <span>{{ bossUnreceivedSummary.customsCount }} 条账单 · {{ bossUnreceivedSummary.customsRecordCount }} 条</span>
-          </div>
-          <div class="finance-summary-card">
-            <span>供应商未付</span>
-            <strong>{{ bossUnreceivedSummary.supplierAmountDisplay }}</strong>
-            <span>{{ bossUnreceivedSummary.supplierCount }} 条账单 · {{ bossUnreceivedSummary.supplierOrderCount }} 单</span>
-          </div>
-          <div class="finance-summary-card">
-            <span>总折算人民币</span>
-            <strong>{{ bossUnreceivedSummary.totalAmountDisplay }}</strong>
-            <span>按当前月汇率折算</span>
+            <span>{{ bossUnreceivedActiveCategory === 'supplier' ? '总供应商数' : '总客户数' }}</span>
+            <strong>{{ activeBossUnreceivedSummary.customerCount }}</strong>
+            <span>{{ activeBossUnreceivedCategoryMeta.label }}</span>
           </div>
           <div class="finance-summary-card">
             <span>总记录数</span>
-            <strong>{{ bossUnreceivedSummary.totalCount }}</strong>
-            <span>三类未结清记录</span>
+            <strong>{{ activeBossUnreceivedSummary.recordCount }}</strong>
+            <span>{{ activeBossUnreceivedSummary.rowCount }} 条账单</span>
           </div>
           <div class="finance-summary-card">
-            <span>当前范围</span>
-            <strong>{{ periodFilterLabelByScope('boss') }}</strong>
-            <span>按月 / 按年 / 全部</span>
+            <span>总折算人民币</span>
+            <strong>{{ activeBossUnreceivedSummary.equivalentRMBDisplay }}</strong>
+            <span>按记录月份汇率折算</span>
           </div>
         </div>
         <div class="boss-unreceived-grid">
-          <div class="table-card finance-tool-card boss-unreceived-section">
+          <div v-if="bossUnreceivedActiveCategory === 'customer'" class="table-card finance-tool-card boss-unreceived-section">
             <div class="table-card-head">
               <div>
                 <strong>客户未收</strong>
-                <span>{{ bossUnreceivedSummary.customerCount }} 条账单 · {{ bossUnreceivedSummary.customerOrderCount }} 单</span>
+                <span>{{ activeBossUnreceivedSummary.rowCount }} 条账单 · {{ activeBossUnreceivedSummary.recordCount }} 单</span>
               </div>
             </div>
             <table class="data-table compact boss-unreceived-table boss-unreceived-customer-table">
               <thead><tr><th>排名</th><th>客户</th><th>账期</th><th>订单数</th><th>未收港币</th><th>未收人民币</th><th>折算人民币</th><th>结算类别</th><th>汇率</th><th>对账状态</th><th>最近记录</th><th>备注</th></tr></thead>
               <tbody>
-                <tr v-for="(row, index) in bossUnreceivedCustomerRows" :key="row.key">
+                <tr v-for="(row, index) in activeBossUnreceivedRows" :key="row.key">
                   <td>{{ index + 1 }}</td>
                   <td :title="row.fullName">{{ row.name }}</td>
                   <td>{{ row.periodLabel }}</td>
@@ -31187,21 +31493,21 @@ function orderDetailFeeRows(order = {}) {
                   <td>{{ row.latestRecord }}</td>
                   <td>{{ row.note }}</td>
                 </tr>
-                <tr v-if="bossUnreceivedCustomerRows.length === 0"><td colspan="12">暂无客户未收</td></tr>
+                <tr v-if="activeBossUnreceivedRows.length === 0"><td colspan="12">暂无客户未收</td></tr>
               </tbody>
             </table>
           </div>
-          <div class="table-card finance-tool-card boss-unreceived-section">
+          <div v-else-if="bossUnreceivedActiveCategory === 'customs'" class="table-card finance-tool-card boss-unreceived-section">
             <div class="table-card-head">
               <div>
                 <strong>报关未收</strong>
-                <span>{{ bossUnreceivedSummary.customsCount }} 条账单 · {{ bossUnreceivedSummary.customsRecordCount }} 条</span>
+                <span>{{ activeBossUnreceivedSummary.rowCount }} 条账单 · {{ activeBossUnreceivedSummary.recordCount }} 条</span>
               </div>
             </div>
             <table class="data-table compact boss-unreceived-table boss-unreceived-customs-table">
               <thead><tr><th>排名</th><th>客户</th><th>账期</th><th>票数</th><th>未收人民币</th><th>折算人民币</th><th>对账状态</th><th>最近记录</th><th>备注</th></tr></thead>
               <tbody>
-                <tr v-for="(row, index) in bossUnreceivedCustomsRows" :key="row.key">
+                <tr v-for="(row, index) in activeBossUnreceivedRows" :key="row.key">
                   <td>{{ index + 1 }}</td>
                   <td :title="row.fullName">{{ row.name }}</td>
                   <td>{{ row.periodLabel }}</td>
@@ -31212,21 +31518,21 @@ function orderDetailFeeRows(order = {}) {
                   <td>{{ row.latestRecord }}</td>
                   <td>{{ row.note }}</td>
                 </tr>
-                <tr v-if="bossUnreceivedCustomsRows.length === 0"><td colspan="9">暂无报关未收</td></tr>
+                <tr v-if="activeBossUnreceivedRows.length === 0"><td colspan="9">暂无报关未收</td></tr>
               </tbody>
             </table>
           </div>
-          <div class="table-card finance-tool-card boss-unreceived-section">
+          <div v-else class="table-card finance-tool-card boss-unreceived-section">
             <div class="table-card-head">
               <div>
                 <strong>供应商未付</strong>
-                <span>{{ bossUnreceivedSummary.supplierCount }} 条账单 · {{ bossUnreceivedSummary.supplierOrderCount }} 单</span>
+                <span>{{ activeBossUnreceivedSummary.rowCount }} 条账单 · {{ activeBossUnreceivedSummary.recordCount }} 单</span>
               </div>
             </div>
             <table class="data-table compact boss-unreceived-table boss-unreceived-supplier-table">
               <thead><tr><th>排名</th><th>供应商</th><th>账期</th><th>订单数</th><th>港币</th><th>人民币</th><th>折算人民币</th><th>汇率</th><th>对账状态</th><th>最近记录</th><th>备注</th></tr></thead>
               <tbody>
-                <tr v-for="(row, index) in bossUnreceivedSupplierRows" :key="row.key">
+                <tr v-for="(row, index) in activeBossUnreceivedRows" :key="row.key">
                   <td>{{ index + 1 }}</td>
                   <td :title="row.fullName">{{ row.name }}</td>
                   <td>{{ row.periodLabel }}</td>
@@ -31239,7 +31545,7 @@ function orderDetailFeeRows(order = {}) {
                   <td>{{ row.latestRecord }}</td>
                   <td>{{ row.note }}</td>
                 </tr>
-                <tr v-if="bossUnreceivedSupplierRows.length === 0"><td colspan="11">暂无供应商未付</td></tr>
+                <tr v-if="activeBossUnreceivedRows.length === 0"><td colspan="11">暂无供应商未付</td></tr>
               </tbody>
             </table>
           </div>
@@ -34189,7 +34495,7 @@ function orderDetailFeeRows(order = {}) {
 	                      <span
 	                        v-for="(address, index) in dispatchLocationEntries('loading')"
 	                        :key="`dispatch-loading-address-${index}`"
-	                        :class="['dispatch-address-item', { 'is-empty': !address }]"
+	                        :class="['dispatch-address-item', { 'is-empty': !dispatchLocationEntryHasValue(address) }]"
 	                      >
 	                        <span class="dispatch-address-index">{{ index + 1 }}</span>
 	                        <input
@@ -34289,7 +34595,7 @@ function orderDetailFeeRows(order = {}) {
 	                      <span
 	                        v-for="(address, index) in dispatchLocationEntries('unloading')"
 	                        :key="`dispatch-unloading-address-${index}`"
-	                        :class="['dispatch-address-item', { 'is-empty': !address }]"
+	                        :class="['dispatch-address-item', { 'is-empty': !dispatchLocationEntryHasValue(address) }]"
 	                      >
 	                        <span class="dispatch-address-index">{{ index + 1 }}</span>
 	                        <input

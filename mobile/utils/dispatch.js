@@ -159,6 +159,81 @@ function normalizePlateText(value = "") {
     .toUpperCase();
 }
 
+function normalizeLocationPartText(value = "") {
+  return normalizeUserText(value, { singleLine: true, compactCjkSpacing: true });
+}
+
+function normalizeLocationDetailText(value = "") {
+  return String(value === undefined || value === null ? "" : value).replace(/\r\n?/g, "\n").trim();
+}
+
+function composeLocationEntryText(city = "", district = "", detail = "") {
+  const cityText = normalizeLocationPartText(city);
+  const districtText = normalizeLocationPartText(district);
+  const detailText = normalizeLocationDetailText(detail);
+  if (!cityText && !districtText) return detailText;
+  if (cityText && !districtText && !detailText) return cityText;
+  if (cityText && districtText && !detailText) return [cityText, districtText].join(" / ");
+  if (cityText && !districtText && detailText) return [cityText, "", detailText].join(" / ");
+  return [cityText, districtText, detailText].join(" / ");
+}
+
+function splitLegacyLocationEntry(value = "") {
+  const text = String(value === undefined || value === null ? "" : value).replace(/\r\n?/g, "\n").trim();
+  if (!text) return { city: "", district: "", detail: "" };
+  const normalized = text.replace(/[／｜|]/g, "/");
+  if (!normalized.includes("/")) return { city: "", district: "", detail: text };
+  const parts = normalized.split("/").map((part) => part.trim());
+  return {
+    city: normalizeLocationPartText(parts[0] || ""),
+    district: normalizeLocationPartText(parts[1] || ""),
+    detail: normalizeLocationDetailText(parts.slice(2).join(" / "))
+  };
+}
+
+function locationEntryHasValue(entry) {
+  return Boolean(entry && String(entry.city || entry.district || entry.detail || "").trim());
+}
+
+function normalizeLocationEntry(entry) {
+  if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+    if (entry.city !== undefined || entry.district !== undefined || entry.detail !== undefined) {
+      return {
+        city: normalizeLocationPartText(entry.city),
+        district: normalizeLocationPartText(entry.district),
+        detail: normalizeLocationDetailText(entry.detail)
+      };
+    }
+    if (entry.value !== undefined) return splitLegacyLocationEntry(entry.value);
+  }
+  return splitLegacyLocationEntry(entry);
+}
+
+function splitLegacyLocationEntries(value = "") {
+  const text = String(value === undefined || value === null ? "" : value).replace(/\r\n?/g, "\n");
+  if (!text.trim()) return [];
+  return text
+    .split(/[；;]+/)
+    .map((entry) => normalizeLocationEntry(entry))
+    .filter(locationEntryHasValue);
+}
+
+function normalizeLocationEntries(entries, fallbackText = "") {
+  const source = Array.isArray(entries)
+    ? entries
+    : (entries && typeof entries === "object" ? [entries] : []);
+  const normalized = source.map((entry) => normalizeLocationEntry(entry)).filter(locationEntryHasValue);
+  if (normalized.length) return normalized;
+  return splitLegacyLocationEntries(fallbackText || (typeof entries === "string" ? entries : ""));
+}
+
+function composeLocationEntriesText(entries) {
+  return normalizeLocationEntries(entries)
+    .map((entry) => composeLocationEntryText(entry.city, entry.district, entry.detail))
+    .filter(Boolean)
+    .join("；");
+}
+
 function normalizeVehicleSource(value) {
   const text = valueText(value);
   return text === "本公司车辆" ? "汉业物流" : text;
@@ -304,6 +379,8 @@ function sanitizeDispatchRow(row) {
   const item = row || {};
   const status = normalizeDispatchPlanStatus(item.status);
   const previousStatus = normalizeOptionalDispatchPlanStatus(item.previousStatus || item.previous_status);
+  const loadingLocations = normalizeLocationEntries(item.loadingLocations || item.loading_locations, item.loading);
+  const unloadingLocations = normalizeLocationEntries(item.unloadingLocations || item.unloading_locations, item.unloading);
   return {
     id: valueText(item.id),
     date: valueText(item.date),
@@ -321,8 +398,10 @@ function sanitizeDispatchRow(row) {
     tonnage: valueText(item.tonnage),
     quantity: item.quantity === undefined || item.quantity === null ? "" : String(item.quantity).trim(),
     weight: valueText(item.weight),
-    loading: valueText(item.loading),
-    unloading: valueText(item.unloading),
+    loading: composeLocationEntriesText(loadingLocations) || valueText(item.loading),
+    loadingLocations,
+    unloading: composeLocationEntriesText(unloadingLocations) || valueText(item.unloading),
+    unloadingLocations,
     loadTime: valueText(item.loadTime || item.load_time),
     vehicleSource: normalizeVehicleSource(item.vehicleSource || item.vehicle_source),
     supplier: valueText(item.supplier),
@@ -385,9 +464,11 @@ function rowWithOrder(row, orders, date) {
       direction: row.direction || "",
       tonnage: row.tonnage || "",
       quantity: row.quantity || "",
-      weight: row.weight || "",
-      loading: row.loading || "",
-      unloading: row.unloading || "",
+	      weight: row.weight || "",
+	      loading: row.loading || "",
+	      loadingLocations: row.loadingLocations || [],
+	      unloading: row.unloading || "",
+	      unloadingLocations: row.unloadingLocations || [],
       loadTime: row.loadTime || "",
       loadingTime: row.loadTime || "",
       vehicleSource: normalizeVehicleSource(row.vehicleSource || ""),
@@ -480,9 +561,25 @@ function dispatchShortLocation(value) {
   return parts.length ? parts.slice(0, 2).join(" / ") : "";
 }
 
+function dispatchShortLocationFromEntries(entries) {
+  return normalizeLocationEntries(entries)
+    .map((entry) => {
+      const city = valueText(entry.city);
+      const district = valueText(entry.district);
+      const detail = normalizeLocationDetailText(entry.detail);
+      return city && district ? [city, district].join(" / ") : city || district || detail;
+    })
+    .filter(Boolean)
+    .join(" + ");
+}
+
+function recordLocationEntries(record, field) {
+  return normalizeLocationEntries(record && record[`${field}Locations`], record && record[field]);
+}
+
 function dispatchOrderRouteText(record) {
-  const loading = dispatchShortLocation(record && record.loading);
-  const unloading = dispatchShortLocation(record && record.unloading);
+  const loading = dispatchShortLocationFromEntries(recordLocationEntries(record, "loading")) || dispatchShortLocation(record && record.loading);
+  const unloading = dispatchShortLocationFromEntries(recordLocationEntries(record, "unloading")) || dispatchShortLocation(record && record.unloading);
   return [loading, unloading].filter(Boolean).join(" -> ") || "-";
 }
 
@@ -502,6 +599,7 @@ function splitDispatchLocationEntries(value) {
 }
 
 function dispatchMessageLocationDetail(value) {
+  if (value && typeof value === "object") return normalizeLocationDetailText(value.detail);
   const text = valueText(value);
   if (!text) return "";
   if (text.indexOf("/") >= 0) {
@@ -598,12 +696,14 @@ function presentDispatchRows(rows, orders, date, options) {
   const merged = normalizeDispatchRows(rows, date).map((row, index) =>
     Object.assign({}, rowWithOrder(row, orders, date), { index })
   );
-  return filteredRows(merged, options).map((row, displayIndex) => {
-    const order = row.order || {};
-    const record = Object.assign({}, order, {
-      loading: order.loading || row.loading,
-      unloading: order.unloading || row.unloading
-    });
+	  return filteredRows(merged, options).map((row, displayIndex) => {
+	    const order = row.order || {};
+	    const record = Object.assign({}, order, {
+	      loading: order.loading || row.loading,
+	      loadingLocations: order.loadingLocations || row.loadingLocations || [],
+	      unloading: order.unloading || row.unloading,
+	      unloadingLocations: order.unloadingLocations || row.unloadingLocations || []
+	    });
     const status = dispatchStatusValueForRow(row);
     const source = valueText(order.vehicleSource || row.vehicleSource);
     const businessType = valueText(order.businessType || row.businessType);
@@ -753,24 +853,26 @@ function buildDispatchWarnings(rows, orders, vehicles, drivers, date) {
 }
 
 function dispatchLocationBlock(label, record, field) {
-  const entries = splitDispatchLocationEntries(record && record[field]);
+  const entries = recordLocationEntries(record, field);
   if (entries.length <= 1) {
-    const location = entries[0] || "-";
-    return `${label}：${dispatchMessageLocationDetail(location) || location}`;
+    const location = entries[0] || {};
+    return `${label}：${dispatchMessageLocationDetail(location) || "-"}`;
   }
   return entries
-    .map((location, index) => `${label}${index + 1}：${dispatchMessageLocationDetail(location) || location || "-"}`)
+    .map((location, index) => `${label}${index + 1}：${dispatchMessageLocationDetail(location) || "-"}`)
     .join("\n");
 }
 
 function dispatchMessageText(rows, orders, date) {
   const mergedRows = normalizeDispatchRows(rows, date).map((row) => rowWithOrder(row, orders, date));
   return mergedRows.map((row) => {
-    const order = row.order || {};
-    const record = Object.assign({}, order, {
-      loading: order.loading || row.loading,
-      unloading: order.unloading || row.unloading
-    });
+	    const order = row.order || {};
+	    const record = Object.assign({}, order, {
+	      loading: order.loading || row.loading,
+	      loadingLocations: order.loadingLocations || row.loadingLocations || [],
+	      unloading: order.unloading || row.unloading,
+	      unloadingLocations: order.unloadingLocations || row.unloadingLocations || []
+	    });
     const rowDate = row.date || date || "-";
     const time = row.loadTime || order.loadTime || order.loadingTime || "-";
     const direction = order.direction || row.direction || "";
@@ -804,9 +906,11 @@ function createDispatchRowFromOrder(order, date, existingRows) {
     direction: order.direction || "",
     tonnage: order.tonnage || "",
     quantity: order.quantity || "",
-    weight: order.weight || "",
-    loading: order.loading || "",
-    unloading: order.unloading || "",
+	    weight: order.weight || "",
+	    loading: order.loading || "",
+	    loadingLocations: normalizeLocationEntries(order.loadingLocations, order.loading),
+	    unloading: order.unloading || "",
+	    unloadingLocations: normalizeLocationEntries(order.unloadingLocations, order.unloading),
     vehicleSource: normalizeVehicleSource(order.vehicleSource || ""),
     supplier: order.supplier || "",
     transportMode: mode,
@@ -838,9 +942,11 @@ function formFromDispatchRow(row, date) {
     direction: order.direction || source.direction || "",
     tonnage: order.tonnage || source.tonnage || "",
     quantity: order.quantity || source.quantity || "",
-    weight: order.weight || source.weight || "",
-    loading: order.loading || source.loading || "",
-    unloading: order.unloading || source.unloading || "",
+	    weight: order.weight || source.weight || "",
+	    loading: order.loading || source.loading || "",
+	    loadingLocations: normalizeLocationEntries(order.loadingLocations || source.loadingLocations, order.loading || source.loading),
+	    unloading: order.unloading || source.unloading || "",
+	    unloadingLocations: normalizeLocationEntries(order.unloadingLocations || source.unloadingLocations, order.unloading || source.unloading),
     loadTime: source.loadTime || order.loadTime || "",
     vehicleSource: normalizeVehicleSource(order.vehicleSource || source.vehicleSource || "汉业物流"),
     supplier: order.supplier === "-" ? "" : (order.supplier || source.supplier || ""),
@@ -879,9 +985,11 @@ function rowFromForm(form, orderNo) {
     direction: source.direction,
     tonnage: source.tonnage,
     quantity: source.quantity,
-    weight: source.weight,
-    loading: source.loading,
-    unloading: source.unloading,
+	    weight: source.weight,
+	    loading: source.loading,
+	    loadingLocations: normalizeLocationEntries(source.loadingLocations, source.loading),
+	    unloading: source.unloading,
+	    unloadingLocations: normalizeLocationEntries(source.unloadingLocations, source.unloading),
     loadTime: source.loadTime,
     vehicleSource: normalizeVehicleSource(source.vehicleSource),
     supplier: normalizeVehicleSource(source.vehicleSource) === "外派车辆" ? source.supplier : "",
@@ -922,9 +1030,11 @@ function orderPayloadFromForm(form, customer, includeFees) {
     driver: source.driver,
     hkDriver: source.hkDriver,
     mainlandDriver: source.mainlandDriver,
-    transportMode: normalizeTransportMode(source.transportMode || ""),
-    loading: source.loading,
-    unloading: source.unloading,
+	    transportMode: normalizeTransportMode(source.transportMode || ""),
+	    loading: source.loading,
+	    loadingLocations: normalizeLocationEntries(source.loadingLocations, source.loading),
+	    unloading: source.unloading,
+	    unloadingLocations: normalizeLocationEntries(source.unloadingLocations, source.unloading),
     date: source.date,
     status: dispatchOrderStatusForPlanStatus(source.status),
     remark: source.note,
