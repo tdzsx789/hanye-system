@@ -11018,8 +11018,9 @@ function buildBossUnreceivedCustomerRows(filterKey = bossPeriodFilter.value) {
         if (!entityName || entityName === "全部") return null;
         const customer = findPartnerByTypedLabel(entityName, "客户") || customerRowsByName.value.get(entityName) || null;
         const { start, end } = statementRecordRange(record);
+        const snapshot = bossUnreceivedSnapshotForRecord(record);
         const sourceOrders = orderRows.value.filter((order) =>
-          isFinanceStatVisibleOrder(order) &&
+          (snapshot ? isFinanceStatVisibleOrder(order) : true) &&
           orderInDateRange(order.date, start, end) &&
           statementCustomerOrderMatchesEntity(order, entityName, customer)
         );
@@ -11031,7 +11032,6 @@ function buildBossUnreceivedCustomerRows(filterKey = bossPeriodFilter.value) {
             rmb: sum.rmb + Number(receivable.rmb || 0)
           };
         }, { hkd: 0, rmb: 0 });
-        const snapshot = bossUnreceivedSnapshotForRecord(record);
         const amount = snapshot
           ? { hkd: Number(snapshot.amountHKD || 0), rmb: Number(snapshot.amountRMB || 0) }
           : liveAmount;
@@ -11169,8 +11169,9 @@ function buildBossUnreceivedSupplierRows(filterKey = bossPeriodFilter.value) {
         const entityName = String(record.entityName || "").trim();
         if (!entityName || entityName === "全部") return null;
         const { start, end } = statementRecordRange(record);
+        const snapshot = bossUnreceivedSnapshotForRecord(record);
         const sourceOrders = orderRows.value.filter((order) =>
-          isFinanceStatVisibleOrder(order) &&
+          (snapshot ? isFinanceStatVisibleOrder(order) : true) &&
           statementSupplierOrderMatchesEntity(order, entityName) &&
           orderInDateRange(order.date, start, end)
         );
@@ -11182,7 +11183,6 @@ function buildBossUnreceivedSupplierRows(filterKey = bossPeriodFilter.value) {
             rmb: sum.rmb + Number(payable.payableRMB || 0)
           };
         }, { hkd: 0, rmb: 0 });
-        const snapshot = bossUnreceivedSnapshotForRecord(record);
         const amount = snapshot
           ? { hkd: Number(snapshot.amountHKD || 0), rmb: Number(snapshot.amountRMB || 0) }
           : liveAmount;
@@ -12093,7 +12093,9 @@ function statementPeriodModeFromKey(periodKey = "") {
 function statementRecordPeriodMode(record = {}) {
   const mode = String(record.periodMode || record.period_mode || "").trim();
   if (["month", "range", "year", "all", "day"].includes(mode)) return mode;
-  return statementPeriodModeFromKey(statementRecordPeriodKey(record));
+  const modeFromKey = statementPeriodModeFromKey(statementRecordPeriodKey(record));
+  if (modeFromKey) return modeFromKey;
+  return statementRecordMonthlyKey(record) ? "month" : "";
 }
 
 function statementRecordMonthlyKey(record = {}) {

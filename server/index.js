@@ -4278,7 +4278,7 @@ function mapStatementDownload(row) {
     start: row.start_date || "",
     end: row.end_date || "",
     periodKey: row.period_key || "",
-    periodMode: row.period_mode || inferStatementPeriodMode(row.period_key || ""),
+    periodMode: row.period_mode || inferStatementPeriodMode(row.period_key || "") || inferStatementPeriodModeFromRange(row.start_date, row.end_date),
     status: normalizeStatementDownloadStatus(row.status || "已导出"),
     paymentStatus: normalizeStatementPaymentStatus(row.payment_status || "未收款"),
     paymentDate: row.payment_date || "",
@@ -9734,6 +9734,15 @@ function inferStatementPeriodMode(periodKey = "") {
   return "";
 }
 
+function inferStatementPeriodModeFromRange(start = "", end = "") {
+  const startText = String(start || "").trim().slice(0, 10);
+  const endText = String(end || "").trim().slice(0, 10);
+  const matched = startText.match(/^(\d{4})-(\d{2})-01$/);
+  if (!matched || !endText) return "";
+  const lastDay = new Date(Number(matched[1]), Number(matched[2]), 0).getDate();
+  return endText === `${matched[1]}-${matched[2]}-${String(lastDay).padStart(2, "0")}` ? "month" : "";
+}
+
 function statementDownloadKey(type, entityName, start, end) {
   return [type, entityName || "全部", start || "", end || ""].join("|");
 }
@@ -9777,31 +9786,51 @@ function readStatementDownloadPayload(body, current = null) {
 }
 
 async function saveStatementDownload(item) {
+  const baseFields = [
+    ["download_key", "downloadKey"],
+    ["statement_type", "statementType"],
+    ["entity_name", "entityName"],
+    ["start_date", "start"],
+    ["end_date", "end"],
+    ["status", "status"],
+    ["payment_status", "paymentStatus"],
+    ["payment_date", "paymentDate"],
+    ["downloaded_at", "downloadedAt"]
+  ];
+  const optionalFields = [
+    ["period_key", "periodKey"],
+    ["period_mode", "periodMode"],
+    ["amount_hkd", "amountHKD"],
+    ["amount_rmb", "amountRMB"],
+    ["record_count", "recordCount"],
+    ["snapshot_ready", "snapshotReady"]
+  ];
+  const availableOptionalFields = [];
+  for (const field of optionalFields) {
+    if (await tableColumnExists("statement_downloads", field[0])) {
+      availableOptionalFields.push(field);
+    }
+  }
+  const fields = [...baseFields, ...availableOptionalFields];
+  const insertColumns = fields.map(([column]) => column).join(", ");
+  const insertValues = fields.map(([, key]) => `@${key}`).join(", ");
+  const updateSet = fields
+    .filter(([column]) => column !== "download_key")
+    .map(([column]) => `${column} = excluded.${column}`)
+    .join(",\n      ");
   const result = await db.prepare(`
     INSERT INTO statement_downloads
-      (download_key, statement_type, entity_name, start_date, end_date, period_key, period_mode, status, payment_status, payment_date, amount_hkd, amount_rmb, record_count, snapshot_ready, downloaded_at)
+      (${insertColumns})
     VALUES
-      (@downloadKey, @statementType, @entityName, @start, @end, @periodKey, @periodMode, @status, @paymentStatus, @paymentDate, @amountHKD, @amountRMB, @recordCount, @snapshotReady, @downloadedAt)
+      (${insertValues})
     ON CONFLICT (download_key)
     DO UPDATE SET
-      statement_type = excluded.statement_type,
-      entity_name = excluded.entity_name,
-      start_date = excluded.start_date,
-      end_date = excluded.end_date,
-      period_key = excluded.period_key,
-      period_mode = excluded.period_mode,
-      status = excluded.status,
-      payment_status = excluded.payment_status,
-      payment_date = excluded.payment_date,
-      amount_hkd = excluded.amount_hkd,
-      amount_rmb = excluded.amount_rmb,
-      record_count = excluded.record_count,
-      snapshot_ready = excluded.snapshot_ready,
-      downloaded_at = excluded.downloaded_at,
+      ${updateSet},
       updated_at = CURRENT_TIMESTAMP,
       deleted_at = NULL
   `).run(item);
-  return db.prepare("SELECT * FROM statement_downloads WHERE id = ?").get(result.lastInsertId);
+  return db.prepare("SELECT * FROM statement_downloads WHERE download_key = ? AND deleted_at IS NULL").get(item.downloadKey)
+    || db.prepare("SELECT * FROM statement_downloads WHERE id = ?").get(result.lastInsertId);
 }
 
 app.get("/api/statement-downloads", async (_req, res) => {
