@@ -97,6 +97,27 @@ npm run docker:logs
 npm run docker:down
 ```
 
+### 本地热更新模式
+
+如果你希望改完前后端代码后浏览器自动刷新，使用开发态 Docker：
+
+```bash
+npm run docker:dev
+```
+
+这个模式会启动 Vite 开发服务器和 `node --watch` 后端容器，访问地址默认是：
+
+```text
+http://127.0.0.1:8080/
+```
+
+如果之前已经开着正式态 Docker，先停掉再起开发态：
+
+```bash
+npm run docker:down
+npm run docker:dev
+```
+
 ## PostgreSQL 备份
 
 默认 Docker 编排已准备 `postgres-backup` 可选 profile。需要本地启用定时备份时运行：

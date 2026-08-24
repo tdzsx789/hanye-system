@@ -252,10 +252,16 @@ function locationEntryValue(entry) {
 function splitLocationEntries(value) {
   const text = normalizeUserText(value, { compactCjkSpacing: true });
   if (!text.trim()) return [createLocationEntry("")];
-  const entries = text
-    .split(/[\n；;]+/)
-    .map((item) => createLocationEntry(item));
-  return entries.length ? entries : [createLocationEntry("")];
+  const trailingBlankCount = (text.match(/[；;]+$/)?.[0].length) || 0;
+  const body = trailingBlankCount > 0 ? text.slice(0, text.length - trailingBlankCount) : text;
+  const entries = body
+    .split(/[；;]+/)
+    .map((item) => createLocationEntry(item))
+    .filter((item) => item && item.value);
+  if (!entries.length) return [createLocationEntry("")];
+  return trailingBlankCount > 0
+    ? [...entries, ...Array.from({ length: trailingBlankCount }, () => createLocationEntry(""))]
+    : entries;
 }
 
 function normalizeLocationEntries(entries) {
@@ -284,7 +290,7 @@ function joinLocationEntries(entries) {
   return normalizeLocationEntries(entries)
     .map((entry) => entry.value)
     .filter(Boolean)
-    .join("\n");
+    .join("；");
 }
 
 function locationEntryCount(entries) {

@@ -389,6 +389,7 @@ function mapCustomer(row) {
     customerCategory,
     name: row.name,
     shortName: row.short_name || "",
+    customsCustomerType: row.customs_customer_type || "",
     province: row.province || "广东省",
     city: row.city,
     address: row.address || "",
@@ -452,6 +453,18 @@ async function customsBusinessColumnExists(column) {
   return tableColumnExists("customs_businesses", column);
 }
 
+let customerCustomsCustomerTypeColumnReady = false;
+
+async function ensureCustomerCustomsCustomerTypeColumn() {
+  if (customerCustomsCustomerTypeColumnReady) return;
+  await db.exec(`
+    ALTER TABLE customers
+    ADD COLUMN IF NOT EXISTS customs_customer_type TEXT NOT NULL DEFAULT '';
+  `);
+  customerColumnAvailability.set("customers.customs_customer_type", true);
+  customerCustomsCustomerTypeColumnReady = true;
+}
+
 let orderFeeCostCurrencyColumnReady = false;
 
 async function ensureOrderFeeCostCurrencyColumn() {
@@ -481,6 +494,7 @@ function normalizeCustomerPayload(body, id = "") {
   };
   const name = userTextValue(body.name);
   const shortName = userTextValue(body.shortName || body.short_name);
+  const customsCustomerType = userTextValue(body.customsCustomerType || body.customs_customer_type);
   const address = userMultilineTextValue(body.address || invoice.address);
   const taxNo = userTextValue(body.taxNo || invoice.taxNo);
   const type = body.type === "供应商" ? "供应商" : "客户";
@@ -492,6 +506,7 @@ function normalizeCustomerPayload(body, id = "") {
     customerCategory,
     name,
     shortName,
+    customsCustomerType: type === "客户" && customerCategory === "报关客户" ? customsCustomerType : "",
     province: userTextValue(body.province || "广东省"),
     city: userTextValue(body.city || "深圳市"),
     address,
@@ -1143,11 +1158,12 @@ function csvRows(headers, rows) {
 }
 
 function shortLocationValue(value) {
-  const parts = textValue(value)
+  const text = firstExportLocationLine(value);
+  const parts = text
     .split("/")
     .map((part) => part.trim())
     .filter(Boolean);
-  return parts.length > 2 ? parts.slice(0, 2).join(" / ") : textValue(value);
+  return parts.length > 2 ? parts.slice(0, 2).join(" / ") : text;
 }
 
 function firstExportLocationLine(value) {
@@ -1158,6 +1174,72 @@ function firstExportLocationLine(value) {
     .map((part) => part.trim())
     .filter(Boolean);
   return parts[0] || text;
+}
+
+function dispatchExportNormalizeLocationText(value = "") {
+  return String(value || "")
+    .replace(/[市区县區镇鎮街道\s/｜|,，-]/g, "")
+    .toLowerCase();
+}
+
+function dispatchExportLocationParts(value = "") {
+  const text = firstExportLocationLine(value);
+  if (!text) return { city: "", district: "", detail: "" };
+  if (text.includes("/")) {
+    const parts = text.split("/").map((part) => part.trim()).filter(Boolean);
+    if (parts.length >= 2) {
+      return {
+        city: parts[0] || "",
+        district: parts[1] || "",
+        detail: parts.slice(2).join(" / ")
+      };
+    }
+    return { city: parts[0] || "", district: "", detail: "" };
+  }
+  const compact = text.replace(/\s+/g, "");
+  const cityMatch = compact.match(/^(.+?(?:市|盟|州|地区|特別行政區|特别行政区|香港|澳门))/);
+  if (cityMatch) {
+    const city = cityMatch[1] || "";
+    const rest = compact.slice(city.length);
+    const districtMatch = rest.match(/^(.+?(?:区|區|县|縣|镇|鎮|乡|鄉|街道))/);
+    return {
+      city,
+      district: districtMatch?.[1] || "",
+      detail: districtMatch ? rest.slice(districtMatch[1].length) : rest
+    };
+  }
+  return {
+    city: "",
+    district: "",
+    detail: text
+  };
+}
+
+function dispatchExportLocationSummary(value = "") {
+  const entries = String(value || "")
+    .replace(/\r/g, "\n")
+    .split(/[\n；;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (!entries.length) return "";
+  const segments = [];
+  let lastCity = "";
+  entries.forEach((entry) => {
+    const parts = dispatchExportLocationParts(entry);
+    const city = String(parts.city || "").trim();
+    const district = String(parts.district || "").trim();
+    const detail = String(parts.detail || "").trim();
+    const text = city && district
+      ? `${city} / ${district}`
+      : city || district || detail || entry;
+    if (city && lastCity && dispatchExportNormalizeLocationText(city) === dispatchExportNormalizeLocationText(lastCity)) {
+      segments.push(district || text);
+      return;
+    }
+    segments.push(text);
+    lastCity = city || "";
+  });
+  return segments.join(" + ");
 }
 
 function exportLocationCityDistrict(value) {
@@ -5861,6 +5943,7 @@ app.delete("/api/files/:id/permanent", async (req, res) => {
 });
 
 app.get("/api/customers", async (req, res) => {
+  await ensureCustomerCustomsCustomerTypeColumn();
   const type = req.query.type === "供应商" ? "供应商" : req.query.type === "客户" ? "客户" : null;
   const rows = type
     ? await db.prepare("SELECT * FROM customers WHERE deleted_at IS NULL AND type = ? ORDER BY created_at DESC, id DESC").all(type)
@@ -5869,6 +5952,7 @@ app.get("/api/customers", async (req, res) => {
 });
 
 app.patch("/api/customers/:id", async (req, res) => {
+  await ensureCustomerCustomsCustomerTypeColumn();
   const id = String(req.params.id || "").trim();
   const item = normalizeCustomerPayload(req.body, id);
 
@@ -5886,6 +5970,7 @@ app.patch("/api/customers/:id", async (req, res) => {
         customer_category = @customerCategory,
         name = @name,
         short_name = @shortName,
+        customs_customer_type = @customsCustomerType,
         province = @province,
         city = @city,
         address = @address,
@@ -5923,6 +6008,7 @@ app.patch("/api/customers/:id", async (req, res) => {
 });
 
 app.post("/api/customers", async (req, res) => {
+  await ensureCustomerCustomsCustomerTypeColumn();
   const item = normalizeCustomerPayload(req.body, req.body.id || (await nextCustomerId(req.body.type)));
 
   if (!item.name) {
@@ -5935,13 +6021,13 @@ app.post("/api/customers", async (req, res) => {
   const hasCustomsCustomFields = await customerColumnExists("customs_custom_fields");
   await db.prepare(`
     INSERT INTO customers
-      (id, type, customer_category, name, short_name, province, city, address, term, settlement_currency, receivable_rmb, receivable_hkd, recent_order, created_at,
+      (id, type, customer_category, name, short_name, customs_customer_type, province, city, address, term, settlement_currency, receivable_rmb, receivable_hkd, recent_order, created_at,
        tax_no, contact, mobile, driver_wage_adjust_hkd, default_template_id,
        invoice_title, invoice_tax_no, invoice_bank, invoice_account, invoice_address_phone,
        customs_home_item_count, customs_page_item_count, customs_import_home_fee, customs_export_home_fee,
        customs_import_page_fee, customs_export_page_fee${hasCustomsManifestFee ? ", customs_manifest_fee" : ""}${hasCustomsVerificationFee ? ", customs_verification_fee" : ""}${hasCustomsCustomFields ? ", customs_custom_fields" : ""})
     VALUES
-      (@id, @type, @customerCategory, @name, @shortName, @province, @city, @address, @term, @settlementCurrency, @receivableRMB, @receivableHKD, @recentOrder, @createdAt,
+      (@id, @type, @customerCategory, @name, @shortName, @customsCustomerType, @province, @city, @address, @term, @settlementCurrency, @receivableRMB, @receivableHKD, @recentOrder, @createdAt,
        @taxNo, @contact, @mobile, @driverWageAdjustHKD, @defaultTemplateId,
        @invoiceTitle, @invoiceTaxNo, @invoiceBank, @invoiceAccount, @invoiceAddressPhone,
        @customsHomeItemCount, @customsPageItemCount, @customsImportHomeFee, @customsExportHomeFee,
@@ -6455,13 +6541,7 @@ function dispatchExportFirstLocation(value = "") {
 }
 
 function dispatchExportShortLocation(value = "") {
-  const text = dispatchExportFirstLocation(value);
-  if (!text) return "";
-  const slashParts = text.split(/\s*\/\s*/).map((item) => item.trim());
-  if (slashParts.length >= 2 && slashParts[1]) {
-    return [slashParts[0], slashParts[1]].filter(Boolean).join(" / ");
-  }
-  return "";
+  return dispatchExportLocationSummary(value);
 }
 
 function dispatchExportRoute(row = {}) {
@@ -6489,7 +6569,7 @@ function dispatchExportWrappedLineCount(value = "", maxWidth = 34) {
 function dispatchExportCellDisplayText(value, columnNumber) {
   if (value instanceof Date) {
     if (columnNumber === 2) {
-      return `${value.getMonth() + 1}/${value.getDate()}`;
+      return `${value.getMonth() + 1}月${value.getDate()}日`;
     }
     return `${String(value.getHours()).padStart(2, "0")}:${String(value.getMinutes()).padStart(2, "0")}`;
   }
@@ -6750,11 +6830,17 @@ async function renderDispatchPlanXlsxBuffer(rows = [], title = "", fallbackDate 
   titleCell.border = { bottom: { style: "medium", color: { argb: "FF000000" } } };
   worksheet.getRow(1).height = 22.5;
 
-  const thickBorder = {
+  const headerBorder = {
     top: { style: "medium", color: { argb: "FF000000" } },
     left: { style: "medium", color: { argb: "FF000000" } },
     bottom: { style: "medium", color: { argb: "FF000000" } },
     right: { style: "medium", color: { argb: "FF000000" } }
+  };
+  const bodyBorder = {
+    top: { style: "thin", color: { argb: "FF000000" } },
+    left: { style: "thin", color: { argb: "FF000000" } },
+    bottom: { style: "thin", color: { argb: "FF000000" } },
+    right: { style: "thin", color: { argb: "FF000000" } }
   };
   headers.forEach((header, index) => {
     const column = index + 1;
@@ -6764,8 +6850,8 @@ async function renderDispatchPlanXlsxBuffer(rows = [], title = "", fallbackDate 
     cell.font = { name: "SimSun", size: 14 };
     cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFFF00" } };
     cell.alignment = { horizontal: "center", vertical: "middle", wrapText: column !== 1 };
-    cell.border = thickBorder;
-    worksheet.getCell(3, column).border = thickBorder;
+    cell.border = headerBorder;
+    worksheet.getCell(3, column).border = headerBorder;
   });
   worksheet.getRow(2).height = 18;
   worksheet.getRow(3).height = 18;
@@ -6787,8 +6873,8 @@ async function renderDispatchPlanXlsxBuffer(rows = [], title = "", fallbackDate 
         vertical: "middle",
         wrapText: columnNumber === 5 || columnNumber === 15
       };
-      cell.border = thickBorder;
-      if (columnNumber === 2 && cell.value instanceof Date) cell.numFmt = "m/d";
+      cell.border = bodyBorder;
+      if (columnNumber === 2 && cell.value instanceof Date) cell.numFmt = "m\"月\"d\"日\"";
       if (columnNumber === 12 && cell.value instanceof Date) cell.numFmt = "h:mm";
     });
   });
@@ -8574,7 +8660,21 @@ app.post("/api/drivers", async (req, res) => {
     res.status(400).json({ message: "司机姓名不能为空" });
     return;
   }
-  const duplicate = await db.prepare("SELECT id FROM drivers WHERE name = ?").get(item.name);
+  const duplicate = await db.prepare("SELECT * FROM drivers WHERE name = ?").get(item.name);
+  if (duplicate?.deleted_at) {
+    await db.prepare(`
+      UPDATE drivers
+      SET type = @type, name = @name, phone = @phone, id_no = @idNo, license = @license,
+          birthday = @birthday, hire_date = @hireDate, leave_date = @leaveDate,
+          employment_status = @employmentStatus, expire_at = @expireAt,
+          status = @status, default_wage = @defaultWage, note = @note,
+          deleted_at = NULL
+      WHERE id = @id
+    `).run({ ...item, id: duplicate.id });
+    await writeAudit("restore", "driver", String(duplicate.id), item.name);
+    res.json({ ...mapDriver(await db.prepare("SELECT * FROM drivers WHERE id = ?").get(duplicate.id)), restored: true });
+    return;
+  }
   if (duplicate) {
     res.status(409).json({ message: "司机姓名已存在，不能重复" });
     return;
@@ -8615,6 +8715,13 @@ app.patch("/api/drivers/:id", async (req, res) => {
   if (!item.name) {
     res.status(400).json({ message: "司机姓名不能为空" });
     return;
+  }
+  if (item.name !== current.name) {
+    const duplicate = await db.prepare("SELECT id FROM drivers WHERE name = ? AND id <> ?").get(item.name, id);
+    if (duplicate) {
+      res.status(409).json({ message: "司机姓名已存在，不能重复" });
+      return;
+    }
   }
   const transaction = db.transaction(async () => {
     const result = await db.prepare(`

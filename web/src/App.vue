@@ -526,7 +526,7 @@ function moveDataTableColumn(columns, tableId, draggedKey, targetKey) {
   const targetIndex = columns.findIndex((column) => column.key === targetKey);
   columns.splice(targetIndex, 0, moved);
   localStorage.setItem(dataTableStorageKey(tableId, "order"), JSON.stringify(columns.filter((column) => !column.locked).map((column) => column.key)));
-  if (tableId === "dispatch_board") saveAccountTablePreferencesSoon();
+  if (shouldSyncAccountDataTablePreferences(tableId)) saveAccountTablePreferencesSoon();
 }
 
 function moveDataTableColumnByOffset(columns, tableId, column, offset) {
@@ -542,15 +542,18 @@ function moveDataTableColumnByOffset(columns, tableId, column, offset) {
   const nextIndex = columns.findIndex((item) => item.key === targetMovableKey);
   columns.splice(offset > 0 ? nextIndex + 1 : nextIndex, 0, moved);
   localStorage.setItem(dataTableStorageKey(tableId, "order"), JSON.stringify(columns.filter((item) => !item.locked).map((item) => item.key)));
-  if (tableId === "dispatch_board") saveAccountTablePreferencesSoon();
+  if (shouldSyncAccountDataTablePreferences(tableId)) saveAccountTablePreferencesSoon();
 }
 
 function resetDataTableColumnWidths(tableId, columns, widths) {
   localStorage.removeItem(dataTableStorageKey(tableId, "widths"));
+  Object.keys(widths).forEach((key) => {
+    delete widths[key];
+  });
   columns.forEach((column) => {
     widths[column.key] = column.width;
   });
-  if (tableId === "dispatch_board") saveAccountTablePreferencesSoon();
+  if (shouldSyncAccountDataTablePreferences(tableId)) saveAccountTablePreferencesSoon();
   notify("已恢复自适应列宽");
 }
 
@@ -562,8 +565,12 @@ function resetDataTableColumnOrder(columns, tableId) {
     (left.defaultIndex ?? 0) - (right.defaultIndex ?? 0)
   );
   columns.splice(0, columns.length, ...lockedStart, ...movable, ...lockedEnd);
-  if (tableId === "dispatch_board") saveAccountTablePreferencesSoon();
+  if (shouldSyncAccountDataTablePreferences(tableId)) saveAccountTablePreferencesSoon();
   notify("已恢复默认列顺序");
+}
+
+function shouldSyncAccountDataTablePreferences(tableId) {
+  return tableId === "dispatch_board" || tableId === CUSTOMS_BUSINESS_TABLE_ID;
 }
 
 function clampColumnWidth(column, width) {
@@ -874,6 +881,7 @@ function normalizeCustomerRecord(customer = {}) {
     ...row,
     customerCategory: row.type === "客户" ? customerCategoryValue(row) : "",
     shortName: String(row.shortName || row.short_name || "").trim(),
+    customsCustomerType: String(row.customsCustomerType || row.customs_customer_type || "").trim(),
     customsHomeItemCount: Number(row.customsHomeItemCount ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsHomeItemCount),
     customsPageItemCount: Number(row.customsPageItemCount ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsPageItemCount),
     customsImportHomeFee: Number(row.customsImportHomeFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportHomeFee),
@@ -1950,6 +1958,7 @@ const customerForm = reactive({
   customerCategory: "运输客户",
   name: "",
   shortName: "",
+  customsCustomerType: "",
   province: "",
   city: "",
   address: "",
@@ -2211,6 +2220,7 @@ const orderColumnWidths = reactive(loadOrderColumnWidths());
 const relatedVehicleOrderColumnWidths = reactive(loadRelatedOrderColumnWidths(relatedVehicleOrderColumns, RELATED_VEHICLE_ORDER_COLUMN_STORAGE_KEY));
 const relatedDriverOrderColumnWidths = reactive(loadRelatedOrderColumnWidths(relatedDriverOrderColumns, RELATED_DRIVER_ORDER_COLUMN_STORAGE_KEY));
 const financeWageTableColumnWidths = reactive(loadDataTableColumnWidths("finance_wages", financeWageTableColumns));
+const customsBusinessColumnWidths = reactive(loadDataTableSavedWidths(CUSTOMS_BUSINESS_TABLE_ID));
 const financeWageDetailColumnWidths = reactive({});
 const financeWageTableColumnVisibility = reactive(loadDataTableColumnVisibility("finance_wages", financeWageTableColumns));
 const financeWageDetailColumnVisibility = reactive(loadStoredJson(dataTableStorageKey("finance_wage_detail", "visibility"), {}));
@@ -2264,6 +2274,7 @@ function accountTablePreferencesSnapshot() {
       order: loadStoredJson(dataTableStorageKey("dispatch_board", "order"), [])
     },
     customsBusiness: {
+      widths: loadStoredJson(dataTableStorageKey(CUSTOMS_BUSINESS_TABLE_ID, "widths"), {}),
       order: loadStoredJson(CUSTOMS_BUSINESS_COLUMN_ORDER_KEY, [])
     },
     otherBusiness: {
@@ -2326,6 +2337,7 @@ function applyAccountTablePreferences(preferences = {}) {
   saveStoredJson(dataTableStorageKey("dispatch_board", "widths"), dispatchWidths);
   saveStoredJson(dataTableStorageKey("dispatch_board", "visibility"), dispatchPrefs.visibility || {});
   saveStoredJson(dataTableStorageKey("dispatch_board", "order"), dispatchPrefs.order || []);
+  saveStoredJson(dataTableStorageKey(CUSTOMS_BUSINESS_TABLE_ID, "widths"), customsPrefs.widths || {});
   saveStoredJson(CUSTOMS_BUSINESS_COLUMN_ORDER_KEY, customsPrefs.order || []);
   saveStoredJson(OTHER_BUSINESS_COLUMN_ORDER_KEY, otherBusinessPrefs.order || []);
 
@@ -2340,6 +2352,7 @@ function applyAccountTablePreferences(preferences = {}) {
   restoreColumnVisibility(dispatchTableColumnVisibility, dispatchTableColumns, dispatchPrefs.visibility || {});
 
   customsBusinessColumnOrder.value = Array.isArray(customsPrefs.order) ? customsPrefs.order : [];
+  restoreObject(customsBusinessColumnWidths, customsPrefs.widths || {});
   otherBusinessColumnOrder.value = Array.isArray(otherBusinessPrefs.order) ? otherBusinessPrefs.order : [];
 }
 
@@ -2909,7 +2922,7 @@ const visibleCustomers = computed(() => {
   const rows = customerRows.value.filter((item) => {
     if (!partnerMatchesActiveView(item)) return false;
     if (!keyword) return true;
-    return [item.id, item.name, item.city, item.term, customerCategoryValue(item), partnerRecentOrderDate(item)]
+    return [item.id, item.name, item.shortName, item.customsCustomerType, item.city, item.term, customerCategoryValue(item), partnerRecentOrderDate(item)]
       .some((value) => String(value || "").toLowerCase().includes(keyword));
   });
   return sortRowsByTable(rows, "customers");
@@ -3053,7 +3066,12 @@ const driverWageTransportModeOptions = computed(() =>
 );
 
 function driverWageCityValue(value) {
-  return normalizeFreightLabel(String(value || "").split(/[\/｜|>]+/)[0] || "");
+  const text = String(value || "")
+    .replace(/\r/g, "\n")
+    .split(/[；;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)[0] || "";
+  return normalizeFreightLabel(text.split(/[\/｜|>]+/)[0] || "");
 }
 
 function supplierCostRuleCityValue(value) {
@@ -3061,19 +3079,20 @@ function supplierCostRuleCityValue(value) {
 }
 
 function supplierCostRuleAreaValue(value) {
-  const parts = String(value || "")
+  const text = String(value || "")
+    .replace(/\r/g, "\n")
+    .split(/[；;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)[0] || "";
+  const parts = text
     .split(/[\/｜|>]+/)
     .map((item) => normalizeFreightLabel(item))
     .filter(Boolean);
-  return parts.slice(0, 2).join("/") || supplierCostRuleCityValue(value);
+  return parts.slice(0, 2).join("/") || supplierCostRuleCityValue(text);
 }
 
 function relatedOrderLocationText(value) {
-  const parts = String(value || "")
-    .split(/[\/｜|>]+/)
-    .map((item) => normalizeFreightLabel(item))
-    .filter(Boolean);
-  return parts.slice(0, 2).join(" / ") || normalizeFreightLabel(value) || "-";
+  return dispatchSummarizeLocationEntries(value) || normalizeFreightLabel(value) || "-";
 }
 
 function relatedOrderRouteText(order) {
@@ -4676,6 +4695,7 @@ async function returnDispatchRowStatus(row) {
 function closeDispatchModal(options = {}) {
   if (loading.value && !options.force) return;
   closeDispatchDriverPicker();
+  clearAllDispatchLocationDrafts();
   clearDispatchRecognitionStatus();
   dispatchModalOpen.value = false;
   editingDispatchRowId.value = "";
@@ -4739,6 +4759,7 @@ function dispatchFormDriverFields(fallback = {}) {
 }
 
 function resetDispatchForm() {
+  clearAllDispatchLocationDrafts();
   Object.assign(dispatchForm, {
     date: dispatchDate.value || offsetDateInputValue(1),
     customerId: "",
@@ -4776,6 +4797,7 @@ async function openDispatchModal() {
 }
 
 function fillDispatchFormFromPlanRow(row, fallbackDate = dispatchDate.value || offsetDateInputValue(1)) {
+  clearAllDispatchLocationDrafts();
   const order = row.order || {};
   const customerName = order.customer || row.customer || "";
   const customer = findPartnerByTypedLabel(customerName, "客户");
@@ -6763,8 +6785,9 @@ const customsBusinessFilteredCustomerOptions = computed(() => {
   const filtered = customsBusinessCustomerOptions.value.filter((customer) => {
     const name = String(customer.name || "").trim();
     const shortName = customerShortDisplay(customer);
+    const customerType = String(customer.customsCustomerType || "").trim();
     if (!keyword) return true;
-    return normalizedCustomsBusinessSearchText([name, shortName, customer.id].join(" ")).includes(keyword);
+    return normalizedCustomsBusinessSearchText([name, shortName, customerType, customer.id].join(" ")).includes(keyword);
   });
   if (selectedCompany && !filtered.some((customer) => String(customer.name || "").trim() === selectedCompany)) {
     const selected = customsBusinessCustomerOptions.value.find((customer) => String(customer.name || "").trim() === selectedCompany);
@@ -6981,11 +7004,16 @@ function normalizedCustomsBusinessSearchText(value = "") {
 }
 
 function customsBusinessSearchValues(row = {}) {
+  const customer = customsBusinessNameValues(row)
+    .map((value) => findCustomsBusinessCustomerByName(value))
+    .find(Boolean);
   return [
     row.company,
     row.customer,
     row.customerName,
     row.customer_name,
+    customer?.shortName,
+    customer?.customsCustomerType,
     row.declarationNo,
     row.sixSheetNo,
     row.direction,
@@ -7083,8 +7111,15 @@ const customsBusinessExportColumns = computed(() =>
 );
 
 const customsBusinessTableMinWidth = computed(() =>
-  `${orderedCustomsBusinessColumns.value.reduce((sum, column) => sum + Number(column.width || 96), 0)}px`
+  `${orderedCustomsBusinessColumns.value.reduce((sum, column) => sum + customsBusinessColumnWidth(column), 0)}px`
 );
+
+function customsBusinessTableStyle() {
+  return {
+    width: `max(100%, ${customsBusinessTableMinWidth.value})`,
+    minWidth: customsBusinessTableMinWidth.value
+  };
+}
 
 function customsBusinessCustomFieldEntry(row = {}, columnName = "") {
   const target = String(columnName || "").trim();
@@ -7099,8 +7134,12 @@ function customsBusinessCustomFieldDisplay(row = {}, columnName = "") {
 }
 
 function customsBusinessColumnStyle(column = {}) {
-  const width = Number(column.width || 96);
+  const width = customsBusinessColumnWidth(column);
   return { width: `${width}px`, minWidth: `${width}px` };
+}
+
+function customsBusinessColumnWidth(column = {}) {
+  return clampColumnWidth(column, Number(customsBusinessColumnWidths[column.key]));
 }
 
 function customsBusinessCellText(row = {}, column = {}) {
@@ -7176,6 +7215,10 @@ function resetCustomsBusinessColumnOrder() {
   customsBusinessColumnOrder.value = [];
   saveAccountTablePreferencesSoon();
   notify("已恢复报关业务默认列顺序");
+}
+
+function resetCustomsBusinessColumnWidths() {
+  resetDataTableColumnWidths(CUSTOMS_BUSINESS_TABLE_ID, orderedCustomsBusinessColumns.value, customsBusinessColumnWidths);
 }
 
 const customsBusinessCompanyFilterOptions = computed(() =>
@@ -11264,11 +11307,21 @@ function buildCustomsStatementRows(sourceRows = []) {
 }
 
 const customsStatementRows = computed(() => buildCustomsStatementRows(customsBusinessRows.value));
+function customsStatementSearchValues(row = {}) {
+  const customer = findCustomsBusinessCustomerByName(row.company);
+  return [
+    row.company,
+    customer?.name,
+    customer?.shortName,
+    customer?.short_name,
+    customer?.customsCustomerType
+  ];
+}
 const filteredCustomsStatementRows = computed(() => {
   const keyword = normalizedCustomsBusinessSearchText(customsStatementCompanySearch.value);
   if (!keyword) return customsStatementRows.value;
   return customsStatementRows.value.filter((row) =>
-    normalizedCustomsBusinessSearchText(row.company).includes(keyword)
+    normalizedCustomsBusinessSearchText(customsStatementSearchValues(row).join(" ")).includes(keyword)
   );
 });
 const customsStatementSummary = computed(() => ({
@@ -12141,7 +12194,10 @@ const customerPageColumns = computed(() => {
   ];
   if (activePartnerType.value === "客户" && normalizeCustomerCategory(activeCustomerCategory.value) === "报关客户") {
     return [
-      ...baseColumns,
+      ...baseColumns.slice(0, 2),
+      { key: "shortName", label: "简称" },
+      { key: "customsCustomerType", label: "客户类型" },
+      ...baseColumns.slice(2),
       { key: "customsHomeItemCount", label: "主页品名项" },
       { key: "customsPageItemCount", label: "续页品名项" },
       { key: "customsImportDeclarationFee", label: "进口报关费" },
@@ -13111,6 +13167,11 @@ function clearDispatchLocationDraftsForTarget(target) {
   dispatchLocationDistrictPicker.keyword = "";
 }
 
+function clearAllDispatchLocationDrafts() {
+  clearDispatchLocationDraftsForTarget("loading");
+  clearDispatchLocationDraftsForTarget("unloading");
+}
+
 function setDispatchRecognitionStatus(message = "", tone = "busy") {
   window.clearTimeout(dispatchRecognitionStatusTimer);
   dispatchRecognitionStatus.value = message;
@@ -13904,6 +13965,8 @@ const dispatchDriverPickerOptions = computed(() => {
 });
 
 const CUSTOMS_CUSTOMER_DETAIL_KEYS = new Set([
+  "shortName",
+  "customsCustomerType",
   "customsHomeItemCount",
   "customsPageItemCount",
   "customsImportPageFee",
@@ -16024,24 +16087,26 @@ const historicalAddressOptions = computed(() => {
       { value: order.loading, kind: "装货地" },
       { value: order.unloading, kind: "卸货地" }
     ].forEach(({ value, kind }) => {
-      const text = String(value || "").trim();
-      if (!text) return;
-      const addressKey = addressOptionKey(text);
-      if (hidden.has(addressKey)) return;
-      const key = `history:${addressKey}`;
-      if (!map.has(key)) {
-        map.set(key, {
-          key,
-          source: "历史地址",
-          direction: kind,
-          level1: "-",
-          level2: "-",
-          level3: "-",
-          rank: 0,
-          pathLabel: text,
-          value: text
-        });
-      }
+      splitDispatchLocationEntriesText(value).forEach((entry) => {
+        const text = String(entry || "").trim();
+        if (!text) return;
+        const addressKey = addressOptionKey(text);
+        if (hidden.has(addressKey)) return;
+        const key = `history:${addressKey}`;
+        if (!map.has(key)) {
+          map.set(key, {
+            key,
+            source: "历史地址",
+            direction: kind,
+            level1: "-",
+            level2: "-",
+            level3: "-",
+            rank: 0,
+            pathLabel: text,
+            value: text
+          });
+        }
+      });
     });
   });
   return [...map.values()].slice(0, 100);
@@ -16151,8 +16216,8 @@ const locationCityOptions = computed(() =>
     ...customerContactRows.value.map((item) => splitLocationParts(contactAreaText(item)).city),
     ...addressBookRows.value.map((item) => splitLocationParts(item.area).city),
     ...orderRows.value.flatMap((order) => [
-      splitLocationParts(order.loading).city,
-      splitLocationParts(order.unloading).city
+      ...splitDispatchLocationEntriesText(order.loading).map((entry) => splitLocationParts(entry).city),
+      ...splitDispatchLocationEntriesText(order.unloading).map((entry) => splitLocationParts(entry).city)
     ])
   ].filter(Boolean))
 );
@@ -18124,7 +18189,8 @@ function startDataTableColumnResize(tableId, widths, column, event) {
     tableId,
     widths,
     key: column.key,
-    min: column.min,
+    min: Number(column.min) || 56,
+    max: Number(column.max),
     startX: event.clientX,
     startWidth: widths[column.key] || column.width
   };
@@ -18135,16 +18201,19 @@ function startDataTableColumnResize(tableId, widths, column, event) {
 
 function resizeDataTableColumn(event) {
   if (!dataTableResizeState) return;
-  dataTableResizeState.widths[dataTableResizeState.key] = Math.max(
+  const nextWidth = Math.max(
     dataTableResizeState.min,
     Math.round(dataTableResizeState.startWidth + event.clientX - dataTableResizeState.startX)
   );
+  dataTableResizeState.widths[dataTableResizeState.key] = Number.isFinite(dataTableResizeState.max)
+    ? Math.min(dataTableResizeState.max, nextWidth)
+    : nextWidth;
 }
 
 function stopDataTableColumnResize() {
   if (dataTableResizeState) {
     localStorage.setItem(dataTableStorageKey(dataTableResizeState.tableId, "widths"), JSON.stringify({ ...dataTableResizeState.widths }));
-    if (dataTableResizeState.tableId === "dispatch_board") saveAccountTablePreferencesSoon();
+    if (shouldSyncAccountDataTablePreferences(dataTableResizeState.tableId)) saveAccountTablePreferencesSoon();
   }
   dataTableResizeState = null;
   document.body.classList.remove("is-column-resizing");
@@ -18156,7 +18225,7 @@ function setDataTableColumnVisible(tableId, visibility, column, visible) {
   if (column.locked) return;
   visibility[column.key] = visible;
   localStorage.setItem(dataTableStorageKey(tableId, "visibility"), JSON.stringify({ ...visibility }));
-  if (tableId === "dispatch_board") saveAccountTablePreferencesSoon();
+  if (shouldSyncAccountDataTablePreferences(tableId)) saveAccountTablePreferencesSoon();
 }
 
 function setDataTableDensity(value) {
@@ -18419,7 +18488,7 @@ function orderCellText(order, key, index = -1) {
 function orderTableCellTitle(order, key) {
   if (key === "customer") return order?.customer || "";
   if (key === "supplier") return order?.supplier || "";
-  if (key === "loading" || key === "unloading") return order?.[key] || "";
+  if (key === "loading" || key === "unloading") return relatedOrderLocationText(order?.[key]);
   if (isOrderFullDisplayColumn(key)) return orderCellText(order, key);
   return "";
 }
@@ -18438,6 +18507,8 @@ function customerListDetailCellText(item = {}, key = "") {
     type: item.type,
     customerCategory: customerCategoryValue(item),
     name: item.name,
+    shortName: item.shortName || "-",
+    customsCustomerType: item.customsCustomerType || "-",
     city: item.city || "-",
     term: item.term || "-",
     settlementCurrency: item.type === "客户" ? (item.settlementCurrency || "人民币结算") : "-",
@@ -18656,6 +18727,12 @@ function currentLocationForm() {
   return locationPicker.owner === "dispatch" ? dispatchForm : orderForm;
 }
 
+function clearDispatchLocationDraftsForPickerTarget() {
+  if (locationPicker.owner === "dispatch" && locationPicker.target) {
+    clearDispatchLocationDraftsForTarget(locationPicker.target);
+  }
+}
+
 function addressBookOptionValue(option = {}) {
   return String(option.value || option.address || option.pathLabel || "").trim();
 }
@@ -18676,7 +18753,11 @@ function locationCityCandidates() {
 }
 
 function splitLocationParts(value = "") {
-  const text = String(value || "").trim();
+  const text = String(value || "")
+    .replace(/\r/g, "\n")
+    .split(/[；;]+/)
+    .map((part) => part.trim())
+    .filter(Boolean)[0] || "";
   const parts = text
     .split("/")
     .map((part) => part.trim())
@@ -18825,10 +18906,6 @@ function normalizeDispatchLocationPartValue(value = "", part = "") {
   const text = part === "detail"
     ? normalizeDispatchLocationDetailText(value)
     : normalizeDispatchLocationText(value, { singleLine: true });
-  if (!text || part === "detail") return text;
-  const parsed = splitDispatchLocationParts(text);
-  if (part === "city") return parsed.city || text;
-  if (part === "district") return parsed.district || text;
   return text;
 }
 
@@ -18852,7 +18929,7 @@ function normalizeDispatchLocationPartsForTarget(target = "", value = "") {
   const parsed = splitDispatchLocationParts(value);
   let city = normalizeDispatchLocationCityValue(target, parsed.city);
   let district = normalizeDispatchLocationText(parsed.district, { singleLine: true });
-  let detail = normalizeDispatchLocationDetailText(parsed.detail).trim();
+  let detail = normalizeDispatchLocationDetailText(parsed.detail);
 
   return { city, district, detail };
 }
@@ -18865,23 +18942,19 @@ function splitAddressBookLocationValue(value = "") {
     .filter(Boolean);
 }
 
-// Keep wrapped pasted address blocks intact; only split obvious multi-address input.
 function splitDispatchLocationEntriesText(value = "") {
   const raw = String(value || "").replace(/\r/g, "\n");
   if (!raw.trim()) return [""];
-  const text = raw.replace(/^\n+|\n+$/g, "");
-  const lines = raw.split(/\n+/).map((item) => item.trim()).filter(Boolean);
-  const hasLabelLine = lines.some((line) => /^(?:联系人|聯絡人|聯繫人|电话|電話|手机|手機|备注|備注|注意事项|注意事項|司机|司機|仓库|倉庫|货好|貨好|请|請|温馨提示|提示|说明|說明|限高)\b/.test(line));
-  const hasLongLabeledLine = lines.some((line) => /[:：]/.test(line)) && lines.some((line) => line.length >= 24);
-  if (hasLabelLine || hasLongLabeledLine) return [text];
-  if (lines.length <= 1) {
-    if (/[；;]/.test(text)) {
-      const semicolonEntries = text.split(/[；;]+/).map((item) => item.trim()).filter(Boolean);
-      if (semicolonEntries.length > 1) return semicolonEntries;
-    }
-    return [text];
-  }
-  return lines;
+  const trailingBlankCount = (raw.match(/[；;]+$/)?.[0].length) || 0;
+  const text = trailingBlankCount > 0 ? raw.slice(0, raw.length - trailingBlankCount) : raw;
+  const entries = text
+    .split(/[；;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (!entries.length) return [""];
+  return trailingBlankCount > 0
+    ? [...entries, ...Array.from({ length: trailingBlankCount }, () => "")]
+    : entries;
 }
 
 function dispatchLocationEntries(target) {
@@ -18894,7 +18967,31 @@ function dispatchLocationEntryCount(target) {
 
 function setDispatchLocationEntries(target, entries) {
   const normalized = entries.map((item) => String(item || ""));
-  dispatchForm[target] = normalized.length > 1 || normalized.some(Boolean) ? normalized.join("\n") : "";
+  dispatchForm[target] = normalized.length > 1 || normalized.some(Boolean) ? normalized.join("；") : "";
+}
+
+function dispatchLocationPersistedParts(target, index) {
+  return normalizeDispatchLocationPartsForTarget(target, dispatchLocationEntries(target)[index] || "");
+}
+
+function dispatchLocationDraftHasPart(draft, part) {
+  return Boolean(draft && Object.prototype.hasOwnProperty.call(draft, part));
+}
+
+function dispatchLocationPartsForEdit(target, index) {
+  const persisted = dispatchLocationPersistedParts(target, index);
+  const draft = dispatchLocationDrafts[dispatchLocationDraftKey(target, index)];
+  return {
+    city: dispatchLocationDraftHasPart(draft, "city") ? normalizeDispatchLocationCityValue(target, draft.city) : persisted.city,
+    district: dispatchLocationDraftHasPart(draft, "district") ? normalizeDispatchLocationText(draft.district, { singleLine: true }) : persisted.district,
+    detail: dispatchLocationDraftHasPart(draft, "detail") ? normalizeDispatchLocationDetailText(draft.detail) : persisted.detail
+  };
+}
+
+function persistDispatchLocationEntryParts(target, index, parts = {}) {
+  const entries = dispatchLocationEntries(target);
+  entries[index] = composeDispatchLocationParts(parts.city, parts.district, parts.detail);
+  setDispatchLocationEntries(target, entries);
 }
 
 function updateDispatchLocationEntry(target, index, value) {
@@ -18904,12 +19001,9 @@ function updateDispatchLocationEntry(target, index, value) {
 }
 
 function updateDispatchLocationEntryPart(target, index, part, value) {
-  const entries = dispatchLocationEntries(target);
-  const current = normalizeDispatchLocationPartsForTarget(target, entries[index] || "");
+  const current = dispatchLocationPartsForEdit(target, index);
   current[part] = normalizeDispatchLocationPartValue(value, part);
-  const normalized = normalizeDispatchLocationPartsForTarget(target, composeDispatchLocationParts(current.city, current.district, current.detail));
-  entries[index] = composeDispatchLocationParts(normalized.city, normalized.district, normalized.detail);
-  setDispatchLocationEntries(target, entries);
+  persistDispatchLocationEntryParts(target, index, current);
 }
 
 function dispatchLocationInputKey(target, index, part) {
@@ -18932,13 +19026,9 @@ function dispatchLocationDraftValue(target, index, part) {
   const key = dispatchLocationDraftKey(target, index);
   const draft = dispatchLocationDrafts[key];
   if (draft && Object.prototype.hasOwnProperty.call(draft, part)) {
-    const value = String(draft[part] || "");
-    if (part === "city" && !String(value || "").trim()) {
-      return normalizeDispatchLocationPartsForTarget(target, dispatchLocationEntries(target)[index] || "").city || "";
-    }
-    return value;
+    return String(draft[part] ?? "");
   }
-  return normalizeDispatchLocationPartsForTarget(target, dispatchLocationEntries(target)[index] || "")[part] || "";
+  return dispatchLocationPersistedParts(target, index)[part] || "";
 }
 
 function dispatchLocationPartValue(target, index, part) {
@@ -18960,14 +19050,6 @@ function dispatchLocationHasCity(target, index) {
 function setDispatchLocationDraftPart(target, index, part, value) {
   const draft = ensureDispatchLocationDraft(target, index);
   draft[part] = String(value || "");
-}
-
-function clearDispatchLocationDraftPart(target, index, part) {
-  const key = dispatchLocationDraftKey(target, index);
-  const draft = dispatchLocationDrafts[key];
-  if (!draft) return;
-  delete draft[part];
-  if (!Object.keys(draft).length) delete dispatchLocationDrafts[key];
 }
 
 function setDispatchLocationInputComposing(target, index, part, composing) {
@@ -19015,25 +19097,24 @@ function commitDispatchLocationDraftPart(target, index, part) {
   } else {
     updateDispatchLocationEntryPart(target, index, part, value);
   }
-  clearDispatchLocationDraftPart(target, index, part);
 }
 
 function updateDispatchLocationCity(target, index, value) {
   if (isDispatchLocationInputComposing(target, index, "city")) return;
-  const entries = dispatchLocationEntries(target);
-  const current = normalizeDispatchLocationPartsForTarget(target, entries[index] || "");
+  const persisted = dispatchLocationPersistedParts(target, index);
+  const current = dispatchLocationPartsForEdit(target, index);
   const nextCity = normalizeDispatchLocationCityValue(target, value);
-  if (current.city !== nextCity) {
+  if (persisted.city !== nextCity) {
     current.district = "";
+    setDispatchLocationDraftPart(target, index, "district", "");
     if (dispatchLocationDistrictSearchKey(target, index)) {
       dispatchLocationDistrictPicker.keyword = "";
       dispatchLocationDistrictPicker.key = "";
     }
   }
   current.city = nextCity;
-  const normalized = normalizeDispatchLocationPartsForTarget(target, composeDispatchLocationParts(current.city, current.district, current.detail));
-  entries[index] = composeDispatchLocationParts(normalized.city, normalized.district, normalized.detail);
-  setDispatchLocationEntries(target, entries);
+  setDispatchLocationDraftPart(target, index, "city", nextCity);
+  persistDispatchLocationEntryParts(target, index, current);
 }
 
 function dispatchLocationDistrictKey(target, index) {
@@ -19063,41 +19144,32 @@ function openDispatchLocationDistrictPicker(target, index) {
 
 function closeDispatchLocationDistrictPicker(target, index) {
   if (!dispatchLocationDistrictSearchKey(target, index)) return;
-  const entries = dispatchLocationEntries(target);
-  const current = normalizeDispatchLocationPartsForTarget(target, entries[index] || "");
+  const current = dispatchLocationPartsForEdit(target, index);
   const value = String(dispatchLocationDistrictPicker.keyword || dispatchLocationDraftValue(target, index, "district") || current.district || "").trim();
   current.district = value;
-  const normalized = normalizeDispatchLocationPartsForTarget(target, composeDispatchLocationParts(current.city, current.district, current.detail));
-  entries[index] = composeDispatchLocationParts(normalized.city, normalized.district, normalized.detail);
-  setDispatchLocationEntries(target, entries);
+  setDispatchLocationDraftPart(target, index, "district", value);
+  persistDispatchLocationEntryParts(target, index, current);
   dispatchLocationDistrictPicker.key = "";
   dispatchLocationDistrictPicker.keyword = value;
-  clearDispatchLocationDraftPart(target, index, "district");
 }
 
 function selectDispatchLocationDistrict(target, index, value = "") {
   const district = String(value || "").trim();
-  const entries = dispatchLocationEntries(target);
-  const current = normalizeDispatchLocationPartsForTarget(target, entries[index] || "");
+  const current = dispatchLocationPartsForEdit(target, index);
   current.district = district;
-  const normalized = normalizeDispatchLocationPartsForTarget(target, composeDispatchLocationParts(current.city, current.district, current.detail));
-  entries[index] = composeDispatchLocationParts(normalized.city, normalized.district, normalized.detail);
-  setDispatchLocationEntries(target, entries);
+  setDispatchLocationDraftPart(target, index, "district", district);
+  persistDispatchLocationEntryParts(target, index, current);
   dispatchLocationDistrictPicker.key = "";
   dispatchLocationDistrictPicker.keyword = district;
-  clearDispatchLocationDraftPart(target, index, "district");
 }
 
 function clearDispatchLocationDistrict(target, index) {
-  const entries = dispatchLocationEntries(target);
-  const current = normalizeDispatchLocationPartsForTarget(target, entries[index] || "");
+  const current = dispatchLocationPartsForEdit(target, index);
   current.district = "";
-  const normalized = normalizeDispatchLocationPartsForTarget(target, composeDispatchLocationParts(current.city, current.district, current.detail));
-  entries[index] = composeDispatchLocationParts(normalized.city, normalized.district, normalized.detail);
-  setDispatchLocationEntries(target, entries);
+  setDispatchLocationDraftPart(target, index, "district", "");
+  persistDispatchLocationEntryParts(target, index, current);
   dispatchLocationDistrictPicker.key = dispatchLocationDistrictKey(target, index);
   dispatchLocationDistrictPicker.keyword = "";
-  clearDispatchLocationDraftPart(target, index, "district");
 }
 
 function confirmFirstDispatchLocationDistrictOption(target, index) {
@@ -19126,11 +19198,11 @@ function addDispatchLocationEntry(target) {
 function normalizeDispatchLocationFormValuesForSave() {
   ["loading", "unloading"].forEach((target) => {
     const entries = dispatchLocationEntries(target)
-      .filter((item) => String(item || "").trim())
-      .map((item) => {
-        const parts = normalizeDispatchLocationPartsForTarget(target, item);
+      .map((item, index) => {
+        const parts = dispatchLocationPartsForEdit(target, index);
         return composeDispatchLocationParts(parts.city, parts.district, parts.detail);
-      });
+      })
+      .filter((item) => String(item || "").trim());
     setDispatchLocationEntries(target, entries.length ? entries : [""]);
   });
 }
@@ -19455,7 +19527,8 @@ function applySelectedAddressBookEntries() {
     return;
   }
   const form = currentLocationForm();
-  form[locationPicker.target] = values.join("\n");
+  clearDispatchLocationDraftsForPickerTarget();
+  form[locationPicker.target] = locationPicker.owner === "dispatch" ? values.join("；") : values.join("\n");
   const firstOption = selectedOptions[0] || {};
   if (locationPicker.owner === "order" && locationPicker.target === "unloading") {
     orderForm.unloadingContact = firstOption.contact || "";
@@ -19538,6 +19611,7 @@ function applyLocationOption(option) {
     ? `${option.value} / ${detail}`
     : option.value;
   const form = currentLocationForm();
+  clearDispatchLocationDraftsForPickerTarget();
   form[locationPicker.target] = value;
   if (locationPicker.owner === "order" && locationPicker.target === "unloading") {
     orderForm.unloadingContact = option.contact || "";
@@ -19570,6 +19644,7 @@ function applyTemplateLocationSelection() {
   }
   const detail = String(locationPicker.detail || "").trim();
   const form = currentLocationForm();
+  clearDispatchLocationDraftsForPickerTarget();
   form[locationPicker.target] = detail && !value.includes(detail)
     ? `${value} / ${detail}`
     : value;
@@ -19590,6 +19665,7 @@ function applyCustomLocation() {
     return;
   }
   const form = currentLocationForm();
+  clearDispatchLocationDraftsForPickerTarget();
   form[locationPicker.target] = value;
   closeLocationPicker();
   if (locationPicker.owner === "order") {
@@ -20875,6 +20951,9 @@ function buildCustomerPayload() {
   return {
     ...customerForm,
     shortName: String(customerForm.shortName || "").trim(),
+    customsCustomerType: customerForm.type === "客户" && normalizeCustomerCategory(customerForm.customerCategory) === "报关客户"
+      ? String(customerForm.customsCustomerType || "").trim()
+      : "",
     customerCategory: customerForm.type === "客户" ? normalizeCustomerCategory(customerForm.customerCategory) : "",
     settlementCurrency: customerForm.type === "客户" ? (customerForm.settlementCurrency || "人民币结算") : "",
     taxNo: customerForm.invoiceTax || customerForm.taxNo,
@@ -20999,6 +21078,7 @@ function openCustomerModal(customer = null, createType = activePartnerType.value
     customerCategory,
     name: normalizedCustomer?.name || "",
     shortName: normalizedCustomer?.shortName || "",
+    customsCustomerType: normalizedCustomer?.customsCustomerType || "",
     province: normalizedCustomer?.province || "",
     city: normalizedCustomer?.city || "",
     address: normalizedCustomer?.address || "",
@@ -21164,8 +21244,12 @@ function handleOrderDirectionChange() {
 
 function handleDispatchFormDirectionChange() {
   ["loading", "unloading"].forEach((target) => {
-    const entries = dispatchLocationEntries(target).map((entry) => {
-      const parts = normalizeDispatchLocationPartsForTarget(target, entry);
+    const entries = dispatchLocationEntries(target).map((entry, index) => {
+      const parts = dispatchLocationPartsForEdit(target, index);
+      if (dispatchLocationCityRestrictedToHongKong(target)) {
+        parts.city = "香港";
+        setDispatchLocationDraftPart(target, index, "city", "香港");
+      }
       return composeDispatchLocationParts(parts.city, parts.district, parts.detail);
     });
     setDispatchLocationEntries(target, entries);
@@ -23218,7 +23302,7 @@ async function saveDriver() {
       : (activeDriverRows.value[0]?.id || null);
     driverModalOpen.value = false;
     await loadExpiryReminders({ silent: true, showPopup: activeModule.value === "home" });
-    notify(`已保存司机：${item.name}`);
+    notify(item.restored ? `司机姓名已存在，已恢复原记录：${item.name}` : `已保存司机：${item.name}`);
   } catch (error) {
     notify(error.message);
   } finally {
@@ -25428,6 +25512,27 @@ function parseOrderFreightTemplate(item) {
   }
 }
 
+function normalizeLoadedOrderFreightFee(fee = {}) {
+  const row = { ...fee };
+  const manualAssignee = Boolean(row.manualAssignee || row.manual_assignee || row._manualAssignee)
+    || String(row.driverRole || row.driver_role || "").trim() === "手动指定";
+  const feeItem = row.feeItemId
+    ? feeItemRowsById.value.get(String(row.feeItemId || "").trim())
+    : (row.name ? feeItemRowsByName.value.get(String(row.name || "").trim()) : null);
+  if (manualAssignee) {
+    row.manualAssignee = true;
+    row._manualAssignee = true;
+    row.driverRole = "手动指定";
+    row.driverName = normalizeOrderFeeAssigneeText(row.driverName || row.driver_name || "");
+    return row;
+  }
+  row.manualAssignee = false;
+  row._manualAssignee = false;
+  row.driverName = "";
+  row.driverRole = isCrossBorderFreightFee(row) ? "" : String(feeItem?.defaultDriverRole || "").trim();
+  return row;
+}
+
 function applyFeeTemplateRows(fees, options = {}) {
   const stripAttachments = options.stripAttachments !== false;
   orderFees.value = (Array.isArray(fees) ? fees : []).map((fee) => {
@@ -25514,8 +25619,7 @@ function loadSavedFeeTemplate(item) {
     notify("该模板暂无收费项目");
     return;
   }
-  applyOrderTemplateFields(content.order || {});
-  applyFeeTemplateRows(fees, { stripAttachments: true });
+  applyFeeTemplateRows(fees.map((fee) => normalizeLoadedOrderFreightFee(fee)), { stripAttachments: true });
   loadFeeTemplateMenuOpen.value = false;
   notify(`已载入模板：${item.name}`);
 }
@@ -25526,8 +25630,7 @@ function loadLatestOrderTemplate() {
     notify("暂无可载入的最近订单模板");
     return;
   }
-  applyOrderTemplateFields(order);
-  applyFeeTemplateRows(order.fees, { stripAttachments: true });
+  applyFeeTemplateRows((Array.isArray(order.fees) ? order.fees : []).map((fee) => normalizeLoadedOrderFreightFee(fee)), { stripAttachments: true });
   loadFeeTemplateMenuOpen.value = false;
   notify(`已载入最近订单模板：${order.no}`);
 }
@@ -25598,6 +25701,7 @@ async function saveCurrentFeesAsTemplate() {
           amountManual: Boolean(fee._manualAmount),
           cost: normalizeFeeCost(fee) ?? 0,
           costManual: Boolean(fee._manualCost),
+          manualAssignee: Boolean(fee._manualAssignee || String(fee.driverRole || "").trim() === "手动指定"),
           remark: fee.remark || "",
           driverRole: fee.driverRole || "",
           driverName: fee.driverName || "",
@@ -30468,7 +30572,7 @@ function orderDetailFeeRows(order = {}) {
             <input
               v-model.trim="customsStatementCompanySearch"
               type="search"
-              placeholder="搜索客户"
+              placeholder="搜索客户 / 客户类型"
             />
             <button
               v-if="customsStatementCompanySearch"
@@ -31655,6 +31759,9 @@ function orderDetailFeeRows(order = {}) {
           <button class="ghost-btn small" type="button" :disabled="!customsBusinessFiltersActive" @click="clearCustomsBusinessFilters">
             <IconSvg name="refresh" />清空筛选
           </button>
+          <button class="ghost-btn small" type="button" @click="resetCustomsBusinessColumnWidths">
+            <IconSvg name="refresh" />恢复列宽
+          </button>
           <span class="column-manager-wrap customs-business-column-manager" @click.stop>
             <button class="ghost-btn small" type="button" title="调整列表列顺序" aria-label="调整列表列顺序" @click="customsBusinessColumnMenuOpen = !customsBusinessColumnMenuOpen"><IconSvg name="list" />列顺序</button>
             <div v-if="customsBusinessColumnMenuOpen" class="column-manager-menu customs-business-column-menu" @click.stop>
@@ -31678,7 +31785,7 @@ function orderDetailFeeRows(order = {}) {
           <div class="finance-summary-card"><span>单票均额</span><strong>RMB {{ money(customsBusinessSummary.count ? customsBusinessSummary.revenue / customsBusinessSummary.count : 0) }}</strong></div>
         </div>
         <div class="table-card finance-table-card">
-          <table class="data-table compact boss-data-table customs-business-table" :style="{ minWidth: customsBusinessTableMinWidth }">
+          <table class="data-table compact boss-data-table customs-business-table customs-business-resizable-table" :style="customsBusinessTableStyle()">
             <colgroup>
               <col v-for="column in orderedCustomsBusinessColumns" :key="column.key" :style="customsBusinessColumnStyle(column)" />
             </colgroup>
@@ -31687,7 +31794,7 @@ function orderDetailFeeRows(order = {}) {
                 <th
                   v-for="column in orderedCustomsBusinessColumns"
                   :key="column.key"
-                  :class="{ 'customs-business-actions-col': column.key === 'actions', 'customs-business-amount-col': column.amount }"
+                  :class="['resizable-th', { 'customs-business-actions-col': column.key === 'actions', 'customs-business-amount-col': column.amount }]"
                   :draggable="column.key !== 'actions'"
                   :title="column.key !== 'actions' ? '拖动左右调整列顺序' : ''"
                   @dragstart="startCustomsBusinessColumnDrag(column, $event)"
@@ -31695,7 +31802,10 @@ function orderDetailFeeRows(order = {}) {
                   @dragover.prevent
                   @dragenter.prevent="dropCustomsBusinessColumn(column)"
                   @drop.prevent="dropCustomsBusinessColumn(column)"
-                >{{ column.label }}</th>
+                >
+                  <span>{{ column.label }}</span>
+                  <span class="column-resize-handle" title="拖动调整列宽" @click.stop @pointerdown="startDataTableColumnResize(CUSTOMS_BUSINESS_TABLE_ID, customsBusinessColumnWidths, column, $event)"></span>
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -33817,6 +33927,9 @@ function orderDetailFeeRows(order = {}) {
             <div class="form-grid customer-form-grid">
               <label class="span-2">名称<input v-model.trim="customerForm.name" placeholder="请输入名称" /></label>
               <label>简称<input v-model.trim="customerForm.shortName" placeholder="用于列表展示" /></label>
+              <label v-if="customerForm.type === '客户' && normalizeCustomerCategory(customerForm.customerCategory) === '报关客户'">客户类型
+                <input v-model.trim="customerForm.customsCustomerType" placeholder="例如：一般贸易 / 跨境电商" />
+              </label>
               <label>税号<input v-model.trim="customerForm.invoiceTax" placeholder="纳税人识别号" /></label>
               <label>开户行<input v-model.trim="customerForm.invoiceBank" placeholder="开户银行" /></label>
               <label>银行账号<input v-model.trim="customerForm.invoiceAccount" placeholder="银行账号" /></label>
@@ -34064,7 +34177,7 @@ function orderDetailFeeRows(order = {}) {
               <label class="span-2 dispatch-note-field">备注<textarea v-model.trim="dispatchForm.note" rows="2" placeholder="备注"></textarea></label>
               <label v-if="dispatchForm.vehicleSource === '外派车辆'">外派供应商<select v-model="dispatchForm.supplier"><option value=""></option><option v-for="customer in customerRows.filter((item) => item.type === '供应商')" :key="customer.id" :value="customer.name">{{ customerShortDisplay(customer) }}</option></select></label>
               <div class="dispatch-location-pair">
-	                <label class="dispatch-location-field">
+	                <div class="dispatch-location-field">
 	                  <span class="dispatch-location-label">
 	                    <span>装货地</span>
 	                    <span :class="['dispatch-location-count', { 'is-empty': dispatchLocationEntryCount('loading') === 0 }]">
@@ -34163,8 +34276,8 @@ function orderDetailFeeRows(order = {}) {
                       </span>
                     </span>
 	                  </span>
-	                </label>
-	                <label class="dispatch-location-field">
+	                </div>
+	                <div class="dispatch-location-field">
 	                  <span class="dispatch-location-label">
 	                    <span>卸货地</span>
 	                    <span :class="['dispatch-location-count', { 'is-empty': dispatchLocationEntryCount('unloading') === 0 }]">
@@ -34263,7 +34376,7 @@ function orderDetailFeeRows(order = {}) {
                       </span>
                     </span>
                   </span>
-                </label>
+                </div>
               </div>
             </div>
           </div>

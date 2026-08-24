@@ -4909,12 +4909,15 @@ select {
   min-width: 1460px;
 }
 
+.customs-business-resizable-table {
+  table-layout: fixed;
+}
+
 .other-business-table {
   min-width: 1120px;
 }
 
 .customs-business-table .customs-business-text-col {
-  max-width: 240px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4928,8 +4931,8 @@ select {
   position: sticky;
   right: 0;
   z-index: 3;
-  width: 118px;
-  min-width: 118px;
+  width: auto;
+  min-width: 0;
   text-align: center;
   background: #fff;
   box-shadow: -8px 0 16px rgba(15, 23, 42, 0.06);
@@ -7073,6 +7076,7 @@ select {
 .customer-order-table .resizable-th,
 .order-table .resizable-th,
 .related-order-table .resizable-th,
+.customs-business-table .resizable-th,
 .finance-wage-detail-table .resizable-th,
 .managed-data-table .resizable-th {
   position: sticky;

@@ -545,6 +545,7 @@ async function initializeSchema() {
       customer_category TEXT NOT NULL DEFAULT '运输客户',
       name TEXT NOT NULL,
       short_name TEXT NOT NULL DEFAULT '',
+      customs_customer_type TEXT NOT NULL DEFAULT '',
       province TEXT NOT NULL DEFAULT '',
       city TEXT NOT NULL DEFAULT '',
       address TEXT NOT NULL DEFAULT '',
@@ -1129,6 +1130,7 @@ async function initializeSchema() {
     ],
     customers: [
       "customer_category TEXT NOT NULL DEFAULT '运输客户'",
+      "customs_customer_type TEXT NOT NULL DEFAULT ''",
       "province TEXT NOT NULL DEFAULT ''",
       "address TEXT NOT NULL DEFAULT ''",
       "settlement_currency TEXT NOT NULL DEFAULT ''",

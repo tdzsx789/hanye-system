@@ -140,6 +140,8 @@ export function createCustomerListDetailColumns() {
     { key: "id", label: "编号", width: 108, min: 82 },
     { key: "type", label: "类型", width: 72, min: 58 },
     { key: "name", label: "名称", width: 220, min: 120 },
+    { key: "shortName", label: "简称", width: 128, min: 88 },
+    { key: "customsCustomerType", label: "客户类型", width: 120, min: 86 },
     { key: "city", label: "城市", width: 90, min: 68 },
     { key: "term", label: "账期", width: 100, min: 76 },
     { key: "settlementCurrency", label: "结算币种", width: 100, min: 78 },

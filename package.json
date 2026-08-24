@@ -8,6 +8,9 @@
     "dev:server": "npm --prefix server run dev",
     "build:web": "npm --prefix web run build",
     "docker:up": "docker compose up --build",
+    "docker:dev": "docker compose down && docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build",
+    "docker:dev:down": "docker compose -f docker-compose.yml -f docker-compose.dev.yml down",
+    "docker:dev:logs": "docker compose -f docker-compose.yml -f docker-compose.dev.yml logs -f",
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f"
   }

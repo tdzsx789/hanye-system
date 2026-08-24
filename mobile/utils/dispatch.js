@@ -472,9 +472,9 @@ function isTransportOrder(order) {
 }
 
 function dispatchShortLocation(value) {
-  const parts = valueText(value)
-    .replace(/\r/g, "\n")
-    .split(/[\n；;\/]+/)
+  const [firstEntry = ""] = splitDispatchLocationEntries(value);
+  const parts = valueText(firstEntry)
+    .split(/[/｜|>]+/)
     .map((item) => item.trim())
     .filter(Boolean);
   return parts.length ? parts.slice(0, 2).join(" / ") : "";
@@ -487,11 +487,18 @@ function dispatchOrderRouteText(record) {
 }
 
 function splitDispatchLocationEntries(value) {
-  return valueText(value)
-    .replace(/\r/g, "\n")
-    .split(/[\n；;]+/)
+  const text = valueText(value).replace(/\r/g, "\n");
+  if (!text.trim()) return [""];
+  const trailingBlankCount = (text.match(/[；;]+$/)?.[0].length) || 0;
+  const body = trailingBlankCount > 0 ? text.slice(0, text.length - trailingBlankCount) : text;
+  const entries = body
+    .split(/[；;]+/)
     .map((item) => item.trim())
     .filter(Boolean);
+  if (!entries.length) return [""];
+  return trailingBlankCount > 0
+    ? [...entries, ...Array.from({ length: trailingBlankCount }, () => "")]
+    : entries;
 }
 
 function dispatchMessageLocationDetail(value) {
