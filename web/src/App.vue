@@ -5425,18 +5425,36 @@ function removeDispatchRowsByOrderRefs(orderRefs = []) {
   }
 }
 
+function dispatchSummarizeLocationEntries(value = "") {
+  const entries = splitDispatchLocationEntriesText(value)
+    .map((entry) => {
+      const parts = splitLocationParts(entry);
+      const city = String(parts.city || "").trim();
+      const district = String(parts.district || "").trim();
+      const detail = String(parts.detail || "").trim();
+      const text = city && district
+        ? [city, district].join(" / ")
+        : city || district || detail || String(entry || "").trim();
+      return { city, district, text };
+    })
+    .filter((item) => item.text);
+  if (!entries.length) return "";
+  const segments = [];
+  let lastCity = "";
+  entries.forEach((item) => {
+    const city = item.city;
+    if (city && lastCity && normalizeLocationText(city) === normalizeLocationText(lastCity)) {
+      segments.push(item.district || item.text);
+      return;
+    }
+    segments.push(item.text);
+    lastCity = city || "";
+  });
+  return segments.join(" + ");
+}
+
 function dispatchShortLocation(value = "") {
-  const [firstAddress = ""] = splitDispatchLocationEntriesText(value);
-  const firstLine = String(firstAddress || "")
-    .replace(/\r/g, "\n")
-    .split(/\n+/)
-    .map((part) => part.trim())
-    .find(Boolean) || "";
-  if (!firstLine) return "";
-  const parts = splitDispatchLocationParts(firstLine);
-  if (parts.city && parts.district) return [parts.city, parts.district].join(" / ");
-  if (parts.city) return parts.city;
-  return firstLine;
+  return dispatchSummarizeLocationEntries(value);
 }
 
 function dispatchOrderRouteText(order) {
@@ -5446,18 +5464,7 @@ function dispatchOrderRouteText(order) {
 }
 
 function dispatchExportShortLocation(value = "") {
-  const [firstAddress = ""] = splitDispatchLocationEntriesText(value);
-  const firstLine = String(firstAddress || "")
-    .replace(/\r/g, "\n")
-    .split(/\n+/)
-    .map((part) => part.trim())
-    .find(Boolean) || "";
-  if (!firstLine) return "";
-  const parts = splitDispatchLocationParts(firstLine);
-  const city = String(parts.city || "").trim();
-  const district = String(parts.district || "").trim();
-  if (!district) return "";
-  return [city, district].filter(Boolean).join(" / ");
+  return dispatchSummarizeLocationEntries(value);
 }
 
 function dispatchExportRouteSummary(row = {}) {
@@ -18847,26 +18854,6 @@ function normalizeDispatchLocationPartsForTarget(target = "", value = "") {
   let district = normalizeDispatchLocationText(parsed.district, { singleLine: true });
   let detail = normalizeDispatchLocationDetailText(parsed.detail).trim();
 
-  if (!city) {
-    const detailParts = splitLocationParts(detail);
-    if (detailParts.city || detailParts.district || detailParts.detail) {
-      city = normalizeDispatchLocationCityValue(target, detailParts.city);
-      if (city) {
-        district = detailParts.district || district;
-        detail = detailParts.detail || detail;
-      }
-    }
-  }
-
-  if (!city && isDispatchLocationCityLikeValue(target, detail)) {
-    city = normalizeDispatchLocationCityValue(target, detail);
-    detail = "";
-  }
-
-  if (city && normalizeLocationText(detail) === normalizeLocationText(city)) {
-    detail = "";
-  }
-
   return { city, district, detail };
 }
 
@@ -18946,9 +18933,6 @@ function dispatchLocationDraftValue(target, index, part) {
   const draft = dispatchLocationDrafts[key];
   if (draft && Object.prototype.hasOwnProperty.call(draft, part)) {
     const value = String(draft[part] || "");
-    if (part === "detail" && !String(draft.city || "").trim() && isDispatchLocationCityLikeValue(target, value)) {
-      return "";
-    }
     if (part === "city" && !String(value || "").trim()) {
       return normalizeDispatchLocationPartsForTarget(target, dispatchLocationEntries(target)[index] || "").city || "";
     }
@@ -19292,7 +19276,7 @@ function openLocationPicker(target, mode = "template", owner = "order") {
 
 function openDispatchLocationPicker(target) {
   if (!dispatchCustomerSelected.value) {
-    notify("请先选择客户，再添加装货地或卸货地");
+    notify("请先选择客户，再使用联系人地址");
     return;
   }
   openLocationPicker(target, "addressBook", "dispatch");
@@ -34080,11 +34064,11 @@ function orderDetailFeeRows(order = {}) {
               <label class="span-2 dispatch-note-field">备注<textarea v-model.trim="dispatchForm.note" rows="2" placeholder="备注"></textarea></label>
               <label v-if="dispatchForm.vehicleSource === '外派车辆'">外派供应商<select v-model="dispatchForm.supplier"><option value=""></option><option v-for="customer in customerRows.filter((item) => item.type === '供应商')" :key="customer.id" :value="customer.name">{{ customerShortDisplay(customer) }}</option></select></label>
               <div class="dispatch-location-pair">
-	                <label class="dispatch-location-field" :class="{ 'is-disabled': !dispatchCustomerSelected }">
+	                <label class="dispatch-location-field">
 	                  <span class="dispatch-location-label">
 	                    <span>装货地</span>
 	                    <span :class="['dispatch-location-count', { 'is-empty': dispatchLocationEntryCount('loading') === 0 }]">
-	                      {{ !dispatchCustomerSelected ? '请先选择客户' : (dispatchLocationEntryCount('loading') ? `共 ${dispatchLocationEntryCount('loading')} 个地址` : '未选择地址') }}
+	                      {{ dispatchLocationEntryCount('loading') ? `共 ${dispatchLocationEntryCount('loading')} 个地址` : '未选择地址' }}
 	                    </span>
 	                  </span>
 	                  <span class="location-input-row dispatch-location-row" @click.stop>
@@ -34100,20 +34084,19 @@ function orderDetailFeeRows(order = {}) {
 	                          :list="dispatchLocationCityOptionsListId('loading')"
 	                          :value="dispatchLocationDraftValue('loading', index, 'city')"
 	                          placeholder="市"
-	                          :disabled="!dispatchCustomerSelected"
 	                          @input="handleDispatchLocationTextInput('loading', index, 'city', $event)"
 	                          @change="commitDispatchLocationDraftPart('loading', index, 'city')"
 	                          @compositionstart="handleDispatchLocationTextCompositionStart('loading', index, 'city')"
 	                          @compositionend="handleDispatchLocationTextCompositionEnd('loading', index, 'city', $event)"
 	                          @blur="commitDispatchLocationDraftPart('loading', index, 'city')"
 	                        />
-	                        <span class="searchable-select dispatch-location-district-search" :class="{ 'is-open': dispatchLocationDistrictSearchKey('loading', index), 'is-disabled': !dispatchCustomerSelected || !dispatchLocationHasCity('loading', index) }" @click.stop>
+	                        <span class="searchable-select dispatch-location-district-search" :class="{ 'is-open': dispatchLocationDistrictSearchKey('loading', index), 'is-disabled': !dispatchLocationHasCity('loading', index) }" @click.stop>
 	                          <input
 	                            :value="dispatchLocationDistrictSearchKey('loading', index) ? dispatchLocationDistrictPicker.keyword : dispatchLocationDraftValue('loading', index, 'district')"
 	                            type="search"
 	                            autocomplete="off"
 	                            :placeholder="dispatchLocationHasCity('loading', index) ? '区' : '请先选择市'"
-	                            :disabled="!dispatchCustomerSelected || !dispatchLocationHasCity('loading', index)"
+	                            :disabled="!dispatchLocationHasCity('loading', index)"
 	                            @focus="openDispatchLocationDistrictPicker('loading', index)"
 	                            @input="handleDispatchLocationTextInput('loading', index, 'district', $event)"
 	                            @change="commitDispatchLocationDraftPart('loading', index, 'district')"
@@ -34126,7 +34109,7 @@ function orderDetailFeeRows(order = {}) {
 	                          <button
 	                            type="button"
 	                            class="customs-business-company-toggle"
-	                            :disabled="!dispatchCustomerSelected || !dispatchLocationHasCity('loading', index)"
+	                            :disabled="!dispatchLocationHasCity('loading', index)"
 	                            :title="dispatchLocationDistrictSearchKey('loading', index) ? '收起区列表' : '展开区列表'"
 	                            :aria-label="dispatchLocationDistrictSearchKey('loading', index) ? '收起区列表' : '展开区列表'"
 	                            @click.stop="dispatchLocationDistrictSearchKey('loading', index) ? closeDispatchLocationDistrictPicker('loading', index) : openDispatchLocationDistrictPicker('loading', index)"
@@ -34157,7 +34140,6 @@ function orderDetailFeeRows(order = {}) {
 	                          :value="dispatchLocationDraftValue('loading', index, 'detail')"
                             rows="2"
 	                          :placeholder="index === 0 ? '详细地址，例如：美泰物流园A栋一楼' : '继续填写第 ' + (index + 1) + ' 个地址'"
-	                          :disabled="!dispatchCustomerSelected"
 	                          @input="handleDispatchLocationTextInput('loading', index, 'detail', $event)"
 	                          @change="commitDispatchLocationDraftPart('loading', index, 'detail')"
 	                          @compositionstart="handleDispatchLocationTextCompositionStart('loading', index, 'detail')"
@@ -34182,11 +34164,11 @@ function orderDetailFeeRows(order = {}) {
                     </span>
 	                  </span>
 	                </label>
-	                <label class="dispatch-location-field" :class="{ 'is-disabled': !dispatchCustomerSelected }">
+	                <label class="dispatch-location-field">
 	                  <span class="dispatch-location-label">
 	                    <span>卸货地</span>
 	                    <span :class="['dispatch-location-count', { 'is-empty': dispatchLocationEntryCount('unloading') === 0 }]">
-	                      {{ !dispatchCustomerSelected ? '请先选择客户' : (dispatchLocationEntryCount('unloading') ? `共 ${dispatchLocationEntryCount('unloading')} 个地址` : '未选择地址') }}
+	                      {{ dispatchLocationEntryCount('unloading') ? `共 ${dispatchLocationEntryCount('unloading')} 个地址` : '未选择地址' }}
 	                    </span>
 	                  </span>
                   <span class="location-input-row dispatch-location-row" @click.stop>
@@ -34202,20 +34184,19 @@ function orderDetailFeeRows(order = {}) {
 	                          :list="dispatchLocationCityOptionsListId('unloading')"
 	                          :value="dispatchLocationDraftValue('unloading', index, 'city')"
 	                          placeholder="市"
-	                          :disabled="!dispatchCustomerSelected"
 	                          @input="handleDispatchLocationTextInput('unloading', index, 'city', $event)"
 	                          @change="commitDispatchLocationDraftPart('unloading', index, 'city')"
 	                          @compositionstart="handleDispatchLocationTextCompositionStart('unloading', index, 'city')"
 	                          @compositionend="handleDispatchLocationTextCompositionEnd('unloading', index, 'city', $event)"
 	                          @blur="commitDispatchLocationDraftPart('unloading', index, 'city')"
 	                        />
-	                        <span class="searchable-select dispatch-location-district-search" :class="{ 'is-open': dispatchLocationDistrictSearchKey('unloading', index), 'is-disabled': !dispatchCustomerSelected || !dispatchLocationHasCity('unloading', index) }" @click.stop>
+	                        <span class="searchable-select dispatch-location-district-search" :class="{ 'is-open': dispatchLocationDistrictSearchKey('unloading', index), 'is-disabled': !dispatchLocationHasCity('unloading', index) }" @click.stop>
 	                          <input
 	                            :value="dispatchLocationDistrictSearchKey('unloading', index) ? dispatchLocationDistrictPicker.keyword : dispatchLocationDraftValue('unloading', index, 'district')"
 	                            type="search"
 	                            autocomplete="off"
 	                            :placeholder="dispatchLocationHasCity('unloading', index) ? '区' : '请先选择市'"
-	                            :disabled="!dispatchCustomerSelected || !dispatchLocationHasCity('unloading', index)"
+	                            :disabled="!dispatchLocationHasCity('unloading', index)"
 	                            @focus="openDispatchLocationDistrictPicker('unloading', index)"
 	                            @input="handleDispatchLocationTextInput('unloading', index, 'district', $event)"
 	                            @change="commitDispatchLocationDraftPart('unloading', index, 'district')"
@@ -34228,7 +34209,7 @@ function orderDetailFeeRows(order = {}) {
 	                          <button
 	                            type="button"
 	                            class="customs-business-company-toggle"
-	                            :disabled="!dispatchCustomerSelected || !dispatchLocationHasCity('unloading', index)"
+	                            :disabled="!dispatchLocationHasCity('unloading', index)"
 	                            :title="dispatchLocationDistrictSearchKey('unloading', index) ? '收起区列表' : '展开区列表'"
 	                            :aria-label="dispatchLocationDistrictSearchKey('unloading', index) ? '收起区列表' : '展开区列表'"
 	                            @click.stop="dispatchLocationDistrictSearchKey('unloading', index) ? closeDispatchLocationDistrictPicker('unloading', index) : openDispatchLocationDistrictPicker('unloading', index)"
@@ -34259,7 +34240,6 @@ function orderDetailFeeRows(order = {}) {
 	                          :value="dispatchLocationDraftValue('unloading', index, 'detail')"
                             rows="2"
 	                          :placeholder="index === 0 ? '详细地址，例如：赤鱲角駿運路' : '继续填写第 ' + (index + 1) + ' 个地址'"
-	                          :disabled="!dispatchCustomerSelected"
 	                          @input="handleDispatchLocationTextInput('unloading', index, 'detail', $event)"
 	                          @change="commitDispatchLocationDraftPart('unloading', index, 'detail')"
 	                          @compositionstart="handleDispatchLocationTextCompositionStart('unloading', index, 'detail')"
