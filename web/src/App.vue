@@ -11425,8 +11425,11 @@ function financeDateRangeBounds(filterKey = financePeriodFilter.value) {
   return periodFilterBounds(filterKey);
 }
 
-function orderInDateRange(order, startValue, endValue) {
-  const date = parseInputDate(order?.date);
+function orderInDateRange(orderOrDate, startValue, endValue) {
+  const dateValue = typeof orderOrDate === "object" && orderOrDate !== null
+    ? orderOrDate.date
+    : orderOrDate;
+  const date = parseInputDate(dateValue);
   if (!date) return false;
   const start = parseInputDate(startValue);
   const end = parseInputDate(endValue);
