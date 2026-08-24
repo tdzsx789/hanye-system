@@ -8,6 +8,7 @@ export const LEGACY_STATEMENT_DOWNLOAD_ROWS_KEY = "hanye_statement_download_rows
 export const LEGACY_DRIVER_ROUTE_ADJUST_RULES_KEY = "hanye_driver_route_adjust_rules";
 export const STATEMENT_CUSTOMER_EXCHANGE_RATES_KEY = "hanye_statement_customer_exchange_rates";
 export const STATEMENT_CUSTOMER_UNRECEIVED_AMOUNTS_KEY = "hanye_statement_customer_unreceived_amounts";
+export const BOSS_UNRECEIVED_NOTES_KEY = "hanye_boss_unreceived_notes";
 export const STATEMENT_DEFAULT_EXCHANGE_RATE = "0.88";
 
 export const ROUTE_ALIASES = {
@@ -55,7 +56,7 @@ export const FINANCE_WAGE_MODULES = ["financeWages"];
 export const FINANCE_CENTER_MODULES = ["financeCosts", "financeSupplierStatements", "financeCustomsStatements", "financeCostCenter", "financeDaily"];
 export const FINANCE_CUSTOMS_STATEMENT_EXEMPT_ACCOUNTS = new Set(["Ganyaomei"]);
 export const BUSINESS_MODULES = ["home", "customers", "dispatchBoard", "orders", "customsBusiness", "otherBusiness"];
-export const SYSTEM_CONFIG_MODULES = ["freight", "templates", "master", "security", "accounts"];
+export const SYSTEM_CONFIG_MODULES = ["rules", "freight", "templates", "master", "security", "accounts"];
 export const SYSTEM_CONFIG_VIEW_MODULES = ["freight", "templates", "master", "security"];
 export const ROLE_ALLOWED_MODULES = {
   管理员: [
@@ -103,6 +104,7 @@ export const MODULES = [
   { id: "bossVehicleProfit", label: "车辆利润", group: "老板中心" },
   { id: "bossSupplierProfit", label: "供应商利润", group: "老板中心" },
   { id: "bossCompanyExpenses", label: "办公室支出", group: "老板中心" },
+  { id: "rules", label: "规则库", group: "系统配置" },
   { id: "freight", label: "运费模板", group: "系统配置" },
   { id: "templates", label: "模板中心", group: "系统配置" },
   { id: "master", label: "基础数据", group: "系统配置" },

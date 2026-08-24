@@ -40,6 +40,7 @@ import {
   AUDIT_ENTITY_LABELS,
   AUDIT_RECORD_PREFIXES,
   BOSS_CENTER_MODULES,
+  BOSS_UNRECEIVED_NOTES_KEY,
   BUSINESS_MODULES,
   CUSTOMER_FREIGHT_QUOTE_TYPE,
   DEFAULT_DRIVER_TYPES,
@@ -1409,6 +1410,7 @@ const bossVehicleExchangeRateInputMonth = ref(currentPeriodMonthKey());
 const bossVehicleExchangeRateSaving = ref(false);
 const bossDashboardDetailType = ref("");
 const bossUnreceivedActiveCategory = ref("customer");
+const bossUnreceivedNotes = reactive(loadStoredJson(BOSS_UNRECEIVED_NOTES_KEY, {}));
 const monthlyExchangeRateDrafts = reactive({});
 const bossCompanyExpenseSaving = ref(false);
 const bossCompanyExpenseForm = reactive({
@@ -10986,10 +10988,29 @@ function sortBossUnreceivedRows(rows = []) {
   );
 }
 
+function bossUnreceivedSnapshotForRecord(record = {}) {
+  const snapshot = statementDownloadSnapshotRecord(record);
+  return statementDownloadSnapshotHasValue(snapshot) ? snapshot : null;
+}
+
+function bossUnreceivedLatestRecordLabel(source = {}, record = {}) {
+  const sourceDate = String(source.date || "").trim();
+  const sourceNo = String(source.no || source.declarationNo || source.sixSheetNo || "").trim();
+  if (sourceDate || sourceNo) return `${sourceDate || "-"} / ${sourceNo || "-"}`;
+  const exportDate = statementDownloadExportDate(record);
+  return exportDate ? `对账单导出 / ${exportDate}` : "-";
+}
+
+function bossUnreceivedSnapshotNote(type = "customer", matchedCount = 0) {
+  const base = type === "supplier" ? "按月供应商对账单快照汇总" : "按月对账单快照汇总";
+  return matchedCount ? `${base}，当前可匹配源数据 ${matchedCount} 条` : base;
+}
+
 function buildBossUnreceivedCustomerRows(filterKey = bossPeriodFilter.value) {
   return sortBossUnreceivedRows(
     statementDownloadRows.value
       .filter((record) => statementRecordType(record) === "customer")
+      .filter((record) => statementRecordIsMonthlySettlement(record))
       .filter((record) => statementRecordIsOpen(record))
       .filter((record) => statementRecordMatchesPeriod(record, filterKey))
       .map((record) => {
@@ -11003,30 +11024,35 @@ function buildBossUnreceivedCustomerRows(filterKey = bossPeriodFilter.value) {
           statementCustomerOrderMatchesEntity(order, entityName, customer)
         );
         const outstandingOrders = sourceOrders.filter((order) => !isChargedOrder(order));
-        const amount = outstandingOrders.reduce((sum, order) => {
+        const liveAmount = outstandingOrders.reduce((sum, order) => {
           const receivable = orderCustomerReceivableBreakdown(order);
           return {
             hkd: sum.hkd + Number(receivable.hkd || 0),
             rmb: sum.rmb + Number(receivable.rmb || 0)
           };
         }, { hkd: 0, rmb: 0 });
-        if (!Number(amount.hkd || 0) && !Number(amount.rmb || 0)) return null;
+        const snapshot = bossUnreceivedSnapshotForRecord(record);
+        const amount = snapshot
+          ? { hkd: Number(snapshot.amountHKD || 0), rmb: Number(snapshot.amountRMB || 0) }
+          : liveAmount;
+        const sourceCount = snapshot ? Number(snapshot.recordCount || 0) : outstandingOrders.length;
+        if (!Number(amount.hkd || 0) && !Number(amount.rmb || 0) && !sourceCount) return null;
         const latestOrder = sourceOrders
           .slice()
           .sort((left, right) =>
             String(right.date || "").localeCompare(String(left.date || ""))
             || String(right.no || "").localeCompare(String(left.no || ""))
           )[0] || {};
-        const periodMonth = statementRecordPeriodMonth(record) || inputMonthKey(latestOrder.date) || currentPeriodMonthKey();
+        const periodMonth = statementRecordMonthlyKey(record) || inputMonthKey(latestOrder.date) || currentPeriodMonthKey();
         const equivalentRMB = bossCompanyRmbEquivalent(amount.hkd, amount.rmb, periodMonth);
-        const chargedCount = sourceOrders.length - outstandingOrders.length;
+        const chargedCount = Math.max(0, sourceOrders.length - sourceCount);
         const settlementCurrency = statementCustomerSettlementCurrencyForFilter(
           { customer: entityName, customerId: customer?.id || "" },
-          filterKey
+          periodMonth
         );
         const exchangeRate = statementCustomerExchangeRateForFilter(
           { customer: entityName, customerId: customer?.id || "" },
-          filterKey
+          periodMonth
         );
         return {
           key: `customer|${entityName}|${start || ""}|${end || ""}`,
@@ -11035,25 +11061,29 @@ function buildBossUnreceivedCustomerRows(filterKey = bossPeriodFilter.value) {
           fullName: entityName || "-",
           periodLabel: statementRecordPeriodLabel(record),
           periodMonth,
-          count: outstandingOrders.length,
-          countLabel: `${outstandingOrders.length} 单`,
-          orderCount: outstandingOrders.length,
+          count: sourceCount,
+          countLabel: `${sourceCount} 单`,
+          orderCount: sourceCount,
           customsRecordCount: 0,
           unreceivedHKD: amount.hkd,
           unreceivedRMB: amount.rmb,
           unreceivedHKDDisplay: moneyHkdDisplay(amount.hkd),
           unreceivedRMBDisplay: moneyRmbDisplay(amount.rmb),
+          amountDisplay: settlementCurrency === "港币" ? moneyHkdDisplay(amount.hkd) : moneyRmbDisplay(amount.rmb),
+          amountValue: settlementCurrency === "港币" ? Number(amount.hkd || 0) : Number(amount.rmb || 0),
           equivalentRMB,
           equivalentRMBDisplay: moneyRmbDisplay(equivalentRMB),
           currencyLabel: settlementCurrency,
           exchangeRate,
           paymentStatus: "未收款",
           statementStatus: statementRecordStatus(record),
-          latestRecord: `${latestOrder.date || "-"} / ${latestOrder.no || "-"}`,
-          note: chargedCount ? `已收费剔除 ${chargedCount} 单` : "按订单汇总",
-          recordCountLabel: `${outstandingOrders.length} 单`,
+          latestRecord: bossUnreceivedLatestRecordLabel(latestOrder, record),
+          note: snapshot
+            ? bossUnreceivedSnapshotNote("customer", sourceOrders.length)
+            : (chargedCount ? `按月对账单实时汇总，已收费剔除 ${chargedCount} 单` : "按月对账单实时汇总"),
+          recordCountLabel: `${sourceCount} 单`,
           sourceCount: sourceOrders.length,
-          chargedCount,
+          chargedCount: snapshot ? 0 : chargedCount,
           downloadedAt: record.downloadedAt || "",
           paymentDate: record.paymentDate || "",
           sourceRecord: record
@@ -11067,6 +11097,7 @@ function buildBossUnreceivedCustomsRows(filterKey = bossPeriodFilter.value) {
   return sortBossUnreceivedRows(
     statementDownloadRows.value
       .filter((record) => statementRecordType(record) === "customs")
+      .filter((record) => statementRecordIsMonthlySettlement(record))
       .filter((record) => statementRecordIsOpen(record))
       .filter((record) => statementRecordMatchesPeriod(record, filterKey))
       .map((record) => {
@@ -11077,8 +11108,11 @@ function buildBossUnreceivedCustomsRows(filterKey = bossPeriodFilter.value) {
           statementCustomsRowMatchesEntity(row, entityName) &&
           orderInDateRange(row.date, start, end)
         );
-        const amount = sourceRows.reduce((sum, row) => sum + Number(row.total || 0), 0);
-        if (!Number(amount || 0)) return null;
+        const liveAmount = sourceRows.reduce((sum, row) => sum + Number(row.total || 0), 0);
+        const snapshot = bossUnreceivedSnapshotForRecord(record);
+        const amount = snapshot ? Number(snapshot.amountRMB || 0) : liveAmount;
+        const sourceCount = snapshot ? Number(snapshot.recordCount || 0) : sourceRows.length;
+        if (!Number(amount || 0) && !sourceCount) return null;
         const latestRow = sourceRows
           .slice()
           .sort((left, right) =>
@@ -11086,7 +11120,7 @@ function buildBossUnreceivedCustomsRows(filterKey = bossPeriodFilter.value) {
             || String(right.declarationNo || "").localeCompare(String(left.declarationNo || ""))
             || String(right.sixSheetNo || "").localeCompare(String(left.sixSheetNo || ""))
           )[0] || {};
-        const periodMonth = statementRecordPeriodMonth(record) || inputMonthKey(latestRow.date) || currentPeriodMonthKey();
+        const periodMonth = statementRecordMonthlyKey(record) || inputMonthKey(latestRow.date) || currentPeriodMonthKey();
         return {
           key: `customs|${entityName}|${start || ""}|${end || ""}`,
           typeLabel: "报关对账单",
@@ -11094,23 +11128,25 @@ function buildBossUnreceivedCustomsRows(filterKey = bossPeriodFilter.value) {
           fullName: entityName || "-",
           periodLabel: statementRecordPeriodLabel(record),
           periodMonth,
-          count: sourceRows.length,
-          countLabel: `${sourceRows.length} 条`,
+          count: sourceCount,
+          countLabel: `${sourceCount} 条`,
           orderCount: 0,
-          customsRecordCount: sourceRows.length,
+          customsRecordCount: sourceCount,
           unreceivedHKD: 0,
           unreceivedRMB: amount,
           unreceivedHKDDisplay: moneyHkdDisplay(0),
           unreceivedRMBDisplay: moneyRmbDisplay(amount),
+          amountDisplay: moneyRmbDisplay(amount),
+          amountValue: Number(amount || 0),
           equivalentRMB: amount,
           equivalentRMBDisplay: moneyRmbDisplay(amount),
           currencyLabel: "人民币",
           exchangeRate: "-",
           paymentStatus: "未收款",
           statementStatus: statementRecordStatus(record),
-          latestRecord: `${latestRow.date || "-"} / ${latestRow.declarationNo || latestRow.sixSheetNo || "-"}`,
-          note: "按报关业务汇总",
-          recordCountLabel: `${sourceRows.length} 条`,
+          latestRecord: bossUnreceivedLatestRecordLabel(latestRow, record),
+          note: snapshot ? bossUnreceivedSnapshotNote("customs", sourceRows.length) : "按月对账单实时汇总",
+          recordCountLabel: `${sourceCount} 条`,
           sourceCount: sourceRows.length,
           chargedCount: 0,
           downloadedAt: record.downloadedAt || "",
@@ -11126,6 +11162,7 @@ function buildBossUnreceivedSupplierRows(filterKey = bossPeriodFilter.value) {
   return sortBossUnreceivedRows(
     statementDownloadRows.value
       .filter((record) => statementRecordType(record) === "supplier")
+      .filter((record) => statementRecordIsMonthlySettlement(record))
       .filter((record) => statementRecordIsOpen(record))
       .filter((record) => statementRecordMatchesPeriod(record, filterKey))
       .map((record) => {
@@ -11137,21 +11174,27 @@ function buildBossUnreceivedSupplierRows(filterKey = bossPeriodFilter.value) {
           statementSupplierOrderMatchesEntity(order, entityName) &&
           orderInDateRange(order.date, start, end)
         );
-        const amount = sourceOrders.reduce((sum, order) => {
+        const payableOrders = sourceOrders.filter((order) => !isChargedOrder(order));
+        const liveAmount = payableOrders.reduce((sum, order) => {
           const payable = supplierOrderPayableBreakdown(order);
           return {
             hkd: sum.hkd + Number(payable.payableHKD || 0),
             rmb: sum.rmb + Number(payable.payableRMB || 0)
           };
         }, { hkd: 0, rmb: 0 });
-        if (!Number(amount.hkd || 0) && !Number(amount.rmb || 0)) return null;
+        const snapshot = bossUnreceivedSnapshotForRecord(record);
+        const amount = snapshot
+          ? { hkd: Number(snapshot.amountHKD || 0), rmb: Number(snapshot.amountRMB || 0) }
+          : liveAmount;
+        const sourceCount = snapshot ? Number(snapshot.recordCount || 0) : payableOrders.length;
+        if (!Number(amount.hkd || 0) && !Number(amount.rmb || 0) && !sourceCount) return null;
         const latestOrder = sourceOrders
           .slice()
           .sort((left, right) =>
             String(right.date || "").localeCompare(String(left.date || ""))
             || String(right.no || "").localeCompare(String(left.no || ""))
           )[0] || {};
-        const periodMonth = statementRecordPeriodMonth(record) || inputMonthKey(latestOrder.date) || currentPeriodMonthKey();
+        const periodMonth = statementRecordMonthlyKey(record) || inputMonthKey(latestOrder.date) || currentPeriodMonthKey();
         const equivalentRMB = bossCompanyRmbEquivalent(amount.hkd, amount.rmb, periodMonth);
         return {
           key: `supplier|${entityName}|${start || ""}|${end || ""}`,
@@ -11160,25 +11203,29 @@ function buildBossUnreceivedSupplierRows(filterKey = bossPeriodFilter.value) {
           fullName: entityName || "-",
           periodLabel: statementRecordPeriodLabel(record),
           periodMonth,
-          count: sourceOrders.length,
-          countLabel: `${sourceOrders.length} 单`,
-          orderCount: sourceOrders.length,
+          count: sourceCount,
+          countLabel: `${sourceCount} 单`,
+          orderCount: sourceCount,
           customsRecordCount: 0,
           unreceivedHKD: amount.hkd,
           unreceivedRMB: amount.rmb,
           unreceivedHKDDisplay: moneyHkdDisplay(amount.hkd),
           unreceivedRMBDisplay: moneyRmbDisplay(amount.rmb),
+          amountDisplay: moneyPairDisplay(amount.hkd, amount.rmb),
+          amountValue: Number(amount.hkd || 0) + Number(amount.rmb || 0),
           equivalentRMB,
           equivalentRMBDisplay: moneyRmbDisplay(equivalentRMB),
           currencyLabel: "港币 / 人民币",
           exchangeRate: monthlyExchangeRateInputValue(periodMonth),
           paymentStatus: "未收款",
           statementStatus: statementRecordStatus(record),
-          latestRecord: `${latestOrder.date || "-"} / ${latestOrder.no || "-"}`,
-          note: "按外派订单汇总",
-          recordCountLabel: `${sourceOrders.length} 单`,
+          latestRecord: bossUnreceivedLatestRecordLabel(latestOrder, record),
+          note: snapshot
+            ? bossUnreceivedSnapshotNote("supplier", sourceOrders.length)
+            : (sourceOrders.length > sourceCount ? `按月对账单实时汇总，已收费剔除 ${sourceOrders.length - sourceCount} 单` : "按月对账单实时汇总"),
+          recordCountLabel: `${sourceCount} 单`,
           sourceCount: sourceOrders.length,
-          chargedCount: 0,
+          chargedCount: snapshot ? 0 : Math.max(0, sourceOrders.length - sourceCount),
           downloadedAt: record.downloadedAt || "",
           paymentDate: record.paymentDate || "",
           sourceRecord: record
@@ -11208,18 +11255,47 @@ function bossUnreceivedRowsByCategory(category = bossUnreceivedActiveCategory.va
   return bossUnreceivedAllCustomerRows.value;
 }
 
+function bossUnreceivedRowKey(row = {}) {
+  return String(row.key || "").trim();
+}
+
+function bossUnreceivedRowNoteValue(row = {}) {
+  const key = bossUnreceivedRowKey(row);
+  if (!key) return String(row.note || "").trim();
+  if (Object.prototype.hasOwnProperty.call(bossUnreceivedNotes, key)) {
+    return String(bossUnreceivedNotes[key] ?? "");
+  }
+  return String(row.note || "").trim();
+}
+
+function setBossUnreceivedRowNote(row = {}, value = "") {
+  const key = bossUnreceivedRowKey(row);
+  if (!key) return;
+  bossUnreceivedNotes[key] = String(value ?? "");
+  saveStoredJson(BOSS_UNRECEIVED_NOTES_KEY, { ...bossUnreceivedNotes });
+}
+
+function bossUnreceivedCustomerAmountDisplay(row = {}) {
+  return row.currencyLabel === "港币"
+    ? String(row.unreceivedHKDDisplay || moneyHkdDisplay(row.unreceivedHKD || 0))
+    : String(row.unreceivedRMBDisplay || moneyRmbDisplay(row.unreceivedRMB || 0));
+}
+
+function bossUnreceivedCustomsAmountDisplay(row = {}) {
+  return String(row.unreceivedRMBDisplay || moneyRmbDisplay(row.unreceivedRMB || 0));
+}
+
 function bossUnreceivedSummaryForRows(rows = []) {
   const hkd = rows.reduce((sum, row) => sum + Number(row.unreceivedHKD || 0), 0);
   const rmb = rows.reduce((sum, row) => sum + Number(row.unreceivedRMB || 0), 0);
-  const equivalentRMB = rows.reduce((sum, row) => sum + Number(row.equivalentRMB || 0), 0);
   return {
     customerCount: new Set(rows.map((row) => String(row.fullName || row.name || "").trim()).filter(Boolean)).size,
     recordCount: rows.reduce((sum, row) => sum + Number(row.orderCount || row.customsRecordCount || row.count || 0), 0),
     rowCount: rows.length,
     hkd,
     rmb,
-    equivalentRMB,
-    equivalentRMBDisplay: moneyRmbDisplay(equivalentRMB)
+    equivalentRMB: 0,
+    equivalentRMBDisplay: "-"
   };
 }
 
@@ -11557,6 +11633,101 @@ function statementDownloadRecordForCustomerRow(row = {}) {
   return statementDownloadRecordForCustomerRowForFilter(row);
 }
 
+function statementDownloadSnapshotRecord(record = {}) {
+  return {
+    amountHKD: Number(record.amountHKD ?? record.amount_hkd ?? 0),
+    amountRMB: Number(record.amountRMB ?? record.amount_rmb ?? 0),
+    recordCount: Number(record.recordCount ?? record.record_count ?? 0),
+    snapshotReady: Boolean(record.snapshotReady ?? record.snapshot_ready)
+  };
+}
+
+function statementDownloadSnapshotHasValue(snapshot = {}) {
+  return Boolean(
+    Number(snapshot.amountHKD || 0) ||
+    Number(snapshot.amountRMB || 0) ||
+    Number(snapshot.recordCount || 0)
+  );
+}
+
+function statementDownloadExportDate(record = {}) {
+  const value = String(record.downloadedAt || record.downloaded_at || record.updatedAt || record.updated_at || record.createdAt || record.created_at || "").trim();
+  return value ? value.slice(0, 10) : "";
+}
+
+function statementOrderWasOutstandingAtExport(order = {}, record = {}) {
+  const chargedAt = normalizeOrderChargedAt(order.chargedAt || order.charged_at);
+  if (!chargedAt) return true;
+  const exportDate = statementDownloadExportDate(record);
+  if (!exportDate) return true;
+  return chargedAt > exportDate;
+}
+
+function statementDownloadSnapshotForRecord(record = {}) {
+  const type = statementRecordType(record);
+  const entityName = String(record.entityName || "").trim();
+  if (!entityName || entityName === "全部") return null;
+  const { start, end } = statementRecordRange(record);
+  if (!start && !end) return null;
+  if (type === "customer") {
+    const customer = findPartnerByTypedLabel(entityName, "客户") || customerRowsByName.value.get(entityName) || null;
+    const sourceOrders = orderRows.value.filter((order) =>
+      isFinanceStatVisibleOrder(order) &&
+      orderInDateRange(order.date, start, end) &&
+      statementCustomerOrderMatchesEntity(order, entityName, customer)
+    );
+    const billableOrders = sourceOrders.filter((order) => statementOrderWasOutstandingAtExport(order, record));
+    const amount = billableOrders.reduce((sum, order) => {
+      const receivable = orderCustomerReceivableBreakdown(order);
+      return {
+        hkd: sum.hkd + Number(receivable.hkd || 0),
+        rmb: sum.rmb + Number(receivable.rmb || 0)
+      };
+    }, { hkd: 0, rmb: 0 });
+    return {
+      amountHKD: amount.hkd,
+      amountRMB: amount.rmb,
+      recordCount: billableOrders.length || sourceOrders.length,
+      snapshotReady: true
+    };
+  }
+  if (type === "customs") {
+    const sourceRows = customsBusinessAllRows.value.filter((row) =>
+      statementCustomsRowMatchesEntity(row, entityName) &&
+      orderInDateRange(row.date, start, end)
+    );
+    const amount = sourceRows.reduce((sum, row) => sum + Number(row.total || 0), 0);
+    return {
+      amountHKD: 0,
+      amountRMB: amount,
+      recordCount: sourceRows.length,
+      snapshotReady: true
+    };
+  }
+  if (type === "supplier") {
+    const sourceOrders = orderRows.value.filter((order) =>
+      isFinanceStatVisibleOrder(order) &&
+      statementSupplierOrderMatchesEntity(order, entityName) &&
+      orderInDateRange(order.date, start, end)
+    );
+    const payableOrders = sourceOrders.filter((order) => !isChargedOrder(order));
+    const amount = payableOrders.reduce((sum, order) => {
+      const payable = supplierOrderPayableBreakdown(order);
+      return {
+        hkd: sum.hkd + Number(payable.payableHKD || 0),
+        rmb: sum.rmb + Number(payable.payableRMB || 0)
+      };
+    }, { hkd: 0, rmb: 0 });
+    return {
+      amountHKD: amount.hkd,
+      amountRMB: amount.rmb,
+      recordCount: payableOrders.length || sourceOrders.length,
+      snapshotReady: true
+    };
+  }
+  return null;
+}
+
 function statementCustomerUnreceivedKeyForFilter(row = {}, filterKey = activeStatementMonthFilter.value) {
   const customerKey = statementCustomerRowKeyForFilter(row, filterKey);
   if (!customerKey) return "";
@@ -11767,17 +11938,34 @@ function statementDownloadKey(type, entityName, start, end) {
   return [type, entityName || "全部", start || "", end || ""].join("|");
 }
 
-async function markStatementDownloaded(type, entityName, start, end) {
+function statementDownloadPeriodPayload(type = "customer") {
+  const periodKey = statementRecordType({ type }) === "customs"
+    ? periodFilterValue("customsStatement")
+    : activeStatementMonthFilter.value;
+  return {
+    periodKey,
+    periodMode: periodFilterParts(periodKey).mode
+  };
+}
+
+async function markStatementDownloaded(type, entityName, start, end, snapshot = {}) {
   const key = statementDownloadKey(type, entityName, start, end);
+  const periodPayload = statementDownloadPeriodPayload(type);
   const payload = {
     key,
     type,
     entityName: entityName || "全部",
     start,
     end,
+    periodKey: snapshot.periodKey || periodPayload.periodKey,
+    periodMode: snapshot.periodMode || periodPayload.periodMode,
     status: "已导出",
     paymentStatus: "未收款",
     paymentDate: "",
+    amountHKD: Number(snapshot.amountHKD || 0),
+    amountRMB: Number(snapshot.amountRMB || 0),
+    recordCount: Number(snapshot.recordCount || 0),
+    snapshotReady: snapshot.snapshotReady !== undefined ? Boolean(snapshot.snapshotReady) : true,
     downloadedAt: new Date().toISOString()
   };
   try {
@@ -11795,15 +11983,26 @@ function statementCustomerPaymentPayload(row = {}, paymentStatus = "未收款", 
   const { start, end } = statementDateRangeBounds(activeStatementMonthFilter.value);
   const entityName = row.customer || "全部";
   const record = statementDownloadRecordForCustomerRow(row);
+  const snapshot = statementDownloadSnapshotRecord(record);
+  const snapshotPayload = statementDownloadSnapshotHasValue(snapshot)
+    ? snapshot
+    : (statementDownloadSnapshotForRecord(record) || snapshot);
+  const periodPayload = statementDownloadPeriodPayload("customer");
   return {
     key: statementDownloadKey("customer", entityName, start || "", end || ""),
     type: "customer",
     entityName,
     start: start || "",
     end: end || "",
+    periodKey: statementRecordPeriodKey(record) || periodPayload.periodKey,
+    periodMode: statementRecordPeriodMode(record) || periodPayload.periodMode,
     status: statusOverride || record?.status || "未导出",
     paymentStatus,
     paymentDate: paymentStatus === "已收款" ? paymentDate : "",
+    amountHKD: Number(snapshotPayload.amountHKD || 0),
+    amountRMB: Number(snapshotPayload.amountRMB || 0),
+    recordCount: Number(snapshotPayload.recordCount || 0),
+    snapshotReady: Boolean(snapshotPayload.snapshotReady ?? true),
     downloadedAt: record?.downloadedAt || new Date().toISOString()
   };
 }
@@ -11875,6 +12074,42 @@ function statementRecordRange(record = {}) {
   if (start && !end) return { start, end: start };
   if (!start && end) return { start: end, end };
   return { start, end };
+}
+
+function statementRecordPeriodKey(record = {}) {
+  return String(record.periodKey || record.period_key || "").trim();
+}
+
+function statementPeriodModeFromKey(periodKey = "") {
+  const key = String(periodKey || "").trim();
+  if (/^\d{4}-\d{2}$/.test(key)) return "month";
+  if (key === "all") return "all";
+  if (key.startsWith("year:")) return "year";
+  if (key.startsWith("range:")) return "range";
+  if (key.startsWith("day:")) return "day";
+  return "";
+}
+
+function statementRecordPeriodMode(record = {}) {
+  const mode = String(record.periodMode || record.period_mode || "").trim();
+  if (["month", "range", "year", "all", "day"].includes(mode)) return mode;
+  return statementPeriodModeFromKey(statementRecordPeriodKey(record));
+}
+
+function statementRecordMonthlyKey(record = {}) {
+  const { start, end } = statementRecordRange(record);
+  if (!start || !end) return "";
+  const monthKey = inputMonthKey(start);
+  if (!/^\d{4}-\d{2}$/.test(monthKey) || inputMonthKey(end) !== monthKey) return "";
+  const monthRange = periodFilterBounds(monthKey);
+  return start === monthRange.start && end === monthRange.end ? monthKey : "";
+}
+
+function statementRecordIsMonthlySettlement(record = {}) {
+  const monthlyKey = statementRecordMonthlyKey(record);
+  if (!monthlyKey) return false;
+  const mode = statementRecordPeriodMode(record);
+  return mode === "month";
 }
 
 function statementRecordPeriodMonth(record = {}) {
@@ -12813,8 +13048,8 @@ function parseDispatchExcelPort(value = "") {
 function parseDispatchExcelDirection(rows = []) {
   const destination = dispatchExcelValueAfterLabel(rows, ["出口目的港", "目的港"]);
   const origin = dispatchExcelValueAfterLabel(rows, ["起运港", "起運港"]);
-  if (normalizeDispatchExcelLookupText(destination).includes("香港")) return "出口";
-  if (normalizeDispatchExcelLookupText(origin).includes("香港")) return "进口";
+  if (isHongKongLocation(destination)) return "出口";
+  if (isHongKongLocation(origin)) return "进口";
   const allText = normalizeDispatchExcelLookupText(dispatchExcelAllText(rows));
   if (allText.includes("进口")) return "进口";
   if (allText.includes("出口")) return "出口";
@@ -13245,10 +13480,8 @@ function parseDispatchImageDirection(allText = "", loadingBlock = "", unloadingB
   const normalized = normalizeDispatchExcelLookupText(allText);
   if (normalized.includes("出口")) return "出口";
   if (normalized.includes("进口")) return "进口";
-  const loadingText = normalizeDispatchExcelLookupText(loadingBlock);
-  const unloadingText = normalizeDispatchExcelLookupText(unloadingBlock);
-  if (unloadingText.includes("香港") || unloadingText.includes("hongkong")) return "出口";
-  if (loadingText.includes("香港") || loadingText.includes("hongkong")) return "进口";
+  if (isHongKongLocation(unloadingBlock) || normalizeDispatchExcelLookupText(unloadingBlock).includes("hongkong")) return "出口";
+  if (isHongKongLocation(loadingBlock) || normalizeDispatchExcelLookupText(loadingBlock).includes("hongkong")) return "进口";
   return "";
 }
 
@@ -14522,7 +14755,7 @@ function locationPartMatches(part, location, tokens) {
 function splitFreightLocationEntries(value = "") {
   return String(value || "")
     .replace(/\r/g, "\n")
-    .split(/[\n；;]+/)
+    .split(/[；;]+/)
     .map((item) => item.trim())
     .filter(Boolean);
 }
@@ -19061,16 +19294,13 @@ function normalizeDispatchLocationPartValue(value = "", part = "") {
 }
 
 function normalizeDispatchLocationCityValue(target = "", value = "") {
-  const text = normalizeDispatchLocationText(value, { singleLine: true });
-  if (!text) return "";
-  if (dispatchLocationCityRestrictedToHongKong(target)) return "香港";
-  return normalizeDispatchLocationPartValue(text, "city");
+  return normalizeDispatchLocationPartValue(value, "city");
 }
 
 function isDispatchLocationCityLikeValue(target = "", value = "") {
   const text = normalizeDispatchLocationText(value, { singleLine: true });
   if (!text) return false;
-  if (dispatchLocationCityRestrictedToHongKong(target)) return text.includes("香港");
+  if (dispatchLocationCityRestrictedToHongKong(target)) return normalizeLocationText(splitLocationParts(text).city).startsWith("香港");
   const normalized = normalizeLocationText(text);
   return isLikelyDispatchLocationCity(text)
     || locationCityCandidates().some((city) => normalizeLocationText(city) === normalized);
@@ -19193,7 +19423,7 @@ function dispatchLocationPayload(target = "") {
 function splitAddressBookLocationValue(value = "") {
   return String(value || "")
     .replace(/\r/g, "\n")
-    .split(/[\n；;]+/)
+    .split(/[；;]+/)
     .map((item) => item.trim())
     .filter(Boolean);
 }
@@ -19416,10 +19646,17 @@ function updateDispatchLocationCity(target, index, value) {
   if (isDispatchLocationInputComposing(target, index, "city")) return;
   const persisted = dispatchLocationPersistedParts(target, index);
   const current = dispatchLocationPartsForEdit(target, index);
-  const nextCity = normalizeDispatchLocationCityValue(target, value);
+  const previousCity = normalizeLocationText(persisted.city || current.city || "");
+  const nextCity = dispatchLocationCityRestrictedToHongKong(target)
+    ? "香港"
+    : normalizeDispatchLocationCityValue(target, value);
   if (persisted.city !== nextCity) {
     current.district = "";
     setDispatchLocationDraftPart(target, index, "district", "");
+    if (previousCity && !previousCity.startsWith("香港")) {
+      current.detail = "";
+      setDispatchLocationDraftPart(target, index, "detail", "");
+    }
     if (dispatchLocationDistrictSearchKey(target, index)) {
       dispatchLocationDistrictPicker.keyword = "";
       dispatchLocationDistrictPicker.key = "";
@@ -20853,6 +21090,7 @@ async function loadDatabaseData(options = {}) {
   const canLoadBossVehicleExchangeRates = canAccessMonthlyExchangeRates();
   const canLoadCompanyExpenses = canAccessCompanyExpenses();
   const canLoadMasterData = canAccessModule("master");
+  const canLoadRules = canAccessModule("rules");
   const canLoadAccounts = canAccessModule("accounts");
   const canLoadAuditLogs = canAccessModule("security");
   const canLoadDriverRouteAdjustRules = canAccessModule("financeWages");
@@ -20885,6 +21123,7 @@ async function loadDatabaseData(options = {}) {
       feeItemData,
       freightRateData,
       masterData,
+      ruleData,
       accountData,
       addressBookData,
       hiddenAddressHistoryData,
@@ -20910,6 +21149,7 @@ async function loadDatabaseData(options = {}) {
       apiFetchListFrom(masterDataApi.listFeeItems, "收费项目"),
       apiFetchListFrom(masterDataApi.listFreightRates, "运费模板"),
       canLoadMasterData ? apiFetchListFrom(masterDataApi.listMasterData, "基础数据") : Promise.resolve([]),
+      canLoadRules ? apiFetchListFrom(masterDataApi.listRules, "规则库") : Promise.resolve([]),
       canLoadAccounts ? apiFetchListFrom(accountsApi.listAccounts, "权限账号") : Promise.resolve([]),
       apiFetchListFrom(customersApi.listAddressBook, "地址本"),
       apiFetchListFrom(customersApi.listHiddenAddressHistory, "隐藏历史地址"),
@@ -20938,7 +21178,7 @@ async function loadDatabaseData(options = {}) {
     driverAdjustmentRows.value = driverAdjustmentData;
     feeItemRows.value = sortFeeItems(feeItemData);
     freightRateRows.value = freightRateData;
-    ruleRows.value = [];
+    ruleRows.value = ruleData;
     masterRows.value = masterData;
     accountRows.value = accountData;
     addressBookRows.value = addressBookData;
@@ -21550,16 +21790,37 @@ function selectOrderCustomer(customer) {
 }
 
 function isHongKongLocation(value = "") {
-  return normalizeLocationText(value).includes("香港");
+  const { city = "" } = splitLocationParts(value);
+  return normalizeLocationText(city).startsWith("香港");
+}
+
+function normalizeRestrictedHongKongLocationEntry(entry = {}) {
+  const city = normalizeLocationText(entry.city || "");
+  const next = {
+    city: "香港",
+    district: String(entry.district || "").trim(),
+    detail: normalizeDispatchLocationDetailText(entry.detail)
+  };
+  if (city && !city.startsWith("香港")) {
+    next.district = "";
+    next.detail = "";
+  }
+  return next;
 }
 
 function handleOrderDirectionChange() {
   if (orderHasTransportFields.value) {
     if (orderForm.direction === "出口") {
-      if (!orderForm.unloading) setOrderLocationEntries("unloading", [{ city: "香港", district: "", detail: "" }]);
+      const unloadingEntries = recordDispatchLocationEntries(orderForm, "unloading").map((entry) =>
+        normalizeRestrictedHongKongLocationEntry(entry)
+      );
+      setOrderLocationEntries("unloading", unloadingEntries.length ? unloadingEntries : [{ city: "香港", district: "", detail: "" }]);
       if (isHongKongLocation(orderForm.loading)) setOrderLocationEntries("loading", []);
     } else if (orderForm.direction === "进口") {
-      if (!orderForm.loading) setOrderLocationEntries("loading", [{ city: "香港", district: "", detail: "" }]);
+      const loadingEntries = recordDispatchLocationEntries(orderForm, "loading").map((entry) =>
+        normalizeRestrictedHongKongLocationEntry(entry)
+      );
+      setOrderLocationEntries("loading", loadingEntries.length ? loadingEntries : [{ city: "香港", district: "", detail: "" }]);
       if (isHongKongLocation(orderForm.unloading)) setOrderLocationEntries("unloading", []);
     }
   }
@@ -21571,8 +21832,11 @@ function handleDispatchFormDirectionChange() {
     const entries = dispatchLocationEntries(target).map((entry, index) => {
       const parts = dispatchLocationPartsForEdit(target, index);
       if (dispatchLocationCityRestrictedToHongKong(target)) {
-        parts.city = "香港";
-        setDispatchLocationDraftPart(target, index, "city", "香港");
+        const normalized = normalizeRestrictedHongKongLocationEntry(parts);
+        setDispatchLocationDraftPart(target, index, "city", normalized.city);
+        setDispatchLocationDraftPart(target, index, "district", normalized.district);
+        setDispatchLocationDraftPart(target, index, "detail", normalized.detail);
+        return normalized;
       }
       return parts;
     });
@@ -24479,8 +24743,9 @@ function customsStatementExportFilename(company = "客户", start = "", end = ""
 }
 
 async function exportCustomsStatementByFormat(format = "excel", row = activeStatementExportRow.value) {
+  const exportRow = row || {};
   closeStatementExportMenu();
-  const company = String(row.company || "").trim();
+  const company = String(exportRow.company || "").trim();
   if (!company) {
     notify("当前客户信息不完整，无法导出报关对账单");
     return;
@@ -24503,7 +24768,12 @@ async function exportCustomsStatementByFormat(format = "excel", row = activeStat
       columns: customsBusinessExportColumns.value
     });
     downloadBlob(blob, customsStatementExportFilename(company, start, end, normalizedFormat === "pdf" ? "pdf" : "xlsx"));
-    await markStatementDownloaded("customs", company, start, end);
+    await markStatementDownloaded("customs", company, start, end, {
+      amountHKD: 0,
+      amountRMB: Number(exportRow.total || 0),
+      recordCount: Number(rows.length || 0),
+      snapshotReady: true
+    });
     notify(`已导出报关对账单 ${normalizedFormat === "pdf" ? "PDF" : "Excel"}`);
   } catch (error) {
     notify(error.message || "报关对账单导出失败");
@@ -24757,13 +25027,19 @@ async function exportStatementCsv() {
       });
       const totalHKD = rows.reduce((sum, row) => sum + Number(row[15] || 0), 0);
       const totalRMB = rows.reduce((sum, row) => sum + Number(row[16] || 0), 0);
+      const payableOrders = orders.filter((order) => !isChargedOrder(order));
       await exportXlsx(
         `${exportFilenamePart(entityName)}_供应商对账_${start || "全部"}_${end || "全部"}.xlsx`,
         ["序号", "排车单号", "订单号", "日期", "客户", "口岸", "进出口", "吨位", "件数/板数", "重量", "装货地", "卸货地", "车牌", "运输模式", "币种", "应付HKD", "应付RMB", "成本匹配", "成本明细", "状态"],
         [...rows, ["合计", "", "", "", "", "", "", "", "", "", "", "", "", "", "", money(totalHKD), money(totalRMB), "", "", ""]],
         "供应商对账"
       );
-      await markStatementDownloaded("supplier", entityName, start, end);
+      await markStatementDownloaded("supplier", entityName, start, end, {
+        amountHKD: totalHKD,
+        amountRMB: totalRMB,
+        recordCount: payableOrders.length,
+        snapshotReady: true
+      });
       notify("已按订单成本导出供应商对账单");
       return;
     }
@@ -24832,6 +25108,13 @@ async function exportStatementCsv() {
     ]);
     const totalOrders = orders.filter(customerStatementOrderIncludedInTotals);
     const total = statementConvertedTotal(totalOrders, statementSettlementCurrency.value, statementExchangeRate.value);
+    const snapshotAmount = totalOrders.reduce((sum, order) => {
+      const receivable = orderCustomerReceivableBreakdown(order);
+      return {
+        hkd: sum.hkd + Number(receivable.hkd || 0),
+        rmb: sum.rmb + Number(receivable.rmb || 0)
+      };
+    }, { hkd: 0, rmb: 0 });
     await exportXlsx(
       `${exportFilenamePart(entityName)}_客户对账_${start || "全部"}_${end || "全部"}.xlsx`,
       ["序号", "排车单号", "订单号", "日期", "客户", "口岸", "进出口", "吨位", "件数/板数", "重量", "装货地", "卸货地", "应收HKD", "应收RMB", "杂费明细", "附件", "状态", "收费备注"],
@@ -24841,7 +25124,12 @@ async function exportStatementCsv() {
       ],
       "客户对账"
     );
-    await markStatementDownloaded("customer", entityName, start, end);
+    await markStatementDownloaded("customer", entityName, start, end, {
+      amountHKD: snapshotAmount.hkd,
+      amountRMB: snapshotAmount.rmb,
+      recordCount: totalOrders.length,
+      snapshotReady: true
+    });
     notify("已导出客户对账单并记录下载");
   } catch (error) {
     notify(error.message || "对账单导出失败");
@@ -24879,6 +25167,7 @@ async function toggleStatementExportMenu() {
 }
 
 async function exportStatementByFormat(format, templateRow = selectedTemplate.value) {
+  const exportRow = activeStatementExportRow.value || {};
   closeStatementExportMenu();
   const entityName = ensureStatementEntity();
   const { start, end } = statementDateRange();
@@ -24901,23 +25190,41 @@ async function exportStatementByFormat(format, templateRow = selectedTemplate.va
   const exchange = statementExportExchangePayload();
   if (statementExportType.value === "supplier") {
     const exportOrders = supplierStatementTemplateOrders(orders);
+    const snapshot = {
+      amountHKD: Number(exportRow.hkd || 0),
+      amountRMB: Number(exportRow.rmb || 0),
+      recordCount: Number(exportRow.count || 0),
+      snapshotReady: true
+    };
     const ok = format === "pdf"
       ? await exportOrderSnapshotsAsPdf(exportOrders, title, templateRow, exchange, statementExportFilename(entityName, start, end, "pdf"))
       : await exportOrderSnapshotsAsExcel(exportOrders, title, templateRow, exchange, statementExportFilename(entityName, start, end, "xlsx"), { includeReceiptSheet: false });
-    if (ok) await markStatementDownloaded(statementExportType.value, entityName, start, end);
+    if (ok) await markStatementDownloaded(statementExportType.value, entityName, start, end, snapshot);
     return;
   }
   if (statementExportType.value === "customer") {
+    const snapshot = {
+      amountHKD: Number(exportRow.hkd || 0),
+      amountRMB: Number(exportRow.rmb || 0),
+      recordCount: Number(exportRow.count || 0),
+      snapshotReady: true
+    };
     const ok = format === "pdf"
       ? await exportOrderSnapshotsAsPdf(orders, title, templateRow, exchange, statementExportFilename(entityName, start, end, "pdf"))
       : await exportOrderSnapshotsAsExcel(orders, title, templateRow, exchange, statementExportFilename(entityName, start, end, "xlsx"), { includeReceiptSheet: true });
-    if (ok) await markStatementDownloaded(statementExportType.value, entityName, start, end);
+    if (ok) await markStatementDownloaded(statementExportType.value, entityName, start, end, snapshot);
     return;
   }
+  const snapshot = {
+    amountHKD: Number(exportRow.hkd || 0),
+    amountRMB: Number(exportRow.rmb || exportRow.total || 0),
+    recordCount: Number(exportRow.count || 0),
+    snapshotReady: true
+  };
   const ok = format === "pdf"
     ? await exportOrderRowsAsPdf(orders, title, templateRow, exchange)
     : await exportOrderRowsAsCsv(orders, title, templateRow, exchange);
-  if (ok) await markStatementDownloaded(statementExportType.value, entityName, start, end);
+  if (ok) await markStatementDownloaded(statementExportType.value, entityName, start, end, snapshot);
 }
 
 function parseVisualExportTemplate(item = selectedTemplate.value) {
@@ -31462,11 +31769,6 @@ function orderDetailFeeRows(order = {}) {
             <strong>{{ activeBossUnreceivedSummary.recordCount }}</strong>
             <span>{{ activeBossUnreceivedSummary.rowCount }} 条账单</span>
           </div>
-          <div class="finance-summary-card">
-            <span>总折算人民币</span>
-            <strong>{{ activeBossUnreceivedSummary.equivalentRMBDisplay }}</strong>
-            <span>按记录月份汇率折算</span>
-          </div>
         </div>
         <div class="boss-unreceived-grid">
           <div v-if="bossUnreceivedActiveCategory === 'customer'" class="table-card finance-tool-card boss-unreceived-section">
@@ -31477,23 +31779,19 @@ function orderDetailFeeRows(order = {}) {
               </div>
             </div>
             <table class="data-table compact boss-unreceived-table boss-unreceived-customer-table">
-              <thead><tr><th>排名</th><th>客户</th><th>账期</th><th>订单数</th><th>未收港币</th><th>未收人民币</th><th>折算人民币</th><th>结算类别</th><th>汇率</th><th>对账状态</th><th>最近记录</th><th>备注</th></tr></thead>
+              <thead><tr><th>排名</th><th>客户</th><th>账期</th><th>订单数</th><th>未收金额</th><th>结算类别</th><th>汇率</th><th>备注</th></tr></thead>
               <tbody>
                 <tr v-for="(row, index) in activeBossUnreceivedRows" :key="row.key">
                   <td>{{ index + 1 }}</td>
                   <td :title="row.fullName">{{ row.name }}</td>
                   <td>{{ row.periodLabel }}</td>
                   <td>{{ row.countLabel }}</td>
-                  <td>{{ row.unreceivedHKDDisplay }}</td>
-                  <td>{{ row.unreceivedRMBDisplay }}</td>
-                  <td><strong>{{ row.equivalentRMBDisplay }}</strong></td>
-                  <td>{{ row.currencyLabel }}</td>
+                  <td><strong>{{ row.amountDisplay }}</strong></td>
+                  <td><span class="statement-settlement-chip" :class="{ hkd: row.currencyLabel === '港币' }">{{ row.currencyLabel }}</span></td>
                   <td>{{ row.exchangeRate }}</td>
-                  <td>{{ row.statementStatus }}</td>
-                  <td>{{ row.latestRecord }}</td>
-                  <td>{{ row.note }}</td>
+                  <td class="boss-unreceived-note-cell"><input class="statement-unreceived-input boss-unreceived-note-input" :value="bossUnreceivedRowNoteValue(row)" :placeholder="row.note || '备注'" @input="setBossUnreceivedRowNote(row, $event.target.value)" /></td>
                 </tr>
-                <tr v-if="activeBossUnreceivedRows.length === 0"><td colspan="12">暂无客户未收</td></tr>
+                <tr v-if="activeBossUnreceivedRows.length === 0"><td colspan="8">暂无客户未收</td></tr>
               </tbody>
             </table>
           </div>
@@ -31505,20 +31803,17 @@ function orderDetailFeeRows(order = {}) {
               </div>
             </div>
             <table class="data-table compact boss-unreceived-table boss-unreceived-customs-table">
-              <thead><tr><th>排名</th><th>客户</th><th>账期</th><th>票数</th><th>未收人民币</th><th>折算人民币</th><th>对账状态</th><th>最近记录</th><th>备注</th></tr></thead>
+              <thead><tr><th>排名</th><th>客户</th><th>账期</th><th>票数</th><th>未收人民币</th><th>备注</th></tr></thead>
               <tbody>
                 <tr v-for="(row, index) in activeBossUnreceivedRows" :key="row.key">
                   <td>{{ index + 1 }}</td>
                   <td :title="row.fullName">{{ row.name }}</td>
                   <td>{{ row.periodLabel }}</td>
                   <td>{{ row.countLabel }}</td>
-                  <td>{{ row.unreceivedRMBDisplay }}</td>
-                  <td><strong>{{ row.equivalentRMBDisplay }}</strong></td>
-                  <td>{{ row.statementStatus }}</td>
-                  <td>{{ row.latestRecord }}</td>
-                  <td>{{ row.note }}</td>
+                  <td><strong>{{ row.amountDisplay }}</strong></td>
+                  <td class="boss-unreceived-note-cell"><input class="statement-unreceived-input boss-unreceived-note-input" :value="bossUnreceivedRowNoteValue(row)" :placeholder="row.note || '备注'" @input="setBossUnreceivedRowNote(row, $event.target.value)" /></td>
                 </tr>
-                <tr v-if="activeBossUnreceivedRows.length === 0"><td colspan="9">暂无报关未收</td></tr>
+                <tr v-if="activeBossUnreceivedRows.length === 0"><td colspan="6">暂无报关未收</td></tr>
               </tbody>
             </table>
           </div>
@@ -31530,7 +31825,7 @@ function orderDetailFeeRows(order = {}) {
               </div>
             </div>
             <table class="data-table compact boss-unreceived-table boss-unreceived-supplier-table">
-              <thead><tr><th>排名</th><th>供应商</th><th>账期</th><th>订单数</th><th>港币</th><th>人民币</th><th>折算人民币</th><th>汇率</th><th>对账状态</th><th>最近记录</th><th>备注</th></tr></thead>
+              <thead><tr><th>排名</th><th>供应商</th><th>账期</th><th>订单数</th><th>港币</th><th>人民币</th><th>汇率</th><th>备注</th></tr></thead>
               <tbody>
                 <tr v-for="(row, index) in activeBossUnreceivedRows" :key="row.key">
                   <td>{{ index + 1 }}</td>
@@ -31539,13 +31834,10 @@ function orderDetailFeeRows(order = {}) {
                   <td>{{ row.countLabel }}</td>
                   <td>{{ row.unreceivedHKDDisplay }}</td>
                   <td>{{ row.unreceivedRMBDisplay }}</td>
-                  <td><strong>{{ row.equivalentRMBDisplay }}</strong></td>
                   <td>{{ row.exchangeRate }}</td>
-                  <td>{{ row.statementStatus }}</td>
-                  <td>{{ row.latestRecord }}</td>
-                  <td>{{ row.note }}</td>
+                  <td class="boss-unreceived-note-cell"><input class="statement-unreceived-input boss-unreceived-note-input" :value="bossUnreceivedRowNoteValue(row)" :placeholder="row.note || '备注'" @input="setBossUnreceivedRowNote(row, $event.target.value)" /></td>
                 </tr>
-                <tr v-if="activeBossUnreceivedRows.length === 0"><td colspan="11">暂无供应商未付</td></tr>
+                <tr v-if="activeBossUnreceivedRows.length === 0"><td colspan="8">暂无供应商未付</td></tr>
               </tbody>
             </table>
           </div>

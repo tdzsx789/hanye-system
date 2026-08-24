@@ -1335,7 +1335,7 @@ function firstExportLocationLine(value) {
   const text = textValue(value).replace(/\r/g, "\n").trim();
   if (!text) return "";
   const parts = text
-    .split(/[\n；;]+/)
+    .split(/[；;]+/)
     .map((part) => part.trim())
     .filter(Boolean);
   return parts[0] || text;
@@ -1429,7 +1429,7 @@ function dispatchExportLooksLikeDistrictOnly(value = "") {
 function dispatchExportLocationSummarySegments(value = "") {
   return String(value || "")
     .replace(/\r/g, "\n")
-    .split(/[\n；;]+/)
+    .split(/[；;]+/)
     .flatMap((item) => item.split(/[+＋]/))
     .map((item) => item.trim())
     .filter(Boolean)
@@ -4277,9 +4277,15 @@ function mapStatementDownload(row) {
     entityName: row.entity_name || "全部",
     start: row.start_date || "",
     end: row.end_date || "",
+    periodKey: row.period_key || "",
+    periodMode: row.period_mode || inferStatementPeriodMode(row.period_key || ""),
     status: normalizeStatementDownloadStatus(row.status || "已导出"),
     paymentStatus: normalizeStatementPaymentStatus(row.payment_status || "未收款"),
     paymentDate: row.payment_date || "",
+    amountHKD: Number(row.amount_hkd || 0),
+    amountRMB: Number(row.amount_rmb || 0),
+    recordCount: Number(row.record_count || 0),
+    snapshotReady: Boolean(row.snapshot_ready),
     downloadedAt: row.downloaded_at || row.updated_at || row.created_at || "",
     createdAt: row.created_at || "",
     updatedAt: row.updated_at || ""
@@ -6823,7 +6829,7 @@ function dispatchExportShortSupplier(row = {}, supplierShortNames = new Map()) {
 function dispatchExportFirstLocation(value = "") {
   return String(value || "")
     .replace(/\r/g, "\n")
-    .split(/[\n；;]+/)
+    .split(/[；;]+/)
     .map((item) => item.trim())
     .filter(Boolean)[0] || "";
 }
@@ -9713,6 +9719,21 @@ function normalizeStatementPaymentDate(value = "", status = "未收款") {
   return normalizeStatementPaymentStatus(status) === "已收款" ? todayInputValue() : "";
 }
 
+function normalizeStatementPeriodMode(value = "") {
+  const text = String(value || "").trim();
+  return ["month", "range", "year", "all", "day"].includes(text) ? text : "";
+}
+
+function inferStatementPeriodMode(periodKey = "") {
+  const key = String(periodKey || "").trim();
+  if (/^\d{4}-\d{2}$/.test(key)) return "month";
+  if (key === "all") return "all";
+  if (key.startsWith("year:")) return "year";
+  if (key.startsWith("range:")) return "range";
+  if (key.startsWith("day:")) return "day";
+  return "";
+}
+
 function statementDownloadKey(type, entityName, start, end) {
   return [type, entityName || "全部", start || "", end || ""].join("|");
 }
@@ -9722,20 +9743,35 @@ function readStatementDownloadPayload(body, current = null) {
   const entityName = String(body.entityName ?? body.entity_name ?? current?.entity_name ?? "全部").trim() || "全部";
   const start = String(body.start ?? body.startDate ?? body.start_date ?? current?.start_date ?? "").trim();
   const end = String(body.end ?? body.endDate ?? body.end_date ?? current?.end_date ?? "").trim();
+  const periodKey = String(body.periodKey ?? body.period_key ?? current?.period_key ?? "").trim();
+  const periodMode = normalizeStatementPeriodMode(body.periodMode ?? body.period_mode ?? current?.period_mode ?? "")
+    || inferStatementPeriodMode(periodKey);
   const downloadKey = String(
     body.key ?? body.downloadKey ?? body.download_key ?? current?.download_key ?? statementDownloadKey(type, entityName, start, end)
   ).trim() || statementDownloadKey(type, entityName, start, end);
   const status = normalizeStatementDownloadStatus(body.status ?? body.statementStatus ?? body.statement_status ?? current?.status ?? "已导出");
   const paymentStatus = status === "已收款" ? "已收款" : "未收款";
+  const amountHKD = Number(body.amountHKD ?? body.amount_hkd ?? current?.amount_hkd ?? 0);
+  const amountRMB = Number(body.amountRMB ?? body.amount_rmb ?? current?.amount_rmb ?? 0);
+  const recordCount = Number(body.recordCount ?? body.record_count ?? current?.record_count ?? 0);
+  const snapshotReady = Boolean(
+    body.snapshotReady ?? body.snapshot_ready ?? current?.snapshot_ready ?? (amountHKD || amountRMB || recordCount)
+  );
   return {
     downloadKey,
     statementType: type,
     entityName,
     start,
     end,
+    periodKey,
+    periodMode,
     status,
     paymentStatus,
     paymentDate: normalizeStatementPaymentDate(body.paymentDate ?? body.payment_date ?? current?.payment_date ?? "", paymentStatus),
+    amountHKD,
+    amountRMB,
+    recordCount,
+    snapshotReady,
     downloadedAt: String(body.downloadedAt ?? body.downloaded_at ?? current?.downloaded_at ?? new Date().toISOString()).trim()
   };
 }
@@ -9743,18 +9779,24 @@ function readStatementDownloadPayload(body, current = null) {
 async function saveStatementDownload(item) {
   const result = await db.prepare(`
     INSERT INTO statement_downloads
-      (download_key, statement_type, entity_name, start_date, end_date, status, payment_status, payment_date, downloaded_at)
+      (download_key, statement_type, entity_name, start_date, end_date, period_key, period_mode, status, payment_status, payment_date, amount_hkd, amount_rmb, record_count, snapshot_ready, downloaded_at)
     VALUES
-      (@downloadKey, @statementType, @entityName, @start, @end, @status, @paymentStatus, @paymentDate, @downloadedAt)
+      (@downloadKey, @statementType, @entityName, @start, @end, @periodKey, @periodMode, @status, @paymentStatus, @paymentDate, @amountHKD, @amountRMB, @recordCount, @snapshotReady, @downloadedAt)
     ON CONFLICT (download_key)
     DO UPDATE SET
       statement_type = excluded.statement_type,
       entity_name = excluded.entity_name,
       start_date = excluded.start_date,
       end_date = excluded.end_date,
+      period_key = excluded.period_key,
+      period_mode = excluded.period_mode,
       status = excluded.status,
       payment_status = excluded.payment_status,
       payment_date = excluded.payment_date,
+      amount_hkd = excluded.amount_hkd,
+      amount_rmb = excluded.amount_rmb,
+      record_count = excluded.record_count,
+      snapshot_ready = excluded.snapshot_ready,
       downloaded_at = excluded.downloaded_at,
       updated_at = CURRENT_TIMESTAMP,
       deleted_at = NULL

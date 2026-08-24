@@ -5561,7 +5561,7 @@ select {
 }
 
 .boss-unreceived-summary-grid {
-  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  grid-template-columns: repeat(2, minmax(180px, 1fr));
 }
 
 .boss-unreceived-table {
@@ -5588,19 +5588,19 @@ select {
 
 .boss-unreceived-customer-table th:nth-child(2),
 .boss-unreceived-customer-table td:nth-child(2) {
-  width: 14%;
+  width: 27%;
   white-space: normal;
   word-break: break-word;
 }
 
 .boss-unreceived-customer-table th:nth-child(3),
 .boss-unreceived-customer-table td:nth-child(3) {
-  width: 10%;
+  width: 12%;
 }
 
 .boss-unreceived-customer-table th:nth-child(4),
 .boss-unreceived-customer-table td:nth-child(4) {
-  width: 7%;
+  width: 8%;
   text-align: center;
 }
 
@@ -5608,7 +5608,7 @@ select {
 .boss-unreceived-customer-table td:nth-child(5),
 .boss-unreceived-customer-table th:nth-child(6),
 .boss-unreceived-customer-table td:nth-child(6) {
-  width: 8.5%;
+  width: 14%;
 }
 
 .boss-unreceived-customer-table th:nth-child(7),
@@ -5618,44 +5618,24 @@ select {
 
 .boss-unreceived-customer-table th:nth-child(8),
 .boss-unreceived-customer-table td:nth-child(8) {
-  width: 8%;
-}
-
-.boss-unreceived-customer-table th:nth-child(9),
-.boss-unreceived-customer-table td:nth-child(9) {
-  width: 7%;
-}
-
-.boss-unreceived-customer-table th:nth-child(10),
-.boss-unreceived-customer-table td:nth-child(10) {
-  width: 8%;
-}
-
-.boss-unreceived-customer-table th:nth-child(11),
-.boss-unreceived-customer-table td:nth-child(11) {
-  width: 12%;
-}
-
-.boss-unreceived-customer-table th:nth-child(12),
-.boss-unreceived-customer-table td:nth-child(12) {
-  width: 10.5%;
+  width: 15%;
 }
 
 .boss-unreceived-customs-table th:nth-child(2),
 .boss-unreceived-customs-table td:nth-child(2) {
-  width: 16%;
+  width: 30%;
   white-space: normal;
   word-break: break-word;
 }
 
 .boss-unreceived-customs-table th:nth-child(3),
 .boss-unreceived-customs-table td:nth-child(3) {
-  width: 12%;
+  width: 14%;
 }
 
 .boss-unreceived-customs-table th:nth-child(4),
 .boss-unreceived-customs-table td:nth-child(4) {
-  width: 8%;
+  width: 10%;
   text-align: center;
 }
 
@@ -5663,39 +5643,24 @@ select {
 .boss-unreceived-customs-table td:nth-child(5),
 .boss-unreceived-customs-table th:nth-child(6),
 .boss-unreceived-customs-table td:nth-child(6) {
-  width: 12%;
-}
-
-.boss-unreceived-customs-table th:nth-child(7),
-.boss-unreceived-customs-table td:nth-child(7) {
-  width: 10%;
-}
-
-.boss-unreceived-customs-table th:nth-child(8),
-.boss-unreceived-customs-table td:nth-child(8) {
-  width: 14%;
-}
-
-.boss-unreceived-customs-table th:nth-child(9),
-.boss-unreceived-customs-table td:nth-child(9) {
-  width: 12%;
+  width: 18%;
 }
 
 .boss-unreceived-supplier-table th:nth-child(2),
 .boss-unreceived-supplier-table td:nth-child(2) {
-  width: 15%;
+  width: 22%;
   white-space: normal;
   word-break: break-word;
 }
 
 .boss-unreceived-supplier-table th:nth-child(3),
 .boss-unreceived-supplier-table td:nth-child(3) {
-  width: 10%;
+  width: 12%;
 }
 
 .boss-unreceived-supplier-table th:nth-child(4),
 .boss-unreceived-supplier-table td:nth-child(4) {
-  width: 7%;
+  width: 8%;
   text-align: center;
 }
 
@@ -5703,7 +5668,7 @@ select {
 .boss-unreceived-supplier-table td:nth-child(5),
 .boss-unreceived-supplier-table th:nth-child(6),
 .boss-unreceived-supplier-table td:nth-child(6) {
-  width: 9%;
+  width: 12%;
 }
 
 .boss-unreceived-supplier-table th:nth-child(7),
@@ -5713,22 +5678,29 @@ select {
 
 .boss-unreceived-supplier-table th:nth-child(8),
 .boss-unreceived-supplier-table td:nth-child(8) {
-  width: 8%;
+  width: 24%;
 }
 
-.boss-unreceived-supplier-table th:nth-child(9),
-.boss-unreceived-supplier-table td:nth-child(9) {
-  width: 8%;
+.boss-unreceived-note-cell {
+  overflow: visible;
+  white-space: normal;
 }
 
-.boss-unreceived-supplier-table th:nth-child(10),
-.boss-unreceived-supplier-table td:nth-child(10) {
-  width: 12%;
+.boss-unreceived-note-input {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 700;
 }
 
-.boss-unreceived-supplier-table th:nth-child(11),
-.boss-unreceived-supplier-table td:nth-child(11) {
-  width: 12%;
+.boss-unreceived-note-cell .boss-unreceived-note-input {
+  min-width: 0;
+}
+
+.boss-unreceived-amount-cell {
+  white-space: nowrap;
 }
 
 .boss-page .table-card-head span,

@@ -12,6 +12,7 @@ const ROLE_LEVELS = {
 
 const BOSS_MODULES = [
   "bossDashboard",
+  "bossUnreceived",
   "bossCompanyProfit",
   "bossVehicleProfit",
   "bossSupplierProfit",
@@ -41,6 +42,7 @@ const ALL_MODULES = [
   "financeCostCenter",
   "financeDaily",
   ...BOSS_MODULES,
+  "rules",
   "freight",
   "templates",
   "master",
@@ -52,7 +54,7 @@ const BUSINESS_MODULES = ["home", "customers", "dispatchBoard", "orders", "custo
 const VEHICLE_DRIVER_MODULES = ["vehicleDriver", ...VEHICLE_EXPENSE_MODULES];
 const FINANCE_WAGE_MODULES = ["financeWages"];
 const FINANCE_MODULES = ["financeCosts", "financeSupplierStatements", "financeCustomsStatements", "financeCostCenter", "financeDaily"];
-const SYSTEM_MODULES = ["freight", "templates", "master", "security", "accounts"];
+const SYSTEM_MODULES = ["rules", "freight", "templates", "master", "security", "accounts"];
 const SYSTEM_CONFIG_VIEW_MODULES = ["freight", "templates", "master", "security"];
 const MODULE_LABELS = {
   home: "首页看板",
@@ -73,10 +75,12 @@ const MODULE_LABELS = {
   financeCostCenter: "成本中心",
   financeDaily: "日常收支",
   bossDashboard: "老板看板",
+  bossUnreceived: "未收未付",
   bossCompanyProfit: "公司利润",
   bossVehicleProfit: "车辆利润",
   bossSupplierProfit: "供应商利润",
   bossCompanyExpenses: "办公室支出",
+  rules: "规则库",
   freight: "运费模板",
   templates: "模板中心",
   master: "基础数据",

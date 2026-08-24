@@ -554,11 +554,10 @@ function isTransportOrder(order) {
 
 function dispatchShortLocation(value) {
   const [firstEntry = ""] = splitDispatchLocationEntries(value);
-  const parts = valueText(firstEntry)
-    .split(/[/｜|>]+/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-  return parts.length ? parts.slice(0, 2).join(" / ") : "";
+  const parts = splitLocationParts(valueText(firstEntry));
+  return parts.city && parts.district
+    ? [parts.city, parts.district].join(" / ")
+    : parts.city || parts.district || parts.detail || "";
 }
 
 function dispatchShortLocationFromEntries(entries) {

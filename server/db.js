@@ -1004,9 +1004,15 @@ async function initializeSchema() {
       entity_name TEXT NOT NULL DEFAULT '',
       start_date TEXT NOT NULL DEFAULT '',
       end_date TEXT NOT NULL DEFAULT '',
+      period_key TEXT NOT NULL DEFAULT '',
+      period_mode TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT '已导出',
       payment_status TEXT NOT NULL DEFAULT '未收款',
       payment_date TEXT NOT NULL DEFAULT '',
+      amount_hkd DOUBLE PRECISION NOT NULL DEFAULT 0,
+      amount_rmb DOUBLE PRECISION NOT NULL DEFAULT 0,
+      record_count INTEGER NOT NULL DEFAULT 0,
+      snapshot_ready BOOLEAN NOT NULL DEFAULT false,
       downloaded_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
       created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
       updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
@@ -1079,7 +1085,13 @@ async function initializeSchema() {
     statement_downloads: [
       "status TEXT NOT NULL DEFAULT '已导出'",
       "payment_status TEXT NOT NULL DEFAULT '未收款'",
-      "payment_date TEXT NOT NULL DEFAULT ''"
+      "payment_date TEXT NOT NULL DEFAULT ''",
+      "period_key TEXT NOT NULL DEFAULT ''",
+      "period_mode TEXT NOT NULL DEFAULT ''",
+      "amount_hkd DOUBLE PRECISION NOT NULL DEFAULT 0",
+      "amount_rmb DOUBLE PRECISION NOT NULL DEFAULT 0",
+      "record_count INTEGER NOT NULL DEFAULT 0",
+      "snapshot_ready BOOLEAN NOT NULL DEFAULT false"
     ],
     drivers: [
       "type TEXT NOT NULL DEFAULT '香港司机'",
