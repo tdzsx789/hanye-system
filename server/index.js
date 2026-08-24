@@ -9910,9 +9910,9 @@ app.post("/api/accounts", async (req, res) => {
     hireDate: String(req.body.hireDate || "").trim(),
     phone: String(req.body.phone || "").trim(),
     email: String(req.body.email || "").trim(),
-    note: String(req.body.note || "").trim(),
-    permissions: JSON.stringify(accountPermissionsForAccount(item))
+    note: String(req.body.note || "").trim()
   };
+  item.permissions = JSON.stringify(accountPermissionsForAccount(item));
   if (!item.username) {
     res.status(400).json({ message: "账号不能为空" });
     return;
@@ -9954,9 +9954,9 @@ app.patch("/api/accounts/:id", async (req, res) => {
     hireDate: req.body.hireDate === undefined ? current.hire_date : String(req.body.hireDate || "").trim(),
     phone: req.body.phone === undefined ? current.phone : String(req.body.phone || "").trim(),
     email: req.body.email === undefined ? current.email : String(req.body.email || "").trim(),
-    note: req.body.note === undefined ? current.note : String(req.body.note || "").trim(),
-    permissions: JSON.stringify(accountPermissionsForAccount(item))
+    note: req.body.note === undefined ? current.note : String(req.body.note || "").trim()
   };
+  item.permissions = JSON.stringify(accountPermissionsForAccount(item));
   if (!item.username) {
     res.status(400).json({ message: "账号不能为空" });
     return;
