@@ -1143,6 +1143,19 @@ body.is-modal-dragging .modal-head {
   justify-content: flex-end;
 }
 
+.order-detail-charge-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 10px;
+}
+
+.order-charged-date {
+  color: #065f46;
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+}
+
 .upload-status-pill {
   display: inline-flex;
   align-items: center;
@@ -1296,7 +1309,7 @@ body.is-modal-dragging .modal-head {
 }
 
 .invoice-actions-col {
-  width: 82px;
+  width: 136px;
 }
 
 .invoice-fee-table th,
@@ -1635,9 +1648,11 @@ body.is-modal-dragging .modal-head {
 }
 
 .invoice-actions-cell .op-group {
+  display: grid;
+  grid-template-columns: repeat(4, 28px);
   justify-content: center;
   gap: 4px;
-  min-width: 60px;
+  min-width: 0;
 }
 
 .invoice-actions-cell .table-op {
@@ -5486,8 +5501,203 @@ select {
 .boss-page > .finance-filter-bar,
 .boss-page > .finance-summary-grid,
 .boss-page > .finance-insight-grid,
+.boss-page > .boss-unreceived-grid,
 .boss-page > .table-card {
   flex: 0 0 auto;
+}
+
+.boss-page .boss-unreceived-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.boss-page .boss-unreceived-section {
+  overflow: auto;
+}
+
+.boss-page .boss-unreceived-section .table-card-head {
+  min-height: 0;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.boss-page .boss-unreceived-section .table-card-head span {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.boss-unreceived-summary-grid {
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+}
+
+.boss-unreceived-table {
+  width: 100%;
+  min-width: 0;
+  table-layout: fixed;
+  font-size: 12px;
+}
+
+.boss-unreceived-table th,
+.boss-unreceived-table td {
+  padding: 7px 6px;
+  vertical-align: middle;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.boss-unreceived-table th:first-child,
+.boss-unreceived-table td:first-child {
+  width: 4.5%;
+  text-align: center;
+}
+
+.boss-unreceived-customer-table th:nth-child(2),
+.boss-unreceived-customer-table td:nth-child(2) {
+  width: 14%;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.boss-unreceived-customer-table th:nth-child(3),
+.boss-unreceived-customer-table td:nth-child(3) {
+  width: 10%;
+}
+
+.boss-unreceived-customer-table th:nth-child(4),
+.boss-unreceived-customer-table td:nth-child(4) {
+  width: 7%;
+  text-align: center;
+}
+
+.boss-unreceived-customer-table th:nth-child(5),
+.boss-unreceived-customer-table td:nth-child(5),
+.boss-unreceived-customer-table th:nth-child(6),
+.boss-unreceived-customer-table td:nth-child(6) {
+  width: 8.5%;
+}
+
+.boss-unreceived-customer-table th:nth-child(7),
+.boss-unreceived-customer-table td:nth-child(7) {
+  width: 10%;
+}
+
+.boss-unreceived-customer-table th:nth-child(8),
+.boss-unreceived-customer-table td:nth-child(8) {
+  width: 8%;
+}
+
+.boss-unreceived-customer-table th:nth-child(9),
+.boss-unreceived-customer-table td:nth-child(9) {
+  width: 7%;
+}
+
+.boss-unreceived-customer-table th:nth-child(10),
+.boss-unreceived-customer-table td:nth-child(10) {
+  width: 8%;
+}
+
+.boss-unreceived-customer-table th:nth-child(11),
+.boss-unreceived-customer-table td:nth-child(11) {
+  width: 12%;
+}
+
+.boss-unreceived-customer-table th:nth-child(12),
+.boss-unreceived-customer-table td:nth-child(12) {
+  width: 10.5%;
+}
+
+.boss-unreceived-customs-table th:nth-child(2),
+.boss-unreceived-customs-table td:nth-child(2) {
+  width: 16%;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.boss-unreceived-customs-table th:nth-child(3),
+.boss-unreceived-customs-table td:nth-child(3) {
+  width: 12%;
+}
+
+.boss-unreceived-customs-table th:nth-child(4),
+.boss-unreceived-customs-table td:nth-child(4) {
+  width: 8%;
+  text-align: center;
+}
+
+.boss-unreceived-customs-table th:nth-child(5),
+.boss-unreceived-customs-table td:nth-child(5),
+.boss-unreceived-customs-table th:nth-child(6),
+.boss-unreceived-customs-table td:nth-child(6) {
+  width: 12%;
+}
+
+.boss-unreceived-customs-table th:nth-child(7),
+.boss-unreceived-customs-table td:nth-child(7) {
+  width: 10%;
+}
+
+.boss-unreceived-customs-table th:nth-child(8),
+.boss-unreceived-customs-table td:nth-child(8) {
+  width: 14%;
+}
+
+.boss-unreceived-customs-table th:nth-child(9),
+.boss-unreceived-customs-table td:nth-child(9) {
+  width: 12%;
+}
+
+.boss-unreceived-supplier-table th:nth-child(2),
+.boss-unreceived-supplier-table td:nth-child(2) {
+  width: 15%;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.boss-unreceived-supplier-table th:nth-child(3),
+.boss-unreceived-supplier-table td:nth-child(3) {
+  width: 10%;
+}
+
+.boss-unreceived-supplier-table th:nth-child(4),
+.boss-unreceived-supplier-table td:nth-child(4) {
+  width: 7%;
+  text-align: center;
+}
+
+.boss-unreceived-supplier-table th:nth-child(5),
+.boss-unreceived-supplier-table td:nth-child(5),
+.boss-unreceived-supplier-table th:nth-child(6),
+.boss-unreceived-supplier-table td:nth-child(6) {
+  width: 9%;
+}
+
+.boss-unreceived-supplier-table th:nth-child(7),
+.boss-unreceived-supplier-table td:nth-child(7) {
+  width: 10%;
+}
+
+.boss-unreceived-supplier-table th:nth-child(8),
+.boss-unreceived-supplier-table td:nth-child(8) {
+  width: 8%;
+}
+
+.boss-unreceived-supplier-table th:nth-child(9),
+.boss-unreceived-supplier-table td:nth-child(9) {
+  width: 8%;
+}
+
+.boss-unreceived-supplier-table th:nth-child(10),
+.boss-unreceived-supplier-table td:nth-child(10) {
+  width: 12%;
+}
+
+.boss-unreceived-supplier-table th:nth-child(11),
+.boss-unreceived-supplier-table td:nth-child(11) {
+  width: 12%;
 }
 
 .boss-page .table-card-head span,
@@ -6246,6 +6456,86 @@ select {
   background: #fff;
 }
 
+.company-expense-salary-panel {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.company-expense-salary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.company-expense-salary-head strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.company-expense-salary-list {
+  display: grid;
+  gap: 8px;
+}
+
+.company-expense-salary-row {
+  display: grid;
+  grid-template-columns: minmax(0, 120px) minmax(0, 96px) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+}
+
+.company-expense-salary-row label {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.company-expense-salary-row input {
+  min-width: 0;
+  height: 32px;
+}
+
+.company-expense-salary-note {
+  min-width: 0;
+}
+
+.company-expense-salary-note textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 76px;
+  padding-top: 6px;
+  resize: vertical;
+}
+
+.company-expense-salary-remove {
+  align-self: start;
+  margin-top: 22px;
+}
+
+.company-expense-salary-total {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 4px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.company-expense-salary-hint {
+  margin: 0;
+}
+
 .route-adjust-driver-picker {
   position: relative;
   display: grid;
@@ -6364,6 +6654,10 @@ select {
   width: 100%;
   min-width: 0;
   height: 30px;
+}
+
+.company-expense-employee-cell {
+  min-width: 120px;
 }
 
 .company-expense-table tr.is-row-editing td {
@@ -11272,11 +11566,7 @@ tr.selected {
 }
 
 .dispatch-table {
-  min-width: 1620px;
-}
-
-.dispatch-table.managed-data-table {
-  min-width: 100%;
+  min-width: max-content;
 }
 
 .dispatch-table .sticky-data-table-column,
@@ -11345,7 +11635,7 @@ tr.selected {
 }
 
 .dispatch-driver-cell {
-  min-width: 160px;
+  min-width: 118px;
 }
 
 .dispatch-table .dispatch-driver-manual-field {

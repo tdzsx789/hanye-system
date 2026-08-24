@@ -41,10 +41,22 @@ defineProps({
   editDisabledTitle: {
     type: String,
     default: "当前订单不可编辑"
+  },
+  canMarkCharged: {
+    type: Boolean,
+    default: false
+  },
+  chargedAt: {
+    type: String,
+    default: ""
+  },
+  chargeLoading: {
+    type: Boolean,
+    default: false
   }
 });
 
-const emit = defineEmits(["close", "edit"]);
+const emit = defineEmits(["close", "edit", "mark-charged", "cancel-charged"]);
 </script>
 
 <template>
@@ -57,6 +69,15 @@ const emit = defineEmits(["close", "edit"]);
         </div>
         <div class="modal-detail-actions">
           <button class="ghost-btn small" type="button" :title="canEdit ? '编辑' : editDisabledTitle" @click="emit('edit', order)"><IconSvg :name="canEdit ? 'edit' : 'eye'" />{{ canEdit ? '编辑' : '查看' }}</button>
+          <span v-if="canMarkCharged" class="order-detail-charge-actions">
+            <span v-if="chargedAt" class="status-badge order-charged-date">{{ chargedAt }}</span>
+            <button
+              :class="['ghost-btn', 'small', { active: !chargedAt, danger: chargedAt }]"
+              type="button"
+              :disabled="chargeLoading"
+              @click="chargedAt ? emit('cancel-charged', order) : emit('mark-charged', order)"
+            ><IconSvg :name="chargedAt ? 'refresh' : 'check'" />{{ chargedAt ? '取消收费' : '已收费' }}</button>
+          </span>
           <button type="button" class="icon-btn" @click="emit('close')"><IconSvg name="close" />关闭</button>
         </div>
       </div>

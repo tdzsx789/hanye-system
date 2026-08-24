@@ -92,6 +92,13 @@ export function createCompanyExpense(payload) {
   });
 }
 
+export function createCompanyExpenseBatch(payload) {
+  return apiFetch("/company-expenses/batch", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
 export function updateCompanyExpense(id, payload) {
   return apiFetch(`/company-expenses/${encodeURIComponent(id)}`, {
     method: "PATCH",

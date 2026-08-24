@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 export const ACCOUNT_ROLES = ["司机", "跟单员", "财务", "管理员"];
+export const FINANCE_CUSTOMS_STATEMENT_EXEMPT_ACCOUNTS = new Set(["Ganyaomei"]);
 
 const ROLE_LEVELS = {
   司机: 1,
@@ -53,14 +54,6 @@ const FINANCE_WAGE_MODULES = ["financeWages"];
 const FINANCE_MODULES = ["financeCosts", "financeSupplierStatements", "financeCustomsStatements", "financeCostCenter", "financeDaily"];
 const SYSTEM_MODULES = ["freight", "templates", "master", "security", "accounts"];
 const SYSTEM_CONFIG_VIEW_MODULES = ["freight", "templates", "master", "security"];
-
-export const ROLE_ALLOWED_MODULES = {
-  管理员: ALL_MODULES,
-  财务: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_WAGE_MODULES, ...FINANCE_MODULES, ...SYSTEM_CONFIG_VIEW_MODULES],
-  跟单员: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_MODULES, ...SYSTEM_CONFIG_VIEW_MODULES],
-  司机: [...VEHICLE_DRIVER_MODULES, ...FINANCE_MODULES]
-};
-
 const MODULE_LABELS = {
   home: "首页看板",
   customers: "客户/供应商",
@@ -91,6 +84,17 @@ const MODULE_LABELS = {
   accounts: "权限账号"
 };
 
+export const ROLE_ALLOWED_MODULES = {
+  管理员: ALL_MODULES,
+  财务: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_WAGE_MODULES, ...FINANCE_MODULES, ...SYSTEM_CONFIG_VIEW_MODULES],
+  跟单员: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...SYSTEM_CONFIG_VIEW_MODULES],
+  司机: [...VEHICLE_DRIVER_MODULES, ...FINANCE_MODULES]
+};
+
+function normalizeAccountUsername(value = "") {
+  return String(value || "").trim().toLowerCase();
+}
+
 export function normalizeAccountRole(value = "") {
   const text = String(value || "").trim();
   if (ACCOUNT_ROLES.includes(text)) return text;
@@ -109,12 +113,34 @@ export function allowedModulesForRole(role = "") {
   return [...(ROLE_ALLOWED_MODULES[normalizeAccountRole(role)] || ROLE_ALLOWED_MODULES["司机"])];
 }
 
+export function specialAllowedModulesForAccount(account = "") {
+  const username = typeof account === "object" ? account?.username : account;
+  const key = normalizeAccountUsername(username);
+  if (key && FINANCE_CUSTOMS_STATEMENT_EXEMPT_ACCOUNTS.has(String(username || "").trim())) return ["financeCustomsStatements"];
+  if (key === "ganyaomei") return ["financeCustomsStatements"];
+  return [];
+}
+
+export function allowedModulesForAccount(account = "") {
+  const role = typeof account === "object" ? account?.role : account;
+  const moduleSet = new Set(allowedModulesForRole(role));
+  specialAllowedModulesForAccount(account).forEach((moduleId) => moduleSet.add(moduleId));
+  return [...moduleSet];
+}
+
 export function accountPermissionsForRole(role = "") {
   return allowedModulesForRole(role).map((moduleId) => MODULE_LABELS[moduleId] || moduleId);
 }
 
-export function canAccessModule(role = "", moduleId = "") {
-  return allowedModulesForRole(role).includes(moduleId);
+export function accountPermissionsForAccount(account = "") {
+  return allowedModulesForAccount(account).map((moduleId) => MODULE_LABELS[moduleId] || moduleId);
+}
+
+export function canAccessModule(subject = "", moduleId = "") {
+  if (subject && typeof subject === "object") {
+    return allowedModulesForAccount(subject).includes(moduleId);
+  }
+  return allowedModulesForRole(subject).includes(moduleId);
 }
 
 export function isSystemModule(moduleId = "") {

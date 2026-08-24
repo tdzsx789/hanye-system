@@ -45,6 +45,7 @@ export const VEHICLE_EXPENSE_MODULES = [
 export const VEHICLE_DRIVER_MODULES = ["vehicleDriver", ...VEHICLE_EXPENSE_MODULES];
 export const BOSS_CENTER_MODULES = [
   "bossDashboard",
+  "bossUnreceived",
   "bossCompanyProfit",
   "bossVehicleProfit",
   "bossSupplierProfit",
@@ -52,6 +53,7 @@ export const BOSS_CENTER_MODULES = [
 ];
 export const FINANCE_WAGE_MODULES = ["financeWages"];
 export const FINANCE_CENTER_MODULES = ["financeCosts", "financeSupplierStatements", "financeCustomsStatements", "financeCostCenter", "financeDaily"];
+export const FINANCE_CUSTOMS_STATEMENT_EXEMPT_ACCOUNTS = new Set(["Ganyaomei"]);
 export const BUSINESS_MODULES = ["home", "customers", "dispatchBoard", "orders", "customsBusiness", "otherBusiness"];
 export const SYSTEM_CONFIG_MODULES = ["freight", "templates", "master", "security", "accounts"];
 export const SYSTEM_CONFIG_VIEW_MODULES = ["freight", "templates", "master", "security"];
@@ -65,13 +67,13 @@ export const ROLE_ALLOWED_MODULES = {
     ...SYSTEM_CONFIG_MODULES
   ],
   财务: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_WAGE_MODULES, ...FINANCE_CENTER_MODULES, ...SYSTEM_CONFIG_VIEW_MODULES],
-  跟单员: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...FINANCE_CENTER_MODULES, ...SYSTEM_CONFIG_VIEW_MODULES],
+  跟单员: [...BUSINESS_MODULES, ...VEHICLE_DRIVER_MODULES, ...SYSTEM_CONFIG_VIEW_MODULES],
   司机: [...VEHICLE_DRIVER_MODULES, ...FINANCE_CENTER_MODULES]
 };
 export const ROLE_PERMISSION_LABELS = {
   管理员: "全部权限",
   财务: "业务、车辆司机、司机工资统计、财务中心、系统配置（运费模板、模板中心、基础数据、数据安全）",
-  跟单员: "业务、车辆司机、财务中心（不含司机工资统计）、系统配置（运费模板、模板中心、基础数据、数据安全）",
+  跟单员: "业务、车辆司机、系统配置（运费模板、模板中心、基础数据、数据安全）",
   司机: "车辆司机、财务中心（不含司机工资统计）"
 };
 
@@ -96,6 +98,7 @@ export const MODULES = [
   { id: "financeCostCenter", label: "成本中心", group: "财务中心" },
   { id: "financeDaily", label: "日常收支", group: "财务中心" },
   { id: "bossDashboard", label: "老板看板", group: "老板中心" },
+  { id: "bossUnreceived", label: "未收未付", group: "老板中心" },
   { id: "bossCompanyProfit", label: "公司利润", group: "老板中心" },
   { id: "bossVehicleProfit", label: "车辆利润", group: "老板中心" },
   { id: "bossSupplierProfit", label: "供应商利润", group: "老板中心" },

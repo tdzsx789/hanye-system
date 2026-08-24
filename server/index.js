@@ -9,7 +9,9 @@ import http from "node:http";
 import zlib from "node:zlib";
 import {
   ACCOUNT_ROLES,
+  accountPermissionsForAccount,
   accountPermissionsForRole,
+  allowedModulesForAccount,
   allowedModulesForRole,
   canAccessModule,
   hashPassword,
@@ -222,6 +224,11 @@ const ORDER_STATUS_RANK = {
   "已签收": 60,
   "已审核": 70
 };
+const ORDER_SIGN_REQUIREMENT_CUSTOMERS = [
+  { keywords: ["恒泰通"], tripNo: true, sixSheetNo: true },
+  { keywords: ["前海慧华"], tripNo: true, sixSheetNo: true },
+  { keywords: ["深佩"], sixSheetNo: true }
+];
 
 function requestHasAdminOrderDeletePermission(req) {
   return normalizeAccountRole(req.account?.role) === "管理员";
@@ -243,6 +250,40 @@ function normalizeOrderStatus(status = "", fallback = "待确认") {
   if (text === "已派车") return "预排";
   if (ORDER_STATUS_OPTIONS.includes(text)) return text;
   return fallback;
+}
+
+function normalizedSignRequirementText(value = "") {
+  return String(value || "").trim().replace(/\s+/g, "").toLowerCase();
+}
+
+function orderSignRequirementForCustomer(customer = {}, fallbackName = "") {
+  const values = [
+    customer?.id,
+    customer?.name,
+    customer?.short_name,
+    customer?.shortName,
+    fallbackName
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  return ORDER_SIGN_REQUIREMENT_CUSTOMERS.find((rule) =>
+    values.some((value) =>
+      rule.keywords.some((keyword) => normalizedSignRequirementText(value).includes(normalizedSignRequirementText(keyword)))
+    )
+  ) || null;
+}
+
+function missingOrderSignRequiredFieldLabels(order = {}, customer = {}) {
+  const requirement = orderSignRequirementForCustomer(customer, order.customer);
+  if (!requirement) return [];
+  const labels = [];
+  if (requirement.tripNo && !String(order.tripNo || order.trip_no || "").trim()) labels.push("车次号");
+  if (requirement.sixSheetNo && !String(order.sixSheetNo || order.six_sheet_no || "").trim()) labels.push("六联单号");
+  return labels;
+}
+
+function orderSignRequiredMessage(labels = []) {
+  return labels.length ? `请先填写${labels.join("和")}后再签收` : "";
 }
 
 function orderStatusRank(status = "") {
@@ -519,8 +560,30 @@ function mapOrder(row) {
     tripNo: userTextValue(row.trip_no),
     sixSheetEnabled: Boolean(row.six_sheet_enabled),
     sixSheetNo: userTextValue(row.six_sheet_no),
+    chargedAt: userTextValue(row.charged_at),
     fees: []
   };
+}
+
+function normalizeOrderChargedAt(value = "") {
+  const text = userTextValue(value);
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : "";
+}
+
+function orderIsCharged(order = {}) {
+  return Boolean(normalizeOrderChargedAt(order.chargedAt || order.charged_at));
+}
+
+function orderChargeDateCn(value = "") {
+  const chargedAt = normalizeOrderChargedAt(value);
+  if (!chargedAt) return "";
+  const [year, month, day] = chargedAt.split("-");
+  return `${year}年${month}月${day}日`;
+}
+
+function orderChargeNoteText(order = {}) {
+  const dateText = orderChargeDateCn(order.chargedAt || order.charged_at);
+  return dateText ? `于${dateText}已收费` : "";
 }
 
 function creatorFieldsFromAccount(account = {}) {
@@ -580,6 +643,7 @@ const ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS = [
 ];
 const ORDER_EXPORT_SYSTEM_TOTAL_COLUMN_KEYS = new Set(ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS.map((column) => column.key));
 const ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN = { key: "__sequence", label: "序号", width: 42, fontSize: 8, system: true };
+const ORDER_EXPORT_CHARGE_NOTE_COLUMN = { key: "__chargeNote", label: "收费备注", width: 128, fontSize: 8, system: true };
 
 function normalizeExportTemplate(template = null) {
   if (!template || template.type !== "visual-export-template") return null;
@@ -1148,13 +1212,22 @@ function exportFeeCalculationText(fee = {}) {
   const amountNumber = Number(amountValue || 0);
   const unitPriceText = textValue(unitPriceValue).trim();
   const unitPriceNumber = Number(unitPriceValue);
-  const hasUsefulUnitPrice = unitPriceText
-    && Number.isFinite(unitPriceNumber)
-    && (unitPriceNumber !== 0 || amountNumber === 0);
-  const quantityValue = fee.quantity ?? fee.qty ?? (hasUsefulUnitPrice ? 1 : "");
+  const rawQuantityValue = fee.quantity ?? fee.qty;
+  const quantityTextRaw = textValue(rawQuantityValue).trim();
+  const quantityValue = quantityTextRaw
+    ? rawQuantityValue
+    : (Number.isFinite(amountNumber) && amountNumber !== 0 ? 1 : "");
   const quantityText = textValue(quantityValue).trim();
+  const derivedUnitPrice = !unitPriceText && quantityText
+    ? (Number.isFinite(Number(quantityValue)) && Number(quantityValue) !== 0 ? amountNumber / Number(quantityValue) : null)
+    : null;
+  const resolvedUnitPriceValue = unitPriceText && Number.isFinite(unitPriceNumber)
+    ? unitPriceValue
+    : derivedUnitPrice;
+  const hasUsefulUnitPrice = Number.isFinite(Number(resolvedUnitPriceValue))
+    && (Number(resolvedUnitPriceValue) !== 0 || amountNumber === 0);
   if (quantityText && hasUsefulUnitPrice) {
-    return `${formatFeeMathNumber(quantityValue)}*${formatFeeMathNumber(unitPriceValue)}=${formatFeeMathNumber(amountValue)}`;
+    return `${formatFeeMathNumber(quantityValue)}*${formatFeeMathNumber(resolvedUnitPriceValue)}=${formatFeeMathNumber(amountValue)}`;
   }
   return formatFeeMathNumber(amountValue);
 }
@@ -1308,15 +1381,17 @@ function isExportAmountColumn(column) {
     || key === "receivableHKD"
     || key === "receivableRMB"
     || key.startsWith("fee-item-")
+    || isExportFeeItemColumn(column)
     || /金额|应收|港币|人民币|运费|税金|过磅费|停车费|登记费|等候费|装货费|卸货费/.test(label);
 }
 
 function exportOrderColumnAmount(order, column) {
   const key = textValue(column?.key);
   if (key === "__sequence") return 0;
+  if (key === "__chargeNote") return 0;
   if (key === "__hkdTotal") return Number(order?.receivableHKD || 0);
   if (key === "__rmbTotal") return Number(order?.receivableRMB || 0);
-  if (key.startsWith("fee-item-")) return feeAmountForColumn(order, column);
+  if (isExportFeeItemColumn(column)) return feeAmountForColumn(order, column);
   if (key === "receivableHKD" || key === "receivableRMB") return Number(order?.[key] || 0);
   return Number(order?.[key] || 0);
 }
@@ -1324,10 +1399,11 @@ function exportOrderColumnAmount(order, column) {
 function exportOrderColumnValue(order, column, rowIndex = 0, options = {}) {
   const key = textValue(column?.key);
   if (key === "__sequence") return rowIndex + 1;
+  if (key === "__chargeNote") return orderChargeNoteText(order);
   if (key === "__hkdTotal") return formatExportAmount(order?.receivableHKD);
   if (key === "__rmbTotal") return formatExportAmount(order?.receivableRMB);
   if (key === "loading" || key === "unloading") return shortLocationValue(order?.[key]);
-  if (key.startsWith("fee-item-")) return feeDisplayForColumn(order, column, options);
+  if (isExportFeeItemColumn(column)) return feeDisplayForColumn(order, column, options);
   if (key === "receivableHKD" || key === "receivableRMB") return formatExportAmount(order?.[key]);
   const value = order?.[key];
   if (value !== undefined && value !== null && value !== "" && Number(value) === 0) return "";
@@ -1358,10 +1434,11 @@ function exportTotalAmountForColumn(orders, column, exchange = null, options = {
 
 function exportTotalRow(orders, columns, exchangeInput = null, options = {}) {
   const exchange = normalizeExportExchange(exchangeInput);
+  const totalOrders = Array.isArray(options.totalOrders) ? options.totalOrders : orders;
   return columns.map((column, index) => {
     if (index === 0) return "合计";
     if (!isExportAmountColumn(column)) return "";
-    return formatExportAmount(exportTotalAmountForColumn(orders, column, exchange, options), false);
+    return formatExportAmount(exportTotalAmountForColumn(totalOrders, column, exchange, options), false);
   });
 }
 
@@ -1406,8 +1483,9 @@ function exportSettlementTotalTargetIndex(columns = [], summary = null) {
   return index >= 0 ? index : Math.max(0, columns.length - 1);
 }
 
-function exportSettlementTotalRow(orders, columns, exchangeInput = null) {
-  const summary = exportSettlementTotalSummary(orders, exchangeInput);
+function exportSettlementTotalRow(orders, columns, exchangeInput = null, options = {}) {
+  const totalOrders = Array.isArray(options.totalOrders) ? options.totalOrders : orders;
+  const summary = exportSettlementTotalSummary(totalOrders, exchangeInput);
   if (!summary) return null;
   const targetIndex = exportSettlementTotalTargetIndex(columns, summary);
   const labelIndex = Math.max(0, targetIndex - 1);
@@ -1442,6 +1520,9 @@ function sortOrdersForExport(orders = []) {
 function exportTableRowData(orders, columns, exchange = null, options = {}) {
   const sortedOrders = sortOrdersForExport(orders);
   const includeSettlementTotal = Boolean(options.includeSettlementTotal);
+  const totalOrders = options.excludeChargedFromTotals
+    ? sortedOrders.filter((order) => !orderIsCharged(order))
+    : sortedOrders;
   const valueOptions = {
     includeAdvanceAddress: Boolean(options.includeAdvanceAddress)
   };
@@ -1452,13 +1533,16 @@ function exportTableRowData(orders, columns, exchange = null, options = {}) {
   }));
   rows.push({
     kind: "total",
-    values: exportTotalRow(sortedOrders, columns, exchange, { rawCurrencyTotals: includeSettlementTotal })
+    values: exportTotalRow(sortedOrders, columns, exchange, {
+      rawCurrencyTotals: includeSettlementTotal,
+      totalOrders
+    })
   });
   if (includeSettlementTotal) {
-    const settlementRow = exportSettlementTotalRow(sortedOrders, columns, exchange);
+    const settlementRow = exportSettlementTotalRow(sortedOrders, columns, exchange, { totalOrders });
     if (settlementRow) rows.push(settlementRow);
   }
-  return { sortedOrders, rows };
+  return { sortedOrders, totalOrders, rows };
 }
 
 function exportTableRows(orders, columns, exchange = null, options = {}) {
@@ -1644,7 +1728,7 @@ function mergeExportColumnsByTemplateOrder(templateColumns = [], includedColumns
   return result;
 }
 
-function exportColumnsForOrders(templatePayload = null, orders = []) {
+function exportColumnsForOrders(templatePayload = null, orders = [], options = {}) {
   const template = normalizeExportTemplate(templatePayload);
   const columns = exportColumnsFromTemplate(templatePayload);
   const sequenceColumn = columns.find((column) => column.key === ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key);
@@ -1661,6 +1745,9 @@ function exportColumnsForOrders(templatePayload = null, orders = []) {
     ...(columns.find((column) => column.key === systemColumn.key) || {})
   }));
   const dynamicColumns = dynamicExportFeeColumns(orders, bodyColumns);
+  const chargeNoteColumns = options.includeChargeNoteColumn && orders.some(orderIsCharged)
+    ? [{ ...ORDER_EXPORT_CHARGE_NOTE_COLUMN }]
+    : [];
   return [
     sequenceColumn || { ...ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN },
     ...mergeExportColumnsByTemplateOrder(
@@ -1668,7 +1755,8 @@ function exportColumnsForOrders(templatePayload = null, orders = []) {
       bodyColumns,
       dynamicColumns
     ),
-    ...totalColumns
+    ...totalColumns,
+    ...chargeNoteColumns
   ].map((column) => ({
     ...column,
     width: exportColumnAutoWidth(column, orders, { fluid: template?.orientation === "fluid" })
@@ -1707,11 +1795,15 @@ function exportTemplateTextRows(templatePayload = null, title = "订单导出") 
 }
 
 function renderOrdersCsv(orders, title = "订单导出", templatePayload = null, exchange = null) {
-  const columns = exportColumnsForOrders(templatePayload, orders);
+  const isCustomerStatement = isCustomerStatementExportTitle(title);
+  const columns = exportColumnsForOrders(templatePayload, orders, {
+    includeChargeNoteColumn: isCustomerStatement
+  });
   const headers = columns.map(exportColumnHeaderText);
   const rows = exportTableRows(orders, columns, exchange, {
     includeSettlementTotal: shouldIncludeSettlementTotal(title, exchange),
-    includeAdvanceAddress: isCustomerStatementExportTitle(title)
+    includeAdvanceAddress: isCustomerStatement,
+    excludeChargedFromTotals: isCustomerStatement
   });
   const { headerRows, footerRows } = exportTemplateTextRows(templatePayload, title);
   const csvBodyRows = [
@@ -1752,6 +1844,7 @@ function isExportFeeItemColumn(column = {}) {
 
 function exportColumnMinimumWidth(column = {}) {
   const key = textValue(column.key);
+  if (key === ORDER_EXPORT_CHARGE_NOTE_COLUMN.key) return 88;
   const isFeeColumn = isExportFeeItemColumn(column);
   const widthUnits = Math.max(
     stringDisplayWidth(exportColumnBaseLabel(column)),
@@ -1764,6 +1857,7 @@ function exportColumnMinimumWidth(column = {}) {
 function exportColumnMaxWidth(column = {}) {
   const key = textValue(column.key);
   if (key === ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key) return 42;
+  if (key === ORDER_EXPORT_CHARGE_NOTE_COLUMN.key) return 138;
   if (key === "date") return 72;
   if (["direction", "currency", "tonnage"].includes(key)) return 50;
   if (["quantity", "weight", "status"].includes(key)) return 68;
@@ -1780,6 +1874,7 @@ function exportColumnMaxWidth(column = {}) {
 function exportColumnFluidMaxWidth(column = {}) {
   const key = textValue(column.key);
   if (key === ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key) return 42;
+  if (key === ORDER_EXPORT_CHARGE_NOTE_COLUMN.key) return 180;
   if (["direction", "currency", "tonnage"].includes(key)) return 56;
   if (key === "date") return 76;
   if (key === "customer" || key === "supplier") return 240;
@@ -2287,12 +2382,16 @@ function pdfFooterItemY(item = {}, template = null) {
 
 async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePayload = null, exchange = null, options = {}) {
   const template = normalizeExportTemplate(templatePayload);
-  const columns = exportColumnsForOrders(templatePayload, orders);
+  const isCustomerStatement = isCustomerStatementExportTitle(title);
+  const columns = exportColumnsForOrders(templatePayload, orders, {
+    includeChargeNoteColumn: isCustomerStatement
+  });
   const headers = columns.map(exportColumnHeaderText);
   const includeSettlementTotal = shouldIncludeSettlementTotal(title, exchange);
   const tableData = exportTableRowData(orders, columns, exchange, {
     includeSettlementTotal,
-    includeAdvanceAddress: isCustomerStatementExportTitle(title)
+    includeAdvanceAddress: isCustomerStatement,
+    excludeChargedFromTotals: isCustomerStatement
   });
   const rows = tableData.rows.map((row) => row.values);
   const workbook = new ExcelJS.Workbook();
@@ -2426,6 +2525,7 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
   });
 
   const sortedOrders = tableData.sortedOrders;
+  const totalOrders = tableData.totalOrders || sortedOrders;
   const totalRowOffset = tableData.rows.findIndex((row) => row.kind === "total");
   const totalRowNumber = totalRowOffset >= 0 ? tableStartRow + 1 + totalRowOffset : 0;
   rows.forEach((rowValues, rowIndex) => {
@@ -2440,15 +2540,17 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
     row.height = Math.max(isSettlementTotalRow ? 24 : 22, tableFontSize * 1.9 + 12);
     row.eachCell((cell, columnNumber) => {
       const column = columns[columnNumber - 1] || {};
+      const isChargeNoteColumn = textValue(column.key) === ORDER_EXPORT_CHARGE_NOTE_COLUMN.key;
+      const isChargeNoteCell = isChargeNoteColumn && !isSummaryRow && sourceOrder && orderChargeNoteText(sourceOrder);
       if (isSettlementTotalRow && columnNumber - 1 === rowMeta.targetIndex) {
         const formula = exportSettlementTotalExcelFormula(rowMeta.summary, columns, totalRowNumber);
         cell.value = formula
           ? { formula, result: Number(rowMeta.summary?.amount || 0) }
           : Number(rowMeta.summary?.amount || 0);
         cell.numFmt = "#,##0.00";
-      } else if (!isSettlementTotalRow && isExportAmountColumn(column) && (isTotalRow || !exportLocationFeeType(column))) {
+      } else if (!isSettlementTotalRow && isExportAmountColumn(column) && (isTotalRow || (!exportLocationFeeType(column) && !isExportFeeItemColumn(column)))) {
         const amount = isTotalRow
-          ? exportTotalAmountForColumn(sortedOrders, column, exchange, { rawCurrencyTotals: includeSettlementTotal })
+          ? exportTotalAmountForColumn(totalOrders, column, exchange, { rawCurrencyTotals: includeSettlementTotal })
           : exportOrderColumnAmount(sourceOrder, column);
         if (isTotalRow || Number(amount || 0) !== 0) {
           cell.value = Number(amount || 0);
@@ -2460,8 +2562,8 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
       cell.font = {
         name: "Microsoft YaHei",
         size: Number(column.fontSize || tableFontSize),
-        bold: isSummaryRow || Boolean(template?.tableBold),
-        color: { argb: excelArgb(template?.tableTextColor || "#17233c") }
+        bold: isSummaryRow || Boolean(isChargeNoteCell) || Boolean(template?.tableBold),
+        color: { argb: isChargeNoteCell ? excelArgb("#047857") : excelArgb(template?.tableTextColor || "#17233c") }
       };
       if (isTotalRow) {
         cell.fill = {
@@ -2477,10 +2579,17 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
           fgColor: { argb: "FFFFFF00" }
         };
       }
+      if (isChargeNoteCell) {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: excelArgb("#dcfce7") }
+        };
+      }
       const horizontal = isSettlementTotalRow
         ? (columnNumber - 1 === rowMeta.targetIndex ? "right" : "center")
-        : excelAlignment(template?.tableAlign);
-      cell.alignment = { vertical: "middle", horizontal, wrapText: false };
+        : (isChargeNoteColumn ? "center" : excelAlignment(template?.tableAlign));
+      cell.alignment = { vertical: "middle", horizontal, wrapText: isChargeNoteColumn };
       if (!isSummaryRow && sourceOrder) {
         const comment = exportOrderColumnComment(sourceOrder, column);
         if (comment) {
@@ -2868,7 +2977,10 @@ async function renderKenfaStatementXlsxBuffer(orders, title = "客户对账单",
 
 function renderOrdersExcelHtml(orders, title = "订单导出", templatePayload = null, exchange = null) {
   const template = normalizeExportTemplate(templatePayload);
-  const columns = exportColumnsForOrders(templatePayload, orders);
+  const isCustomerStatement = isCustomerStatementExportTitle(title);
+  const columns = exportColumnsForOrders(templatePayload, orders, {
+    includeChargeNoteColumn: isCustomerStatement
+  });
   const context = {
     title,
     date: todayInputValue(),
@@ -2915,7 +3027,8 @@ function renderOrdersExcelHtml(orders, title = "订单导出", templatePayload =
   const tableWidthCss = template?.orientation === "fluid" ? `${Math.max(1, tablePixelWidth)}px` : "100%";
   const tableData = exportTableRowData(orders, columns, exchange, {
     includeSettlementTotal: shouldIncludeSettlementTotal(title, exchange),
-    includeAdvanceAddress: isCustomerStatementExportTitle(title)
+    includeAdvanceAddress: isCustomerStatement,
+    excludeChargedFromTotals: isCustomerStatement
   });
   const rowsHtml = tableData.rows.map((rowData) => `
     <tr${rowData.kind === "total" || rowData.kind === "settlementTotal" ? ' class="total-row"' : ""}>
@@ -3044,6 +3157,7 @@ function normalizeExportOrderSnapshot(order = {}) {
   snapshot.receivableHKD = Number(snapshot.receivableHKD ?? order.receivableHKD ?? 0);
   snapshot.receivableRMB = Number(snapshot.receivableRMB ?? order.receivableRMB ?? 0);
   snapshot.status = String(snapshot.status || order.status || "");
+  snapshot.chargedAt = normalizeOrderChargedAt(snapshot.chargedAt || order.chargedAt || order.charged_at || "");
   snapshot.remark = String(snapshot.remark || order.remark || "");
   snapshot.tripNoEnabled = normalizeExportBoolean(snapshot.tripNoEnabled ?? order.tripNoEnabled ?? order.trip_no_enabled);
   snapshot.tripNo = String(snapshot.tripNo || order.tripNo || order.trip_no || "");
@@ -3065,7 +3179,10 @@ async function loadExportOrdersFromRequest(body = {}, orderNos = []) {
 
 function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = null, filename = "", exchange = null) {
   const template = normalizeExportTemplate(templatePayload);
-  const sourceColumns = exportColumnsForOrders(templatePayload, orders);
+  const isCustomerStatement = isCustomerStatementExportTitle(title);
+  const sourceColumns = exportColumnsForOrders(templatePayload, orders, {
+    includeChargeNoteColumn: isCustomerStatement
+  });
   const tableWidth = sourceColumns.reduce((sum, column) => sum + Number(column.width || 76), 0);
   const fluidPageWidth = Math.max(842, Math.ceil(tableWidth + 48));
   const layout = template?.orientation === "portrait" ? "portrait" : "landscape";
@@ -3206,7 +3323,8 @@ function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = 
   const includeSettlementTotal = shouldIncludeSettlementTotal(title, exchange);
   const { rows: pdfRows } = exportTableRowData(orders, columns, exchange, {
     includeSettlementTotal,
-    includeAdvanceAddress: isCustomerStatementExportTitle(title)
+    includeAdvanceAddress: isCustomerStatement,
+    excludeChargedFromTotals: isCustomerStatement
   });
   let y = drawHeader();
   pdfRows.forEach((rowData) => {
@@ -3735,6 +3853,7 @@ function mapCompanyExpense(row) {
     entryType: row.entry_type || "expense",
     periodMonth: row.period_month || "",
     category: row.category || "",
+    employeeName: row.employee_name || "",
     amount: Number(row.amount || 0),
     note: row.note || "",
     createdAt: row.created_at || "",
@@ -3748,9 +3867,24 @@ function readCompanyExpensePayload(body = {}, current = null) {
     entryType: entryType === "income" ? "income" : "expense",
     periodMonth: normalizePeriodMonthKey(body.periodMonth ?? body.period_month ?? body.month ?? current?.period_month ?? ""),
     category: userTextValue(body.category ?? current?.category ?? ""),
+    employeeName: userTextValue(body.employeeName ?? body.employee_name ?? current?.employee_name ?? ""),
     amount: Number(body.amount ?? current?.amount ?? 0),
     note: userTextValue(body.note ?? current?.note ?? "")
   };
+}
+
+function companyExpenseRequiresEmployeeName(item = {}) {
+  return String(item.entryType || "").trim() === "expense" && String(item.category || "").trim() === "员工工资";
+}
+
+function validateCompanyExpensePayload(item = {}) {
+  if (!item.periodMonth) return "请选择有效月份";
+  if (!item.category) return "请填写项目名称";
+  if (!Number.isFinite(item.amount) || item.amount <= 0) return "请填写大于 0 的金额";
+  if (companyExpenseRequiresEmployeeName(item) && !String(item.employeeName || "").trim()) {
+    return "请填写员工姓名";
+  }
+  return "";
 }
 
 function readCostCenterRatePayload(body = {}, current = null) {
@@ -4176,6 +4310,10 @@ function customsBusinessPeriodBounds(query = {}) {
   const period = String(query.period || "").trim();
   const mode = String(query.mode || "").trim();
   if (period === "all" || mode === "all") return { start: "", end: "" };
+
+  if (["yesterday", "today", "tomorrow", "week", "month", "lastMonth"].includes(period)) {
+    return dispatchPlanPeriodBounds({ period });
+  }
 
   const periodDayMatched = period.match(/^day:(\d{4}-\d{2}-\d{2})$/);
   if (periodDayMatched || mode === "day") {
@@ -4743,8 +4881,8 @@ function mapAccount(row) {
     phone: userTextValue(row.phone),
     email: userTextValue(row.email),
     note: userTextValue(row.note),
-    permissions: accountPermissionsForRole(role),
-    allowedModules: allowedModulesForRole(role),
+    permissions: accountPermissionsForAccount(row),
+    allowedModules: allowedModulesForAccount(row),
     tablePreferences: parseJsonObjectText(row.table_preferences, {}),
     createdAt: row.created_at
   };
@@ -4935,7 +5073,7 @@ app.post("/api/auth/login", async (req, res) => {
     res.status(403).json({ message: "司机账号无系统登录权限" });
     return;
   }
-  const permissions = JSON.stringify(accountPermissionsForRole(role));
+  const permissions = JSON.stringify(accountPermissionsForAccount(row));
   await db.prepare(`
     UPDATE app_accounts
     SET role = @role,
@@ -5018,8 +5156,8 @@ function requiredModuleForRequest(req) {
 
 function authorizeApiRequest(req, res, next) {
   if (req.path.startsWith("/reminders") && req.method === "GET") {
-    const canReadReminders = canAccessModule(req.account?.role, "vehicleDriver")
-      || canAccessModule(req.account?.role, "dispatchBoard");
+    const canReadReminders = canAccessModule(req.account, "vehicleDriver")
+      || canAccessModule(req.account, "dispatchBoard");
     if (!canReadReminders) {
       res.status(403).json({ message: "当前账号无权访问该功能" });
       return;
@@ -5028,7 +5166,7 @@ function authorizeApiRequest(req, res, next) {
     return;
   }
   if (req.path.startsWith("/vehicle-profit-exchange-rates")) {
-    const canAccessExchangeRates = VEHICLE_PROFIT_EXCHANGE_RATE_MODULES.some((moduleId) => canAccessModule(req.account?.role, moduleId));
+    const canAccessExchangeRates = VEHICLE_PROFIT_EXCHANGE_RATE_MODULES.some((moduleId) => canAccessModule(req.account, moduleId));
     if (!canAccessExchangeRates) {
       res.status(403).json({ message: "当前账号无权访问该功能" });
       return;
@@ -5038,8 +5176,8 @@ function authorizeApiRequest(req, res, next) {
   }
   if (req.path.startsWith("/company-expenses")) {
     const canAccessCompanyExpenses = req.method === "GET"
-      ? COMPANY_EXPENSE_MODULES.some((moduleId) => canAccessModule(req.account?.role, moduleId))
-      : canAccessModule(req.account?.role, "bossCompanyExpenses");
+      ? COMPANY_EXPENSE_MODULES.some((moduleId) => canAccessModule(req.account, moduleId))
+      : canAccessModule(req.account, "bossCompanyExpenses");
     if (!canAccessCompanyExpenses) {
       res.status(403).json({ message: "当前账号无权访问该功能" });
       return;
@@ -5049,8 +5187,8 @@ function authorizeApiRequest(req, res, next) {
   }
   if (req.path.startsWith("/other-businesses")) {
     const canAccessOtherBusiness = req.method === "GET"
-      ? canAccessModule(req.account?.role, "otherBusiness") || COMPANY_EXPENSE_MODULES.some((moduleId) => canAccessModule(req.account?.role, moduleId))
-      : canAccessModule(req.account?.role, "otherBusiness");
+      ? canAccessModule(req.account, "otherBusiness") || COMPANY_EXPENSE_MODULES.some((moduleId) => canAccessModule(req.account, moduleId))
+      : canAccessModule(req.account, "otherBusiness");
     if (!canAccessOtherBusiness) {
       res.status(403).json({ message: "当前账号无权访问该功能" });
       return;
@@ -5058,8 +5196,18 @@ function authorizeApiRequest(req, res, next) {
     next();
     return;
   }
+  if (req.path.startsWith("/statement-downloads")) {
+    const canAccessStatements = ["financeCosts", "financeSupplierStatements", "financeCustomsStatements"]
+      .some((moduleId) => canAccessModule(req.account, moduleId));
+    if (!canAccessStatements) {
+      res.status(403).json({ message: "当前账号无权访问该功能" });
+      return;
+    }
+    next();
+    return;
+  }
   const moduleId = requiredModuleForRequest(req);
-  if (moduleId && !canAccessModule(req.account?.role, moduleId)) {
+  if (moduleId && !canAccessModule(req.account, moduleId)) {
     res.status(403).json({ message: "当前账号无权访问该功能" });
     return;
   }
@@ -7786,11 +7934,18 @@ async function resolveOrderCustomer(item) {
   let customer = null;
 
   if (customerId) {
-    customer = await db.prepare("SELECT id, name FROM customers WHERE id = ? AND deleted_at IS NULL").get(customerId);
+    customer = await db.prepare("SELECT id, name, short_name FROM customers WHERE id = ? AND deleted_at IS NULL").get(customerId);
   }
 
   if (!customer && customerName) {
-    customer = await db.prepare("SELECT id, name FROM customers WHERE name = ? AND deleted_at IS NULL AND type = '客户'").get(customerName);
+    customer = await db.prepare(`
+      SELECT id, name, short_name
+      FROM customers
+      WHERE deleted_at IS NULL
+        AND type = '客户'
+        AND (name = ? OR short_name = ?)
+      LIMIT 1
+    `).get(customerName, customerName);
   }
 
   if (!customer) {
@@ -7799,7 +7954,13 @@ async function resolveOrderCustomer(item) {
 
   item.customerId = customer.id;
   item.customer = customer.name;
+  item._resolvedCustomer = customer;
   return true;
+}
+
+function validateOrderReadyForSignedStatus(item = {}, customer = item?._resolvedCustomer || {}) {
+  if (normalizeOrderStatus(item.status, "") !== "已签收") return "";
+  return orderSignRequiredMessage(missingOrderSignRequiredFieldLabels(item, customer));
 }
 
 app.post("/api/orders", async (req, res) => {
@@ -7810,6 +7971,11 @@ app.post("/api/orders", async (req, res) => {
   item.fees = item.fees || [];
   if (!(await resolveOrderCustomer(item))) {
     res.status(400).json({ message: "请选择有效客户" });
+    return;
+  }
+  const signValidationMessage = validateOrderReadyForSignedStatus(item);
+  if (signValidationMessage) {
+    res.status(409).json({ message: signValidationMessage });
     return;
   }
 
@@ -7944,6 +8110,11 @@ app.patch("/api/orders/:no", async (req, res) => {
     res.status(400).json({ message: "请选择有效客户" });
     return;
   }
+  const signValidationMessage = validateOrderReadyForSignedStatus(item);
+  if (signValidationMessage) {
+    res.status(409).json({ message: signValidationMessage });
+    return;
+  }
 
   if (item.fees.length > 0) {
     Object.assign(item, calculateOrderReceivables(item.fees, item.currency));
@@ -7983,7 +8154,12 @@ app.patch("/api/orders/:no/status", async (req, res) => {
     return;
   }
 
-  const current = await db.prepare("SELECT status FROM orders WHERE no = ? AND deleted_at IS NULL").get(no);
+  const current = await db.prepare(`
+    SELECT orders.*, customers.short_name AS customer_short_name
+    FROM orders
+    LEFT JOIN customers ON customers.id = orders.customer_id
+    WHERE orders.no = ? AND orders.deleted_at IS NULL
+  `).get(no);
   if (!current) {
     res.status(404).json({ message: "订单不存在或已删除" });
     return;
@@ -8004,6 +8180,17 @@ app.patch("/api/orders/:no/status", async (req, res) => {
     res.status(409).json({ message: `${current.status}订单不能退回${status}` });
     return;
   }
+  if (status === "已签收" && current.status !== "已审核") {
+    const labels = missingOrderSignRequiredFieldLabels(current, {
+      id: current.customer_id,
+      name: current.customer,
+      short_name: current.customer_short_name
+    });
+    if (labels.length) {
+      res.status(409).json({ message: orderSignRequiredMessage(labels) });
+      return;
+    }
+  }
 
   const result = await db.prepare("UPDATE orders SET status = ? WHERE no = ? AND deleted_at IS NULL").run(status, no);
   if (result.changes === 0) {
@@ -8017,6 +8204,29 @@ app.patch("/api/orders/:no/status", async (req, res) => {
   if (dispatchStatus) {
     await syncDispatchPlanRowsStatusForOrder(row, dispatchStatus);
   }
+  res.json((await hydrateOrderRowsForApi([mapOrder(row)]))[0]);
+});
+
+app.patch("/api/orders/:no/charge", async (req, res) => {
+  const no = String(req.params.no || "").trim();
+  const current = await db.prepare("SELECT * FROM orders WHERE no = ? AND deleted_at IS NULL").get(no);
+  if (!current) {
+    res.status(404).json({ message: "订单不存在或已删除" });
+    return;
+  }
+  if (String(current.status || "").trim() !== "已审核") {
+    res.status(409).json({ message: "只有已审核订单才能标记收费状态" });
+    return;
+  }
+  const chargedAt = normalizeOrderChargedAt(req.body?.chargedAt ?? req.body?.charged_at ?? "");
+  const rawHasDate = userTextValue(req.body?.chargedAt ?? req.body?.charged_at ?? "");
+  if (rawHasDate && !chargedAt) {
+    res.status(400).json({ message: "收费日期格式应为 YYYY-MM-DD" });
+    return;
+  }
+  await db.prepare("UPDATE orders SET charged_at = ? WHERE no = ? AND deleted_at IS NULL").run(chargedAt, no);
+  await writeAudit(chargedAt ? "mark_charged" : "cancel_charged", "order", no, chargedAt ? `收费日期 ${chargedAt}` : "取消已收费");
+  const row = await db.prepare("SELECT * FROM orders WHERE no = ?").get(no);
   res.json((await hydrateOrderRowsForApi([mapOrder(row)]))[0]);
 });
 
@@ -8720,25 +8930,52 @@ app.get("/api/company-expenses", async (_req, res) => {
 
 app.post("/api/company-expenses", async (req, res) => {
   const item = readCompanyExpensePayload(req.body || {});
-  if (!item.periodMonth) {
-    res.status(400).json({ message: "请选择有效月份" });
-    return;
-  }
-  if (!item.category) {
-    res.status(400).json({ message: "请填写项目名称" });
-    return;
-  }
-  if (!Number.isFinite(item.amount) || item.amount <= 0) {
-    res.status(400).json({ message: "请填写大于 0 的金额" });
+  const validationMessage = validateCompanyExpensePayload(item);
+  if (validationMessage) {
+    res.status(400).json({ message: validationMessage });
     return;
   }
   const row = await db.prepare(`
-    INSERT INTO company_expenses (entry_type, period_month, category, amount, note)
-    VALUES (@entryType, @periodMonth, @category, @amount, @note)
+    INSERT INTO company_expenses (entry_type, period_month, category, employee_name, amount, note)
+    VALUES (@entryType, @periodMonth, @category, @employeeName, @amount, @note)
     RETURNING *
   `).get(item);
-  await writeAudit("create", "company_expense", String(row.id), `${item.entryType}/${item.periodMonth}/${item.category}/${item.amount}`);
+  await writeAudit("create", "company_expense", String(row.id), `${item.entryType}/${item.periodMonth}/${item.category}${item.employeeName ? `/${item.employeeName}` : ""}/${item.amount}`);
   res.status(201).json(mapCompanyExpense(row));
+});
+
+app.post("/api/company-expenses/batch", async (req, res) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+  if (!items.length) {
+    res.status(400).json({ message: "请先填写工资明细" });
+    return;
+  }
+  const normalizedItems = items.map((body) => readCompanyExpensePayload(body || {}));
+  for (const item of normalizedItems) {
+    const validationMessage = validateCompanyExpensePayload(item);
+    if (validationMessage) {
+      res.status(400).json({ message: validationMessage });
+      return;
+    }
+  }
+  const rows = [];
+  const insert = await db.prepare(`
+    INSERT INTO company_expenses (entry_type, period_month, category, employee_name, amount, note)
+    VALUES (@entryType, @periodMonth, @category, @employeeName, @amount, @note)
+    RETURNING *
+  `);
+  const transaction = db.transaction(async (batchItems) => {
+    for (const item of batchItems) {
+      const row = await insert.get(item);
+      rows.push(row);
+    }
+  });
+  await transaction(normalizedItems);
+  for (const row of rows) {
+    const item = mapCompanyExpense(row);
+    await writeAudit("create", "company_expense", String(item.id), `${item.entryType}/${item.periodMonth}/${item.category}${item.employeeName ? `/${item.employeeName}` : ""}/${item.amount}`);
+  }
+  res.status(201).json(rows.map(mapCompanyExpense));
 });
 
 app.patch("/api/company-expenses/:id", async (req, res) => {
@@ -8749,16 +8986,9 @@ app.patch("/api/company-expenses/:id", async (req, res) => {
     return;
   }
   const item = readCompanyExpensePayload(req.body || {}, current);
-  if (!item.periodMonth) {
-    res.status(400).json({ message: "请选择有效月份" });
-    return;
-  }
-  if (!item.category) {
-    res.status(400).json({ message: "请填写项目名称" });
-    return;
-  }
-  if (!Number.isFinite(item.amount) || item.amount <= 0) {
-    res.status(400).json({ message: "请填写大于 0 的金额" });
+  const validationMessage = validateCompanyExpensePayload(item);
+  if (validationMessage) {
+    res.status(400).json({ message: validationMessage });
     return;
   }
   await db.prepare(`
@@ -8766,12 +8996,13 @@ app.patch("/api/company-expenses/:id", async (req, res) => {
     SET entry_type = @entryType,
         period_month = @periodMonth,
         category = @category,
+        employee_name = @employeeName,
         amount = @amount,
         note = @note,
         updated_at = CURRENT_TIMESTAMP
     WHERE id = @id AND deleted_at IS NULL
   `).run({ id, ...item });
-  await writeAudit("update", "company_expense", String(id), `${item.entryType}/${item.periodMonth}/${item.category}/${item.amount}`);
+  await writeAudit("update", "company_expense", String(id), `${item.entryType}/${item.periodMonth}/${item.category}${item.employeeName ? `/${item.employeeName}` : ""}/${item.amount}`);
   res.json(mapCompanyExpense(await db.prepare("SELECT * FROM company_expenses WHERE id = ?").get(id)));
 });
 
@@ -9680,7 +9911,7 @@ app.post("/api/accounts", async (req, res) => {
     phone: String(req.body.phone || "").trim(),
     email: String(req.body.email || "").trim(),
     note: String(req.body.note || "").trim(),
-    permissions: JSON.stringify(accountPermissionsForRole(role))
+    permissions: JSON.stringify(accountPermissionsForAccount(item))
   };
   if (!item.username) {
     res.status(400).json({ message: "账号不能为空" });
@@ -9724,7 +9955,7 @@ app.patch("/api/accounts/:id", async (req, res) => {
     phone: req.body.phone === undefined ? current.phone : String(req.body.phone || "").trim(),
     email: req.body.email === undefined ? current.email : String(req.body.email || "").trim(),
     note: req.body.note === undefined ? current.note : String(req.body.note || "").trim(),
-    permissions: JSON.stringify(accountPermissionsForRole(role))
+    permissions: JSON.stringify(accountPermissionsForAccount(item))
   };
   if (!item.username) {
     res.status(400).json({ message: "账号不能为空" });

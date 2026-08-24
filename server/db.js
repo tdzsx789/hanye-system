@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Pool, types } from "pg";
-import { accountPermissionsForRole, hashPassword, normalizeAccountRole, roleLevelFor } from "./auth.js";
+import { accountPermissionsForAccount, accountPermissionsForRole, hashPassword, normalizeAccountRole, roleLevelFor } from "./auth.js";
 
 types.setTypeParser(20, (value) => Number(value));
 types.setTypeParser(1700, (value) => Number(value));
@@ -610,6 +610,7 @@ async function initializeSchema() {
       trip_no TEXT NOT NULL DEFAULT '',
       six_sheet_enabled INTEGER NOT NULL DEFAULT 0,
       six_sheet_no TEXT NOT NULL DEFAULT '',
+      charged_at TEXT NOT NULL DEFAULT '',
       deleted_at TEXT
     );
 
@@ -921,6 +922,7 @@ async function initializeSchema() {
       entry_type TEXT NOT NULL DEFAULT 'expense',
       period_month TEXT NOT NULL DEFAULT '',
       category TEXT NOT NULL DEFAULT '',
+      employee_name TEXT NOT NULL DEFAULT '',
       amount DOUBLE PRECISION NOT NULL DEFAULT 0,
       note TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
@@ -1048,6 +1050,7 @@ async function initializeSchema() {
       "trip_no TEXT NOT NULL DEFAULT ''",
       "six_sheet_enabled INTEGER NOT NULL DEFAULT 0",
       "six_sheet_no TEXT NOT NULL DEFAULT ''",
+      "charged_at TEXT NOT NULL DEFAULT ''",
       "created_by_account_id BIGINT",
       "created_by_username TEXT NOT NULL DEFAULT ''",
       "created_by_display_name TEXT NOT NULL DEFAULT ''"
@@ -1178,7 +1181,8 @@ async function initializeSchema() {
       "end_date TEXT NOT NULL DEFAULT ''"
     ],
     company_expenses: [
-      "entry_type TEXT NOT NULL DEFAULT 'expense'"
+      "entry_type TEXT NOT NULL DEFAULT 'expense'",
+      "employee_name TEXT NOT NULL DEFAULT ''"
     ]
   };
 
@@ -1254,10 +1258,10 @@ async function initializeSchema() {
   await dropColumnIfExists("app_accounts", "department");
   await dropColumnIfExists("app_accounts", "position");
 
-  const accountRows = await db.prepare("SELECT id, role FROM app_accounts WHERE deleted_at IS NULL").all();
+  const accountRows = await db.prepare("SELECT id, username, role FROM app_accounts WHERE deleted_at IS NULL").all();
   for (const row of accountRows) {
     const role = normalizeAccountRole(row.role);
-    const permissions = JSON.stringify(accountPermissionsForRole(role));
+    const permissions = JSON.stringify(accountPermissionsForAccount({ username: row.username, role }));
     await db.prepare(`
       UPDATE app_accounts
       SET role = @role,

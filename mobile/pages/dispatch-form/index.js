@@ -148,6 +148,36 @@ function findCustomerByIdOrText(customers, customerId, customerText) {
     || null;
 }
 
+function orderSignRequirementForCustomer(customer, fallbackName) {
+  const values = [
+    customer && customer.id,
+    customer && customer.name,
+    customer && customer.shortName,
+    customer && customer.short_name,
+    fallbackName
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  return ORDER_SIGN_REQUIREMENT_CUSTOMERS.find((rule) =>
+    values.some((value) =>
+      rule.keywords.some((keyword) => normalizeLocationText(value).indexOf(normalizeLocationText(keyword)) >= 0)
+    )
+  ) || null;
+}
+
+function missingOrderSignRequiredFieldLabels(form, customer) {
+  const requirement = orderSignRequirementForCustomer(customer, form && form.customer);
+  if (!requirement) return [];
+  const labels = [];
+  if (requirement.tripNo && !String(form && form.tripNo || "").trim()) labels.push("车次号");
+  if (requirement.sixSheetNo && !String(form && form.sixSheetNo || "").trim()) labels.push("六联单号");
+  return labels;
+}
+
+function orderSignRequiredMessage(labels) {
+  return labels && labels.length ? `请先填写${labels.join("和")}后再签收` : "";
+}
+
 function decorateCustomerSuggestion(customer) {
   return Object.assign({}, customer, {
     displayName: customerOptionPrimaryDisplay(customer),
@@ -185,6 +215,11 @@ const LOAD_TIME_MINUTES = ["00", "15", "30", "45"];
 const ORDER_BUSINESS_TYPE_OPTIONS = ["运输", "报关", "运输+报关"];
 const FEE_CATEGORY_OPTIONS = ["正常", "代垫", "公司自费"];
 const ORDER_STATUS_OPTIONS = ["待确认", "预排", "正常", "通关中", "已签收", "已审核", "缺票据", "费用待确认"];
+const ORDER_SIGN_REQUIREMENT_CUSTOMERS = [
+  { keywords: ["恒泰通"], tripNo: true, sixSheetNo: true },
+  { keywords: ["前海慧华"], tripNo: true, sixSheetNo: true },
+  { keywords: ["深佩"], sixSheetNo: true }
+];
 
 let locationEntrySerial = 0;
 
@@ -770,6 +805,7 @@ Page({
         form.customerId = matchedCustomer.id;
         form.customer = customerOptionPrimaryDisplay(matchedCustomer);
       }
+      this.applyOrderRequiredFieldDefaults(form, matchedCustomer);
       const locationPatch = locationEntriesPatchFromForm(form);
       this.setData({
         addressBookCityOptions,
@@ -822,6 +858,18 @@ Page({
     this.setData({
       driverSuggestions: filterDriverSuggestions(this.data.drivers || [], text)
     });
+  },
+
+  applyOrderRequiredFieldDefaults(form, customer) {
+    if (!isOrderEditMode(this.data.mode)) return form;
+    const targetForm = form || Object.assign({}, this.data.form);
+    const matchedCustomer = customer || findCustomerByIdOrText(this.data.customers || [], targetForm.customerId, targetForm.customer);
+    const requirement = orderSignRequirementForCustomer(matchedCustomer, targetForm.customer);
+    if (!requirement) return targetForm;
+    if (requirement.tripNo) targetForm.tripNoEnabled = 1;
+    if (requirement.sixSheetNo) targetForm.sixSheetEnabled = 1;
+    if (!form) this.setData({ form: targetForm });
+    return targetForm;
   },
 
   closeDriverPicker() {
@@ -1010,9 +1058,13 @@ Page({
     const id = event.currentTarget.dataset.id;
     const customer = (this.data.customers || []).find((item) => String(item.id) === String(id));
     if (!customer) return;
+    const form = Object.assign({}, this.data.form, {
+      customer: customerOptionPrimaryDisplay(customer),
+      customerId: customer.id
+    });
+    this.applyOrderRequiredFieldDefaults(form, customer);
     this.setData({
-      "form.customer": customerOptionPrimaryDisplay(customer),
-      "form.customerId": customer.id,
+      form,
       customerPickerOpen: false
     });
   },
@@ -1519,6 +1571,14 @@ Page({
     if (!form.customer) form.customer = customer.name;
     form.loading = joinLocationEntries(this.data.loadingEntries);
     form.unloading = joinLocationEntries(this.data.unloadingEntries);
+    this.applyOrderRequiredFieldDefaults(form, customer);
+    if (isOrderEditMode(this.data.mode) && form.status === "已签收") {
+      const signMissingLabels = missingOrderSignRequiredFieldLabels(form, customer);
+      if (signMissingLabels.length) {
+        wx.showToast({ title: orderSignRequiredMessage(signMissingLabels), icon: "none" });
+        return;
+      }
+    }
     this.setData({ saving: true });
     try {
       const targetRows = await this.loadPlanRows(form.date);

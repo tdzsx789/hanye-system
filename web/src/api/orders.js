@@ -25,6 +25,13 @@ export function updateOrderStatus(orderNo, status) {
   });
 }
 
+export function updateOrderCharge(orderNo, chargedAt = "") {
+  return apiFetch(`/orders/${encodeURIComponent(orderNo)}/charge`, {
+    method: "PATCH",
+    body: JSON.stringify({ chargedAt })
+  });
+}
+
 export function auditOrders(payload) {
   return apiFetch("/orders/audit", {
     method: "POST",

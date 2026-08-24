@@ -121,7 +121,7 @@ export function createDispatchTableColumns() {
     { key: "createdByName", label: "创建者", width: 86, min: 64 },
     { key: "customer", label: "客户", width: 180, min: 110 },
     { key: "businessType", label: "业务类型", width: 78, min: 58 },
-    { key: "driver", label: "司机", width: 210, min: 160 },
+    { key: "driver", label: "司机", width: 148, min: 118 },
     { key: "supplier", label: "供应商", width: 116, min: 86 },
     { key: "status", label: "排车状态", width: 104, min: 84 },
     { key: "port", label: "口岸", width: 86, min: 68 },
