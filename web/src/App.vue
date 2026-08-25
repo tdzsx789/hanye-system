@@ -22768,6 +22768,13 @@ function canCancelAuditOrder(order = {}) {
   return canManageOrderAudit() && orderStatusValue(order) === "已审核";
 }
 
+function canMarkOrderCharged(orderOrStatus = {}) {
+  const status = typeof orderOrStatus === "string"
+    ? String(orderOrStatus || "").trim()
+    : orderStatusValue(orderOrStatus);
+  return ["已签收", "已审核"].includes(status);
+}
+
 function canEditOrder(order = {}) {
   const status = orderStatusValue(order);
   return !status || status !== "已审核";
@@ -28271,7 +28278,7 @@ const activeOrderDetailChargedAtDisplay = computed(() => {
 });
 
 const activeOrderDetailCanMarkCharged = computed(() =>
-  Boolean(activeOrderDetail.value && activeOrderDetail.value.status === "已审核")
+  Boolean(activeOrderDetail.value && canMarkOrderCharged(activeOrderDetail.value))
 );
 
 const orderModalChargedAt = computed(() => {
@@ -28284,7 +28291,11 @@ const orderModalChargedAtDisplay = computed(() =>
 );
 
 const orderModalCanMarkCharged = computed(() =>
-  Boolean(orderViewMode.value && orderModalCurrentOrder.value && orderModalStatusValue() === "已审核")
+  Boolean(
+    !orderAuditMode.value
+    && orderModalCurrentOrder.value
+    && canMarkOrderCharged(orderModalStatusValue())
+  )
 );
 
 const orderChargeForm = reactive({

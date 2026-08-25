@@ -8656,8 +8656,8 @@ app.patch("/api/orders/:no/charge", async (req, res) => {
     res.status(404).json({ message: "订单不存在或已删除" });
     return;
   }
-  if (String(current.status || "").trim() !== "已审核") {
-    res.status(409).json({ message: "只有已审核订单才能标记收费状态" });
+  if (!["已签收", "已审核"].includes(String(current.status || "").trim())) {
+    res.status(409).json({ message: "只有已签收或已审核订单才能标记收费状态" });
     return;
   }
   const chargedAt = normalizeOrderChargedAt(req.body?.chargedAt ?? req.body?.charged_at ?? "");
