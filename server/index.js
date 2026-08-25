@@ -68,7 +68,21 @@ const BOSS_CENTER_READ_MODULES = ["bossDashboard", "bossUnreceived", "bossCompan
 const ORDER_CREATE_LOCK_ID = 524460;
 const AUTH_SECRET = process.env.HANYE_AUTH_SECRET || process.env.AUTH_SECRET || "hanye-system-local-dev-secret";
 const VEHICLE_EXPENSE_TYPES = new Set(["fuel", "repair", "annual", "other"]);
-const VEHICLE_ANNUAL_EXPENSE_NAMES = new Set(["保险费", "年审费", "牌头费"]);
+const VEHICLE_ANNUAL_EXPENSE_NAMES = new Set(["大陆保险", "香港保险", "大陆年审", "香港年审", "牌头费"]);
+const VEHICLE_ANNUAL_EXPENSE_NAME_ALIASES = new Map([
+  ["大陆保险费", "大陆保险"],
+  ["香港保险费", "香港保险"],
+  ["大陆年审费", "大陆年审"],
+  ["香港年审费", "香港年审"],
+  ["保险费", "大陆保险"],
+  ["年审费", "大陆年审"]
+]);
+const VEHICLE_ANNUAL_EXPENSE_REMINDER_FIELDS = new Map([
+  ["大陆保险", "mainland_insurance_date"],
+  ["香港保险", "hk_insurance_date"],
+  ["大陆年审", "mainland_review_date"],
+  ["香港年审", "hk_review_date"]
+]);
 const VEHICLE_PROFIT_DEFAULT_EXCHANGE_RATE = 0.88;
 const OWN_VEHICLE_SOURCE = "汉业物流";
 const LEGACY_OWN_VEHICLE_SOURCE = "本公司车辆";
@@ -182,6 +196,12 @@ function normalizeTransportMode(value = "") {
   if (text === "香港司机 + 大陆骑师接驳") return "双司机";
   if (text === "口岸交货") return "口岸转国内车";
   return ["单司机", "双司机", "口岸转国内车"].includes(text) ? text : "";
+}
+
+function normalizePortText(value = "") {
+  return String(value || "")
+    .replace(/\s*(?:海关|海關)\s*$/u, "")
+    .trim();
 }
 
 function booleanFlag(value, fallback = false) {
@@ -550,7 +570,7 @@ function mapOrder(row) {
     customerId: row.customer_id,
     customer: userTextValue(row.customer),
     businessType: userTextValue(row.business_type),
-    port: userTextValue(row.port),
+    port: normalizePortText(row.port),
     needsWeighing: Boolean(row.needs_weighing),
     direction: userTextValue(row.direction),
     tonnage: userTextValue(row.tonnage),
@@ -3090,7 +3110,7 @@ function kenfaDailyFeeRows(dayOrders = [], exchange = null) {
     if (!feeRows.length) {
       rows.push({
         name: order.businessType || "China Hong Kong ton fare                              中港吨车费",
-        remark: [order.no ? `Order: ${order.no}` : "", order.port || "", order.direction || ""].filter(Boolean).join("  "),
+        remark: [order.no ? `Order: ${order.no}` : "", normalizePortText(order.port), order.direction || ""].filter(Boolean).join("  "),
         amount: Number(kenfaOrderRmbAmount(order, exchange).toFixed(2))
       });
     }
@@ -3439,7 +3459,7 @@ function normalizeExportOrderSnapshot(order = {}) {
   snapshot.createdByUsername = String(snapshot.createdByUsername || order.createdByUsername || order.created_by_username || "");
   snapshot.customer = String(snapshot.customer || order.customer || "");
   snapshot.businessType = String(snapshot.businessType || order.businessType || "");
-  snapshot.port = String(snapshot.port || order.port || "");
+  snapshot.port = normalizePortText(snapshot.port || order.port || "");
   snapshot.direction = String(snapshot.direction || order.direction || "");
   snapshot.tonnage = String(snapshot.tonnage || order.tonnage || "");
   snapshot.currency = String(snapshot.currency || order.currency || "港币");
@@ -3815,14 +3835,25 @@ function mapVehicleExpense(row) {
   const endDate = row.end_date || "";
   const fuelLiters = Number(row.fuel_liters || 0);
   const fuelPricePerLiter = Number(row.fuel_price_per_liter || 0) || (fuelLiters > 0 && Number(row.amount || 0) > 0 ? Number((Number(row.amount || 0) / fuelLiters).toFixed(1)) : 0);
+  const repairItems = normalizeVehicleRepairItems(row.repair_items_json);
+  const fallbackRepairItems = row.expense_type === "repair" && repairItems.length === 0
+    ? normalizeVehicleRepairItems([{
+      content: userTextValue(row.name) || "维修费",
+      quantity: 1,
+      unit: "项",
+      unitPrice: Number(row.amount || 0),
+      amount: Number(row.amount || 0)
+    }])
+    : [];
   return {
     id: row.id,
     type: row.expense_type,
-    name: userTextValue(row.name),
+    name: row.expense_type === "annual" ? normalizeVehicleAnnualExpenseName(row.name) : userTextValue(row.name),
     fuelStation: userTextValue(row.fuel_station),
     fuelLiters,
     fuelPricePerLiter,
     odometerKm: Number(row.odometer_km || 0),
+    repairItems: repairItems.length ? repairItems : fallbackRepairItems,
     plate: normalizePlateText(row.plate),
     date: row.expense_date || "",
     year,
@@ -3836,10 +3867,117 @@ function mapVehicleExpense(row) {
   };
 }
 
+function normalizeVehicleAnnualExpenseName(value = "") {
+  const text = userTextValue(value);
+  if (VEHICLE_ANNUAL_EXPENSE_NAME_ALIASES.has(text)) return VEHICLE_ANNUAL_EXPENSE_NAME_ALIASES.get(text);
+  return VEHICLE_ANNUAL_EXPENSE_NAMES.has(text) ? text : "大陆保险";
+}
+
+function vehicleAnnualExpenseReminderField(name = "") {
+  return VEHICLE_ANNUAL_EXPENSE_REMINDER_FIELDS.get(normalizeVehicleAnnualExpenseName(name)) || "";
+}
+
+function vehicleAnnualExpenseReminderDate(row = {}) {
+  return String(row.end_date || row.endDate || row.expense_date || row.date || "").trim();
+}
+
+async function syncVehicleAnnualExpenseReminderDates(plate) {
+  const normalizedPlate = normalizePlateText(plate);
+  if (!normalizedPlate) return null;
+  const vehicle = await db.prepare("SELECT plate FROM vehicles WHERE plate = ? AND deleted_at IS NULL").get(normalizedPlate);
+  if (!vehicle) return null;
+  const rows = await db.prepare(`
+    SELECT name, expense_date, start_date, end_date
+    FROM vehicle_expenses
+    WHERE deleted_at IS NULL
+      AND expense_type = 'annual'
+      AND plate = ?
+    ORDER BY COALESCE(NULLIF(end_date, ''), NULLIF(start_date, ''), expense_date) DESC, id DESC
+  `).all(normalizedPlate);
+  const nextValues = {
+    mainland_review_date: "",
+    hk_review_date: "",
+    mainland_insurance_date: "",
+    hk_insurance_date: ""
+  };
+  rows.forEach((row) => {
+    const field = vehicleAnnualExpenseReminderField(row.name);
+    if (!field || nextValues[field]) return;
+    nextValues[field] = vehicleAnnualExpenseReminderDate(row);
+  });
+  await db.prepare(`
+    UPDATE vehicles
+    SET mainland_review_date = ?,
+        hk_review_date = ?,
+        mainland_insurance_date = ?,
+        hk_insurance_date = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE plate = ? AND deleted_at IS NULL
+  `).run(
+    nextValues.mainland_review_date,
+    nextValues.hk_review_date,
+    nextValues.mainland_insurance_date,
+    nextValues.hk_insurance_date,
+    normalizedPlate
+  );
+  return nextValues;
+}
+
 function normalizeVehicleExpenseCurrency(value = "") {
   const text = String(value || "").trim().toUpperCase();
   if (text === "HKD" || text === "港币") return "港币";
   return "人民币";
+}
+
+function vehicleRepairNumberField(value, decimals = 2) {
+  const number = Number(value ?? 0);
+  if (!Number.isFinite(number) || number < 0) return 0;
+  return Number(number.toFixed(decimals));
+}
+
+function normalizeVehicleRepairItems(value = []) {
+  const source = Array.isArray(value) ? value : parseJsonArrayText(value);
+  return source
+    .map((item, index) => {
+      const content = userTextValue(
+        item?.content
+        ?? item?.itemContent
+        ?? item?.repairItemContent
+        ?? item?.name
+        ?? item?.item
+        ?? ""
+      );
+      const quantity = vehicleRepairNumberField(item?.quantity ?? item?.qty, 3);
+      const unit = userTextValue(item?.unit ?? "");
+      let unitPrice = vehicleRepairNumberField(item?.unitPrice ?? item?.unit_price ?? item?.price);
+      let amount = vehicleRepairNumberField(item?.amount ?? item?.total ?? item?.priceYuan ?? item?.price_yuan);
+      if (!amount && quantity > 0 && unitPrice > 0) amount = vehicleRepairNumberField(quantity * unitPrice);
+      if (!unitPrice && quantity > 0 && amount > 0) unitPrice = vehicleRepairNumberField(amount / quantity);
+      return {
+        content,
+        quantity,
+        unit,
+        unitPrice,
+        amount,
+        sortOrder: Number.isFinite(Number(item?.sortOrder ?? item?.sort_order)) ? Number(item?.sortOrder ?? item?.sort_order) : index
+      };
+    })
+    .filter((item) => item.content)
+    .sort((left, right) => left.sortOrder - right.sortOrder)
+    .slice(0, 100);
+}
+
+function vehicleRepairItemsTotal(items = []) {
+  return vehicleRepairNumberField(normalizeVehicleRepairItems(items).reduce((sum, item) => sum + Number(item.amount || 0), 0));
+}
+
+function vehicleRepairSummaryName(items = []) {
+  const names = normalizeVehicleRepairItems(items)
+    .map((item) => item.content)
+    .filter(Boolean);
+  if (names.length === 0) return "维修费";
+  if (names.length <= 2) return names.join("、");
+  return `${names.slice(0, 2).join("、")}等${names.length}项`;
 }
 
 function normalizeVehicleExpensePayload(body = {}, current = null) {
@@ -3867,18 +4005,31 @@ function normalizeVehicleExpensePayload(body = {}, current = null) {
   const defaultNames = {
     fuel: "加油记录",
     repair: "维修费",
-    annual: "保险费",
+    annual: "大陆保险",
     other: ""
   };
+  const amountRaw = Number(body.amount ?? current?.amount ?? 0);
+  const repairItems = type === "repair"
+    ? normalizeVehicleRepairItems(body.repairItems ?? body.repair_items ?? current?.repair_items_json ?? [])
+    : [];
+  const repairFallbackItems = type === "repair" && repairItems.length === 0 && (rawName || Number(amountRaw || 0) > 0)
+    ? normalizeVehicleRepairItems([{
+      content: rawName || defaultNames.repair,
+      quantity: 1,
+      unit: "项",
+      unitPrice: Number(amountRaw || 0),
+      amount: Number(amountRaw || 0)
+    }])
+    : [];
+  const normalizedRepairItems = repairItems.length ? repairItems : repairFallbackItems;
   const name = type === "annual"
-    ? (VEHICLE_ANNUAL_EXPENSE_NAMES.has(rawName) ? rawName : "保险费")
-    : (rawName || defaultNames[type]);
+    ? normalizeVehicleAnnualExpenseName(rawName || current?.name || "大陆保险")
+    : (type === "repair" ? vehicleRepairSummaryName(normalizedRepairItems) : (rawName || defaultNames[type]));
   const fuelLitersRaw = Number(body.fuelLiters ?? body.fuel_liters ?? current?.fuel_liters ?? 0);
   const derivedFuelPrice = fuelLitersRaw > 0 && Number(body.amount ?? current?.amount ?? 0) > 0
     ? Number((Number(body.amount ?? current?.amount ?? 0) / fuelLitersRaw).toFixed(1))
     : 0;
   const fuelPriceRaw = Number(body.fuelPricePerLiter ?? body.fuel_price_per_liter ?? current?.fuel_price_per_liter ?? derivedFuelPrice ?? 0);
-  const amountRaw = Number(body.amount ?? current?.amount ?? 0);
   const roundedFuelLiters = type === "fuel" ? Number(fuelLitersRaw.toFixed(1)) : 0;
   const roundedFuelPrice = type === "fuel" ? Number(fuelPriceRaw.toFixed(1)) : 0;
   let roundedAmount = Number.isFinite(amountRaw) ? amountRaw : 0;
@@ -3902,6 +4053,8 @@ function normalizeVehicleExpensePayload(body = {}, current = null) {
         endDate,
         currency: normalizeVehicleExpenseCurrency(body.currency ?? current?.currency ?? "人民币"),
         amount: roundedAmount,
+        repairItems: [],
+        repairItemsJson: "[]",
         note: userTextValue(body.note ?? current?.note ?? "")
       };
     }
@@ -3917,7 +4070,7 @@ function normalizeVehicleExpensePayload(body = {}, current = null) {
       : "",
     fuelLiters: type === "fuel" ? roundedFuelLiters : 0,
     fuelPricePerLiter: type === "fuel" ? roundedFuelPrice : 0,
-    odometerKm: type === "fuel"
+    odometerKm: type === "fuel" || type === "repair"
       ? Number(body.odometerKm ?? body.odometer_km ?? current?.odometer_km ?? 0)
       : 0,
     plate: normalizePlateText(body.plate ?? current?.plate ?? ""),
@@ -3925,8 +4078,12 @@ function normalizeVehicleExpensePayload(body = {}, current = null) {
     year: type === "annual" ? annualYear : null,
     startDate,
     endDate,
-    currency: normalizeVehicleExpenseCurrency(body.currency ?? current?.currency ?? "人民币"),
-    amount: type === "fuel" ? Number(roundedAmount.toFixed(1)) : Number(body.amount ?? current?.amount ?? 0),
+    currency: type === "repair" ? "人民币" : normalizeVehicleExpenseCurrency(body.currency ?? current?.currency ?? "人民币"),
+    amount: type === "fuel"
+      ? Number(roundedAmount.toFixed(1))
+      : (type === "repair" ? vehicleRepairItemsTotal(normalizedRepairItems) : Number(body.amount ?? current?.amount ?? 0)),
+    repairItems: normalizedRepairItems,
+    repairItemsJson: type === "repair" ? JSON.stringify(normalizedRepairItems) : "[]",
     note: userTextValue(body.note ?? current?.note ?? "")
   };
 }
@@ -5156,11 +5313,12 @@ function mapRule(row) {
 }
 
 function mapMasterData(row) {
+  const isPort = String(row.type || "") === "口岸";
   return {
     id: row.id,
     type: row.type,
-    name: row.name,
-    value: row.value,
+    name: isPort ? normalizePortText(row.name) : row.name,
+    value: isPort ? normalizePortText(row.value || row.name) : row.value,
     sortOrder: row.sort_order
   };
 }
@@ -6747,7 +6905,7 @@ function normalizeDispatchPlanRow(row = {}, existingRow = null, requestCreator =
     businessType: dispatchRowStringField(item, existingRow, "businessType", "business_type"),
     currency: dispatchRowStringField(item, existingRow, "currency"),
     plate: normalizePlateText(item.plate),
-    port: userTextValue(item.port),
+    port: normalizePortText(item.port),
     needsWeighing: dispatchRowBooleanField(item, existingRow, "needsWeighing", "needs_weighing", false),
     direction: userTextValue(item.direction),
     tonnage: userTextValue(item.tonnage),
@@ -7091,7 +7249,7 @@ function dispatchExportRowsForWorkbook(rows = [], fallbackDate = "", customerSho
       dispatchExportText(order.quantity, row.quantity),
       hkDriver,
       mainlandDriver,
-      dispatchExportText(order.port, row.port),
+      dispatchExportText(normalizePortText(order.port), normalizePortText(row.port)),
       dispatchExportText(order.direction, row.direction),
       dispatchExportTimeValue(dispatchExportText(row.loadTime, order.loadTime, order.loadingTime)),
       dispatchExportShortSupplier(row, supplierShortNames),
@@ -7412,7 +7570,7 @@ function normalizeDispatchRecycleRow(row = {}, planDate = todayInputValue()) {
     businessType: userTextValue(item.businessType || item.business_type),
     currency: userTextValue(item.currency),
     plate: normalizePlateText(item.plate),
-    port: userTextValue(item.port),
+    port: normalizePortText(item.port),
     needsWeighing: booleanFlag(item.needsWeighing ?? item.needs_weighing, false),
     direction: userTextValue(item.direction),
     tonnage: userTextValue(item.tonnage),
@@ -8299,7 +8457,7 @@ async function readOrderPayload(body, existing = null) {
     customerId: pickBody(body, "customerId", "customer_id", existing?.customer_id || null),
     customer: userTextValue(pickBody(body, "customer", "customer_name", existing?.customer || "")),
     businessType: userTextValue(pickBody(body, "businessType", "business_type", existing?.business_type || "运输") || "运输"),
-    port: userTextValue(pickBody(body, "port", null, existing?.port || "")),
+    port: normalizePortText(pickBody(body, "port", null, existing?.port || "")),
     needsWeighing: booleanFlag(pickBody(body, "needsWeighing", "needs_weighing", existing?.needs_weighing || false), false) ? 1 : 0,
     direction: userTextValue(pickBody(body, "direction", null, existing?.direction || "")),
     tonnage: userTextValue(pickBody(body, "tonnage", null, existing?.tonnage || "")),
@@ -8407,6 +8565,7 @@ function validateOrderReadyForSignedStatus(item = {}, customer = item?._resolved
 app.post("/api/orders", async (req, res) => {
   const requestedNo = String(req.body?.no || "").trim();
   const requestedDispatchNo = String(req.body?.dispatchNo || req.body?.dispatch_no || "").trim();
+  const skipSignValidation = booleanFlag(req.body?.skipSignValidation ?? req.body?.skip_sign_validation, false);
   const item = await readOrderPayload({ ...req.body, no: requestedNo || undefined, dispatchNo: requestedDispatchNo });
   Object.assign(item, creatorFieldsFromAccount(req.account));
   item.fees = item.fees || [];
@@ -8414,7 +8573,7 @@ app.post("/api/orders", async (req, res) => {
     res.status(400).json({ message: "请选择有效客户" });
     return;
   }
-  const signValidationMessage = validateOrderReadyForSignedStatus(item);
+  const signValidationMessage = skipSignValidation ? "" : validateOrderReadyForSignedStatus(item);
   if (signValidationMessage) {
     res.status(409).json({ message: signValidationMessage });
     return;
@@ -8544,6 +8703,7 @@ app.patch("/api/orders/:no", async (req, res) => {
     return;
   }
 
+  const skipSignValidation = booleanFlag(req.body?.skipSignValidation ?? req.body?.skip_sign_validation, false);
   const item = await readOrderPayload(req.body, existing);
   item.no = no;
   item.fees = item.fees || (await hydrateOrderFees([mapOrder(existing)]))[0].fees;
@@ -8551,7 +8711,7 @@ app.patch("/api/orders/:no", async (req, res) => {
     res.status(400).json({ message: "请选择有效客户" });
     return;
   }
-  const signValidationMessage = validateOrderReadyForSignedStatus(item);
+  const signValidationMessage = skipSignValidation ? "" : validateOrderReadyForSignedStatus(item);
   if (signValidationMessage) {
     res.status(409).json({ message: signValidationMessage });
     return;
@@ -8589,6 +8749,7 @@ app.patch("/api/orders/:no", async (req, res) => {
 app.patch("/api/orders/:no/status", async (req, res) => {
   const no = String(req.params.no || "").trim();
   const status = String(req.body.status || "").trim();
+  const skipSignValidation = booleanFlag(req.body?.skipSignValidation ?? req.body?.skip_sign_validation, false);
   const allowedStatuses = new Set(["待确认", "预排", "正常", "通关中", "已签收", "已审核", "缺票据", "费用待确认"]);
 
   if (!allowedStatuses.has(status)) {
@@ -8622,7 +8783,7 @@ app.patch("/api/orders/:no/status", async (req, res) => {
     res.status(409).json({ message: `${current.status}订单不能退回${status}` });
     return;
   }
-  if (status === "已签收" && current.status !== "已审核") {
+  if (!skipSignValidation && status === "已签收" && current.status !== "已审核") {
     const labels = missingOrderSignRequiredFieldLabels(current, {
       id: current.customer_id,
       name: current.customer,
@@ -8656,8 +8817,8 @@ app.patch("/api/orders/:no/charge", async (req, res) => {
     res.status(404).json({ message: "订单不存在或已删除" });
     return;
   }
-  if (!["已签收", "已审核"].includes(String(current.status || "").trim())) {
-    res.status(409).json({ message: "只有已签收或已审核订单才能标记收费状态" });
+  if (String(current.status || "").trim() !== "已审核") {
+    res.status(409).json({ message: "只有已审核订单才能标记收费状态" });
     return;
   }
   const chargedAt = normalizeOrderChargedAt(req.body?.chargedAt ?? req.body?.charged_at ?? "");
@@ -8889,6 +9050,14 @@ app.post("/api/vehicle-expenses", async (req, res) => {
     res.status(400).json({ message: "请填写支出名称" });
     return;
   }
+  if (item.type === "repair" && (!Array.isArray(item.repairItems) || item.repairItems.length === 0)) {
+    res.status(400).json({ message: "请至少填写一条维修项目" });
+    return;
+  }
+  if (item.type === "repair" && Number(item.odometerKm || 0) <= 0) {
+    res.status(400).json({ message: "请填写当前公里数" });
+    return;
+  }
   if (!Number.isFinite(item.amount) || item.amount <= 0) {
     res.status(400).json({ message: "请填写大于 0 的费用金额" });
     return;
@@ -8908,9 +9077,12 @@ app.post("/api/vehicle-expenses", async (req, res) => {
     }
   }
   const result = await db.prepare(`
-    INSERT INTO vehicle_expenses (expense_type, name, fuel_station, fuel_liters, fuel_price_per_liter, odometer_km, plate, expense_date, start_date, end_date, expense_year, currency, amount, note)
-    VALUES (@type, @name, @fuelStation, @fuelLiters, @fuelPricePerLiter, @odometerKm, @plate, @date, @startDate, @endDate, @year, @currency, @amount, @note)
+    INSERT INTO vehicle_expenses (expense_type, name, fuel_station, fuel_liters, fuel_price_per_liter, odometer_km, repair_items_json, plate, expense_date, start_date, end_date, expense_year, currency, amount, note)
+    VALUES (@type, @name, @fuelStation, @fuelLiters, @fuelPricePerLiter, @odometerKm, @repairItemsJson, @plate, @date, @startDate, @endDate, @year, @currency, @amount, @note)
   `).run(item);
+  if (item.type === "annual") {
+    await syncVehicleAnnualExpenseReminderDates(item.plate);
+  }
   await writeAudit("create", "vehicle_expense", String(result.lastInsertId), `${item.plate}/${item.name}/${item.amount}`);
   res.status(201).json(mapVehicleExpense(await db.prepare("SELECT * FROM vehicle_expenses WHERE id = ?").get(result.lastInsertId)));
 });
@@ -8934,6 +9106,14 @@ app.patch("/api/vehicle-expenses/:id", async (req, res) => {
   }
   if (item.type === "other" && !item.name) {
     res.status(400).json({ message: "请填写支出名称" });
+    return;
+  }
+  if (item.type === "repair" && (!Array.isArray(item.repairItems) || item.repairItems.length === 0)) {
+    res.status(400).json({ message: "请至少填写一条维修项目" });
+    return;
+  }
+  if (item.type === "repair" && Number(item.odometerKm || 0) <= 0) {
+    res.status(400).json({ message: "请填写当前公里数" });
     return;
   }
   if (!Number.isFinite(item.amount) || item.amount <= 0) {
@@ -8962,6 +9142,7 @@ app.patch("/api/vehicle-expenses/:id", async (req, res) => {
         fuel_liters = @fuelLiters,
         fuel_price_per_liter = @fuelPricePerLiter,
         odometer_km = @odometerKm,
+        repair_items_json = @repairItemsJson,
         plate = @plate,
         expense_date = @date,
         start_date = @startDate,
@@ -8973,6 +9154,12 @@ app.patch("/api/vehicle-expenses/:id", async (req, res) => {
         updated_at = CURRENT_TIMESTAMP
     WHERE id = @id AND deleted_at IS NULL
   `).run({ id, ...item });
+  if (current.expense_type === "annual" || item.type === "annual") {
+    await syncVehicleAnnualExpenseReminderDates(current.plate);
+    if (item.plate !== current.plate) {
+      await syncVehicleAnnualExpenseReminderDates(item.plate);
+    }
+  }
   await writeAudit("update", "vehicle_expense", String(id), `${item.plate}/${item.name}/${item.amount}`);
   res.json(mapVehicleExpense(await db.prepare("SELECT * FROM vehicle_expenses WHERE id = ?").get(id)));
 });
@@ -8985,6 +9172,9 @@ app.delete("/api/vehicle-expenses/:id", async (req, res) => {
     return;
   }
   await db.prepare("UPDATE vehicle_expenses SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(id);
+  if (row.expense_type === "annual") {
+    await syncVehicleAnnualExpenseReminderDates(row.plate);
+  }
   await writeAudit("delete", "vehicle_expense", String(id), `${row.plate}/${row.name}`);
   res.json({ ok: true });
 });
@@ -10356,6 +10546,10 @@ app.post("/api/master-data", async (req, res) => {
     value: String(req.body.value || req.body.name || "").trim(),
     sortOrder: Number(req.body.sortOrder || 0)
   };
+  if (item.type === "口岸") {
+    item.name = normalizePortText(item.name);
+    item.value = normalizePortText(item.value || item.name);
+  }
   if (!item.type || !item.name) {
     res.status(400).json({ message: "类型和名称不能为空" });
     return;
@@ -10387,6 +10581,10 @@ app.patch("/api/master-data/:id", async (req, res) => {
     value: req.body.value === undefined ? current.value : String(req.body.value || req.body.name || current.name || "").trim(),
     sortOrder: req.body.sortOrder === undefined ? Number(current.sort_order || 0) : Number(req.body.sortOrder || 0)
   };
+  if (item.type === "口岸") {
+    item.name = normalizePortText(item.name);
+    item.value = normalizePortText(item.value || item.name);
+  }
   if (!item.type || !item.name) {
     res.status(400).json({ message: "类型和名称不能为空" });
     return;

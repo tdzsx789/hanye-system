@@ -18,10 +18,13 @@ export function updateOrder(orderNo, payload) {
   });
 }
 
-export function updateOrderStatus(orderNo, status) {
+export function updateOrderStatus(orderNo, status, options = {}) {
   return apiFetch(`/orders/${encodeURIComponent(orderNo)}/status`, {
     method: "PATCH",
-    body: JSON.stringify({ status })
+    body: JSON.stringify({
+      status,
+      ...(options.skipSignValidation ? { skipSignValidation: true } : {})
+    })
   });
 }
 

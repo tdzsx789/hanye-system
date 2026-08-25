@@ -29,7 +29,7 @@ const STATUS_ACTION_LABELS = {
 
 const DIRECTION_OPTIONS = ["出口", "进口"];
 const TONNAGE_OPTIONS = ["3T", "5T", "8T", "10T", "12T", "20尺柜", "40尺柜", "45尺柜"];
-const PORT_OPTIONS = ["深圳湾海关", "莲塘海关", "文锦渡海关", "大桥海关"];
+const PORT_OPTIONS = ["深圳湾", "莲塘", "文锦渡", "大桥"];
 const VEHICLE_SOURCE_OPTIONS = ["汉业物流", "外派车辆"];
 const TRANSPORT_MODE_OPTIONS = ["单司机", "双司机", "口岸转国内车"];
 const BUSINESS_TYPE_OPTIONS = ["运输", "运输+报关"];

@@ -12,6 +12,9 @@
   --row-hover-bg: #d8eaff;
   --row-selected-bg: #c7ddff;
   --list-hover-bg: #dcecff;
+  --charged-row-bg: #ecf8ef;
+  --charged-row-hover-bg: #e0f3e6;
+  --charged-row-accent: #2f8f5b;
 }
 
 * {
@@ -2728,8 +2731,16 @@ select {
 
 .vehicle-expense-card {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
+}
+
+.vehicle-expense-page .vehicle-expense-card,
+.vehicle-expense-page .vehicle-repair-board {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .vehicle-expense-card > .table-wrap {
@@ -2744,6 +2755,44 @@ select {
 
 .vehicle-expense-period-controls {
   justify-content: flex-end;
+}
+
+.vehicle-expense-class-grid {
+  grid-template-columns: repeat(auto-fill, minmax(104px, 132px));
+  justify-content: start;
+}
+
+.vehicle-expense-class-card {
+  min-height: 44px;
+  padding: 7px 9px;
+  gap: 2px;
+}
+
+.vehicle-expense-class-card span {
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.vehicle-annual-plate-grid {
+  grid-template-columns: repeat(auto-fill, minmax(108px, 136px));
+  justify-content: start;
+}
+
+.vehicle-annual-plate-card small {
+  color: #0f766e;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.vehicle-fuel-plate-grid {
+  grid-template-columns: repeat(auto-fill, minmax(108px, 136px));
+  justify-content: start;
+}
+
+.vehicle-fuel-plate-card small {
+  color: #0f766e;
+  font-size: 11px;
+  font-weight: 850;
 }
 
 .vehicle-expense-period-label {
@@ -3074,6 +3123,270 @@ select {
   color: var(--muted);
   font-size: 12px;
   font-weight: 700;
+}
+
+.vehicle-repair-layout {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 10px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.vehicle-repair-class-grid {
+  grid-template-columns: repeat(auto-fill, minmax(112px, 144px));
+  justify-content: start;
+}
+
+.vehicle-repair-class-card small {
+  color: #0f766e;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.vehicle-repair-board {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.vehicle-repair-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.vehicle-repair-period-controls {
+  justify-content: flex-end;
+}
+
+.vehicle-repair-workbench {
+  display: grid;
+  grid-template-columns: minmax(210px, 260px) minmax(0, 1fr);
+  gap: 10px;
+  min-height: 0;
+  padding: 10px;
+  overflow: hidden;
+}
+
+.vehicle-repair-plate-panel,
+.vehicle-repair-record-list {
+  min-height: 0;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+.vehicle-repair-plate-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-right: 2px;
+}
+
+.vehicle-repair-plate-card {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid #d6e3f2;
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.vehicle-repair-plate-card:hover,
+.vehicle-repair-plate-card.active {
+  border-color: #0b63ce;
+  background: #eef6ff;
+}
+
+.vehicle-repair-plate-card strong {
+  font-size: 13px;
+}
+
+.vehicle-repair-plate-card span,
+.vehicle-repair-plate-card small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vehicle-repair-history-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 10px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.vehicle-repair-history-head {
+  display: grid;
+  gap: 8px;
+}
+
+.vehicle-repair-history-head h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 20px;
+  line-height: 1.2;
+  letter-spacing: 0;
+}
+
+.vehicle-repair-summary-grid {
+  grid-template-columns: repeat(4, minmax(118px, 1fr));
+}
+
+.vehicle-repair-record-list {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.vehicle-repair-record-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.vehicle-repair-record-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 10px;
+}
+
+.vehicle-repair-record-toggle {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 18px;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.vehicle-repair-record-toggle > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.vehicle-repair-record-toggle strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vehicle-repair-record-toggle small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vehicle-repair-detail-table-wrap {
+  padding: 0 10px 10px;
+  overflow: auto;
+}
+
+.vehicle-repair-detail-table {
+  min-width: 620px;
+}
+
+.vehicle-repair-record-note {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.vehicle-expense-modal {
+  width: min(1040px, calc(100vw - 48px));
+}
+
+.vehicle-repair-item-editor {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.vehicle-repair-item-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.vehicle-repair-item-editor-head strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.vehicle-repair-item-list {
+  display: grid;
+  gap: 8px;
+  max-height: min(38vh, 360px);
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+.vehicle-repair-item-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.4fr) minmax(76px, 0.5fr) minmax(78px, 0.5fr) minmax(96px, 0.6fr) minmax(96px, 0.6fr) 30px;
+  gap: 8px;
+  align-items: end;
+}
+
+.vehicle-repair-item-row label,
+.vehicle-repair-item-content {
+  min-width: 0;
+}
+
+.vehicle-repair-item-row .icon-btn {
+  width: 30px;
+  height: 30px;
+}
+
+@media (max-width: 980px) {
+  .vehicle-repair-workbench {
+    grid-template-columns: 1fr;
+  }
+
+  .vehicle-repair-plate-panel {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    max-height: 180px;
+  }
+
+  .vehicle-repair-summary-grid {
+    grid-template-columns: repeat(2, minmax(118px, 1fr));
+  }
+
+  .vehicle-repair-item-row {
+    grid-template-columns: 1fr;
+  }
 }
 
 .home-page {
@@ -7811,6 +8124,28 @@ tbody tr.selected td {
 
 tr.selected {
   background: var(--row-selected-bg);
+}
+
+.order-table tbody tr.charged-row:not(.selected) td {
+  background: var(--charged-row-bg);
+}
+
+.order-table tbody tr.charged-row:not(.selected):hover td {
+  background: var(--charged-row-hover-bg);
+}
+
+.order-table tbody tr.charged-row:not(.selected) .sticky-managed-column,
+.order-table tbody tr.charged-row:not(.selected) .sticky-order-right-column {
+  background: var(--charged-row-bg);
+}
+
+.order-table tbody tr.charged-row:not(.selected):hover .sticky-managed-column,
+.order-table tbody tr.charged-row:not(.selected):hover .sticky-order-right-column {
+  background: var(--charged-row-hover-bg);
+}
+
+.order-table tbody tr.charged-row td:first-child {
+  box-shadow: inset 4px 0 0 var(--charged-row-accent);
 }
 
 .table-link-btn {

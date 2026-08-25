@@ -18,6 +18,10 @@ function valueText(value) {
   return normalizeUserText(value, { compactCjkSpacing: true });
 }
 
+function normalizePortText(value = "") {
+  return valueText(value).replace(/\s*(?:海关|海關)\s*$/u, "").trim();
+}
+
 const USER_TEXT_COMPAT_CHAR_MAP = {
   "⺅": "亻",
   "⺆": "冂",
@@ -392,7 +396,7 @@ function sanitizeDispatchRow(row) {
     businessType: valueText(item.businessType || item.business_type),
     currency: valueText(item.currency),
     plate: normalizePlateText(item.plate),
-    port: valueText(item.port),
+    port: normalizePortText(item.port),
     needsWeighing: booleanFlag(item.needsWeighing ?? item.needs_weighing, false),
     direction: valueText(item.direction),
     tonnage: valueText(item.tonnage),
@@ -459,7 +463,7 @@ function rowWithOrder(row, orders, date) {
       businessType: row.businessType || "",
       currency: row.currency || "",
       date: row.date || date,
-      port: row.port || "",
+      port: normalizePortText(row.port),
       needsWeighing: booleanFlag(row.needsWeighing, false),
       direction: row.direction || "",
       tonnage: row.tonnage || "",
@@ -771,7 +775,7 @@ function presentUnplannedOrders(rows, orders, date, keyword) {
       no: order.no,
       dispatchNo: order.dispatchNo || "",
       customer: order.customer || "-",
-      port: order.port || "-",
+      port: normalizePortText(order.port) || "-",
       direction: order.direction || "-",
       tonnage: order.tonnage || "-",
       plate: order.plate || "-",
@@ -877,7 +881,7 @@ function dispatchMessageText(rows, orders, date) {
     const direction = order.direction || row.direction || "";
     const needsWeighing = row.needsWeighing ?? order.needsWeighing;
     return [
-      `装货时间：${rowDate}   ${time}  ${dispatchWeighingText(needsWeighing)} ${dispatchDirectionText(direction)} 口岸：${order.port || row.port || "-"}`,
+      `装货时间：${rowDate}   ${time}  ${dispatchWeighingText(needsWeighing)} ${dispatchDirectionText(direction)} 口岸：${normalizePortText(order.port || row.port) || "-"}`,
       `车牌：${row.plate || order.plate || "-"} 吨位：${order.tonnage || row.tonnage || "-"}    板数：${order.quantity || row.quantity || "-"}`,
       "",
       dispatchLocationBlock("装货地", record, "loading"),
@@ -900,7 +904,7 @@ function createDispatchRowFromOrder(order, date, existingRows) {
     orderNo: order.no,
     customer: order.customer || "",
     plate: order.plate || "",
-    port: order.port || "",
+    port: normalizePortText(order.port),
     needsWeighing: booleanFlag(order.needsWeighing, false),
     direction: order.direction || "",
     tonnage: order.tonnage || "",
@@ -936,7 +940,7 @@ function formFromDispatchRow(row, date) {
     businessType: order.businessType || source.businessType || "运输",
     currency: order.currency || source.currency || "",
     plate: source.plate || order.plate || "",
-    port: order.port || source.port || "",
+    port: normalizePortText(order.port || source.port),
     needsWeighing: booleanFlag(source.needsWeighing ?? order.needsWeighing, false),
     direction: order.direction || source.direction || "",
     tonnage: order.tonnage || source.tonnage || "",
@@ -979,7 +983,7 @@ function rowFromForm(form, orderNo) {
     businessType: source.businessType || "运输",
     currency: source.currency || "",
     plate: normalizePlateText(source.plate),
-    port: source.port,
+    port: normalizePortText(source.port),
     needsWeighing: booleanFlag(source.needsWeighing, false),
     direction: source.direction,
     tonnage: source.tonnage,
@@ -1016,7 +1020,7 @@ function orderPayloadFromForm(form, customer, includeFees) {
     customerId: customer.id,
     customer: customer.name,
     businessType: source.businessType || "运输",
-    port: source.port,
+    port: normalizePortText(source.port),
     needsWeighing: booleanFlag(source.needsWeighing, false),
     direction: source.direction,
     tonnage: source.tonnage,
@@ -1087,6 +1091,7 @@ module.exports = {
   normalizeDispatchPlanStatus,
   normalizeDispatchRows,
   normalizePlateText,
+  normalizePortText,
   normalizeTransportMode,
   normalizeUserText,
   orderPayloadFromForm,

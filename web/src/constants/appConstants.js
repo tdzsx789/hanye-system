@@ -56,7 +56,7 @@ export const FINANCE_WAGE_MODULES = ["financeWages"];
 export const FINANCE_CENTER_MODULES = ["financeCosts", "financeSupplierStatements", "financeCustomsStatements", "financeCostCenter", "financeDaily"];
 export const FINANCE_CUSTOMS_STATEMENT_EXEMPT_ACCOUNTS = new Set(["Ganyaomei"]);
 export const BUSINESS_MODULES = ["home", "customers", "dispatchBoard", "orders", "customsBusiness", "otherBusiness"];
-export const SYSTEM_CONFIG_MODULES = ["rules", "freight", "templates", "master", "security", "accounts"];
+export const SYSTEM_CONFIG_MODULES = ["freight", "templates", "master", "security", "accounts"];
 export const SYSTEM_CONFIG_VIEW_MODULES = ["freight", "templates", "master", "security"];
 export const ROLE_ALLOWED_MODULES = {
   管理员: [
@@ -104,7 +104,6 @@ export const MODULES = [
   { id: "bossVehicleProfit", label: "车辆利润", group: "老板中心" },
   { id: "bossSupplierProfit", label: "供应商利润", group: "老板中心" },
   { id: "bossCompanyExpenses", label: "办公室支出", group: "老板中心" },
-  { id: "rules", label: "规则库", group: "系统配置" },
   { id: "freight", label: "运费模板", group: "系统配置" },
   { id: "templates", label: "模板中心", group: "系统配置" },
   { id: "master", label: "基础数据", group: "系统配置" },
@@ -115,12 +114,12 @@ export const MODULES = [
 export const VEHICLE_EXPENSE_CONFIGS = [
   { moduleId: "vehicleFuelExpenses", type: "fuel", title: "加油费管理", addLabel: "增加加油记录", defaultName: "加油记录", timeLabel: "时间" },
   { moduleId: "vehicleRepairExpenses", type: "repair", title: "维修费管理", addLabel: "增加维修费", defaultName: "维修费", timeLabel: "时间" },
-  { moduleId: "vehicleAnnualExpenses", type: "annual", title: "保险年审牌头费", addLabel: "增加保险年审牌头费", defaultName: "保险费", timeLabel: "时间范围" },
+  { moduleId: "vehicleAnnualExpenses", type: "annual", title: "保险年审牌头费", addLabel: "增加年费记录", defaultName: "大陆保险", timeLabel: "时间范围" },
   { moduleId: "vehicleOtherExpenses", type: "other", title: "其他支出", addLabel: "增加其他支出", defaultName: "", timeLabel: "时间" }
 ];
 export const VEHICLE_EXPENSE_CONFIG_BY_MODULE = Object.fromEntries(VEHICLE_EXPENSE_CONFIGS.map((item) => [item.moduleId, item]));
 export const VEHICLE_EXPENSE_CONFIG_BY_TYPE = Object.fromEntries(VEHICLE_EXPENSE_CONFIGS.map((item) => [item.type, item]));
-export const VEHICLE_ANNUAL_EXPENSE_NAMES = ["保险费", "年审费", "牌头费"];
+export const VEHICLE_ANNUAL_EXPENSE_NAMES = ["大陆保险", "香港保险", "大陆年审", "香港年审", "牌头费"];
 
 export const AUDIT_ACTION_LABELS = {
   create: "新增",

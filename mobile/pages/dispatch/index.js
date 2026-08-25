@@ -13,6 +13,7 @@ const {
   dispatchSummaryCards,
   hasDispatchAccess,
   presentDispatchRows,
+  normalizePortText,
   sanitizeDispatchRow,
   sortDispatchRows
 } = require("../../utils/dispatch");
@@ -58,7 +59,7 @@ function compactOrderForDispatchForm(order) {
     customerId: order.customerId || "",
     customer: order.customer || "",
     businessType: order.businessType || "",
-    port: order.port || "",
+    port: normalizePortText(order.port),
     needsWeighing: Boolean(order.needsWeighing),
     direction: order.direction || "",
     tonnage: order.tonnage || "",

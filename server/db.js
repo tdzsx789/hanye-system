@@ -695,6 +695,7 @@ async function initializeSchema() {
       fuel_liters DOUBLE PRECISION NOT NULL DEFAULT 0,
       fuel_price_per_liter DOUBLE PRECISION NOT NULL DEFAULT 0,
       odometer_km DOUBLE PRECISION NOT NULL DEFAULT 0,
+      repair_items_json TEXT NOT NULL DEFAULT '[]',
       plate TEXT NOT NULL REFERENCES vehicles(plate) ON UPDATE CASCADE,
       expense_date TEXT NOT NULL DEFAULT (CURRENT_DATE::text),
       start_date TEXT NOT NULL DEFAULT '',
@@ -1195,6 +1196,7 @@ async function initializeSchema() {
       "fuel_liters DOUBLE PRECISION NOT NULL DEFAULT 0",
       "fuel_price_per_liter DOUBLE PRECISION NOT NULL DEFAULT 0",
       "odometer_km DOUBLE PRECISION NOT NULL DEFAULT 0",
+      "repair_items_json TEXT NOT NULL DEFAULT '[]'",
       "start_date TEXT NOT NULL DEFAULT ''",
       "end_date TEXT NOT NULL DEFAULT ''"
     ],
@@ -1736,7 +1738,7 @@ const DEMO_ORDERS = [
     customerId: "KH00021053",
     customer: "深圳市汉业国际货运代理有限公司",
     businessType: "运输",
-    port: "深圳湾海关",
+    port: "深圳湾",
     direction: "出口",
     tonnage: "5T",
     currency: "港币",
@@ -1767,7 +1769,7 @@ const DEMO_ORDERS = [
     customerId: "KH00021054",
     customer: "深圳市文永供应链管理有限公司",
     businessType: "运输+报关",
-    port: "莲塘海关",
+    port: "莲塘",
     direction: "进口",
     tonnage: "3T",
     currency: "人民币",
@@ -1798,7 +1800,7 @@ const DEMO_ORDERS = [
     customerId: "KH00021055",
     customer: "深圳市环联程物流有限公司",
     businessType: "运输",
-    port: "文锦渡海关",
+    port: "文锦渡",
     direction: "出口",
     tonnage: "12T",
     currency: "港币",
@@ -1829,7 +1831,7 @@ const DEMO_ORDERS = [
     customerId: "KH00021056",
     customer: "香港恒达贸易有限公司",
     businessType: "运输",
-    port: "深圳湾海关",
+    port: "深圳湾",
     direction: "出口",
     tonnage: "5T",
     currency: "港币",
@@ -1860,7 +1862,7 @@ const DEMO_ORDERS = [
     customerId: "KH00021054",
     customer: "深圳市文永供应链管理有限公司",
     businessType: "运输+报关",
-    port: "莲塘海关",
+    port: "莲塘",
     direction: "进口",
     tonnage: "5T",
     currency: "人民币",
@@ -1891,7 +1893,7 @@ const DEMO_ORDERS = [
     customerId: "KH00021053",
     customer: "深圳市汉业国际货运代理有限公司",
     businessType: "运输+报关",
-    port: "大桥海关",
+    port: "大桥",
     direction: "出口",
     tonnage: "3T",
     currency: "港币",
@@ -1981,10 +1983,10 @@ const STANDARD_TONNAGE_MASTER_DATA = [
 ];
 
 const DEMO_MASTER_DATA = [
-  { type: "口岸", name: "深圳湾海关", value: "深圳湾海关", sortOrder: 1 },
-  { type: "口岸", name: "莲塘海关", value: "莲塘海关", sortOrder: 2 },
-  { type: "口岸", name: "文锦渡海关", value: "文锦渡海关", sortOrder: 3 },
-  { type: "口岸", name: "大桥海关", value: "大桥海关", sortOrder: 4 },
+  { type: "口岸", name: "深圳湾", value: "深圳湾", sortOrder: 1 },
+  { type: "口岸", name: "莲塘", value: "莲塘", sortOrder: 2 },
+  { type: "口岸", name: "文锦渡", value: "文锦渡", sortOrder: 3 },
+  { type: "口岸", name: "大桥", value: "大桥", sortOrder: 4 },
   ...STANDARD_TONNAGE_MASTER_DATA,
   { type: "账期", name: "现结", value: "现结", sortOrder: 1 },
   { type: "账期", name: "月结15天", value: "月结15天", sortOrder: 2 },
@@ -2343,11 +2345,18 @@ async function seedRuleItem(item) {
 }
 
 async function seedMasterData(item) {
+  const normalized = item && item.type === "口岸"
+    ? {
+        ...item,
+        name: String(item.name || "").replace(/\s*(?:海关|海關)\s*$/u, "").trim(),
+        value: String(item.value || item.name || "").replace(/\s*(?:海关|海關)\s*$/u, "").trim()
+      }
+    : item;
   await db.prepare(`
     INSERT INTO master_data (type, name, value, sort_order)
     VALUES (@type, @name, @value, @sortOrder)
     ON CONFLICT (type, name) DO NOTHING
-  `).run(item);
+  `).run(normalized);
 }
 
 async function ensureOrderStatusMasterData() {
