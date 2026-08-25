@@ -2148,6 +2148,45 @@ body.is-modal-dragging .modal-head {
   font-weight: 900;
 }
 
+.order-fee-fx-menu {
+  position: fixed;
+  z-index: 90;
+  display: grid;
+  gap: 6px;
+  width: 196px;
+  padding: 8px;
+  border: 1px solid #9cc5ff;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 16px 36px rgb(15 35 70 / 18%);
+}
+
+.order-fee-fx-menu button {
+  width: 100%;
+  min-height: 30px;
+  border: 1px solid #0f6bff;
+  border-radius: 6px;
+  background: #0f6bff;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.order-fee-fx-menu button:disabled {
+  border-color: #cbd5e1;
+  background: #e2e8f0;
+  color: #64748b;
+}
+
+.order-fee-fx-menu span {
+  overflow: hidden;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .fee-driver-cell {
   display: flex;
   gap: 4px;
@@ -2773,7 +2812,8 @@ select {
   line-height: 1.2;
 }
 
-.vehicle-annual-plate-grid {
+.vehicle-annual-plate-grid,
+.vehicle-other-plate-grid {
   grid-template-columns: repeat(auto-fill, minmax(108px, 136px));
   justify-content: start;
 }
@@ -2784,12 +2824,14 @@ select {
   font-weight: 850;
 }
 
-.vehicle-fuel-plate-grid {
+.vehicle-fuel-plate-grid,
+.vehicle-other-plate-grid {
   grid-template-columns: repeat(auto-fill, minmax(108px, 136px));
   justify-content: start;
 }
 
-.vehicle-fuel-plate-card small {
+.vehicle-fuel-plate-card small,
+.vehicle-other-plate-card small {
   color: #0f766e;
   font-size: 11px;
   font-weight: 850;
@@ -2984,6 +3026,26 @@ select {
   min-height: 0;
 }
 
+.boolean-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: #17233c;
+  font-weight: 700;
+}
+
+.boolean-toggle input {
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
+  accent-color: var(--blue);
+}
+
 .vehicle-expense-expiry-pill {
   display: inline-flex;
   align-items: center;
@@ -3026,8 +3088,84 @@ select {
   gap: 8px;
 }
 
+.vehicle-detail-expense-panel .data-table th:last-child,
+.vehicle-maintenance-panel .data-table th:last-child {
+  width: 86px;
+  min-width: 86px;
+  text-align: center;
+}
+
+.vehicle-detail-expense-panel .data-table td.row-actions,
+.vehicle-maintenance-panel .data-table td.row-actions {
+  display: table-cell;
+  width: 86px;
+  min-width: 86px;
+  padding: 0 8px;
+  overflow: visible;
+  text-align: center;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.vehicle-detail-expense-panel .data-table td.row-actions .icon-btn.icon-only,
+.vehicle-maintenance-panel .data-table td.row-actions .icon-btn.icon-only {
+  flex: 0 0 30px;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+  vertical-align: middle;
+}
+
+.vehicle-detail-expense-panel .data-table td.row-actions .icon-btn + .icon-btn,
+.vehicle-maintenance-panel .data-table td.row-actions .icon-btn + .icon-btn {
+  margin-left: 6px;
+}
+
 .vehicle-expense-form-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.vehicle-expense-other-name-combobox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 34px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  box-sizing: border-box;
+}
+
+.vehicle-expense-other-name-combobox:focus-within {
+  border-color: #8bbcff;
+  box-shadow: 0 0 0 3px rgba(15, 107, 255, 0.08);
+}
+
+.vehicle-expense-other-name-combobox > .ui-icon {
+  color: #94a3b8;
+}
+
+.vehicle-expense-other-name-input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  outline: none;
+}
+
+.vehicle-expense-other-name-input::placeholder {
+  color: #94a3b8;
+}
+
+.vehicle-expense-other-name-dropdown {
+  width: 100%;
+  min-width: 0;
 }
 
 .vehicle-expense-receipt-panel {
@@ -3158,7 +3296,6 @@ select {
   justify-content: space-between;
   gap: 8px 12px;
   padding: 10px 12px;
-  border-bottom: 1px solid var(--border);
 }
 
 .vehicle-repair-period-controls {
@@ -3268,6 +3405,21 @@ select {
   padding: 10px;
 }
 
+.vehicle-repair-record-main .row-actions {
+  width: auto;
+  flex: 0 0 auto;
+}
+
+.vehicle-repair-record-main .row-actions .icon-btn.icon-only {
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  min-height: 34px;
+  padding: 0;
+  border-radius: 8px;
+  flex: 0 0 34px;
+}
+
 .vehicle-repair-record-toggle {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto 18px;
@@ -3300,6 +3452,33 @@ select {
   font-size: 12px;
   font-weight: 750;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vehicle-repair-record-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+small.vehicle-repair-record-meta {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.vehicle-repair-maintenance-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border: 1px solid #f59e0b;
+  border-radius: 999px;
+  background: #fff7ed;
+  color: #b45309;
+  font-size: 11px;
+  font-weight: 800;
   white-space: nowrap;
 }
 
@@ -5716,7 +5895,11 @@ select {
 }
 
 .statement-customer-table .statement-status-inline .statement-status-select,
-.statement-customer-table .statement-status-inline .statement-status-chip {
+.statement-customer-table .statement-status-inline .statement-status-chip,
+.statement-supplier-table .statement-status-inline .statement-status-select,
+.statement-supplier-table .statement-status-inline .statement-status-chip,
+.statement-customs-table .statement-status-inline .statement-status-select,
+.statement-customs-table .statement-status-inline .statement-status-chip {
   flex: 1 1 auto;
   width: auto;
   min-width: 0;
@@ -5896,7 +6079,7 @@ select {
 }
 
 .boss-unreceived-summary-grid {
-  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
 }
 
 .boss-unreceived-table {
@@ -6786,12 +6969,77 @@ select {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.company-expense-form {
-  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
-  align-items: end;
+.company-expense-create-panel {
+  display: grid;
+  gap: 0;
+  overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: #fff;
+}
+
+.company-expense-create-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  background: #f8fbff;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.company-expense-create-toggle > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.company-expense-create-toggle strong {
+  font-size: 14px;
+  font-weight: 850;
+}
+
+.company-expense-create-toggle small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.company-expense-create-toggle b {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  gap: 4px;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid #cfe0f4;
+  border-radius: 999px;
+  background: #fff;
+  color: #0f6bff;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.company-expense-create-toggle b .ui-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.company-expense-create-panel.collapsed .company-expense-create-toggle {
+  background: #fff;
+}
+
+.company-expense-form {
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  align-items: end;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
 }
 
 .company-expense-salary-panel {
@@ -7410,7 +7658,6 @@ select {
 
 .customer-order-table .resizable-th,
 .order-table .resizable-th,
-.related-order-table .resizable-th,
 .customs-business-table .resizable-th,
 .finance-wage-detail-table .resizable-th,
 .managed-data-table .resizable-th {
@@ -8422,73 +8669,6 @@ tr.selected {
   height: 100%;
 }
 
-.related-order-panel {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: auto;
-}
-
-.related-order-table {
-  width: max-content;
-  min-width: 0;
-  table-layout: fixed;
-}
-
-.related-order-table th,
-.related-order-table td {
-  overflow: hidden;
-  height: 32px;
-  padding-top: 4px;
-  padding-bottom: 4px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.related-order-no-col {
-  width: 104px;
-}
-
-.related-order-date-col {
-  width: 82px;
-}
-
-.related-order-customer-col {
-  width: 176px;
-}
-
-.related-order-route-col {
-  width: auto;
-}
-
-.related-order-mode-col,
-.related-order-status-col {
-  width: 72px;
-}
-
-.related-order-money-col {
-  width: 76px;
-}
-
-.related-order-customer-cell {
-  max-width: 0;
-}
-
-.related-order-route-cell {
-  min-width: 0;
-  max-width: 0;
-  white-space: nowrap !important;
-  line-height: 1.25;
-}
-
-.driver-related-order-table {
-  min-width: 1320px;
-}
-
-.vehicle-related-order-table {
-  min-width: 720px;
-}
-
 .related-order-summary {
   display: flex;
   align-items: center;
@@ -8504,44 +8684,6 @@ tr.selected {
 
 .related-order-summary strong {
   color: #0f172a;
-}
-
-.related-order-filter {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border);
-  background: #f8fbff;
-}
-
-.related-order-filter button {
-  height: 28px;
-  padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: #fff;
-  color: #475569;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.related-order-filter button.active {
-  border-color: #93c5fd;
-  background: #e7f1ff;
-  color: var(--blue);
-}
-
-.tabs-date-filter {
-  margin-left: auto;
-  padding: 0;
-  border: 0;
-  background: transparent;
-}
-
-.tabs-date-filter button {
-  height: 26px;
-  padding: 0 8px;
 }
 
 .empty-state,
@@ -12170,26 +12312,38 @@ tr.selected {
   min-width: 176px;
 }
 
-.dispatch-load-time-field {
-  display: grid;
-  grid-template-columns: minmax(82px, 1fr) 54px auto 64px;
+.dispatch-load-time-text {
+  display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.dispatch-load-time-text strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 900;
 }
 
 .dispatch-load-date {
   display: inline-flex;
   min-width: 0;
-  min-height: 24px;
+  min-height: 22px;
   align-items: center;
   justify-content: center;
-  padding: 2px 7px;
+  padding: 1px 6px;
   border: 1px solid #dbe7f5;
   border-radius: 6px;
   background: #f8fbff;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 800;
   line-height: 1.2;
   overflow: hidden;
@@ -12199,18 +12353,18 @@ tr.selected {
 
 .dispatch-time-input {
   min-width: 0 !important;
-  height: 32px !important;
-  line-height: 32px;
+  height: 28px !important;
+  line-height: 28px;
 }
 
 .dispatch-time-hour-input,
 .dispatch-time-minute-input {
-  width: 64px;
-  padding-inline: 6px !important;
+  width: 50px;
+  padding-inline: 4px !important;
 }
 
 .dispatch-time-hour-input {
-  width: 54px;
+  width: 46px;
   text-align: center;
   font-weight: 800;
 }
@@ -12325,7 +12479,7 @@ tr.selected {
 
 .dispatch-load-time-picker {
   display: grid;
-  grid-template-columns: minmax(58px, 0.75fr) auto minmax(68px, 0.9fr);
+  grid-template-columns: minmax(58px, 0.75fr) auto minmax(92px, 0.95fr);
   align-items: center;
   gap: 6px;
   min-width: 0;
@@ -12341,6 +12495,90 @@ tr.selected {
   padding-right: 22px;
 }
 
+.searchable-select.dispatch-load-minute-select {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  min-height: 36px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  box-sizing: border-box;
+}
+
+.searchable-select.dispatch-load-row-minute-select {
+  min-height: 28px;
+  padding: 0 4px;
+  border-radius: 6px;
+  gap: 2px;
+}
+
+.searchable-select.dispatch-load-minute-select:focus-within,
+.searchable-select.dispatch-load-minute-select.is-open {
+  border-color: #8bbcff;
+  box-shadow: 0 0 0 3px rgba(15, 107, 255, 0.08);
+}
+
+.searchable-select.dispatch-load-minute-select.is-disabled {
+  background: #f4f7fb;
+}
+
+.dispatch-load-minute-input {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  outline: none;
+  text-align: center;
+  font-weight: 800;
+}
+
+.dispatch-load-time-picker .dispatch-load-minute-input {
+  width: auto;
+}
+
+.dispatch-load-row-minute-select .dispatch-load-minute-input {
+  width: auto;
+  height: 24px;
+  font-size: 12px;
+}
+
+.dispatch-load-minute-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+}
+
+.dispatch-load-minute-toggle:hover:not(:disabled) {
+  background: #eef6ff;
+  color: #0f6bff;
+}
+
+.dispatch-load-minute-toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.dispatch-load-minute-dropdown {
+  left: auto;
+  right: 0;
+  width: min(160px, calc(100vw - 80px));
+}
+
 .dispatch-load-time-hour-manual {
   text-align: center;
   font-weight: 800;
@@ -12350,9 +12588,9 @@ tr.selected {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 8px;
+  min-width: 6px;
   color: #334155;
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 900;
   line-height: 1;
 }

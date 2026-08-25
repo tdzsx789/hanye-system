@@ -53,7 +53,7 @@ export const BOSS_CENTER_MODULES = [
   "bossCompanyExpenses"
 ];
 export const FINANCE_WAGE_MODULES = ["financeWages"];
-export const FINANCE_CENTER_MODULES = ["financeCosts", "financeSupplierStatements", "financeCustomsStatements", "financeCostCenter", "financeDaily"];
+export const FINANCE_CENTER_MODULES = ["financeCosts", "financeSupplierStatements", "financeCustomsStatements", "financeCostCenter"];
 export const FINANCE_CUSTOMS_STATEMENT_EXEMPT_ACCOUNTS = new Set(["Ganyaomei"]);
 export const BUSINESS_MODULES = ["home", "customers", "dispatchBoard", "orders", "customsBusiness", "otherBusiness"];
 export const SYSTEM_CONFIG_MODULES = ["freight", "templates", "master", "security", "accounts"];
@@ -91,13 +91,12 @@ export const MODULES = [
   { id: "vehicleFuelExpenses", label: "加油费管理", group: "车辆司机" },
   { id: "vehicleRepairExpenses", label: "维修费管理", group: "车辆司机" },
   { id: "vehicleAnnualExpenses", label: "保险年审牌头费", group: "车辆司机" },
-  { id: "vehicleOtherExpenses", label: "其他支出", group: "车辆司机" },
+  { id: "vehicleOtherExpenses", label: "高速隧道费", group: "车辆司机" },
   { id: "financeWages", label: "司机工资统计", group: "财务中心" },
   { id: "financeCosts", label: "客户对账单", group: "财务中心" },
   { id: "financeSupplierStatements", label: "供应商对账单", group: "财务中心" },
   { id: "financeCustomsStatements", label: "报关对账单", group: "财务中心" },
   { id: "financeCostCenter", label: "成本中心", group: "财务中心" },
-  { id: "financeDaily", label: "日常收支", group: "财务中心" },
   { id: "bossDashboard", label: "老板看板", group: "老板中心" },
   { id: "bossUnreceived", label: "未收未付", group: "老板中心" },
   { id: "bossCompanyProfit", label: "公司利润", group: "老板中心" },
@@ -115,7 +114,7 @@ export const VEHICLE_EXPENSE_CONFIGS = [
   { moduleId: "vehicleFuelExpenses", type: "fuel", title: "加油费管理", addLabel: "增加加油记录", defaultName: "加油记录", timeLabel: "时间" },
   { moduleId: "vehicleRepairExpenses", type: "repair", title: "维修费管理", addLabel: "增加维修费", defaultName: "维修费", timeLabel: "时间" },
   { moduleId: "vehicleAnnualExpenses", type: "annual", title: "保险年审牌头费", addLabel: "增加年费记录", defaultName: "大陆保险", timeLabel: "时间范围" },
-  { moduleId: "vehicleOtherExpenses", type: "other", title: "其他支出", addLabel: "增加其他支出", defaultName: "", timeLabel: "时间" }
+  { moduleId: "vehicleOtherExpenses", type: "other", title: "高速隧道费管理", addLabel: "增加高速隧道费记录", defaultName: "高速隧道费", timeLabel: "月份" }
 ];
 export const VEHICLE_EXPENSE_CONFIG_BY_MODULE = Object.fromEntries(VEHICLE_EXPENSE_CONFIGS.map((item) => [item.moduleId, item]));
 export const VEHICLE_EXPENSE_CONFIG_BY_TYPE = Object.fromEntries(VEHICLE_EXPENSE_CONFIGS.map((item) => [item.type, item]));
@@ -230,15 +229,6 @@ export const DEFAULT_DRIVER_TYPES = ["香港司机", "大陆骑师", "其他"];
 export const DRIVER_ADJUSTMENT_TYPES = ["预支款", "停车费", "过磅费", "加油费", "维修费", "其他报销"];
 export const DRIVER_ADJUSTMENT_STATUS_OPTIONS = ["待工资结算", "工资报销", "已结算"];
 
-export const RELATED_ORDER_DATE_FILTERS = [
-  { key: "all", label: "全部" },
-  { key: "today", label: "今日" },
-  { key: "week", label: "本周" },
-  { key: "month", label: "本月" },
-  { key: "lastMonth", label: "上月" },
-  { key: "year", label: "今年" },
-  { key: "pastYears", label: "往年" }
-];
 export const ORDER_DATE_FILTERS = [
   { key: "yesterday", label: "昨日" },
   { key: "today", label: "今日" },

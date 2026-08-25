@@ -40,7 +40,6 @@ const ALL_MODULES = [
   "financeSupplierStatements",
   "financeCustomsStatements",
   "financeCostCenter",
-  "financeDaily",
   ...BOSS_MODULES,
   "rules",
   "freight",
@@ -53,7 +52,7 @@ const ALL_MODULES = [
 const BUSINESS_MODULES = ["home", "customers", "dispatchBoard", "orders", "customsBusiness", "otherBusiness"];
 const VEHICLE_DRIVER_MODULES = ["vehicleDriver", ...VEHICLE_EXPENSE_MODULES];
 const FINANCE_WAGE_MODULES = ["financeWages"];
-const FINANCE_MODULES = ["financeCosts", "financeSupplierStatements", "financeCustomsStatements", "financeCostCenter", "financeDaily"];
+const FINANCE_MODULES = ["financeCosts", "financeSupplierStatements", "financeCustomsStatements", "financeCostCenter"];
 const SYSTEM_MODULES = ["rules", "freight", "templates", "master", "security", "accounts"];
 const SYSTEM_CONFIG_VIEW_MODULES = ["freight", "templates", "master", "security"];
 const MODULE_LABELS = {
@@ -73,7 +72,6 @@ const MODULE_LABELS = {
   financeSupplierStatements: "供应商对账单",
   financeCustomsStatements: "报关对账单",
   financeCostCenter: "成本中心",
-  financeDaily: "日常收支",
   bossDashboard: "老板看板",
   bossUnreceived: "未收未付",
   bossCompanyProfit: "公司利润",

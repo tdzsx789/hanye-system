@@ -4,8 +4,6 @@ function withDefaultIndex(columns) {
 
 export const CUSTOMER_ORDER_COLUMN_STORAGE_KEY = "hanye_customer_order_column_widths";
 export const ORDER_COLUMN_STORAGE_KEY = "hanye_order_column_widths";
-export const RELATED_VEHICLE_ORDER_COLUMN_STORAGE_KEY = "hanye_related_vehicle_order_column_widths";
-export const RELATED_DRIVER_ORDER_COLUMN_STORAGE_KEY = "hanye_related_driver_order_column_widths";
 export const CUSTOMER_ORDER_COLUMN_VISIBILITY_KEY = "hanye_customer_order_column_visibility";
 export const ORDER_COLUMN_VISIBILITY_KEY = "hanye_order_column_visibility";
 export const CUSTOMER_ORDER_COLUMN_ORDER_KEY = "hanye_customer_order_column_order";
@@ -71,33 +69,6 @@ export function createOrderColumns() {
   ]);
 }
 
-export function createRelatedVehicleOrderColumns() {
-  return [
-    { key: "no", label: "订单号", width: 104, min: 72 },
-    { key: "date", label: "日期", width: 82, min: 68 },
-    { key: "customer", label: "客户", width: 176, min: 90 },
-    { key: "route", label: "路线", width: 280, min: 130 },
-    { key: "status", label: "状态", width: 76, min: 60 }
-  ];
-}
-
-export function createRelatedDriverOrderColumns() {
-  return [
-    { key: "no", label: "订单号", width: 104, min: 72 },
-    { key: "date", label: "日期", width: 82, min: 68 },
-    { key: "customer", label: "客户", width: 176, min: 90 },
-    { key: "route", label: "路线", width: 260, min: 130 },
-    { key: "transportMode", label: "运输模式", width: 82, min: 68 },
-    { key: "costCenter", label: "成本中心", width: 120, min: 86 },
-    { key: "advanceHKD", label: "代垫HKD", width: 92, min: 72 },
-    { key: "advanceRMB", label: "代垫RMB", width: 92, min: 72 },
-    { key: "routeAdjustHKD", label: "调整HKD", width: 92, min: 72 },
-    { key: "routeAdjustRMB", label: "调整RMB", width: 92, min: 72 },
-    { key: "payable", label: "应付合计", width: 116, min: 86 },
-    { key: "status", label: "状态", width: 70, min: 60 }
-  ];
-}
-
 export function createFinanceWageTableColumns() {
   return withDefaultIndex([
     { key: "driver", label: "司机", width: 120, min: 84, locked: true },
@@ -115,7 +86,7 @@ export function createFinanceWageTableColumns() {
 export function createDispatchTableColumns() {
   return withDefaultIndex([
     { key: "sequence", label: "序号", width: 72, min: 58, locked: true },
-    { key: "loadTime", label: "装车日期/时间", width: 230, min: 220, locked: true },
+    { key: "loadTime", label: "装车日期/时间", width: 176, min: 156, locked: true },
     { key: "plate", label: "车牌", width: 128, min: 118, locked: true },
     { key: "dispatchNo", label: "排车单号", width: 112, min: 88 },
     { key: "createdByName", label: "创建者", width: 86, min: 64 },

@@ -642,6 +642,7 @@ async function initializeSchema() {
       cost DOUBLE PRECISION DEFAULT NULL,
       cost_currency TEXT NOT NULL DEFAULT '港币',
       cost_manual BOOLEAN NOT NULL DEFAULT false,
+      fx_links_json TEXT NOT NULL DEFAULT '{}',
       advance_address TEXT NOT NULL DEFAULT '',
       remark TEXT NOT NULL DEFAULT '',
       driver_role TEXT NOT NULL DEFAULT '',
@@ -681,9 +682,12 @@ async function initializeSchema() {
       hk_insurance_date TEXT NOT NULL DEFAULT '',
       insurance_reminder TEXT NOT NULL DEFAULT '提前30天',
       maintenance_reminder TEXT NOT NULL DEFAULT '',
+      maintenance_due_date TEXT NOT NULL DEFAULT '',
+      maintenance_due_km DOUBLE PRECISION NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT '正常',
       monthly_cost DOUBLE PRECISION NOT NULL DEFAULT 0,
       note TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
       deleted_at TEXT
     );
 
@@ -695,6 +699,9 @@ async function initializeSchema() {
       fuel_liters DOUBLE PRECISION NOT NULL DEFAULT 0,
       fuel_price_per_liter DOUBLE PRECISION NOT NULL DEFAULT 0,
       odometer_km DOUBLE PRECISION NOT NULL DEFAULT 0,
+      is_maintenance BOOLEAN NOT NULL DEFAULT false,
+      maintenance_next_date TEXT NOT NULL DEFAULT '',
+      maintenance_next_km DOUBLE PRECISION NOT NULL DEFAULT 0,
       repair_items_json TEXT NOT NULL DEFAULT '[]',
       plate TEXT NOT NULL REFERENCES vehicles(plate) ON UPDATE CASCADE,
       expense_date TEXT NOT NULL DEFAULT (CURRENT_DATE::text),
@@ -1072,6 +1079,11 @@ async function initializeSchema() {
       "created_by_username TEXT NOT NULL DEFAULT ''",
       "created_by_display_name TEXT NOT NULL DEFAULT ''"
     ],
+    vehicles: [
+      "maintenance_due_date TEXT NOT NULL DEFAULT ''",
+      "maintenance_due_km DOUBLE PRECISION NOT NULL DEFAULT 0",
+      "updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)"
+    ],
     driver_wage_rules: [
       "transport_mode TEXT NOT NULL DEFAULT '单司机'",
       "advance_fee_rates TEXT NOT NULL DEFAULT '{}'"
@@ -1132,6 +1144,7 @@ async function initializeSchema() {
       "cost DOUBLE PRECISION DEFAULT NULL",
       "cost_currency TEXT NOT NULL DEFAULT '港币'",
       "cost_manual BOOLEAN NOT NULL DEFAULT false",
+      "fx_links_json TEXT NOT NULL DEFAULT '{}'",
       "advance_address TEXT NOT NULL DEFAULT ''",
       "driver_role TEXT NOT NULL DEFAULT ''",
       "driver_name TEXT NOT NULL DEFAULT ''"
@@ -1196,6 +1209,9 @@ async function initializeSchema() {
       "fuel_liters DOUBLE PRECISION NOT NULL DEFAULT 0",
       "fuel_price_per_liter DOUBLE PRECISION NOT NULL DEFAULT 0",
       "odometer_km DOUBLE PRECISION NOT NULL DEFAULT 0",
+      "is_maintenance BOOLEAN NOT NULL DEFAULT false",
+      "maintenance_next_date TEXT NOT NULL DEFAULT ''",
+      "maintenance_next_km DOUBLE PRECISION NOT NULL DEFAULT 0",
       "repair_items_json TEXT NOT NULL DEFAULT '[]'",
       "start_date TEXT NOT NULL DEFAULT ''",
       "end_date TEXT NOT NULL DEFAULT ''"
@@ -1418,6 +1434,101 @@ async function initializeSchema() {
         END)
     WHERE expense_type = 'annual'
       AND (COALESCE(start_date, '') = '' OR COALESCE(end_date, '') = '')
+  `).run();
+
+  await db.prepare(`
+    WITH normalized_annual AS (
+      SELECT
+        plate,
+        CASE
+          WHEN TRIM(name) IN ('大陆保险', '大陆保险费', '保险费') THEN 'mainland_insurance_date'
+          WHEN TRIM(name) IN ('香港保险', '香港保险费') THEN 'hk_insurance_date'
+          WHEN TRIM(name) IN ('大陆年审', '大陆年审费', '年审费') THEN 'mainland_review_date'
+          WHEN TRIM(name) IN ('香港年审', '香港年审费') THEN 'hk_review_date'
+          ELSE ''
+        END AS reminder_field,
+        COALESCE(NULLIF(end_date, ''), NULLIF(expense_date, ''), '') AS expire_date,
+        COALESCE(NULLIF(end_date, ''), NULLIF(start_date, ''), NULLIF(expense_date, ''), '') AS sort_date,
+        id
+      FROM vehicle_expenses
+      WHERE deleted_at IS NULL
+        AND expense_type = 'annual'
+    ),
+    latest_annual AS (
+      SELECT DISTINCT ON (plate, reminder_field)
+        plate,
+        reminder_field,
+        expire_date
+      FROM normalized_annual
+      WHERE reminder_field <> ''
+        AND expire_date <> ''
+      ORDER BY plate, reminder_field, sort_date DESC, id DESC
+    ),
+    vehicle_annual AS (
+      SELECT
+        vehicle.plate,
+        COALESCE(MAX(expire_date) FILTER (WHERE reminder_field = 'mainland_review_date'), '') AS mainland_review_date,
+        COALESCE(MAX(expire_date) FILTER (WHERE reminder_field = 'hk_review_date'), '') AS hk_review_date,
+        COALESCE(MAX(expire_date) FILTER (WHERE reminder_field = 'mainland_insurance_date'), '') AS mainland_insurance_date,
+        COALESCE(MAX(expire_date) FILTER (WHERE reminder_field = 'hk_insurance_date'), '') AS hk_insurance_date
+      FROM vehicles AS vehicle
+      LEFT JOIN latest_annual ON latest_annual.plate = vehicle.plate
+      WHERE vehicle.deleted_at IS NULL
+      GROUP BY vehicle.plate
+    )
+    UPDATE vehicles AS vehicle
+    SET mainland_review_date = vehicle_annual.mainland_review_date,
+        hk_review_date = vehicle_annual.hk_review_date,
+        mainland_insurance_date = vehicle_annual.mainland_insurance_date,
+        hk_insurance_date = vehicle_annual.hk_insurance_date,
+        updated_at = CURRENT_TIMESTAMP
+    FROM vehicle_annual
+    WHERE vehicle.plate = vehicle_annual.plate
+      AND vehicle.deleted_at IS NULL
+      AND (
+        COALESCE(vehicle.mainland_review_date, '') IS DISTINCT FROM vehicle_annual.mainland_review_date
+        OR COALESCE(vehicle.hk_review_date, '') IS DISTINCT FROM vehicle_annual.hk_review_date
+        OR COALESCE(vehicle.mainland_insurance_date, '') IS DISTINCT FROM vehicle_annual.mainland_insurance_date
+        OR COALESCE(vehicle.hk_insurance_date, '') IS DISTINCT FROM vehicle_annual.hk_insurance_date
+      )
+  `).run();
+
+  await db.prepare(`
+    WITH latest AS (
+      SELECT DISTINCT ON (plate)
+        plate,
+        COALESCE(NULLIF(maintenance_next_date, ''), '') AS maintenance_next_date,
+        COALESCE(maintenance_next_km, 0) AS maintenance_next_km
+      FROM vehicle_expenses
+      WHERE deleted_at IS NULL
+        AND expense_type = 'repair'
+        AND COALESCE(is_maintenance, false) = true
+        AND (
+          COALESCE(NULLIF(maintenance_next_date, ''), '') <> ''
+          OR COALESCE(maintenance_next_km, 0) > 0
+        )
+      ORDER BY plate, COALESCE(NULLIF(expense_date, ''), created_at) DESC, id DESC
+    ),
+    vehicle_maintenance AS (
+      SELECT
+        vehicle.plate,
+        COALESCE(latest.maintenance_next_date, '') AS maintenance_due_date,
+        COALESCE(latest.maintenance_next_km, 0) AS maintenance_due_km
+      FROM vehicles AS vehicle
+      LEFT JOIN latest ON latest.plate = vehicle.plate
+      WHERE vehicle.deleted_at IS NULL
+    )
+    UPDATE vehicles AS vehicle
+    SET maintenance_due_date = vehicle_maintenance.maintenance_due_date,
+        maintenance_due_km = vehicle_maintenance.maintenance_due_km,
+        updated_at = CURRENT_TIMESTAMP
+    FROM vehicle_maintenance
+    WHERE vehicle.plate = vehicle_maintenance.plate
+      AND vehicle.deleted_at IS NULL
+      AND (
+        COALESCE(vehicle.maintenance_due_date, '') IS DISTINCT FROM vehicle_maintenance.maintenance_due_date
+        OR COALESCE(vehicle.maintenance_due_km, 0) IS DISTINCT FROM vehicle_maintenance.maintenance_due_km
+      )
   `).run();
 
   await db.prepare(`
@@ -1691,11 +1802,11 @@ const DEMO_ADDRESS_BOOK = [
 ];
 
 const DEMO_VEHICLES = [
-  { plate: "粤ZFC62港", brand: "五十铃", model: "NPR", type: "3T中港车", purchaseDate: "2023-03-18", factoryDate: "2022-12-01", mainlandReviewDate: "2027-03-18", hkReviewDate: "2027-02-28", mainlandInsuranceDate: "2027-03-10", hkInsuranceDate: "2027-02-20", insuranceReminder: "提前30天", maintenanceReminder: "每10000公里", status: "正常", monthlyCost: 12800, note: "常跑莲塘/深圳湾，带尾板" },
-  { plate: "粤ZYR22港", brand: "日野", model: "700", type: "12T中港车", purchaseDate: "2022-09-12", factoryDate: "2022-04-01", mainlandReviewDate: "2026-09-12", hkReviewDate: "2026-08-30", mainlandInsuranceDate: "2026-09-01", hkInsuranceDate: "2026-08-20", insuranceReminder: "提前30天", maintenanceReminder: "每8000公里", status: "正常", monthlyCost: 16500, note: "大吨位线路，适合福永/葵涌" },
-  { plate: "粤Z1234港", brand: "东风", model: "天锦", type: "5T外派车", purchaseDate: "2024-01-10", factoryDate: "2023-10-01", mainlandReviewDate: "2027-01-10", hkReviewDate: "2026-12-20", mainlandInsuranceDate: "2026-12-31", hkInsuranceDate: "2026-12-20", insuranceReminder: "提前30天", maintenanceReminder: "供应商负责", status: "正常", monthlyCost: 0, note: "飞龙通达外派车辆样例" },
-  { plate: "港AU7421", brand: "Mercedes-Benz", model: "Actros", type: "香港本地车", purchaseDate: "2021-07-08", factoryDate: "2021-01-01", mainlandReviewDate: "", hkReviewDate: "2026-11-15", mainlandInsuranceDate: "", hkInsuranceDate: "2026-11-01", insuranceReminder: "提前45天", maintenanceReminder: "每月保养", status: "正常", monthlyCost: 9800, note: "香港本地提派备用" },
-  { plate: "粤B8D936", brand: "江铃", model: "顺达", type: "大陆接驳车", purchaseDate: "2024-05-22", factoryDate: "2024-02-01", mainlandReviewDate: "2027-05-22", hkReviewDate: "", mainlandInsuranceDate: "2027-05-01", hkInsuranceDate: "", insuranceReminder: "提前30天", maintenanceReminder: "每10000公里", status: "正常", monthlyCost: 7200, note: "口岸转国内车样例" }
+  { plate: "粤ZFC62港", brand: "五十铃", model: "NPR", type: "3T中港车", purchaseDate: "2023-03-18", factoryDate: "2022-12-01", mainlandReviewDate: "", hkReviewDate: "", mainlandInsuranceDate: "", hkInsuranceDate: "", insuranceReminder: "提前30天", maintenanceReminder: "每10000公里", status: "正常", monthlyCost: 12800, note: "常跑莲塘/深圳湾，带尾板" },
+  { plate: "粤ZYR22港", brand: "日野", model: "700", type: "12T中港车", purchaseDate: "2022-09-12", factoryDate: "2022-04-01", mainlandReviewDate: "", hkReviewDate: "", mainlandInsuranceDate: "", hkInsuranceDate: "", insuranceReminder: "提前30天", maintenanceReminder: "每8000公里", status: "正常", monthlyCost: 16500, note: "大吨位线路，适合福永/葵涌" },
+  { plate: "粤Z1234港", brand: "东风", model: "天锦", type: "5T外派车", purchaseDate: "2024-01-10", factoryDate: "2023-10-01", mainlandReviewDate: "", hkReviewDate: "", mainlandInsuranceDate: "", hkInsuranceDate: "", insuranceReminder: "提前30天", maintenanceReminder: "供应商负责", status: "正常", monthlyCost: 0, note: "飞龙通达外派车辆样例" },
+  { plate: "港AU7421", brand: "Mercedes-Benz", model: "Actros", type: "香港本地车", purchaseDate: "2021-07-08", factoryDate: "2021-01-01", mainlandReviewDate: "", hkReviewDate: "", mainlandInsuranceDate: "", hkInsuranceDate: "", insuranceReminder: "提前45天", maintenanceReminder: "每月保养", status: "正常", monthlyCost: 9800, note: "香港本地提派备用" },
+  { plate: "粤B8D936", brand: "江铃", model: "顺达", type: "大陆接驳车", purchaseDate: "2024-05-22", factoryDate: "2024-02-01", mainlandReviewDate: "", hkReviewDate: "", mainlandInsuranceDate: "", hkInsuranceDate: "", insuranceReminder: "提前30天", maintenanceReminder: "每10000公里", status: "正常", monthlyCost: 7200, note: "口岸转国内车样例" }
 ];
 
 const DEMO_DRIVERS = [
