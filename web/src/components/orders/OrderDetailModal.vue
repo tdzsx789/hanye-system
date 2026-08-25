@@ -72,8 +72,9 @@ const emit = defineEmits(["close", "edit", "mark-charged", "cancel-charged"]);
           <span v-if="canMarkCharged" class="order-detail-charge-actions">
             <span v-if="chargedAt" class="status-badge order-charged-date">{{ chargedAt }}</span>
             <button
-              :class="['ghost-btn', 'small', { active: !chargedAt, danger: chargedAt }]"
+              class="icon-btn order-charge-btn"
               type="button"
+              :aria-pressed="Boolean(chargedAt)"
               :disabled="chargeLoading"
               @click="chargedAt ? emit('cancel-charged', order) : emit('mark-charged', order)"
             ><IconSvg :name="chargedAt ? 'refresh' : 'check'" />{{ chargedAt ? '取消收费' : '已收费' }}</button>

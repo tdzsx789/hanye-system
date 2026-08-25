@@ -1150,6 +1150,28 @@ body.is-modal-dragging .modal-head {
   margin-right: 10px;
 }
 
+.order-detail-charge-actions .order-charge-btn {
+  flex: 0 0 auto;
+  height: 34px;
+  padding: 0 12px;
+  font-size: 13px;
+  color: #475569;
+  background: #fff;
+  border-color: #d7dde6;
+  box-shadow: none;
+}
+
+.order-detail-charge-actions .order-charge-btn:hover:not(:disabled) {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+}
+
+.order-detail-charge-actions .order-charge-btn[aria-pressed="true"] {
+  color: #475569;
+  background: #fff;
+  border-color: #d7dde6;
+}
+
 .order-charged-date {
   color: #065f46;
   background: #ecfdf5;

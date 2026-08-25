@@ -1439,6 +1439,10 @@ const otherBusinessPeriodFilter = ref(normalizePeriodFilter(localStorage.getItem
 const customsStatementPeriodFilter = ref(normalizePeriodFilter(localStorage.getItem("hanye_customs_statement_period_filter") || currentPeriodMonthKey()));
 const customsStatementCompanySearch = ref("");
 const vehicleExpensePeriodFilter = ref(normalizePeriodFilter(localStorage.getItem("hanye_vehicle_expense_period_filter") || currentPeriodMonthKey()));
+const vehicleExpenseVehicleClassFilter = ref(localStorage.getItem("hanye_vehicle_expense_vehicle_class_filter") || "全部");
+if (!["全部", ...TONNAGE_OPTIONS, "未分类"].includes(vehicleExpenseVehicleClassFilter.value)) {
+  vehicleExpenseVehicleClassFilter.value = "全部";
+}
 const financeWageDetailDriverId = ref(null);
 const selectedFinanceWageDetailOrderNo = ref("");
 const activeFinanceWageCard = ref("wages");
@@ -3489,8 +3493,34 @@ const activeVehicleExpenseConfig = computed(() =>
   VEHICLE_EXPENSE_CONFIG_BY_MODULE[activeModule.value] || VEHICLE_EXPENSE_CONFIGS[0]
 );
 
+function vehicleExpenseVehicleClassName(item = {}) {
+  const vehicle = vehicleRowsByPlate.value.get(String(item?.plate || "").trim()) || null;
+  return String(vehicle?.type || "").trim() || "未分类";
+}
+
+const vehicleExpenseClassCards = computed(() => {
+  if (activeVehicleExpenseConfig.value.type !== "annual") return [];
+  const rows = vehicleExpenseRows.value.filter((item) => item.type === "annual");
+  const counts = rows.reduce((map, item) => {
+    const className = vehicleExpenseVehicleClassName(item);
+    map.set(className, (map.get(className) || 0) + 1);
+    return map;
+  }, new Map());
+  const cardItems = [
+    { key: "全部", label: "全部车辆", count: rows.length }
+  ];
+  TONNAGE_OPTIONS.forEach((tonnage) => {
+    cardItems.push({ key: tonnage, label: tonnage, count: counts.get(tonnage) || 0 });
+  });
+  const unmatchedCount = counts.get("未分类") || 0;
+  if (unmatchedCount > 0 || vehicleExpenseVehicleClassFilter.value === "未分类") {
+    cardItems.push({ key: "未分类", label: "未分类", count: unmatchedCount });
+  }
+  return cardItems;
+});
+
 function vehicleExpenseTableColumns() {
-  const columns = [{ key: "name", label: "名称" }];
+  const columns = [{ key: "name", label: activeVehicleExpenseConfig.value.type === "annual" ? "类型" : "名称" }];
   if (activeVehicleExpenseConfig.value.type === "fuel") {
     columns.push({ key: "fuelLiters", label: "加油升数" });
     columns.push({ key: "amount", label: "加油费" });
@@ -3526,8 +3556,31 @@ const visibleVehicleExpenses = computed(() => {
   const periodRows = config.type === "annual"
     ? rows
     : rows.filter((item) => dateMatchesPeriodFilter(item.date, periodFilterValue("vehicleExpenses")));
-  const searchedRows = !keyword ? periodRows : periodRows.filter((item) =>
-    [item.name, item.fuelStation, item.fuelLiters, item.fuelPricePerLiter, item.odometerKm, item.plate, item.date, item.year, item.startDate, item.endDate, vehicleExpenseExpiryText(item), item.currency, item.amount, item.note]
+  const classFilteredRows = config.type === "annual" && vehicleExpenseVehicleClassFilter.value !== "全部"
+    ? periodRows.filter((item) => {
+      const vehicleClass = vehicleExpenseVehicleClassName(item);
+      if (vehicleExpenseVehicleClassFilter.value === "未分类") return vehicleClass === "未分类";
+      return vehicleClass === vehicleExpenseVehicleClassFilter.value;
+    })
+    : periodRows;
+  const searchedRows = !keyword ? classFilteredRows : classFilteredRows.filter((item) =>
+    [
+      item.name,
+      item.fuelStation,
+      item.fuelLiters,
+      item.fuelPricePerLiter,
+      item.odometerKm,
+      item.plate,
+      vehicleExpenseVehicleClassName(item),
+      item.date,
+      item.year,
+      item.startDate,
+      item.endDate,
+      vehicleExpenseExpiryText(item),
+      item.currency,
+      item.amount,
+      item.note
+    ]
       .some((value) => String(value || "").toLowerCase().includes(keyword))
   );
   return sortRowsByTable(searchedRows, "vehicleExpenses");
@@ -9670,7 +9723,7 @@ function vehicleExpenseBreakdownByTypeForPlate(plate, filterKey = currentPeriodM
       typeBucket.rmb += amount.rmb;
       if (expense.type === "annual") {
         const annualName = String(expense.name || "").trim();
-        const annualBucket = annualName === "年审费"
+        const annualBucket = ["大陆年审", "香港年审"].includes(annualName)
           ? breakdowns.review
           : annualName === "牌头费"
             ? breakdowns.plateHead
@@ -13039,13 +13092,19 @@ function parseDispatchRecognitionWeight(value = "") {
   return unit;
 }
 
+function normalizePortText(value = "") {
+  return String(value ?? "")
+    .replace(/\s*(?:海关|海關)\s*$/u, "")
+    .trim();
+}
+
 function parseDispatchExcelPort(value = "") {
   const text = normalizeDispatchExcelLookupText(value);
   const options = [
-    { value: "深圳湾海关", keywords: ["深圳湾", "深圳灣"] },
-    { value: "莲塘海关", keywords: ["莲塘", "蓮塘"] },
-    { value: "文锦渡海关", keywords: ["文锦渡", "文錦渡"] },
-    { value: "大桥海关", keywords: ["大桥", "大橋", "港珠澳"] }
+    { value: "深圳湾", keywords: ["深圳湾", "深圳灣"] },
+    { value: "莲塘", keywords: ["莲塘", "蓮塘"] },
+    { value: "文锦渡", keywords: ["文锦渡", "文錦渡"] },
+    { value: "大桥", keywords: ["大桥", "大橋", "港珠澳"] }
   ];
   return options.find((option) => option.keywords.some((keyword) => text.includes(normalizeDispatchExcelLookupText(keyword))))?.value || "";
 }
@@ -18068,6 +18127,10 @@ watch(otherBusinessPeriodFilter, () => {
   if (loggedIn.value && activeModule.value === "otherBusiness") {
     loadOtherBusinesses().catch((error) => notify(error.message || "其他业务加载失败"));
   }
+});
+
+watch(vehicleExpenseVehicleClassFilter, (value) => {
+  localStorage.setItem("hanye_vehicle_expense_vehicle_class_filter", String(value || "全部"));
 });
 
 watch(customsStatementPeriodFilter, () => {
@@ -23830,6 +23893,10 @@ async function saveVehicleExpense() {
   try {
     const item = await persistVehicleExpenseFromModal();
     if (!item) return;
+    if (item.type === "annual") {
+      await loadDatabaseData({ preserveSelection: true, silent: true });
+      await loadExpiryReminders({ silent: true, showPopup: activeModule.value === "home" });
+    }
     vehicleExpenseModalOpen.value = false;
     resetVehicleExpenseReceiptState();
     notify(`已保存${vehicleExpenseTypeLabel(item.type)}：${item.plate}`);
@@ -25385,7 +25452,7 @@ function exportVehicleDriver() {
 
 function exportVehicleExpenses() {
   const config = activeVehicleExpenseConfig.value;
-  const headers = ["名称"];
+  const headers = [config.type === "annual" ? "类型" : "名称"];
   if (config.type === "fuel") headers.push("加油升数", "加油时公里数", "加油站");
   headers.push("车牌", config.type === "annual" ? "时间范围" : "时间");
   if (config.type === "annual") headers.push("到期提醒");
@@ -30132,20 +30199,6 @@ function orderDetailFeeRows(order = {}) {
                     <tr><td>香港年审</td><td>{{ selectedVehicle?.hkReviewDate || '-' }}</td><td>{{ selectedVehicle?.insuranceReminder || '-' }}</td><td>{{ selectedVehicle?.status || '-' }}</td></tr>
                   </tbody>
                 </table>
-                <div class="file-toolbar">
-                  <button class="file-upload-btn" type="button" @click="openVehicleFileUploadPanel"><IconSvg name="upload" />上传证件/保险单</button>
-                  <span class="hint">每年保险单、年审资料都可保存，支持预览和下载。</span>
-                </div>
-                <table class="data-table compact">
-                  <thead><tr><th>文件名</th><th>大小</th><th>上传时间</th><th>操作</th></tr></thead>
-                  <tbody>
-                    <tr v-for="file in vehicleFileRows" :key="file.id">
-	                      <td class="file-name-column"><span class="file-name-cell" :title="file.filename">{{ file.filename }}</span></td><td>{{ fileSizeText(file.size) }}</td><td>{{ file.createdAt }}</td>
-                      <td class="row-actions"><button class="icon-btn" @click="openStoredFile(file, 'preview')"><IconSvg name="eye" />预览</button><button class="icon-btn" @click="openStoredFile(file, 'download')"><IconSvg name="download" />下载</button><button class="icon-btn danger" @click="deleteFile(file, vehicleFileRows)"><IconSvg name="trash" />删除</button></td>
-                    </tr>
-                    <tr v-if="vehicleFileRows.length === 0"><td colspan="4">暂无证件附件</td></tr>
-                  </tbody>
-                </table>
               </div>
               <div v-else-if="activeVehicleDetailTab === '费用记录'" class="vehicle-detail-expense-panel">
                 <div class="related-order-summary">
@@ -30375,6 +30428,18 @@ function orderDetailFeeRows(order = {}) {
         </div>
 
         <div class="table-card full-height vehicle-expense-card">
+          <div v-if="activeVehicleExpenseConfig.type === 'annual'" class="cost-center-source-grid vehicle-expense-class-grid">
+            <button
+              v-for="item in vehicleExpenseClassCards"
+              :key="item.key"
+              type="button"
+              :class="['cost-center-source-card vehicle-expense-class-card', { active: vehicleExpenseVehicleClassFilter === item.key }]"
+              @click="vehicleExpenseVehicleClassFilter = item.key"
+            >
+              <span>{{ item.label }}</span>
+              <strong>{{ item.count }} 条</strong>
+            </button>
+          </div>
           <div class="data-table-toolbar vehicle-expense-summary">
             <div class="data-table-tool-group">
               <strong class="data-table-title">{{ activeVehicleExpenseConfig.title }}</strong>
@@ -30395,6 +30460,7 @@ function orderDetailFeeRows(order = {}) {
               <span class="finance-period-chip">当前范围：{{ periodFilterLabelByScope('vehicleExpenses') }}</span>
             </div>
             <span v-else class="finance-period-chip">年费按有效期进入车辆利润</span>
+            <span v-if="activeVehicleExpenseConfig.type === 'annual'" class="finance-period-chip">当前分类：{{ vehicleExpenseVehicleClassFilter }}</span>
           </div>
           <div class="table-wrap">
             <table :class="['data-table compact vehicle-expense-table', `is-${activeVehicleExpenseConfig.type}`]">
@@ -35236,8 +35302,9 @@ function orderDetailFeeRows(order = {}) {
 	        <span v-if="orderModalCanMarkCharged" class="order-detail-charge-actions">
 	          <span v-if="orderModalChargedAt" class="status-badge order-charged-date">{{ orderModalChargedAtDisplay }}</span>
 	          <button
-	            :class="['ghost-btn', 'small', { active: !orderModalChargedAt, danger: !!orderModalChargedAt }]"
+	            class="icon-btn order-charge-btn"
 	            type="button"
+	            :aria-pressed="Boolean(orderModalChargedAt)"
 	            :disabled="orderChargeSaving"
 	            @click="orderModalChargedAt ? cancelOrderModalCharge() : markOrderModalCharged()"
 	          ><IconSvg :name="orderModalChargedAt ? 'refresh' : 'check'" />{{ orderModalChargedAt ? '取消收费' : '已收费' }}</button>
