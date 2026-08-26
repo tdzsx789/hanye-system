@@ -41,6 +41,9 @@ const pool = new Pool({
   max: Number(process.env.PGPOOL_MAX || 10),
   idleTimeoutMillis: 30_000
 });
+const REALTIME_NOTIFY_CHANNEL = "hanye_realtime_events";
+const REALTIME_NOTIFY_ORIGIN = `${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
+const REALTIME_NOTIFY_MAX_BYTES = 7500;
 
 const transactionClient = new AsyncLocalStorage();
 
@@ -234,6 +237,116 @@ export function afterCommit(callback) {
     .catch((error) => {
       console.error("afterCommit callback failed", error);
     });
+}
+
+export async function publishRealtimeEvent(event = {}) {
+  if (!event || typeof event !== "object") return;
+  const payloadEvent = {
+    ...event,
+    _origin: REALTIME_NOTIFY_ORIGIN
+  };
+  let payload = JSON.stringify(payloadEvent);
+  if (Buffer.byteLength(payload, "utf8") > REALTIME_NOTIFY_MAX_BYTES) {
+    payload = JSON.stringify({
+      ...payloadEvent,
+      detail: String(payloadEvent.detail || "").slice(0, 1000)
+    });
+  }
+  if (Buffer.byteLength(payload, "utf8") > REALTIME_NOTIFY_MAX_BYTES) {
+    payload = JSON.stringify({
+      id: payloadEvent.id,
+      type: payloadEvent.type,
+      action: payloadEvent.action,
+      entityType: payloadEvent.entityType,
+      entityId: payloadEvent.entityId,
+      actor: payloadEvent.actor,
+      affectedModules: payloadEvent.affectedModules,
+      updatedAt: payloadEvent.updatedAt,
+      _origin: payloadEvent._origin
+    });
+  }
+  await pool.query("SELECT pg_notify($1, $2)", [REALTIME_NOTIFY_CHANNEL, payload]);
+}
+
+export function listenRealtimeEvents(onEvent) {
+  if (typeof onEvent !== "function") return () => {};
+
+  let closed = false;
+  let client = null;
+  let reconnectTimer = null;
+  let reconnectAttempts = 0;
+
+  function scheduleReconnect() {
+    if (closed || reconnectTimer) return;
+    const delay = Math.min(30000, 1000 * (2 ** Math.min(reconnectAttempts, 5)));
+    reconnectAttempts += 1;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connect();
+    }, delay);
+    reconnectTimer.unref?.();
+  }
+
+  function releaseClient(force = false) {
+    if (!client) return;
+    const current = client;
+    client = null;
+    current.removeAllListeners("notification");
+    current.removeAllListeners("error");
+    current.removeAllListeners("end");
+    try {
+      current.release(force);
+    } catch {
+      // The connection may already be closed by pg.
+    }
+  }
+
+  async function connect() {
+    if (closed) return;
+    releaseClient(true);
+    try {
+      client = await pool.connect();
+      client.on("notification", (message) => {
+        if (message.channel !== REALTIME_NOTIFY_CHANNEL) return;
+        try {
+          const event = JSON.parse(message.payload || "{}");
+          if (!event || event._origin === REALTIME_NOTIFY_ORIGIN) return;
+          delete event._origin;
+          try {
+            onEvent(event);
+          } catch (error) {
+            console.warn("Realtime notification handler failed", error);
+          }
+        } catch (error) {
+          console.warn("Realtime notification payload ignored", error);
+        }
+      });
+      client.on("error", (error) => {
+        console.warn("Realtime notification listener disconnected", error);
+        releaseClient(true);
+        scheduleReconnect();
+      });
+      client.on("end", () => {
+        releaseClient(true);
+        scheduleReconnect();
+      });
+      await client.query(`LISTEN ${REALTIME_NOTIFY_CHANNEL}`);
+      reconnectAttempts = 0;
+    } catch (error) {
+      console.warn("Realtime notification listener failed", error);
+      releaseClient(true);
+      scheduleReconnect();
+    }
+  }
+
+  connect();
+
+  return () => {
+    closed = true;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+    releaseClient(true);
+  };
 }
 
 export async function withAdvisoryLock(lockId, callback) {
@@ -641,6 +754,9 @@ async function initializeSchema() {
       amount_manual BOOLEAN NOT NULL DEFAULT false,
       cost DOUBLE PRECISION DEFAULT NULL,
       cost_currency TEXT NOT NULL DEFAULT '港币',
+      cost_hkd DOUBLE PRECISION DEFAULT NULL,
+      cost_rmb DOUBLE PRECISION DEFAULT NULL,
+      cost_parts_json TEXT NOT NULL DEFAULT '[]',
       cost_manual BOOLEAN NOT NULL DEFAULT false,
       fx_links_json TEXT NOT NULL DEFAULT '{}',
       advance_address TEXT NOT NULL DEFAULT '',
@@ -1143,6 +1259,9 @@ async function initializeSchema() {
       "amount_manual BOOLEAN NOT NULL DEFAULT false",
       "cost DOUBLE PRECISION DEFAULT NULL",
       "cost_currency TEXT NOT NULL DEFAULT '港币'",
+      "cost_hkd DOUBLE PRECISION DEFAULT NULL",
+      "cost_rmb DOUBLE PRECISION DEFAULT NULL",
+      "cost_parts_json TEXT NOT NULL DEFAULT '[]'",
       "cost_manual BOOLEAN NOT NULL DEFAULT false",
       "fx_links_json TEXT NOT NULL DEFAULT '{}'",
       "advance_address TEXT NOT NULL DEFAULT ''",
@@ -2369,8 +2488,8 @@ async function seedOrderFees(orderNo, fees, sourceOrder = null) {
   if (Number(existing?.count || 0) > 0) return;
 
   const insert = db.prepare(`
-    INSERT INTO order_fees (order_no, category, name, quantity, unit_price, unit_price_manual, currency, amount, amount_manual, cost, cost_manual, remark, driver_role, driver_name)
-    VALUES (@orderNo, @category, @name, @quantity, @unitPrice, @unitPriceManual, @currency, @amount, @amountManual, @cost, @costManual, @remark, @driverRole, @driverName)
+    INSERT INTO order_fees (order_no, category, name, quantity, unit_price, unit_price_manual, currency, amount, amount_manual, cost, cost_currency, cost_hkd, cost_rmb, cost_parts_json, cost_manual, remark, driver_role, driver_name)
+    VALUES (@orderNo, @category, @name, @quantity, @unitPrice, @unitPriceManual, @currency, @amount, @amountManual, @cost, @costCurrency, @costHKD, @costRMB, @costPartsJson, @costManual, @remark, @driverRole, @driverName)
   `);
   for (const fee of fees) {
     await insert.run({
@@ -2379,6 +2498,12 @@ async function seedOrderFees(orderNo, fees, sourceOrder = null) {
       unitPriceManual: Boolean(fee.unitPriceManual || fee.unit_price_manual),
       amountManual: Boolean(fee.amountManual || fee.amount_manual),
       cost: fee.cost ?? null,
+      costCurrency: fee.costCurrency || fee.cost_currency || "港币",
+      costHKD: fee.costHKD ?? fee.cost_hkd ?? null,
+      costRMB: fee.costRMB ?? fee.cost_rmb ?? null,
+      costPartsJson: Array.isArray(fee.costParts || fee.cost_parts)
+        ? JSON.stringify(fee.costParts || fee.cost_parts)
+        : (typeof fee.costPartsJson === "string" ? fee.costPartsJson : "[]"),
       costManual: Boolean(fee.costManual || fee.cost_manual)
     });
   }

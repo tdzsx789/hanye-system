@@ -13,6 +13,8 @@ const DATA_MUTATION_ACTIONS = new Set([
   "sync",
   "update",
   "update_status",
+  "mark_charged",
+  "cancel_charged",
   "upload"
 ]);
 

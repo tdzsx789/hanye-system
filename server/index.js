@@ -20,7 +20,7 @@ import {
   verifyPassword
 } from "./auth.js";
 import PDFDocument from "pdfkit";
-import { afterCommit, db, databaseInfo, startupDatabaseMaintenanceEnabled, withAdvisoryLock, writeAudit as writeAuditRecord } from "./db.js";
+import { afterCommit, db, databaseInfo, listenRealtimeEvents, publishRealtimeEvent, startupDatabaseMaintenanceEnabled, withAdvisoryLock, writeAudit as writeAuditRecord } from "./db.js";
 import { createRealtimeHub, realtimeEventFromAudit } from "./realtime.js";
 
 const app = express();
@@ -119,7 +119,10 @@ async function writeAudit(action, entityType, entityId, detail = "") {
   await writeAuditRecord(action, entityType, entityId, detail, actor);
   const event = realtimeEventFromAudit({ action, entityType, entityId, detail, actor });
   if (event) {
-    afterCommit(() => realtimeHub?.broadcast(event));
+    afterCommit(async () => {
+      realtimeHub?.broadcast(event);
+      await publishRealtimeEvent(event);
+    });
   }
 }
 
@@ -488,30 +491,35 @@ async function ensureCustomerCustomsCustomerTypeColumn() {
 }
 
 let orderFeeCostCurrencyColumnReady = false;
+let orderFeeInsertColumnSupportCache = null;
 
 async function ensureOrderFeeCostCurrencyColumn() {
   if (orderFeeCostCurrencyColumnReady) return;
-  await db.exec(`
-    ALTER TABLE order_fees
-    ADD COLUMN IF NOT EXISTS client_key TEXT NOT NULL DEFAULT '';
-    ALTER TABLE order_fees
-    ADD COLUMN IF NOT EXISTS cost_currency TEXT NOT NULL DEFAULT '港币';
-    ALTER TABLE order_fees
-    ADD COLUMN IF NOT EXISTS advance_address TEXT NOT NULL DEFAULT '';
-    ALTER TABLE order_fees
-    ADD COLUMN IF NOT EXISTS fx_links_json TEXT NOT NULL DEFAULT '{}';
-    UPDATE order_fees
-    SET cost_currency = COALESCE(NULLIF(cost_currency, ''), currency, '港币')
-    WHERE cost_currency IS NULL OR cost_currency = '';
-    UPDATE order_fees
-    SET fx_links_json = '{}'
-    WHERE fx_links_json IS NULL OR TRIM(fx_links_json) = '';
-  `);
-  customerColumnAvailability.set("order_fees.client_key", true);
-  customerColumnAvailability.set("order_fees.cost_currency", true);
-  customerColumnAvailability.set("order_fees.advance_address", true);
-  customerColumnAvailability.set("order_fees.fx_links_json", true);
+  await Promise.all([
+    tableColumnExists("order_fees", "client_key"),
+    tableColumnExists("order_fees", "cost_currency"),
+    tableColumnExists("order_fees", "cost_hkd"),
+    tableColumnExists("order_fees", "cost_rmb"),
+    tableColumnExists("order_fees", "cost_parts_json"),
+    tableColumnExists("order_fees", "advance_address"),
+    tableColumnExists("order_fees", "fx_links_json")
+  ]);
   orderFeeCostCurrencyColumnReady = true;
+}
+
+async function orderFeeInsertColumnSupport() {
+  if (orderFeeInsertColumnSupportCache) return orderFeeInsertColumnSupportCache;
+  const support = {
+    clientKey: await tableColumnExists("order_fees", "client_key"),
+    costCurrency: await tableColumnExists("order_fees", "cost_currency"),
+    costHKD: await tableColumnExists("order_fees", "cost_hkd"),
+    costRMB: await tableColumnExists("order_fees", "cost_rmb"),
+    costPartsJson: await tableColumnExists("order_fees", "cost_parts_json"),
+    advanceAddress: await tableColumnExists("order_fees", "advance_address"),
+    fxLinksJson: await tableColumnExists("order_fees", "fx_links_json")
+  };
+  orderFeeInsertColumnSupportCache = support;
+  return support;
 }
 
 function normalizeCustomerPayload(body, id = "") {
@@ -961,12 +969,21 @@ async function ossStorageForUpload(item, file) {
 
 function signedOssUrl(row, disposition = "attachment") {
   if (!ossClient || !row?.object_key) return "";
-  return ossClient.signatureUrl(row.object_key, {
-    expires: OSS_SIGNED_URL_EXPIRES_SECONDS,
-    response: {
-      "content-disposition": contentDispositionHeader(disposition, row.filename)
-    }
-  });
+  try {
+    return ossClient.signatureUrl(row.object_key, {
+      expires: OSS_SIGNED_URL_EXPIRES_SECONDS,
+      response: {
+        "content-disposition": contentDispositionHeader(disposition, row.filename)
+      }
+    });
+  } catch (error) {
+    console.warn("Failed to sign OSS url", {
+      objectKey: row.object_key,
+      filename: row.filename,
+      error: error?.message || error
+    });
+    return "";
+  }
 }
 
 async function migrateDatabaseFilesToOss() {
@@ -3740,6 +3757,9 @@ function mapOrderFee(row) {
     amountManual: Boolean(row.amount_manual),
     cost: row.cost == null ? null : Number(row.cost || 0),
     costCurrency: userTextValue(row.cost_currency || row.currency || "港币"),
+    costHKD: row.cost_hkd == null ? null : Number(row.cost_hkd || 0),
+    costRMB: row.cost_rmb == null ? null : Number(row.cost_rmb || 0),
+    costParts: normalizeOrderFeeCostParts(row.cost_parts_json),
     costManual: Boolean(row.cost_manual),
     fxLinks: parseJsonObjectText(row.fx_links_json, {}),
     advanceAddress: userTextValue(row.advance_address),
@@ -3939,22 +3959,25 @@ async function syncVehicleMaintenanceReminderDate(plate) {
   if (!normalizedPlate) return null;
   const vehicle = await db.prepare("SELECT plate FROM vehicles WHERE plate = ? AND deleted_at IS NULL").get(normalizedPlate);
   if (!vehicle) return null;
+  const hasMaintenanceNextKm = await vehicleExpenseHasMaintenanceNextKmColumn();
+  const selectMaintenanceNextKm = hasMaintenanceNextKm ? ", maintenance_next_km" : "";
+  const maintenanceProgressCondition = hasMaintenanceNextKm ? "OR COALESCE(maintenance_next_km, 0) > 0" : "";
   const row = await db.prepare(`
-    SELECT maintenance_next_date, maintenance_next_km
+    SELECT maintenance_next_date${selectMaintenanceNextKm}
     FROM vehicle_expenses
     WHERE deleted_at IS NULL
       AND expense_type = 'repair'
       AND COALESCE(is_maintenance, false) = true
       AND (
         COALESCE(NULLIF(maintenance_next_date, ''), '') <> ''
-        OR COALESCE(maintenance_next_km, 0) > 0
+        ${maintenanceProgressCondition}
       )
       AND plate = ?
     ORDER BY COALESCE(NULLIF(expense_date, ''), created_at) DESC, id DESC
     LIMIT 1
   `).get(normalizedPlate);
   const maintenanceDueDate = String(row?.maintenance_next_date || "").trim();
-  const maintenanceDueKm = Number(row?.maintenance_next_km || 0);
+  const maintenanceDueKm = hasMaintenanceNextKm ? Number(row?.maintenance_next_km || 0) : 0;
   await db.prepare(`
     UPDATE vehicles
     SET maintenance_due_date = ?,
@@ -4174,7 +4197,30 @@ async function lockVehicleExpenseCreation(item = {}) {
   await db.prepare("SELECT pg_advisory_xact_lock(?, hashtext(?))").get(VEHICLE_EXPENSE_CREATE_LOCK_NAMESPACE, vehicleExpenseCreateKey(item));
 }
 
-async function findRecentDuplicateVehicleExpense(item = {}) {
+let vehicleExpenseHasMaintenanceNextKmColumnCache;
+
+async function vehicleExpenseHasMaintenanceNextKmColumn() {
+  if (vehicleExpenseHasMaintenanceNextKmColumnCache !== undefined) {
+    return vehicleExpenseHasMaintenanceNextKmColumnCache;
+  }
+  try {
+    const row = await db.prepare(`
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = ?
+        AND column_name = ?
+      LIMIT 1
+    `).get("vehicle_expenses", "maintenance_next_km");
+    vehicleExpenseHasMaintenanceNextKmColumnCache = Boolean(row);
+  } catch (error) {
+    console.warn("Failed to inspect vehicle_expenses schema", error);
+    vehicleExpenseHasMaintenanceNextKmColumnCache = false;
+  }
+  return vehicleExpenseHasMaintenanceNextKmColumnCache;
+}
+
+async function findRecentDuplicateVehicleExpense(item = {}, hasMaintenanceNextKm = true) {
   return db.prepare(`
     SELECT *
     FROM vehicle_expenses
@@ -4193,7 +4239,7 @@ async function findRecentDuplicateVehicleExpense(item = {}) {
       AND ABS(COALESCE(odometer_km, 0) - @odometerKm) < 0.000001
       AND COALESCE(is_maintenance, false) = @isMaintenance
       AND COALESCE(maintenance_next_date, '') = @maintenanceNextDate
-      AND ABS(COALESCE(maintenance_next_km, 0) - @maintenanceNextKm) < 0.000001
+      ${hasMaintenanceNextKm ? "AND ABS(COALESCE(maintenance_next_km, 0) - @maintenanceNextKm) < 0.000001" : ""}
       AND COALESCE(repair_items_json, '[]') = @repairItemsJson
       AND COALESCE(note, '') = @note
       AND COALESCE(NULLIF(created_at, ''), CURRENT_TIMESTAMP::text)::timestamptz >= CURRENT_TIMESTAMP - INTERVAL '30 seconds'
@@ -4510,6 +4556,23 @@ function parseJsonArrayText(value) {
   } catch {
     return [];
   }
+}
+
+function normalizeOrderFeeCostSplitPart(part = {}, index = 0) {
+  const fallbackCurrency = index === 1 ? "人民币" : "港币";
+  const rawAmount = Number(part.amount ?? part.sourceAmount ?? 0);
+  return {
+    role: userTextValue(part.role || (index === 0 ? "香港司机" : "大陆骑师")),
+    driverName: userTextValue(part.driverName || part.driver_name),
+    currency: normalizeCostCenterCurrency(part.currency || part.sourceCurrency || fallbackCurrency, fallbackCurrency),
+    amount: Number.isFinite(rawAmount) && rawAmount >= 0 ? Number(rawAmount.toFixed(2)) : 0,
+    matched: Boolean(part.matched)
+  };
+}
+
+function normalizeOrderFeeCostParts(value = []) {
+  const source = Array.isArray(value) ? value : parseJsonArrayText(value);
+  return source.map((part, index) => normalizeOrderFeeCostSplitPart(part, index));
 }
 
 function mapDriverRouteAdjustRule(row) {
@@ -5487,6 +5550,66 @@ function mapAuditLog(row) {
   };
 }
 
+function auditFieldValue(record = {}, key = "") {
+  const text = String(key || "").trim();
+  if (!text) return undefined;
+  const snake = text.replace(/[A-Z]/g, (char) => `_${char.toLowerCase()}`);
+  const camel = text.replace(/_([a-z])/g, (_, char) => char.toUpperCase());
+  const candidates = [text, snake, camel].filter(Boolean);
+  for (const candidate of candidates) {
+    if (record && Object.prototype.hasOwnProperty.call(record, candidate)) {
+      return record[candidate];
+    }
+  }
+  const normalizedText = text.replace(/_/g, "").toLowerCase();
+  const normalizedSnake = snake.replace(/_/g, "").toLowerCase();
+  const matchedKey = Object.keys(record || {}).find((candidate) => {
+    const normalizedCandidate = candidate.replace(/_/g, "").toLowerCase();
+    return normalizedCandidate === normalizedText || normalizedCandidate === normalizedSnake;
+  });
+  if (matchedKey) return record[matchedKey];
+  return undefined;
+}
+
+function auditDisplayValue(value) {
+  if (value === null || value === undefined || value === "") return "-";
+  if (Array.isArray(value)) {
+    return value.map((item) => auditDisplayValue(item)).filter((item) => item && item !== "-").join("、") || "-";
+  }
+  if (typeof value === "boolean") return value ? "是" : "否";
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : "-";
+  if (typeof value === "object") {
+    return auditDisplayValue(value.name || value.displayName || value.text || value.value || value.label || value.id || "");
+  }
+  const text = String(value).trim();
+  return text || "-";
+}
+
+function auditPreviewValue(value, maxLength = 24) {
+  const text = auditDisplayValue(value);
+  if (text === "-" || text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength)}…`;
+}
+
+function auditChangeSummary(before = {}, after = {}, fields = [], options = {}) {
+  const changes = [];
+  fields.forEach((field) => {
+    const spec = typeof field === "string" ? { key: field } : (field || {});
+    const beforeValue = typeof spec.before === "function" ? spec.before(before, after) : auditFieldValue(before, spec.key);
+    const afterValue = typeof spec.after === "function" ? spec.after(before, after) : auditFieldValue(after, spec.key);
+    const beforeText = auditDisplayValue(typeof spec.formatBefore === "function" ? spec.formatBefore(beforeValue, before, after) : beforeValue);
+    const afterText = auditDisplayValue(typeof spec.formatAfter === "function" ? spec.formatAfter(afterValue, before, after) : afterValue);
+    if (beforeText !== afterText) {
+      changes.push(`${spec.label || spec.key}：${beforeText} → ${afterText}`);
+    }
+  });
+  if (!changes.length) return options.fallback || "修改";
+  const maxItems = Number(options.maxItems || 4);
+  const prefix = options.prefix || "修改";
+  const body = changes.slice(0, maxItems).join("；");
+  return `${prefix}${options.entityLabel ? ` ${options.entityLabel}` : ""}：${body}${changes.length > maxItems ? "…" : ""}`;
+}
+
 async function loadCustomerShortNameMap(options = {}) {
   const category = String(options.category || "").trim();
   const rows = category
@@ -5961,6 +6084,11 @@ app.patch("/api/auth/password", async (req, res) => {
 });
 
 app.patch("/api/auth/profile", async (req, res) => {
+  const current = await db.prepare("SELECT * FROM app_accounts WHERE id = ? AND deleted_at IS NULL").get(req.account.id);
+  if (!current) {
+    res.status(404).json({ message: "账号不存在或已删除" });
+    return;
+  }
   const item = {
     id: req.account.id,
     displayName: userTextValue(req.body?.displayName),
@@ -5981,7 +6109,17 @@ app.patch("/api/auth/profile", async (req, res) => {
     res.status(404).json({ message: "账号不存在或已删除" });
     return;
   }
-  await writeAudit("update", "account_profile", String(req.account.id), req.account.username);
+  await writeAudit(
+    "update",
+    "account_profile",
+    String(req.account.id),
+    auditChangeSummary(current, item, [
+      { key: "displayName", label: "姓名" },
+      { key: "phone", label: "电话" },
+      { key: "email", label: "邮箱" },
+      { key: "note", label: "备注" }
+    ], { entityLabel: "个人资料" })
+  );
   res.json(mapAccount(await db.prepare("SELECT * FROM app_accounts WHERE id = ?").get(req.account.id)));
 });
 
@@ -6116,7 +6254,25 @@ app.put("/api/customs-businesses/:id", async (req, res) => {
         updated_at = CURRENT_TIMESTAMP
     WHERE id = @id AND deleted_at IS NULL
   `).run({ ...item, id });
-  await writeAudit("update", "customs_business", String(id), `${item.date}/${item.company}/${item.declarationNo || item.sixSheetNo}`);
+  await writeAudit(
+    "update",
+    "customs_business",
+    String(id),
+    auditChangeSummary(current, item, [
+      { label: "日期", before: (before) => before.business_date, after: () => item.date },
+      { key: "company", label: "公司" },
+      { key: "direction", label: "进出口" },
+      { key: "declarationNo", label: "报关单号" },
+      { key: "sixSheetNo", label: "六联单号" },
+      { key: "itemCount", label: "主页品名项" },
+      { key: "pageCount", label: "续页" },
+      { key: "customsFee", label: "报关费" },
+      { key: "manifestFee", label: "舱单费" },
+      { key: "pageFee", label: "续页费" },
+      { key: "total", label: "合计" },
+      { key: "remark", label: "备注" }
+    ], { entityLabel: "报关业务", maxItems: 6 })
+  );
   const row = await db.prepare("SELECT * FROM customs_businesses WHERE id = ?").get(id);
   res.json(mapCustomsBusiness(row));
 });
@@ -6237,7 +6393,22 @@ app.put("/api/other-businesses/:id", async (req, res) => {
         updated_at = CURRENT_TIMESTAMP
     WHERE id = @id AND deleted_at IS NULL
   `).run({ ...item, id });
-  await writeAudit("update", "other_business", String(id), `${item.date}/${item.customer}/${item.title}`);
+  await writeAudit(
+    "update",
+    "other_business",
+    String(id),
+    auditChangeSummary(current, item, [
+      { label: "日期", before: (before) => before.business_date, after: () => item.date },
+      { key: "title", label: "标题" },
+      { key: "customer", label: "客户" },
+      { key: "cost", label: "成本" },
+      { key: "income", label: "收入" },
+      { key: "totalCost", label: "总成本" },
+      { key: "totalIncome", label: "总收入" },
+      { key: "profit", label: "利润" },
+      { key: "remark", label: "备注" }
+    ], { entityLabel: "其他业务" })
+  );
   const row = await db.prepare("SELECT * FROM other_businesses WHERE id = ?").get(id);
   res.json(mapOtherBusiness(row));
 });
@@ -6397,7 +6568,15 @@ app.patch("/api/files/:id/move", async (req, res) => {
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ? AND deleted_at IS NULL
   `).run(entityType, entityId, id);
-  await writeAudit("update", "file", String(id), `${existing.entity_type}/${existing.entity_id} -> ${entityType}/${entityId}`);
+  await writeAudit(
+    "update",
+    "file",
+    String(id),
+    auditChangeSummary(existing, { ...existing, entityType, entityId }, [
+      { key: "entityType", label: "归属类型" },
+      { key: "entityId", label: "关联记录" }
+    ], { entityLabel: "文件" })
+  );
   const row = await db.prepare("SELECT * FROM files WHERE id = ?").get(id);
   res.json(mapFile(row));
 });
@@ -6521,6 +6700,11 @@ app.get("/api/customers", async (req, res) => {
 app.patch("/api/customers/:id", async (req, res) => {
   await ensureCustomerCustomsCustomerTypeColumn();
   const id = String(req.params.id || "").trim();
+  const existing = await db.prepare("SELECT * FROM customers WHERE id = ? AND deleted_at IS NULL").get(id);
+  if (!existing) {
+    res.status(404).json({ message: "客户不存在或已删除" });
+    return;
+  }
   const item = normalizeCustomerPayload(req.body, id);
 
   if (!item.name) {
@@ -6570,7 +6754,19 @@ app.patch("/api/customers/:id", async (req, res) => {
     res.status(404).json({ message: "客户不存在或已删除" });
     return;
   }
-  await writeAudit("update", "customer", id, item.name);
+  await writeAudit(
+    "update",
+    "customer",
+    id,
+    auditChangeSummary(existing, item, [
+      { key: "name", label: "公司名称" },
+      { key: "shortName", label: "简称" },
+      { key: "customerCategory", label: "客户类别" },
+      { key: "settlementCurrency", label: "结算币种" },
+      { key: "contact", label: "联系人" },
+      { key: "mobile", label: "电话" }
+    ], { entityLabel: "客户" })
+  );
   res.json(mapCustomer(await db.prepare("SELECT * FROM customers WHERE id = ?").get(id)));
 });
 
@@ -6688,7 +6884,19 @@ app.patch("/api/customer-contacts/:id", async (req, res) => {
         updated_at = CURRENT_TIMESTAMP
     WHERE id = @id
   `).run({ id, ...item });
-  await writeAudit("update", "customer_contact", String(id), item.name);
+  await writeAudit(
+    "update",
+    "customer_contact",
+    String(id),
+    auditChangeSummary(existing, item, [
+      { key: "name", label: "姓名" },
+      { key: "mobile", label: "手机" },
+      { key: "phone", label: "电话" },
+      { key: "area", label: "片区" },
+      { key: "address", label: "地址" },
+      { key: "remark", label: "备注" }
+    ], { entityLabel: "联系人" })
+  );
   res.json(mapCustomerContact(await db.prepare("SELECT * FROM customer_contacts WHERE id = ?").get(id)));
 });
 
@@ -8337,7 +8545,7 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
     "update",
     "dispatch_plan",
     date,
-    `合并保存 ${result.incomingCount} 条，当前 ${result.savedCount} 条，保护 ${result.stats.protected} 条${result.stats.staleSkipped ? `，跳过旧快照 ${result.stats.staleSkipped} 条` : ""}`
+    `修改排车计划：合并保存 ${result.incomingCount} 条，当前 ${result.savedCount} 条，保护 ${result.stats.protected} 条${result.stats.staleSkipped ? `，跳过旧快照 ${result.stats.staleSkipped} 条` : ""}`
   );
   res.json(mapDispatchPlanRecord(result.saved));
 });
@@ -8727,6 +8935,40 @@ function normalizeOrderFee(fee, fallbackCurrency) {
     ? null
     : Number(rawCost);
   const cost = Number.isFinite(costNumber) && costNumber >= 0 ? costNumber : null;
+  const costParts = normalizeOrderFeeCostParts(fee.costParts ?? fee.cost_parts ?? fee.costPartsJson ?? fee.cost_parts_json);
+  const rawCostHKD = fee.costHKD ?? fee.cost_hkd ?? fee._costHKD ?? fee._costHkd;
+  const rawCostRMB = fee.costRMB ?? fee.cost_rmb ?? fee._costRMB ?? fee._costRmb;
+  const costHKD = rawCostHKD === undefined || rawCostHKD === null || String(rawCostHKD).trim() === ""
+    ? null
+    : Number(rawCostHKD);
+  const costRMB = rawCostRMB === undefined || rawCostRMB === null || String(rawCostRMB).trim() === ""
+    ? null
+    : Number(rawCostRMB);
+  const normalizedCostHKD = Number.isFinite(costHKD) && costHKD >= 0 ? costHKD : null;
+  const normalizedCostRMB = Number.isFinite(costRMB) && costRMB >= 0 ? costRMB : null;
+  let finalCostHKD = normalizedCostHKD;
+  let finalCostRMB = normalizedCostRMB;
+  const hasSplitCostPayload = booleanFlag(fee.costSplit ?? fee.cost_split ?? fee._costSplit, false)
+    || finalCostHKD !== null
+    || finalCostRMB !== null
+    || costParts.length > 0;
+  let finalCost = cost;
+  if (costParts.length > 0) {
+    finalCostHKD = Number(costParts.reduce((sum, part) =>
+      sum + (normalizeCostCenterCurrency(part.currency || "港币") === "港币" ? Number(part.amount || 0) : 0), 0).toFixed(2));
+    finalCostRMB = Number(costParts.reduce((sum, part) =>
+      sum + (normalizeCostCenterCurrency(part.currency || "港币") === "人民币" ? Number(part.amount || 0) : 0), 0).toFixed(2));
+  }
+  if (hasSplitCostPayload) {
+    finalCost = Number((Number(finalCostHKD || 0) + Number(finalCostRMB || 0)).toFixed(2));
+  }
+  if (!hasSplitCostPayload && cost !== null) {
+    if (costCurrency === "人民币" || costCurrency === "RMB") {
+      finalCostRMB = cost;
+    } else {
+      finalCostHKD = cost;
+    }
+  }
   return {
     clientKey,
     category: normalizeOrderFeeCategory(fee.category),
@@ -8737,8 +8979,12 @@ function normalizeOrderFee(fee, fallbackCurrency) {
     currency: userTextValue(fee.currency || fallbackCurrency || "港币"),
     amount,
     amountManual,
-    cost,
-    costCurrency,
+    cost: finalCost,
+    costCurrency: hasSplitCostPayload ? "港币" : costCurrency,
+    costHKD: finalCostHKD,
+    costRMB: finalCostRMB,
+    costParts,
+    costPartsJson: JSON.stringify(costParts),
     costManual: cost == null ? false : booleanFlag(rawCostManual, false),
     fxLinksJson: JSON.stringify(normalizeOrderFeeFxLinks(fee)),
     advanceAddress: userTextValue(fee.advanceAddress || fee.advance_address),
@@ -8799,9 +9045,56 @@ function calculateOrderReceivables(fees, fallbackCurrency) {
 
 async function saveOrderFees(orderNo, fees, fallbackCurrency) {
   await ensureOrderFeeCostCurrencyColumn();
+  const support = await orderFeeInsertColumnSupport();
+  const insertColumns = [
+    "order_no",
+    ...(support.clientKey ? ["client_key"] : []),
+    "category",
+    "name",
+    "quantity",
+    "unit_price",
+    "unit_price_manual",
+    "currency",
+    "amount",
+    "amount_manual",
+    "cost",
+    ...(support.costCurrency ? ["cost_currency"] : []),
+    ...(support.costHKD ? ["cost_hkd"] : []),
+    ...(support.costRMB ? ["cost_rmb"] : []),
+    ...(support.costPartsJson ? ["cost_parts_json"] : []),
+    "cost_manual",
+    ...(support.fxLinksJson ? ["fx_links_json"] : []),
+    ...(support.advanceAddress ? ["advance_address"] : []),
+    "remark",
+    "driver_role",
+    "driver_name"
+  ];
+  const insertValues = [
+    "@orderNo",
+    ...(support.clientKey ? ["@clientKey"] : []),
+    "@category",
+    "@name",
+    "@quantity",
+    "@unitPrice",
+    "@unitPriceManual",
+    "@currency",
+    "@amount",
+    "@amountManual",
+    "@cost",
+    ...(support.costCurrency ? ["@costCurrency"] : []),
+    ...(support.costHKD ? ["@costHKD"] : []),
+    ...(support.costRMB ? ["@costRMB"] : []),
+    ...(support.costPartsJson ? ["@costPartsJson"] : []),
+    "@costManual",
+    ...(support.fxLinksJson ? ["@fxLinksJson"] : []),
+    ...(support.advanceAddress ? ["@advanceAddress"] : []),
+    "@remark",
+    "@driverRole",
+    "@driverName"
+  ];
   const insert = await db.prepare(`
-    INSERT INTO order_fees (order_no, client_key, category, name, quantity, unit_price, unit_price_manual, currency, amount, amount_manual, cost, cost_currency, cost_manual, fx_links_json, advance_address, remark, driver_role, driver_name)
-    VALUES (@orderNo, @clientKey, @category, @name, @quantity, @unitPrice, @unitPriceManual, @currency, @amount, @amountManual, @cost, @costCurrency, @costManual, @fxLinksJson, @advanceAddress, @remark, @driverRole, @driverName)
+    INSERT INTO order_fees (${insertColumns.join(", ")})
+    VALUES (${insertValues.join(", ")})
   `);
   await db.prepare("DELETE FROM order_fees WHERE order_no = ?").run(orderNo);
   const normalizedFees = fees
@@ -8862,7 +9155,22 @@ app.patch("/api/orders/:no", async (req, res) => {
   });
 
   await transaction();
-  await writeAudit("update", "order", no, item.customer);
+  await writeAudit(
+    "update",
+    "order",
+    no,
+    auditChangeSummary(existing, item, [
+      { key: "customer", label: "客户" },
+      { key: "dispatchNo", label: "排车单号" },
+      { key: "status", label: "状态" },
+      { key: "plate", label: "车牌" },
+      { key: "driver", label: "司机" },
+      { key: "supplier", label: "供应商" },
+      { key: "loading", label: "装货地" },
+      { key: "unloading", label: "卸货地" },
+      { key: "remark", label: "备注" }
+    ], { entityLabel: "订单" })
+  );
   const updated = await db.prepare("SELECT * FROM orders WHERE no = ?").get(no);
   res.json((await hydrateOrderRowsForApi([mapOrder(updated)]))[0]);
 });
@@ -8916,18 +9224,23 @@ app.patch("/api/orders/:no/status", async (req, res) => {
     }
   }
 
-  const result = await db.prepare("UPDATE orders SET status = ? WHERE no = ? AND deleted_at IS NULL").run(status, no);
-  if (result.changes === 0) {
+  const dispatchStatus = ORDER_STATUS_TO_DISPATCH_STATUS[status] || "";
+  const transaction = db.transaction(async () => {
+    const result = await db.prepare("UPDATE orders SET status = ? WHERE no = ? AND deleted_at IS NULL").run(status, no);
+    if (result.changes === 0) return null;
+    const row = await db.prepare("SELECT * FROM orders WHERE no = ?").get(no);
+    if (dispatchStatus) {
+      await syncDispatchPlanRowsStatusForOrder(row, dispatchStatus);
+    }
+    return row;
+  });
+  const row = await transaction();
+  if (!row) {
     res.status(404).json({ message: "订单不存在或已删除" });
     return;
   }
 
   await writeAudit(status === "已审核" ? "audit" : "update_status", "order", no, `状态改为${status}`);
-  const row = await db.prepare("SELECT * FROM orders WHERE no = ?").get(no);
-  const dispatchStatus = ORDER_STATUS_TO_DISPATCH_STATUS[status] || "";
-  if (dispatchStatus) {
-    await syncDispatchPlanRowsStatusForOrder(row, dispatchStatus);
-  }
   res.json((await hydrateOrderRowsForApi([mapOrder(row)]))[0]);
 });
 
@@ -9110,7 +9423,21 @@ app.patch("/api/vehicles/:plate", async (req, res) => {
     res.status(404).json({ message: error.message });
     return;
   }
-  await writeAudit("update", "vehicle", item.plate, item.note);
+  await writeAudit(
+    "update",
+    "vehicle",
+    item.plate,
+    auditChangeSummary(current, item, [
+      { key: "plate", label: "车牌" },
+      { key: "brand", label: "品牌" },
+      { key: "model", label: "型号" },
+      { label: "类型", before: (before) => before.vehicle_type, after: () => item.type },
+      { key: "status", label: "状态" },
+      { key: "monthlyCost", label: "月成本" },
+      { key: "maintenanceReminder", label: "保养提醒" },
+      { key: "note", label: "备注" }
+    ], { entityLabel: "车辆" })
+  );
   res.json(mapVehicle(await db.prepare("SELECT * FROM vehicles WHERE plate = ?").get(item.plate)));
 });
 
@@ -9158,6 +9485,7 @@ app.get("/api/vehicle-expenses", async (req, res) => {
 
 app.post("/api/vehicle-expenses", async (req, res) => {
   const item = normalizeVehicleExpensePayload(req.body || {});
+  const hasMaintenanceNextKm = await vehicleExpenseHasMaintenanceNextKmColumn();
   if (!item.plate) {
     res.status(400).json({ message: "请选择车牌" });
     return;
@@ -9199,13 +9527,13 @@ app.post("/api/vehicle-expenses", async (req, res) => {
   }
   const transaction = db.transaction(async () => {
     await lockVehicleExpenseCreation(item);
-    const duplicate = await findRecentDuplicateVehicleExpense(item);
+    const duplicate = await findRecentDuplicateVehicleExpense(item, hasMaintenanceNextKm);
     if (duplicate) {
       return { row: duplicate, created: false };
     }
     const result = await db.prepare(`
-      INSERT INTO vehicle_expenses (expense_type, name, fuel_station, fuel_liters, fuel_price_per_liter, odometer_km, is_maintenance, maintenance_next_date, maintenance_next_km, repair_items_json, plate, expense_date, start_date, end_date, expense_year, currency, amount, note)
-      VALUES (@type, @name, @fuelStation, @fuelLiters, @fuelPricePerLiter, @odometerKm, @isMaintenance, @maintenanceNextDate, @maintenanceNextKm, @repairItemsJson, @plate, @date, @startDate, @endDate, @year, @currency, @amount, @note)
+      INSERT INTO vehicle_expenses (expense_type, name, fuel_station, fuel_liters, fuel_price_per_liter, odometer_km, is_maintenance, maintenance_next_date${hasMaintenanceNextKm ? ", maintenance_next_km" : ""}, repair_items_json, plate, expense_date, start_date, end_date, expense_year, currency, amount, note)
+      VALUES (@type, @name, @fuelStation, @fuelLiters, @fuelPricePerLiter, @odometerKm, @isMaintenance, @maintenanceNextDate${hasMaintenanceNextKm ? ", @maintenanceNextKm" : ""}, @repairItemsJson, @plate, @date, @startDate, @endDate, @year, @currency, @amount, @note)
     `).run(item);
     return {
       row: await db.prepare("SELECT * FROM vehicle_expenses WHERE id = ?").get(result.lastInsertId),
@@ -9214,10 +9542,24 @@ app.post("/api/vehicle-expenses", async (req, res) => {
   });
   const saved = await transaction();
   if (item.type === "annual") {
-    await syncVehicleAnnualExpenseReminderDates(item.plate);
+    try {
+      await syncVehicleAnnualExpenseReminderDates(item.plate);
+    } catch (error) {
+      console.warn("Failed to sync annual expense reminder dates", {
+        plate: item.plate,
+        error: error?.message || error
+      });
+    }
   }
   if (item.type === "repair") {
-    await syncVehicleMaintenanceReminderDate(item.plate);
+    try {
+      await syncVehicleMaintenanceReminderDate(item.plate);
+    } catch (error) {
+      console.warn("Failed to sync maintenance reminder date", {
+        plate: item.plate,
+        error: error?.message || error
+      });
+    }
   }
   if (saved.created) {
     await writeAudit("create", "vehicle_expense", String(saved.row.id), `${item.plate}/${item.name}/${item.amount}`);
@@ -9228,6 +9570,7 @@ app.post("/api/vehicle-expenses", async (req, res) => {
 app.patch("/api/vehicle-expenses/:id", async (req, res) => {
   const id = Number(req.params.id || 0);
   const current = await db.prepare("SELECT * FROM vehicle_expenses WHERE id = ? AND deleted_at IS NULL").get(id);
+  const hasMaintenanceNextKm = await vehicleExpenseHasMaintenanceNextKmColumn();
   if (!current) {
     res.status(404).json({ message: "费用记录不存在或已删除" });
     return;
@@ -9282,7 +9625,7 @@ app.patch("/api/vehicle-expenses/:id", async (req, res) => {
         odometer_km = @odometerKm,
         is_maintenance = @isMaintenance,
         maintenance_next_date = @maintenanceNextDate,
-        maintenance_next_km = @maintenanceNextKm,
+        ${hasMaintenanceNextKm ? "maintenance_next_km = @maintenanceNextKm," : ""}
         repair_items_json = @repairItemsJson,
         plate = @plate,
         expense_date = @date,
@@ -9296,18 +9639,48 @@ app.patch("/api/vehicle-expenses/:id", async (req, res) => {
     WHERE id = @id AND deleted_at IS NULL
     `).run({ id, ...item });
   if (current.expense_type === "annual" || item.type === "annual") {
-    await syncVehicleAnnualExpenseReminderDates(current.plate);
-    if (item.plate !== current.plate) {
-      await syncVehicleAnnualExpenseReminderDates(item.plate);
+    try {
+      await syncVehicleAnnualExpenseReminderDates(current.plate);
+      if (item.plate !== current.plate) {
+        await syncVehicleAnnualExpenseReminderDates(item.plate);
+      }
+    } catch (error) {
+      console.warn("Failed to sync annual expense reminder dates", {
+        plate: item.plate,
+        error: error?.message || error
+      });
     }
   }
   if (current.expense_type === "repair" || item.type === "repair") {
     const syncPlates = new Set([current.plate, item.plate].filter(Boolean));
     for (const plate of syncPlates) {
-      await syncVehicleMaintenanceReminderDate(plate);
+      try {
+        await syncVehicleMaintenanceReminderDate(plate);
+      } catch (error) {
+        console.warn("Failed to sync maintenance reminder date", {
+          plate,
+          error: error?.message || error
+        });
+      }
     }
   }
-  await writeAudit("update", "vehicle_expense", String(id), `${item.plate}/${item.name}/${item.amount}`);
+  await writeAudit(
+    "update",
+    "vehicle_expense",
+    String(id),
+    auditChangeSummary(current, item, [
+      { label: "类型", before: (before) => before.expense_type, after: () => item.type },
+      { key: "plate", label: "车牌" },
+      { key: "name", label: "名称" },
+      { label: "日期", before: (before) => before.expense_date, after: () => item.date },
+      { key: "amount", label: "金额" },
+      { key: "currency", label: "币种" },
+      { key: "isMaintenance", label: "保养" },
+      { key: "maintenanceNextDate", label: "下次保养时间" },
+      { key: "maintenanceNextKm", label: "下次保养里程" },
+      { key: "note", label: "备注" }
+    ], { entityLabel: "车辆支出" })
+  );
   res.json(mapVehicleExpense(await db.prepare("SELECT * FROM vehicle_expenses WHERE id = ?").get(id)));
 });
 
@@ -9320,10 +9693,24 @@ app.delete("/api/vehicle-expenses/:id", async (req, res) => {
   }
   await db.prepare("UPDATE vehicle_expenses SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(id);
   if (row.expense_type === "annual") {
-    await syncVehicleAnnualExpenseReminderDates(row.plate);
+    try {
+      await syncVehicleAnnualExpenseReminderDates(row.plate);
+    } catch (error) {
+      console.warn("Failed to sync annual expense reminder dates", {
+        plate: row.plate,
+        error: error?.message || error
+      });
+    }
   }
   if (row.expense_type === "repair") {
-    await syncVehicleMaintenanceReminderDate(row.plate);
+    try {
+      await syncVehicleMaintenanceReminderDate(row.plate);
+    } catch (error) {
+      console.warn("Failed to sync maintenance reminder date", {
+        plate: row.plate,
+        error: error?.message || error
+      });
+    }
   }
   await writeAudit("delete", "vehicle_expense", String(id), `${row.plate}/${row.name}`);
   res.json({ ok: true });
@@ -9440,7 +9827,22 @@ app.patch("/api/drivers/:id", async (req, res) => {
     res.status(404).json({ message: error.message });
     return;
   }
-  await writeAudit("update", "driver", String(id), item.name);
+  await writeAudit(
+    "update",
+    "driver",
+    String(id),
+    auditChangeSummary(current, item, [
+      { key: "type", label: "类型" },
+      { key: "name", label: "姓名" },
+      { key: "phone", label: "电话" },
+      { key: "idNo", label: "证件号" },
+      { key: "license", label: "执照" },
+      { key: "employmentStatus", label: "在职状态" },
+      { key: "status", label: "状态" },
+      { key: "defaultWage", label: "默认工资" },
+      { key: "note", label: "备注" }
+    ], { entityLabel: "司机" })
+  );
   res.json(mapDriver(await db.prepare("SELECT * FROM drivers WHERE id = ?").get(id)));
 });
 
@@ -9570,7 +9972,26 @@ app.patch("/api/driver-wage-rules/:id", async (req, res) => {
         add_point_fee = @addPointFee, waiting_per_hour = @waitingPerHour, advance_fee_rates = @advanceFeeRates, note = @note
     WHERE id = @id AND deleted_at IS NULL
   `).run(item);
-  await writeAudit("update", "driver_wage_rule", String(id), `${item.direction}/${item.city}`);
+  await writeAudit(
+    "update",
+    "driver_wage_rule",
+    String(id),
+    auditChangeSummary(current, item, [
+      { key: "driverId", label: "司机" },
+      { key: "direction", label: "方向" },
+      { key: "city", label: "城市" },
+      { key: "transportMode", label: "运输模式" },
+      { key: "currency", label: "币种" },
+      { key: "baseRMB", label: "基础RMB" },
+      { key: "baseHKD", label: "基础HKD" },
+      { key: "loadPerBoard", label: "装货板费" },
+      { key: "unloadPerBoard", label: "卸货板费" },
+      { key: "crossSeaFee", label: "过海费" },
+      { key: "addPointFee", label: "加点费" },
+      { key: "waitingPerHour", label: "等候费" },
+      { key: "note", label: "备注" }
+    ], { entityLabel: "司机费用规则" })
+  );
   res.json(mapDriverWageRule(await db.prepare("SELECT * FROM driver_wage_rules WHERE id = ?").get(id)));
 });
 
@@ -9660,7 +10081,22 @@ app.post("/api/cost-center-rates", async (req, res) => {
       WHERE id = @id
         AND deleted_at IS NULL
     `).run({ ...payload, id });
-    await writeAudit("update", "cost_center_rate", String(id), `${payload.source}/${payload.origin}-${payload.destination}/${payload.tonnage || "全部"}/${payload.effectiveDate}`);
+    await writeAudit(
+      "update",
+      "cost_center_rate",
+      String(id),
+      auditChangeSummary(current, payload, [
+        { key: "source", label: "来源" },
+        { key: "entityName", label: "名称" },
+        { key: "origin", label: "装货地" },
+        { key: "destination", label: "卸货地" },
+        { key: "tonnage", label: "吨位" },
+        { key: "currency", label: "币种" },
+        { key: "costValues", label: "成本值", formatBefore: (value) => auditPreviewValue(value, 18), formatAfter: (value) => auditPreviewValue(value, 18) },
+        { key: "note", label: "备注" },
+        { key: "effectiveDate", label: "修改日期" }
+      ], { entityLabel: "成本中心" })
+    );
     res.json(mapCostCenterRate(await db.prepare("SELECT * FROM cost_center_rates WHERE id = ?").get(id)));
     return;
   }
@@ -9707,6 +10143,7 @@ app.post("/api/vehicle-profit-exchange-rates", async (req, res) => {
     res.status(400).json({ message: "请填写有效汇率" });
     return;
   }
+  const current = await db.prepare("SELECT * FROM vehicle_profit_exchange_rates WHERE period_month = ? AND deleted_at IS NULL").get(periodMonth);
   await db.prepare(`
     INSERT INTO vehicle_profit_exchange_rates (period_month, rate)
     VALUES (@periodMonth, @rate)
@@ -9717,7 +10154,15 @@ app.post("/api/vehicle-profit-exchange-rates", async (req, res) => {
       deleted_at = NULL
   `).run({ periodMonth, rate });
   const row = await db.prepare("SELECT * FROM vehicle_profit_exchange_rates WHERE period_month = ?").get(periodMonth);
-  await writeAudit("update", "vehicle_profit_exchange_rate", periodMonth, `汇率 ${rate}`);
+  await writeAudit(
+    "update",
+    "vehicle_profit_exchange_rate",
+    periodMonth,
+    auditChangeSummary({ periodMonth: current?.period_month, rate: current?.rate }, { periodMonth, rate }, [
+      { key: "periodMonth", label: "月份" },
+      { key: "rate", label: "汇率" }
+    ], { entityLabel: "车辆利润汇率" })
+  );
   res.json(mapVehicleProfitExchangeRate(row));
 });
 
@@ -9805,7 +10250,19 @@ app.patch("/api/company-expenses/:id", async (req, res) => {
         updated_at = CURRENT_TIMESTAMP
     WHERE id = @id AND deleted_at IS NULL
   `).run({ id, ...item });
-  await writeAudit("update", "company_expense", String(id), `${item.entryType}/${item.periodMonth}/${item.category}${item.employeeName ? `/${item.employeeName}` : ""}/${item.amount}`);
+  await writeAudit(
+    "update",
+    "company_expense",
+    String(id),
+    auditChangeSummary(current, item, [
+      { key: "entryType", label: "类型" },
+      { key: "periodMonth", label: "月份" },
+      { key: "category", label: "类别" },
+      { key: "employeeName", label: "员工" },
+      { key: "amount", label: "金额" },
+      { key: "note", label: "备注" }
+    ], { entityLabel: "公司级支出" })
+  );
   res.json(mapCompanyExpense(await db.prepare("SELECT * FROM company_expenses WHERE id = ?").get(id)));
 });
 
@@ -9890,7 +10347,20 @@ app.patch("/api/driver-adjustments/:id", async (req, res) => {
         amount = @amount, status = @status, note = @note
     WHERE id = @id AND deleted_at IS NULL
   `).run(item);
-  await writeAudit("update", "driver_adjustment", String(id), item.type);
+  await writeAudit(
+    "update",
+    "driver_adjustment",
+    String(id),
+    auditChangeSummary(current, item, [
+      { key: "driverId", label: "司机" },
+      { key: "date", label: "日期" },
+      { key: "type", label: "类型" },
+      { key: "currency", label: "币种" },
+      { key: "amount", label: "金额" },
+      { key: "status", label: "状态" },
+      { key: "note", label: "备注" }
+    ], { entityLabel: "司机预支/报销" })
+  );
   res.json(mapDriverAdjustment(await db.prepare("SELECT * FROM driver_adjustments WHERE id = ?").get(id)));
 });
 
@@ -10221,7 +10691,18 @@ app.post("/api/statement-downloads", async (req, res) => {
   const current = await db.prepare("SELECT * FROM statement_downloads WHERE download_key = ? AND deleted_at IS NULL").get(incoming.downloadKey);
   const item = readStatementDownloadPayload(body, current);
   const row = await saveStatementDownload(item);
-  await writeAudit("download", "statement", item.downloadKey, `${item.statementType}/${item.entityName}`);
+  await writeAudit(
+    "download",
+    "statement",
+    item.downloadKey,
+    auditChangeSummary(current || {}, item, [
+      { key: "statementType", label: "类型" },
+      { key: "entityName", label: "对象" },
+      { key: "status", label: "状态" },
+      { key: "paymentStatus", label: "收款状态" },
+      { key: "paymentDate", label: "收款日期" }
+    ], { entityLabel: "对账单" })
+  );
   res.status(201).json(mapStatementDownload(row));
 });
 
@@ -10239,7 +10720,16 @@ app.post("/api/statement-downloads/payment", async (req, res) => {
     return;
   }
   const row = await saveStatementDownload(item);
-  await writeAudit("update", "statement", item.downloadKey, `收款状态${item.paymentStatus}${item.paymentDate ? `/${item.paymentDate}` : ""}`);
+  await writeAudit(
+    "update",
+    "statement",
+    item.downloadKey,
+    auditChangeSummary(current || {}, item, [
+      { key: "status", label: "状态" },
+      { key: "paymentStatus", label: "收款状态" },
+      { key: "paymentDate", label: "收款日期" }
+    ], { entityLabel: "对账单" })
+  );
   res.json(mapStatementDownload(row));
 });
 
@@ -10278,7 +10768,16 @@ app.patch("/api/statement-downloads/:id/status", async (req, res) => {
     WHERE id = ? AND deleted_at IS NULL
   `).run(status, paymentStatus, paymentDate, id);
   const row = await db.prepare("SELECT * FROM statement_downloads WHERE id = ?").get(id);
-  await writeAudit("update", "statement", current.download_key || String(id), `状态改为${status}`);
+  await writeAudit(
+    "update",
+    "statement",
+    current.download_key || String(id),
+    auditChangeSummary(current, { ...current, status, paymentStatus, paymentDate }, [
+      { key: "status", label: "状态" },
+      { key: "paymentStatus", label: "收款状态" },
+      { key: "paymentDate", label: "收款日期" }
+    ], { entityLabel: "对账单" })
+  );
   res.json(mapStatementDownload(row));
 });
 
@@ -10425,7 +10924,19 @@ app.patch("/api/fee-items/:id", async (req, res) => {
     res.status(404).json({ message: "收费项目不存在或已删除" });
     return;
   }
-  await writeAudit("update", "fee_item", String(id), item.name);
+  await writeAudit(
+    "update",
+    "fee_item",
+    String(id),
+    auditChangeSummary(current, item, [
+      { key: "category", label: "类别" },
+      { key: "name", label: "名称" },
+      { key: "currency", label: "币种" },
+      { key: "defaultAmount", label: "默认金额" },
+      { key: "defaultDriverRole", label: "默认归属" },
+      { key: "costSource", label: "成本归属" }
+    ], { entityLabel: "收费项目" })
+  );
   res.json(mapFeeItem(await db.prepare("SELECT * FROM fee_items WHERE id = ?").get(id)));
 });
 
@@ -10539,7 +11050,22 @@ app.patch("/api/freight-rates/:id", async (req, res) => {
         effective_date = @effectiveDate, updated_at = CURRENT_TIMESTAMP
     WHERE id = @id AND deleted_at IS NULL
   `).run(item);
-  await writeAudit("update", "freight_rate", String(id), `${item.customerName || "公共模板"}/${item.direction}/${item.level1}/${item.level2}/${item.level3}/${item.tonnage}/${item.effectiveDate}`);
+  await writeAudit(
+    "update",
+    "freight_rate",
+    String(id),
+    auditChangeSummary(current, item, [
+      { key: "customerName", label: "客户" },
+      { key: "direction", label: "方向" },
+      { key: "level1", label: "一级目录" },
+      { key: "level2", label: "二级目录" },
+      { key: "level3", label: "三级目录" },
+      { key: "tonnage", label: "吨位" },
+      { key: "rmbAmount", label: "RMB" },
+      { key: "hkdAmount", label: "HKD" },
+      { key: "effectiveDate", label: "修改日期" }
+    ], { entityLabel: "运费模板" })
+  );
   res.json(mapFreightRate(await db.prepare("SELECT * FROM freight_rates WHERE id = ?").get(id)));
 });
 
@@ -10638,7 +11164,16 @@ app.patch("/api/templates/:id", async (req, res) => {
     res.status(404).json({ message: "模板不存在或已删除" });
     return;
   }
-  await writeAudit("update", "template", String(id), item.name);
+  await writeAudit(
+    "update",
+    "template",
+    String(id),
+    auditChangeSummary(current, item, [
+      { key: "name", label: "模板名称" },
+      { key: "description", label: "说明" },
+      { key: "content", label: "内容", formatBefore: (value) => auditPreviewValue(value, 18), formatAfter: (value) => auditPreviewValue(value, 18) }
+    ], { entityLabel: "模板" })
+  );
   res.json(mapTemplate(await db.prepare("SELECT * FROM templates WHERE id = ?").get(id)));
 });
 
@@ -10713,7 +11248,17 @@ app.patch("/api/rules/:id", async (req, res) => {
     res.status(404).json({ message: "规则不存在或已删除" });
     return;
   }
-  await writeAudit("update", "rule", String(id), item.name);
+  await writeAudit(
+    "update",
+    "rule",
+    String(id),
+    auditChangeSummary(current, item, [
+      { key: "ruleType", label: "规则类型" },
+      { key: "name", label: "名称" },
+      { key: "content", label: "内容", formatBefore: (value) => auditPreviewValue(value, 18), formatAfter: (value) => auditPreviewValue(value, 18) },
+      { key: "enabled", label: "启用" }
+    ], { entityLabel: "规则" })
+  );
   res.json(mapRule(await db.prepare("SELECT * FROM rule_items WHERE id = ?").get(id)));
 });
 
@@ -10797,7 +11342,17 @@ app.patch("/api/master-data/:id", async (req, res) => {
     res.status(404).json({ message: "基础数据不存在或已删除" });
     return;
   }
-  await writeAudit("update", "master_data", String(id), `${item.type}/${item.name}`);
+  await writeAudit(
+    "update",
+    "master_data",
+    String(id),
+    auditChangeSummary(current, item, [
+      { key: "type", label: "类型" },
+      { key: "name", label: "名称" },
+      { key: "value", label: "值" },
+      { key: "sortOrder", label: "排序" }
+    ], { entityLabel: "基础数据" })
+  );
   res.json(mapMasterData(await db.prepare("SELECT * FROM master_data WHERE id = ?").get(id)));
 });
 
@@ -10908,7 +11463,20 @@ app.patch("/api/accounts/:id", async (req, res) => {
     res.status(404).json({ message: "账号不存在或已删除" });
     return;
   }
-  await writeAudit("update", "account", String(id), item.username);
+  await writeAudit(
+    "update",
+    "account",
+    String(id),
+    auditChangeSummary(current, item, [
+      { key: "username", label: "账号" },
+      { key: "displayName", label: "姓名" },
+      { key: "role", label: "部门" },
+      { key: "status", label: "状态" },
+      { key: "hireDate", label: "入职日期" },
+      { key: "phone", label: "电话" },
+      { key: "email", label: "邮箱" }
+    ], { entityLabel: "账号" })
+  );
   res.json(mapAccount(await db.prepare("SELECT * FROM app_accounts WHERE id = ?").get(id)));
 });
 
@@ -10969,7 +11537,18 @@ app.patch("/api/address-book/:id", async (req, res) => {
         updated_at = CURRENT_TIMESTAMP
     WHERE id = @id
   `).run({ id, ...item });
-  await writeAudit("update", "address_book", String(id), item.address);
+  await writeAudit(
+    "update",
+    "address_book",
+    String(id),
+    auditChangeSummary(existing, item, [
+      { key: "area", label: "片区" },
+      { key: "contact", label: "联系人" },
+      { key: "phone", label: "电话" },
+      { key: "address", label: "地址" },
+      { key: "note", label: "备注" }
+    ], { entityLabel: "地址" })
+  );
   res.json(mapAddressBook(await db.prepare("SELECT * FROM address_book WHERE id = ?").get(id)));
 });
 
@@ -11027,9 +11606,25 @@ app.post("/api/address-history-hidden", async (req, res) => {
   res.status(201).json({ key, address });
 });
 
-app.get("/api/audit-logs", async (_req, res) => {
-  const rows = await db.prepare("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 200").all();
-  res.json(rows.map(mapAuditLog));
+app.get("/api/audit-logs", async (req, res) => {
+  const requestedPage = Number(req.query.page || 1);
+  const requestedPageSize = Number(req.query.pageSize || 100);
+  const pageSize = Math.min(1000, Math.max(1, Number.isFinite(requestedPageSize) ? Math.floor(requestedPageSize) : 100));
+  const totalRow = await db.prepare("SELECT COUNT(*) AS count FROM audit_logs").get();
+  const total = Number(totalRow?.count || 0);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(Math.max(1, Number.isFinite(requestedPage) ? Math.floor(requestedPage) : 1), totalPages);
+  const offset = (page - 1) * pageSize;
+  const rows = total > 0
+    ? await db.prepare("SELECT * FROM audit_logs ORDER BY id DESC LIMIT ? OFFSET ?").all(pageSize, offset)
+    : [];
+  res.json({
+    items: rows.map(mapAuditLog),
+    page,
+    pageSize,
+    total,
+    totalPages
+  });
 });
 
 function normalizeLocationEntriesForBackfill(currentValue, fallbackText = "") {
@@ -11165,6 +11760,7 @@ realtimeHub = createRealtimeHub({
   server,
   authenticate: authenticateRealtimeToken
 });
+listenRealtimeEvents((event) => realtimeHub?.broadcast(event));
 
 server.listen(port, () => {
   console.log(`Hanye API listening on http://127.0.0.1:${port}`);
