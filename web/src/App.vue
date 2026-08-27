@@ -16228,7 +16228,9 @@ function normalizeOrderFeeRow(fee = {}) {
   row.costHKD = normalizeOrderFeeCostComponent(row.costHKD ?? row.cost_hkd ?? row._costHKD ?? row._costHkd);
   row.costRMB = normalizeOrderFeeCostComponent(row.costRMB ?? row.cost_rmb ?? row._costRMB ?? row._costRmb);
   row._costSplit = Boolean(row.costSplit ?? row.cost_split ?? row._costSplit)
-    || Boolean(row.costHKD !== null || row.costRMB !== null || row._costParts.length || orderFeeCostSplitEnabled(row, orderForm));
+    || row.costSplitManual
+    || row._costParts.length > 0
+    || orderFeeCostSplitEnabled(row, orderForm);
   applyOrderFeeFxLinkField(row, "cost");
   row.advanceAddress = feeCategoryLabel(row) === "代垫"
     ? String(row.advanceAddress || row.advance_address || "").trim()
@@ -37662,8 +37664,8 @@ function orderDetailFeeRows(order = {}) {
 			                      </div>
 			                    </td>
                     <td class="invoice-cost-cell">
-                      <div class="invoice-cost-stack" :class="{ 'is-split': fee._costSplit }" :title="orderFeeCostTitle(fee)">
-                        <template v-if="fee._costSplit">
+                      <div class="invoice-cost-stack" :class="{ 'is-split': (orderFeeCostSplitParts(fee) || []).length > 0 }" :title="orderFeeCostTitle(fee)">
+                        <template v-if="(orderFeeCostSplitParts(fee) || []).length > 0">
                           <label
                             v-for="(part, partIndex) in (orderFeeCostSplitParts(fee) || [])"
                             :key="`${fee.id || fee._clientKey || 'split'}-${partIndex}`"
