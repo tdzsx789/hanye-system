@@ -32,7 +32,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(["close", "download"]);
+const emit = defineEmits(["close", "download", "delete"]);
 
 const previewUrl = computed(() => props.file ? props.endpoint(props.file, "preview") : "");
 const contentUrl = computed(() => props.file?.id ? `/api/files/${encodeURIComponent(props.file.id)}/content` : previewUrl.value);
@@ -179,6 +179,9 @@ watch(
     <template #headActions>
       <button type="button" class="icon-btn" @click="emit('download', file)">
         <IconSvg name="download" />下载
+      </button>
+      <button type="button" class="icon-btn danger" @click="emit('delete', file)">
+        <IconSvg name="trash" />删除
       </button>
     </template>
     <div

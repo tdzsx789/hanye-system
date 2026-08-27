@@ -607,6 +607,7 @@ function mapOrder(row) {
     receivableHKD: row.receivable_hkd,
     receivableRMB: row.receivable_rmb,
     status: userTextValue(row.status),
+    operatingUnit: userTextValue(row.operating_unit),
     createdByAccountId: row.created_by_account_id || null,
     createdByUsername: row.created_by_username || "",
     createdByName,
@@ -699,6 +700,7 @@ const ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS = [
 const ORDER_EXPORT_SYSTEM_TOTAL_COLUMN_KEYS = new Set(ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS.map((column) => column.key));
 const ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN = { key: "__sequence", label: "序号", width: 42, fontSize: 8, system: true };
 const ORDER_EXPORT_CHARGE_NOTE_COLUMN = { key: "__chargeNote", label: "收费备注", width: 128, fontSize: 8, system: true };
+const ORDER_EXPORT_OPERATING_UNIT_COLUMN = { key: "operatingUnit", label: "经营单位", width: 96, fontSize: 8, system: true };
 
 function normalizeExportTemplate(template = null) {
   if (!template || template.type !== "visual-export-template") return null;
@@ -2084,6 +2086,18 @@ function mergeExportColumnsByTemplateOrder(templateColumns = [], includedColumns
   return result;
 }
 
+function ordersHaveOperatingUnit(orders = []) {
+  return orders.some((order) => textValue(order?.operatingUnit || order?.operating_unit).trim());
+}
+
+function insertOperatingUnitExportColumn(columns = []) {
+  if (columns.some((column) => textValue(column?.key) === ORDER_EXPORT_OPERATING_UNIT_COLUMN.key)) return columns;
+  const nextColumns = [...columns];
+  const customerIndex = nextColumns.findIndex((column) => textValue(column?.key) === "customer");
+  nextColumns.splice(customerIndex >= 0 ? customerIndex + 1 : Math.min(4, nextColumns.length), 0, { ...ORDER_EXPORT_OPERATING_UNIT_COLUMN });
+  return nextColumns;
+}
+
 function exportColumnsForOrders(templatePayload = null, orders = [], options = {}) {
   const template = normalizeExportTemplate(templatePayload);
   const columns = exportColumnsFromTemplate(templatePayload);
@@ -2104,13 +2118,17 @@ function exportColumnsForOrders(templatePayload = null, orders = [], options = {
   const chargeNoteColumns = options.includeChargeNoteColumn && orders.some(orderIsCharged)
     ? [{ ...ORDER_EXPORT_CHARGE_NOTE_COLUMN }]
     : [];
+  const mergedBodyColumns = mergeExportColumnsByTemplateOrder(
+    templateBodyColumns,
+    bodyColumns,
+    dynamicColumns
+  );
+  const exportBodyColumns = options.includeOperatingUnitColumn && ordersHaveOperatingUnit(orders)
+    ? insertOperatingUnitExportColumn(mergedBodyColumns)
+    : mergedBodyColumns;
   return [
     sequenceColumn || { ...ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN },
-    ...mergeExportColumnsByTemplateOrder(
-      templateBodyColumns,
-      bodyColumns,
-      dynamicColumns
-    ),
+    ...exportBodyColumns,
     ...totalColumns,
     ...chargeNoteColumns
   ].map((column) => ({
@@ -2151,7 +2169,8 @@ function exportTemplateTextRows(templatePayload = null, title = "订单导出") 
 function renderOrdersCsv(orders, title = "订单导出", templatePayload = null, exchange = null) {
   const isCustomerStatement = isCustomerStatementExportTitle(title);
   const columns = exportColumnsForOrders(templatePayload, orders, {
-    includeChargeNoteColumn: isCustomerStatement
+    includeChargeNoteColumn: isCustomerStatement,
+    includeOperatingUnitColumn: isCustomerStatement
   });
   const headers = columns.map(exportColumnHeaderText);
   const rows = exportTableRows(orders, columns, exchange, {
@@ -2217,7 +2236,7 @@ function exportColumnMaxWidth(column = {}) {
   if (["quantity", "weight", "status"].includes(key)) return 68;
   if (["plate", "driver", "hkDriver", "mainlandDriver"].includes(key)) return 82;
   if (["dispatchNo", "no", "sixSheetNo", "tripNo"].includes(key)) return 98;
-  if (["customer", "supplier"].includes(key)) return 138;
+  if (["customer", "supplier", "operatingUnit"].includes(key)) return 138;
   if (["loading", "unloading"].includes(key)) return 132;
   if (key === "__hkdTotal" || key === "__rmbTotal" || key === "receivableHKD" || key === "receivableRMB") return 76;
   if (exportLocationFeeType(column)) return 150;
@@ -2231,7 +2250,7 @@ function exportColumnFluidMaxWidth(column = {}) {
   if (key === ORDER_EXPORT_CHARGE_NOTE_COLUMN.key) return 180;
   if (["direction", "currency", "tonnage"].includes(key)) return 56;
   if (key === "date") return 76;
-  if (key === "customer" || key === "supplier") return 240;
+  if (key === "customer" || key === "supplier" || key === "operatingUnit") return 240;
   if (key === "loading" || key === "unloading") return 260;
   if (exportLocationFeeType(column)) return 240;
   if (isExportFeeItemColumn(column)) return 180;
@@ -2738,7 +2757,8 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
   const template = normalizeExportTemplate(templatePayload);
   const isCustomerStatement = isCustomerStatementExportTitle(title);
   const columns = exportColumnsForOrders(templatePayload, orders, {
-    includeChargeNoteColumn: isCustomerStatement
+    includeChargeNoteColumn: isCustomerStatement,
+    includeOperatingUnitColumn: isCustomerStatement
   });
   const headers = columns.map(exportColumnHeaderText);
   const includeSettlementTotal = shouldIncludeSettlementTotal(title, exchange);
@@ -3321,7 +3341,8 @@ function renderOrdersExcelHtml(orders, title = "订单导出", templatePayload =
   const template = normalizeExportTemplate(templatePayload);
   const isCustomerStatement = isCustomerStatementExportTitle(title);
   const columns = exportColumnsForOrders(templatePayload, orders, {
-    includeChargeNoteColumn: isCustomerStatement
+    includeChargeNoteColumn: isCustomerStatement,
+    includeOperatingUnitColumn: isCustomerStatement
   });
   const context = {
     title,
@@ -3500,6 +3521,7 @@ function normalizeExportOrderSnapshot(order = {}) {
   snapshot.receivableHKD = Number(snapshot.receivableHKD ?? order.receivableHKD ?? 0);
   snapshot.receivableRMB = Number(snapshot.receivableRMB ?? order.receivableRMB ?? 0);
   snapshot.status = String(snapshot.status || order.status || "");
+  snapshot.operatingUnit = String(snapshot.operatingUnit || order.operatingUnit || order.operating_unit || "");
   snapshot.chargedAt = normalizeOrderChargedAt(snapshot.chargedAt || order.chargedAt || order.charged_at || "");
   snapshot.remark = String(snapshot.remark || order.remark || "");
   snapshot.tripNoEnabled = normalizeExportBoolean(snapshot.tripNoEnabled ?? order.tripNoEnabled ?? order.trip_no_enabled);
@@ -3524,7 +3546,8 @@ function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = 
   const template = normalizeExportTemplate(templatePayload);
   const isCustomerStatement = isCustomerStatementExportTitle(title);
   const sourceColumns = exportColumnsForOrders(templatePayload, orders, {
-    includeChargeNoteColumn: isCustomerStatement
+    includeChargeNoteColumn: isCustomerStatement,
+    includeOperatingUnitColumn: isCustomerStatement
   });
   const tableWidth = sourceColumns.reduce((sum, column) => sum + Number(column.width || 76), 0);
   const fluidPageWidth = Math.max(842, Math.ceil(tableWidth + 48));
@@ -7151,7 +7174,17 @@ function recordOrderDispatchLoadInfoCandidate(lookup = new Map(), row = {}, plan
     loadTime: dispatchRowLoadTime(row),
     createdAt: dispatchRowCreatedAt(row, planDate),
     priority,
-    statusRank: dispatchRowStatusRank(row)
+    statusRank: dispatchRowStatusRank(row),
+    driverText: [
+      dispatchRowText(row, "driver"),
+      dispatchRowText(row, "hkDriver"),
+      dispatchRowText(row, "mainlandDriver")
+    ]
+      .flatMap((value) => String(value || "").split(/[\/／|｜、]+/))
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+      .filter((value, index, list) => list.indexOf(value) === index)
+      .join(" / ")
   };
   keys.forEach((key) => {
     const existing = lookup.get(key);
@@ -7194,7 +7227,8 @@ async function hydrateOrderDispatchLoadInfo(orders = []) {
     return {
       ...order,
       dispatchLoadDate: matched?.date || String(order?.date || "").trim().slice(0, 10),
-      dispatchLoadTime: matched?.loadTime || ""
+      dispatchLoadTime: matched?.loadTime || "",
+      dispatchDriver: matched?.driverText || ""
     };
   });
 }
@@ -8766,6 +8800,7 @@ async function readOrderPayload(body, existing = null) {
     receivableHKD: Number(pickBody(body, "receivableHKD", "hkd_receivable", existing?.receivable_hkd || 0) || 0),
     receivableRMB: Number(pickBody(body, "receivableRMB", "rmb_receivable", existing?.receivable_rmb || 0) || 0),
     status,
+    operatingUnit: userTextValue(pickBody(body, "operatingUnit", "operating_unit", existing?.operating_unit || "")),
     remark: userMultilineTextValue(pickBody(body, "remark", null, existing?.remark || "")),
     tripNoEnabled: pickBody(body, "tripNoEnabled", "trip_no_enabled", existing?.trip_no_enabled || 0) ? 1 : 0,
     tripNo: userTextValue(pickBody(body, "tripNo", "trip_no", existing?.trip_no || "")),
@@ -8887,12 +8922,12 @@ app.post("/api/orders", async (req, res) => {
 	      INSERT INTO orders
 	        (no, dispatch_no, customer_id, customer, business_type, port, direction, tonnage, currency, quantity,
 	         needs_weighing, weight, vehicle_source, supplier, plate, driver, hk_driver, mainland_driver, transport_mode, loading, loading_locations, unloading, unloading_locations, order_date, receivable_hkd,
-	         receivable_rmb, status, created_by_account_id, created_by_username, created_by_display_name, remark,
+	         receivable_rmb, status, operating_unit, created_by_account_id, created_by_username, created_by_display_name, remark,
 	         trip_no_enabled, trip_no, six_sheet_enabled, six_sheet_no)
 	      VALUES
 	        (@no, @dispatchNo, @customerId, @customer, @businessType, @port, @direction, @tonnage, @currency,
 	         @quantity, @needsWeighing, @weight, @vehicleSource, @supplier, @plate, @driver, @hkDriver, @mainlandDriver, @transportMode, @loading, @loadingLocationsJson, @unloading, @unloadingLocationsJson, @date,
-	         @receivableHKD, @receivableRMB, @status, @createdByAccountId, @createdByUsername, @createdByName, @remark, @tripNoEnabled, @tripNo,
+	         @receivableHKD, @receivableRMB, @status, @operatingUnit, @createdByAccountId, @createdByUsername, @createdByName, @remark, @tripNoEnabled, @tripNo,
 	         @sixSheetEnabled, @sixSheetNo)
     `).run(item);
     await saveOrderFees(item.no, item.fees, item.currency);
@@ -9147,7 +9182,7 @@ app.patch("/api/orders/:no", async (req, res) => {
 	          loading = @loading, loading_locations = @loadingLocationsJson,
 	          unloading = @unloading, unloading_locations = @unloadingLocationsJson,
           order_date = @date, receivable_hkd = @receivableHKD, receivable_rmb = @receivableRMB,
-          status = @status, remark = @remark, trip_no_enabled = @tripNoEnabled,
+          status = @status, operating_unit = @operatingUnit, remark = @remark, trip_no_enabled = @tripNoEnabled,
           trip_no = @tripNo, six_sheet_enabled = @sixSheetEnabled, six_sheet_no = @sixSheetNo
       WHERE no = @no AND deleted_at IS NULL
     `).run(item);
@@ -9163,6 +9198,7 @@ app.patch("/api/orders/:no", async (req, res) => {
       { key: "customer", label: "客户" },
       { key: "dispatchNo", label: "排车单号" },
       { key: "status", label: "状态" },
+      { key: "operatingUnit", label: "经营单位" },
       { key: "plate", label: "车牌" },
       { key: "driver", label: "司机" },
       { key: "supplier", label: "供应商" },

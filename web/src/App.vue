@@ -272,6 +272,14 @@ function normalizeUserText(value = "", options = {}) {
   return options.trim === false ? text : text.trim();
 }
 
+function isDispatchLocationPlaceholderText(value = "") {
+  const text = normalizeUserText(value, { singleLine: true, compactCjkSpacing: true })
+    .replace(/\s+/g, "")
+    .toLowerCase();
+  if (!text) return true;
+  return /^(?:\[\]|\[null\]|\[undefined\]|null|undefined)$/.test(text);
+}
+
 function normalizePlateText(value = "") {
   return normalizeUserText(value, { singleLine: true, compactCjkSpacing: true })
     .replace(/\s+/g, "")
@@ -1683,13 +1691,14 @@ const dispatchDriverFilter = ref("");
 const dispatchDriverPickerRowId = ref("");
 const dispatchDriverSearchKeyword = ref("");
 const dispatchBusinessTypeFilter = ref("");
-const orderStatusFilter = ref("");
 const orderSearchKeyword = ref("");
 const partnerSearch = ref("");
 const orderCustomerFilter = ref("");
-const orderBusinessFilter = ref("");
 const orderPlateFilter = ref("");
 const orderDriverFilter = ref("");
+const orderLoadingLocationFilter = ref("");
+const orderUnloadingLocationFilter = ref("");
+const orderLocationFilterMenu = ref("");
 const vehicleDriverSearch = ref("");
 const feeItemSearchKeyword = ref("");
 
@@ -2308,6 +2317,7 @@ const orderForm = reactive({
   receivableHKD: 0,
   receivableRMB: 0,
   status: "",
+  operatingUnit: "",
   remark: "",
   tripNoEnabled: false,
   tripNo: "",
@@ -3397,6 +3407,7 @@ function supplierCostRuleAreaValue(value) {
 }
 
 function relatedOrderLocationText(value) {
+  if (isDispatchLocationPlaceholderText(value)) return "-";
   return dispatchSummarizeLocationEntries(value) || normalizeFreightLabel(value) || "-";
 }
 
@@ -6612,9 +6623,11 @@ function orderIncludesDriver(order, driver) {
   if (!order || !driver?.name) return false;
   const driverNames = [
     order.driver,
+    order.dispatchDriver,
     order.hkDriver,
     order.mainlandDriver,
-    ...String(order.driver || "").split("/")
+    ...String(order.driver || "").split(/[\/／|｜、]+/),
+    ...String(order.dispatchDriver || "").split(/[\/／|｜、]+/)
   ].map((value) => String(value || "").trim()).filter(Boolean);
   return driverNames.includes(driver.name);
 }
@@ -7516,17 +7529,30 @@ function orderFeeAssigneeNames(fee = {}, order = orderForm) {
   return orderFeeDefaultAssigneeNames(fee, order);
 }
 
-function orderFeeAssigneeDisplay(fee = {}) {
-  return orderFeeAssigneeNames(fee).join("、") || "-";
+function orderFeeAssigneeDisplayNames(fee = {}, order = orderForm) {
+  const names = orderFeeAssigneeNames(fee, order);
+  if (!names.length) return [];
+  return names;
 }
 
-function orderFeeAssigneeInputValue(fee = {}) {
+function orderFeeAssigneeDisplay(fee = {}, order = orderForm) {
+  return orderFeeAssigneeDisplayNames(fee, order).join("、") || "-";
+}
+
+function orderFeeAssigneeInputValue(fee = {}, order = orderForm) {
   const manualName = normalizeOrderFeeAssigneeText(fee.driverName || fee.driver_name);
-  return orderFeeHasManualAssignee(fee) ? manualName : orderFeeAssigneeDisplay(fee);
+  if (orderFeeHasManualAssignee(fee)) return manualName;
+  const names = orderFeeAssigneeDisplayNames(fee, order);
+  if (names.length > 1) return names.join("\n");
+  return names[0] || "-";
 }
 
-function orderFeeAssigneeTitle(fee = {}) {
-  const names = orderFeeAssigneeNames(fee);
+function orderFeeAssigneeLineCount(fee = {}, order = orderForm) {
+  return Math.max(1, String(orderFeeAssigneeInputValue(fee, order) || "").split("\n").length);
+}
+
+function orderFeeAssigneeTitle(fee = {}, order = orderForm) {
+  const names = orderFeeAssigneeDisplayNames(fee, order);
   if (isCompanyCoveredFee(fee)) return names.length ? names.join("、") : "公司承担";
   if (orderFeeHasManualAssignee(fee)) return names.length ? `手动归属：${names.join("、")}` : "手动归属";
   if (normalizeVehicleSource(orderForm.vehicleSource) === "外派车辆") return names.length ? `外派供应商：${names.join("、")}` : "未选择外派供应商";
@@ -13699,9 +13725,11 @@ function normalizedOrderSearchText(value = "") {
 function orderDriverFilterValues(order = {}) {
   return uniqueOrderCostNames([
     order.driver,
+    order.dispatchDriver,
     order.hkDriver,
     order.mainlandDriver,
-    ...String(order.driver || "").split("/")
+    ...String(order.driver || "").split(/[\/／|｜、]+/),
+    ...String(order.dispatchDriver || "").split(/[\/／|｜、]+/)
   ]);
 }
 
@@ -13711,6 +13739,87 @@ function orderPlateFilterValues(order = {}) {
 
 function orderBusinessTypeFilterValues(order = {}) {
   return [order.businessType];
+}
+
+function orderLocationFilterEntryLabel(entry = {}) {
+  const city = normalizeFreightLabel(entry.city || "");
+  const district = normalizeFreightLabel(entry.district || "");
+  const detail = normalizeFreightLabel(entry.detail || "");
+  if (city && district) return `${city} / ${district}`;
+  if (city) return city;
+  if (district) return district;
+  return dispatchSummarizeStructuredLocationEntries([entry]) || detail;
+}
+
+function orderLocationFilterValues(order = {}, target = "loading") {
+  const labels = recordDispatchLocationEntries(order, target)
+    .map(orderLocationFilterEntryLabel)
+    .filter(Boolean);
+  if (labels.length) return uniqueOrderCostNames(labels);
+  const fallback = relatedOrderLocationText(order?.[target] || "");
+  return fallback && fallback !== "-" ? [fallback] : [];
+}
+
+function orderLocationFilterCurrentValue(target = "loading") {
+  return target === "unloading" ? orderUnloadingLocationFilter.value : orderLoadingLocationFilter.value;
+}
+
+function orderLocationFilterDisplayOptions(target = "loading") {
+  const options = target === "unloading" ? orderUnloadingLocationFilterOptions.value : orderLoadingLocationFilterOptions.value;
+  const keyword = normalizedOrderSearchText(orderLocationFilterCurrentValue(target));
+  if (!keyword) return options;
+  return options.filter((option) => normalizedOrderSearchText(option).includes(keyword));
+}
+
+function orderLocationFilterOptionCount(target = "loading") {
+  return (target === "unloading" ? orderUnloadingLocationFilterOptions.value : orderLoadingLocationFilterOptions.value).length;
+}
+
+function openOrderLocationFilterMenu(target = "loading") {
+  orderLocationFilterMenu.value = target;
+}
+
+function toggleOrderLocationFilterMenu(target = "loading") {
+  orderLocationFilterMenu.value = orderLocationFilterMenu.value === target ? "" : target;
+}
+
+function closeOrderLocationFilterMenu() {
+  orderLocationFilterMenu.value = "";
+}
+
+function handleOrderLocationFilterInput(target = "loading", event = null) {
+  const value = String(event?.target?.value || "").trim();
+  if (target === "unloading") {
+    orderUnloadingLocationFilter.value = value;
+  } else {
+    orderLoadingLocationFilter.value = value;
+  }
+  openOrderLocationFilterMenu(target);
+}
+
+function setOrderLocationFilter(target = "loading", value = "") {
+  if (target === "unloading") {
+    orderUnloadingLocationFilter.value = value;
+  } else {
+    orderLoadingLocationFilter.value = value;
+  }
+  closeOrderLocationFilterMenu();
+}
+
+function orderLocationFilterMatches(order = {}, target = "loading", value = "") {
+  const keyword = normalizedOrderSearchText(value);
+  if (!keyword) return true;
+  return orderLocationFilterValues(order, target)
+    .some((location) => normalizedOrderSearchText(location).includes(keyword));
+}
+
+function confirmFirstOrderLocationFilterOption(target = "loading") {
+  const options = orderLocationFilterDisplayOptions(target);
+  if (options.length) {
+    setOrderLocationFilter(target, options[0]);
+    return;
+  }
+  closeOrderLocationFilterMenu();
 }
 
 function orderFilterOptionValues(rows = [], getter) {
@@ -13761,6 +13870,7 @@ function orderRowSearchValues(order = {}) {
     order.businessType,
     order.plate,
     order.driver,
+    order.dispatchDriver,
     order.hkDriver,
     order.mainlandDriver,
     order.port,
@@ -13798,11 +13908,11 @@ const orderFilterBaseRows = computed(() =>
 );
 
 function orderMatchesSelectFilters(order = {}, excludedFilter = "") {
-  if (excludedFilter !== "status" && orderStatusFilter.value && order.status !== orderStatusFilter.value) return false;
   if (excludedFilter !== "customer" && orderCustomerFilter.value && order.customer !== orderCustomerFilter.value) return false;
-  if (excludedFilter !== "businessType" && orderBusinessFilter.value && order.businessType !== orderBusinessFilter.value) return false;
   if (excludedFilter !== "plate" && !orderFilterValueMatch(orderPlateFilterValues(order), orderPlateFilter.value)) return false;
   if (excludedFilter !== "driver" && !orderFilterValueMatch(orderDriverFilterValues(order), orderDriverFilter.value)) return false;
+  if (excludedFilter !== "loading" && !orderLocationFilterMatches(order, "loading", orderLoadingLocationFilter.value)) return false;
+  if (excludedFilter !== "unloading" && !orderLocationFilterMatches(order, "unloading", orderUnloadingLocationFilter.value)) return false;
   return true;
 }
 
@@ -13823,8 +13933,12 @@ const orderDriverFilterOptions = computed(() =>
   orderFilterOptionValues(orderRowsForFilterOptions("driver"), orderDriverFilterValues)
 );
 
-const orderBusinessFilterOptions = computed(() =>
-  orderFilterOptionValues(orderRowsForFilterOptions("businessType"), orderBusinessTypeFilterValues)
+const orderLoadingLocationFilterOptions = computed(() =>
+  orderFilterOptionValues(orderRowsForFilterOptions("loading"), (order) => orderLocationFilterValues(order, "loading"))
+);
+
+const orderUnloadingLocationFilterOptions = computed(() =>
+  orderFilterOptionValues(orderRowsForFilterOptions("unloading"), (order) => orderLocationFilterValues(order, "unloading"))
 );
 
 function clearOrderFilters() {
@@ -13832,8 +13946,9 @@ function clearOrderFilters() {
   orderCustomerFilter.value = "";
   orderPlateFilter.value = "";
   orderDriverFilter.value = "";
-  orderBusinessFilter.value = "";
-  orderStatusFilter.value = "";
+  orderLoadingLocationFilter.value = "";
+  orderUnloadingLocationFilter.value = "";
+  closeOrderLocationFilterMenu();
 }
 
 const orderFiltersActive = computed(() =>
@@ -13842,8 +13957,8 @@ const orderFiltersActive = computed(() =>
       || orderCustomerFilter.value
       || orderPlateFilter.value
       || orderDriverFilter.value
-      || orderBusinessFilter.value
-      || orderStatusFilter.value
+      || orderLoadingLocationFilter.value
+      || orderUnloadingLocationFilter.value
   )
 );
 
@@ -13851,9 +13966,11 @@ const orderFiltersActive = computed(() =>
   [orderCustomerFilterOptions, orderCustomerFilter],
   [orderPlateFilterOptions, orderPlateFilter],
   [orderDriverFilterOptions, orderDriverFilter],
-  [orderBusinessFilterOptions, orderBusinessFilter]
+  [orderLoadingLocationFilterOptions, orderLoadingLocationFilter],
+  [orderUnloadingLocationFilterOptions, orderUnloadingLocationFilter]
 ].forEach(([optionsRef, valueRef]) => {
   watch(optionsRef, (options) => {
+    if (valueRef === orderLoadingLocationFilter || valueRef === orderUnloadingLocationFilter) return;
     if (valueRef.value && !options.includes(valueRef.value)) {
       valueRef.value = "";
     }
@@ -15927,9 +16044,10 @@ function normalizeOrderFeeCostComponent(value = null) {
 }
 
 function normalizeOrderFeeCostSplitPart(part = {}, index = 0) {
-  const fallbackCurrency = index === 1 ? "人民币" : "港币";
+  const role = String(part.role || (index === 0 ? "香港司机" : "大陆骑师")).trim();
+  const fallbackCurrency = role === "大陆骑师" ? "人民币" : "港币";
   return {
-    role: String(part.role || (index === 0 ? "香港司机" : "大陆骑师")).trim(),
+    role,
     driverName: String(part.driverName || part.driver_name || "").trim(),
     currency: normalizeCostCenterCurrency(part.currency || part.sourceCurrency || fallbackCurrency, fallbackCurrency),
     amount: normalizeOrderFeeCostComponent(part.amount ?? part.sourceAmount ?? 0) ?? 0,
@@ -16874,11 +16992,11 @@ function normalizeCostCenterTonnage(value = "") {
   return String(value || "").trim();
 }
 
-function costCenterValueForItem(values = {}, item = {}) {
+function costCenterValueForItem(values = {}, item = {}, fallbackCurrency = "") {
   const rawValues = parseCostCenterValues(values);
   return normalizeCostCenterValue(
     rawValues[costCenterFeeValueKey(item)],
-    item.currency || "港币"
+    fallbackCurrency || item.currency || "港币"
   );
 }
 
@@ -16891,6 +17009,13 @@ function costCenterTonnageSortIndex(value = "") {
   if (!tonnage) return TONNAGE_OPTIONS.length + 1;
   const index = TONNAGE_OPTIONS.indexOf(tonnage);
   return index >= 0 ? index : TONNAGE_OPTIONS.length + 2;
+}
+
+function costCenterItemDefaultCurrency(source = "", item = {}) {
+  const normalizedSource = normalizeCostCenterSourceLabel(source);
+  if (normalizedSource === "大陆骑师") return "人民币";
+  if (normalizedSource === "香港司机") return "港币";
+  return item.currency || "港币";
 }
 
 const costCenterRouteGroups = computed(() =>
@@ -17209,11 +17334,19 @@ function closeCostCenterRuleModal() {
 }
 
 function costCenterRuleValue(item = {}) {
-  return Number(costCenterValueForItem(costCenterRuleForm.costValues, item).amount || 0);
+  return Number(costCenterValueForItem(
+    costCenterRuleForm.costValues,
+    item,
+    costCenterItemDefaultCurrency(costCenterRuleForm.source, item)
+  ).amount || 0);
 }
 
 function setCostCenterRuleValue(item = {}, value = 0) {
-  const current = costCenterValueForItem(costCenterRuleForm.costValues, item);
+  const current = costCenterValueForItem(
+    costCenterRuleForm.costValues,
+    item,
+    costCenterItemDefaultCurrency(costCenterRuleForm.source, item)
+  );
   const amount = Number(value);
   costCenterRuleForm.costValues[costCenterFeeValueKey(item)] = {
     amount: Number.isFinite(amount) && amount >= 0 ? amount : 0,
@@ -17222,23 +17355,39 @@ function setCostCenterRuleValue(item = {}, value = 0) {
 }
 
 function costCenterRuleCurrency(item = {}) {
-  return costCenterValueForItem(costCenterRuleForm.costValues, item).currency;
+  return costCenterValueForItem(
+    costCenterRuleForm.costValues,
+    item,
+    costCenterItemDefaultCurrency(costCenterRuleForm.source, item)
+  ).currency;
 }
 
 function setCostCenterRuleCurrency(item = {}, value = "") {
-  const current = costCenterValueForItem(costCenterRuleForm.costValues, item);
+  const current = costCenterValueForItem(
+    costCenterRuleForm.costValues,
+    item,
+    costCenterItemDefaultCurrency(costCenterRuleForm.source, item)
+  );
   costCenterRuleForm.costValues[costCenterFeeValueKey(item)] = {
     amount: current.amount,
-    currency: normalizeCostCenterCurrency(value, item.currency || "港币")
+    currency: normalizeCostCenterCurrency(value, costCenterItemDefaultCurrency(costCenterRuleForm.source, item))
   };
 }
 
 function costCenterRuleRowValue(row = {}, item = {}) {
-  return Number(costCenterValueForItem(row.costValues, item).amount || 0);
+  return Number(costCenterValueForItem(
+    row.costValues,
+    item,
+    costCenterItemDefaultCurrency(row.source, item)
+  ).amount || 0);
 }
 
 function costCenterRuleRowValueDisplay(row = {}, item = {}) {
-  const value = costCenterValueForItem(row.costValues, item);
+  const value = costCenterValueForItem(
+    row.costValues,
+    item,
+    costCenterItemDefaultCurrency(row.source, item)
+  );
   return `${currencyCodeDisplay(value.currency)} ${money(value.amount)}`;
 }
 
@@ -17325,7 +17474,11 @@ function costCenterCandidatesForFeeSource(fee = {}, order = orderForm, item = {}
         ? (ruleTonnage ? (ruleTonnage === orderTonnage ? 2 : -1) : 1)
         : 0;
       if (tonnageScore < 0) return [];
-      const costValue = costCenterValueForItem(rule.costValues, item);
+      const costValue = costCenterValueForItem(
+        rule.costValues,
+        item,
+        costCenterItemDefaultCurrency(normalizedSource, item)
+      );
       const unitCost = Number(costValue.amount || 0);
       const quantity = feeCostQuantity(fee);
       const sourceAmount = Number((unitCost * quantity).toFixed(2));
@@ -17361,7 +17514,9 @@ function matchedOrderFeeCostForSource(fee = {}, order = orderForm, item = {}, so
   const matched = sortCostCenterCandidates(
     costCenterCandidatesForFeeSource(fee, order, item, normalizedSource, sourceIndex)
   )[0];
-  const fallbackCurrency = normalizeCostCenterCurrency(fee.currency || order.currency || item?.currency || "港币");
+  const fallbackCurrency = normalizeCostCenterCurrency(
+    costCenterItemDefaultCurrency(normalizedSource, item) || fee.currency || order.currency || item?.currency || "港币"
+  );
   if (!matched) {
     return {
       amount: 0,
@@ -19583,8 +19738,9 @@ function dispatchLocationContactLines(record = {}, target, location = "", index 
 
 function dispatchMessageLocationDetail(value = "") {
   if (value && typeof value === "object") {
-    return String(value.detail ?? "");
+    return isDispatchLocationPlaceholderText(value.detail) ? "" : String(value.detail ?? "");
   }
+  if (isDispatchLocationPlaceholderText(value)) return "";
   return String(value ?? "");
 }
 
@@ -20528,6 +20684,7 @@ function orderCellText(order, key, index = -1) {
 function orderTableCellTitle(order, key) {
   if (key === "customer") return order?.customer || "";
   if (key === "supplier") return order?.supplier || "";
+  if (key === "driver") return orderDetailDriverText(order);
   if (key === "loading" || key === "unloading") return relatedOrderLocationText(order?.[key]);
   if (isOrderFullDisplayColumn(key)) return orderCellText(order, key);
   return "";
@@ -20610,7 +20767,7 @@ function openDispatchDriverPicker(row = {}) {
   if (!row?.id || !canEditDispatchDriver(row)) return;
   if (dispatchDriverPickerRowId.value === row.id) return;
   dispatchDriverPickerRowId.value = row.id;
-  dispatchDriverSearchKeyword.value = dispatchDriverInputValue(row);
+  dispatchDriverSearchKeyword.value = "";
 }
 
 function toggleDispatchDriverPicker(row = {}) {
@@ -20863,6 +21020,7 @@ function splitDispatchLocationParts(value = "") {
   const rawText = String(value || "").replace(/\r/g, "\n").replace(/[／｜|]/g, "/");
   const text = rawText.replace(/^\n+|\n+$/g, "");
   if (!text.trim()) return { city: "", district: "", detail: "" };
+  if (isDispatchLocationPlaceholderText(text)) return { city: "", district: "", detail: "" };
   if (["香港", "澳门"].includes(text.trim())) {
     return {
       city: text.trim(),
@@ -20938,6 +21096,7 @@ function composeDispatchLocationParts(city = "", district = "", detail = "") {
 }
 
 function normalizeDispatchLocationText(value = "", options = {}) {
+  if (isDispatchLocationPlaceholderText(value)) return "";
   return normalizeUserText(value, {
     singleLine: options.singleLine,
     compactCjkSpacing: true
@@ -20945,6 +21104,7 @@ function normalizeDispatchLocationText(value = "", options = {}) {
 }
 
 function normalizeDispatchLocationDetailText(value = "") {
+  if (isDispatchLocationPlaceholderText(value)) return "";
   return String(value ?? "").replace(/\r\n?/g, "\n");
 }
 
@@ -21092,7 +21252,7 @@ function splitAddressBookLocationValue(value = "") {
 
 function splitDispatchLocationEntriesText(value = "") {
   const raw = String(value || "").replace(/\r/g, "\n");
-  if (!raw.trim()) return [""];
+  if (!raw.trim() || isDispatchLocationPlaceholderText(raw)) return [""];
   const trailingBlankCount = (raw.match(/[；;]+$/)?.[0].length) || 0;
   const text = trailingBlankCount > 0 ? raw.slice(0, raw.length - trailingBlankCount) : raw;
   const entries = text
@@ -21470,6 +21630,7 @@ function buildNormalizedOrderPayload() {
     "unloadingContact",
     "unloadingPhone",
     "status",
+    "operatingUnit",
     "tripNo",
     "sixSheetNo",
     "customsNo",
@@ -22731,8 +22892,76 @@ async function deleteFile(file, targetRows) {
       if (index >= 0) targetRows.splice(index, 1);
     }
     notify("文件已删除");
+    return true;
   } catch (error) {
     notify(error.message);
+    return false;
+  }
+}
+
+async function refreshFileRowsAfterDeletion(file = {}) {
+  const entityType = String(file.entityType || "").trim();
+  const entityId = String(file.entityId || "").trim();
+  if (!entityType || !entityId) return;
+  if (entityType === "order") {
+    if (String(editingOrderNo.value || "").trim() === entityId) {
+      await loadOrderFiles(entityId);
+    } else {
+      orderAttachmentRows.value = orderAttachmentRows.value.filter((item) => item.id !== file.id);
+    }
+    return;
+  }
+  if (entityType === "customer") {
+    if (String(selectedCustomer.value?.id || "").trim() === entityId) {
+      await loadCustomerFiles();
+    } else {
+      customerFileRows.value = customerFileRows.value.filter((item) => item.id !== file.id);
+    }
+    return;
+  }
+  if (entityType === "vehicle") {
+    if (String(selectedVehicle.value?.plate || "").trim() === entityId) {
+      await loadVehicleFiles();
+    } else {
+      vehicleFileRows.value = vehicleFileRows.value.filter((item) => item.id !== file.id);
+    }
+    return;
+  }
+  if (entityType === "driver") {
+    if (String(selectedDriver.value?.id || "").trim() === entityId) {
+      await loadDriverFiles();
+    } else {
+      driverFileRows.value = driverFileRows.value.filter((item) => item.id !== file.id);
+    }
+    return;
+  }
+  if (entityType === "vehicle_expense") {
+    if (String(editingVehicleExpenseId.value || "").trim() === entityId) {
+      await loadVehicleExpenseReceiptFiles(entityId);
+    } else {
+      vehicleExpenseReceiptRows.value = vehicleExpenseReceiptRows.value.filter((item) => item.id !== file.id);
+    }
+    return;
+  }
+  if (entityType === "otherBusiness") {
+    if (String(editingOtherBusinessId.value || "").trim() === entityId) {
+      await loadOtherBusinessFiles(entityId);
+    } else {
+      otherBusinessAttachmentRows.value = otherBusinessAttachmentRows.value.filter((item) => item.id !== file.id);
+    }
+  }
+}
+
+async function deletePreviewFile(file = previewFile.value) {
+  if (!file?.id) return false;
+  let deleted = false;
+  try {
+    deleted = await deleteFile(file);
+    if (!deleted) return false;
+    await refreshFileRowsAfterDeletion(file);
+    return true;
+  } finally {
+    if (deleted) closeFilePreview();
   }
 }
 
@@ -23454,6 +23683,7 @@ function resetOrderForm() {
     receivableHKD: 0,
     receivableRMB: 0,
     status: "待确认",
+    operatingUnit: "",
     remark: "",
     tripNoEnabled: false,
     tripNo: "",
@@ -23769,6 +23999,7 @@ async function openOrderModal(customer = null, order = null, options = {}) {
       receivableHKD: Number(order.receivableHKD || 0),
       receivableRMB: Number(order.receivableRMB || 0),
       status: order.status || "",
+      operatingUnit: order.operatingUnit || order.operating_unit || "",
       remark: order.remark || "",
       tripNoEnabled: Boolean(order.tripNoEnabled),
       tripNo: order.tripNo || "",
@@ -26869,13 +27100,36 @@ async function exportStatementCsv() {
       return;
     }
 
+    const includeOperatingUnit = orders.some((order) => String(order.operatingUnit || order.operating_unit || "").trim());
     const attachmentTexts = await Promise.all(orders.map((order) => statementAttachmentText(order)));
+    const headers = [
+      "序号",
+      "排车单号",
+      "订单号",
+      "日期",
+      "客户",
+      ...(includeOperatingUnit ? ["经营单位"] : []),
+      "口岸",
+      "进出口",
+      "吨位",
+      "件数/板数",
+      "重量",
+      "装货地",
+      "卸货地",
+      "应收HKD",
+      "应收RMB",
+      "杂费明细",
+      "附件",
+      "状态",
+      "收费备注"
+    ];
     const rows = orders.map((order, index) => [
       index + 1,
       order.dispatchNo || "",
       order.no || "",
       order.date || "",
       order.customer || "",
+      ...(includeOperatingUnit ? [order.operatingUnit || order.operating_unit || ""] : []),
       displayPortText(order.port) || "",
       order.direction || "",
       order.tonnage || "",
@@ -26899,13 +27153,15 @@ async function exportStatementCsv() {
         rmb: sum.rmb + Number(receivable.rmb || 0)
       };
     }, { hkd: 0, rmb: 0 });
+    const totalRow = headers.map(() => "");
+    totalRow[0] = "合计";
+    totalRow[headers.indexOf("应收HKD")] = money(total.hkd);
+    totalRow[headers.indexOf("应收RMB")] = money(total.rmb);
+    totalRow[headers.indexOf("杂费明细")] = `${total.label}${statementSettlementCurrency.value} ${money(total.total)}；汇率 ${statementExchangeRate.value}`;
     await exportXlsx(
       `${exportFilenamePart(entityName)}_客户对账_${start || "全部"}_${end || "全部"}.xlsx`,
-      ["序号", "排车单号", "订单号", "日期", "客户", "口岸", "进出口", "吨位", "件数/板数", "重量", "装货地", "卸货地", "应收HKD", "应收RMB", "杂费明细", "附件", "状态", "收费备注"],
-      [
-        ...rows,
-        ["合计", "", "", "", "", "", "", "", "", "", "", money(total.hkd), money(total.rmb), `${total.label}${statementSettlementCurrency.value} ${money(total.total)}；汇率 ${statementExchangeRate.value}`, "", "", ""]
-      ],
+      headers,
+      [...rows, totalRow],
       "客户对账"
     );
     await markStatementDownloaded("customer", entityName, start, end, {
@@ -29939,6 +30195,16 @@ function handleColumnOrderMenuDocumentClick(event) {
   customsBusinessColumnMenuOpen.value = false;
 }
 
+function isOrderLocationFilterEventTarget(event) {
+  const target = event?.target;
+  return target instanceof Element && Boolean(target.closest(".order-location-filter-wrap"));
+}
+
+function handleOrderLocationFilterDocumentClick(event) {
+  if (!orderLocationFilterMenu.value || isOrderLocationFilterEventTarget(event)) return;
+  closeOrderLocationFilterMenu();
+}
+
 function isOrderFeeFxContextMenuEventTarget(event) {
   const target = event?.target;
   return target instanceof Element && Boolean(target.closest(".order-fee-fx-menu"));
@@ -29959,6 +30225,7 @@ onMounted(async () => {
   document.addEventListener("click", handleDispatchDriverPickerDocumentClick, true);
   document.addEventListener("focusin", handleDispatchDriverPickerFocusIn, true);
   document.addEventListener("click", handleColumnOrderMenuDocumentClick, true);
+  document.addEventListener("click", handleOrderLocationFilterDocumentClick, true);
   document.addEventListener("click", handleOrderFeeFxContextMenuDocumentClick, true);
   document.addEventListener("keydown", handleOrderFeeFxContextMenuKeydown);
   if (loggedIn.value && canAccessModule("dispatchBoard")) loadDispatchPlansForCurrentFilter();
@@ -29988,6 +30255,7 @@ onBeforeUnmount(() => {
   document.removeEventListener("click", handleDispatchDriverPickerDocumentClick, true);
   document.removeEventListener("focusin", handleDispatchDriverPickerFocusIn, true);
   document.removeEventListener("click", handleColumnOrderMenuDocumentClick, true);
+  document.removeEventListener("click", handleOrderLocationFilterDocumentClick, true);
   document.removeEventListener("click", handleOrderFeeFxContextMenuDocumentClick, true);
   document.removeEventListener("keydown", handleOrderFeeFxContextMenuKeydown);
 });
@@ -30254,11 +30522,12 @@ function closeDispatchDetail() {
 
 function orderDetailDriverText(order = {}) {
   const mode = normalizeTransportMode(order.transportMode || "");
+  const dispatchDriver = String(order.dispatchDriver || "").trim();
   const rawNames = mode === "双司机"
-    ? [order.hkDriver, order.mainlandDriver, order.driver]
+    ? [dispatchDriver, order.hkDriver, order.mainlandDriver, order.driver]
     : isDomesticTransferMode(mode)
-      ? [order.hkDriver, order.driver, order.mainlandDriver]
-      : [order.driver, order.hkDriver, order.mainlandDriver];
+      ? [dispatchDriver, order.hkDriver, order.driver, order.mainlandDriver]
+      : [dispatchDriver, order.driver, order.hkDriver, order.mainlandDriver];
   const names = rawNames
     .flatMap((value) => String(value || "").split(/[\/／|｜、]+/))
     .map((value) => String(value || "").trim())
@@ -31305,18 +31574,108 @@ function orderDetailFeeRows(order = {}) {
 	              <option value="">全部司机</option>
 	              <option v-for="driver in orderDriverFilterOptions" :key="driver" :value="driver">{{ driver }}</option>
 	            </select>
-	            <select v-model="orderBusinessFilter" class="order-small-filter" title="业务类型">
-	              <option value="">全部业务</option>
-	              <option v-for="type in orderBusinessFilterOptions" :key="type" :value="type">{{ type }}</option>
-	            </select>
-	            <select v-model="orderStatusFilter" class="order-small-filter" title="状态">
-	              <option value="">全部状态</option>
-              <option>待确认</option>
-              <option>已签收</option>
-              <option>已审核</option>
-	              <option>缺票据</option>
-	              <option>费用待确认</option>
-	            </select>
+	            <span class="searchable-select order-location-filter-wrap" @click.stop>
+	              <span
+	                class="customs-business-company-combobox order-location-combobox"
+	                :class="{ 'is-open': orderLocationFilterMenu === 'loading' }"
+	              >
+	                <IconSvg class="customs-business-company-search-icon order-location-search-icon" name="search" />
+	                <input
+	                  :value="orderLoadingLocationFilter"
+	                  class="customs-business-company-input order-location-filter-input"
+	                  type="search"
+	                  placeholder="搜索装货地"
+	                  autocomplete="off"
+	                  @focus="openOrderLocationFilterMenu('loading')"
+	                  @input="handleOrderLocationFilterInput('loading', $event)"
+	                  @keydown.enter.prevent="confirmFirstOrderLocationFilterOption('loading')"
+	                  @keydown.esc.prevent="closeOrderLocationFilterMenu()"
+	                />
+	                <button
+	                  v-if="orderLoadingLocationFilter"
+	                  class="customs-business-company-clear order-location-filter-clear"
+	                  type="button"
+	                  title="清空装货地"
+	                  aria-label="清空装货地"
+	                  @click="setOrderLocationFilter('loading', '')"
+	                ><IconSvg name="close" /></button>
+	                <button
+	                  class="customs-business-company-toggle order-location-filter-toggle"
+	                  type="button"
+	                  :title="orderLocationFilterMenu === 'loading' ? '收起地点列表' : '展开地点列表'"
+	                  :aria-label="orderLocationFilterMenu === 'loading' ? '收起地点列表' : '展开地点列表'"
+	                  @click="toggleOrderLocationFilterMenu('loading')"
+	                ><IconSvg name="chevronDown" /></button>
+	              </span>
+	              <div v-if="orderLocationFilterMenu === 'loading'" class="searchable-select-dropdown order-location-dropdown">
+	                <button type="button" :class="{ active: !orderLoadingLocationFilter }" @click="setOrderLocationFilter('loading', '')">
+	                  <strong>全部装货地</strong>
+	                  <span>{{ orderLocationFilterOptionCount('loading') }} 个地点</span>
+	                </button>
+	                <button
+	                  v-for="location in orderLocationFilterDisplayOptions('loading')"
+	                  :key="`order-loading-filter-${location}`"
+	                  type="button"
+	                  :class="{ active: location === orderLoadingLocationFilter }"
+	                  :title="location"
+	                  @click="setOrderLocationFilter('loading', location)"
+	                >
+	                  <strong>{{ location }}</strong>
+	                </button>
+	                <p v-if="orderLocationFilterDisplayOptions('loading').length === 0">暂无匹配装货地</p>
+	              </div>
+	            </span>
+	            <span class="searchable-select order-location-filter-wrap" @click.stop>
+	              <span
+	                class="customs-business-company-combobox order-location-combobox"
+	                :class="{ 'is-open': orderLocationFilterMenu === 'unloading' }"
+	              >
+	                <IconSvg class="customs-business-company-search-icon order-location-search-icon" name="search" />
+	                <input
+	                  :value="orderUnloadingLocationFilter"
+	                  class="customs-business-company-input order-location-filter-input"
+	                  type="search"
+	                  placeholder="搜索卸货地"
+	                  autocomplete="off"
+	                  @focus="openOrderLocationFilterMenu('unloading')"
+	                  @input="handleOrderLocationFilterInput('unloading', $event)"
+	                  @keydown.enter.prevent="confirmFirstOrderLocationFilterOption('unloading')"
+	                  @keydown.esc.prevent="closeOrderLocationFilterMenu()"
+	                />
+	                <button
+	                  v-if="orderUnloadingLocationFilter"
+	                  class="customs-business-company-clear order-location-filter-clear"
+	                  type="button"
+	                  title="清空卸货地"
+	                  aria-label="清空卸货地"
+	                  @click="setOrderLocationFilter('unloading', '')"
+	                ><IconSvg name="close" /></button>
+	                <button
+	                  class="customs-business-company-toggle order-location-filter-toggle"
+	                  type="button"
+	                  :title="orderLocationFilterMenu === 'unloading' ? '收起地点列表' : '展开地点列表'"
+	                  :aria-label="orderLocationFilterMenu === 'unloading' ? '收起地点列表' : '展开地点列表'"
+	                  @click="toggleOrderLocationFilterMenu('unloading')"
+	                ><IconSvg name="chevronDown" /></button>
+	              </span>
+	              <div v-if="orderLocationFilterMenu === 'unloading'" class="searchable-select-dropdown order-location-dropdown">
+	                <button type="button" :class="{ active: !orderUnloadingLocationFilter }" @click="setOrderLocationFilter('unloading', '')">
+	                  <strong>全部卸货地</strong>
+	                  <span>{{ orderLocationFilterOptionCount('unloading') }} 个地点</span>
+	                </button>
+	                <button
+	                  v-for="location in orderLocationFilterDisplayOptions('unloading')"
+	                  :key="`order-unloading-filter-${location}`"
+	                  type="button"
+	                  :class="{ active: location === orderUnloadingLocationFilter }"
+	                  :title="location"
+	                  @click="setOrderLocationFilter('unloading', location)"
+	                >
+	                  <strong>{{ location }}</strong>
+	                </button>
+	                <p v-if="orderLocationFilterDisplayOptions('unloading').length === 0">暂无匹配卸货地</p>
+	              </div>
+	            </span>
 	            <button class="ghost-btn small" type="button" :disabled="!orderFiltersActive" @click="clearOrderFilters">
 	              <IconSvg name="refresh" />清空筛选
 	            </button>
@@ -37309,38 +37668,38 @@ function orderDetailFeeRows(order = {}) {
               <label v-if="orderHasTransportFields" class="order-compact-field">吨位<select v-model="orderForm.tonnage" @change="scheduleAutoFreightSync"><option value=""></option><option v-for="item in TONNAGE_OPTIONS" :key="item">{{ item }}</option></select></label>
               <label class="order-compact-field">件数/板数<input v-model.trim="orderForm.quantity" inputmode="text" placeholder="例如：20件 / 4板" @input="scheduleAutoFreightSync" /></label>
               <label v-if="orderHasTransportFields" class="order-compact-field">重量<input v-model.trim="orderForm.weight" placeholder="例如：1200kg" /></label>
-              <label v-if="orderHasCustomsFields" class="order-compact-field">报关单号<input v-model.trim="orderForm.customsNo" placeholder="报关单号" /></label>
-              <label v-if="orderHasCustomsFields" class="order-compact-field">消费使用单位<input v-model.trim="orderForm.customsUnit" placeholder="消费使用单位" /></label>
-              <label v-if="orderHasCustomsFields" class="order-compact-field">品名项数<input v-model.number="orderForm.customsItemCount" type="number" min="0" placeholder="例如：5" /></label>
-              <label v-if="orderHasCustomsFields" class="order-compact-field">续页数量<input v-model.number="orderForm.customsPageCount" type="number" min="0" placeholder="例如：1" /></label>
-              <label v-if="orderHasTransportFields" class="order-compact-field">车辆来源<select v-model="orderForm.vehicleSource" @change="handleOrderVehicleSourceChange"><option value=""></option><option>汉业物流</option><option>外派车辆</option></select></label>
-              <label v-if="orderHasTransportFields && orderUsesOwnVehicle" class="order-compact-field">运输模式
+              <label v-if="orderHasCustomsFields" class="order-compact-field order-customs-row-field">报关单号<input v-model.trim="orderForm.customsNo" placeholder="报关单号" /></label>
+              <label v-if="orderHasCustomsFields" class="order-compact-field order-customs-row-field">消费使用单位<input v-model.trim="orderForm.customsUnit" placeholder="消费使用单位" /></label>
+              <label v-if="orderHasCustomsFields" class="order-compact-field order-customs-row-field">品名项数<input v-model.number="orderForm.customsItemCount" type="number" min="0" placeholder="例如：5" /></label>
+              <label v-if="orderHasCustomsFields" class="order-compact-field order-customs-row-field">续页数量<input v-model.number="orderForm.customsPageCount" type="number" min="0" placeholder="例如：1" /></label>
+              <label v-if="orderHasTransportFields" class="order-compact-field order-row-2-field">车辆来源<select v-model="orderForm.vehicleSource" @change="handleOrderVehicleSourceChange"><option value=""></option><option>汉业物流</option><option>外派车辆</option></select></label>
+              <label v-if="orderHasTransportFields && orderUsesOwnVehicle" class="order-compact-field order-row-2-field">运输模式
                 <select v-model="orderForm.transportMode" @change="handleOrderTransportModeChange">
                   <option v-for="mode in TRANSPORT_MODE_OPTIONS" :key="mode">{{ mode }}</option>
                 </select>
               </label>
-              <label v-if="orderHasTransportFields && orderUsesOwnVehicle && !orderUsesRelayDrivers" class="order-compact-field">香港司机
+              <label v-if="orderHasTransportFields && orderUsesOwnVehicle && !orderUsesRelayDrivers" class="order-compact-field order-row-2-field">香港司机
                 <select v-model="orderForm.driver">
                   <option value=""></option>
                   <option v-for="driver in hongKongDriverOptions.length ? hongKongDriverOptions : activeDriverRows" :key="driver.id" :value="driver.name">{{ driver.name }}</option>
                 </select>
               </label>
-              <label v-if="orderHasTransportFields && orderUsesRelayDrivers" class="order-compact-field">香港司机
+              <label v-if="orderHasTransportFields && orderUsesRelayDrivers" class="order-compact-field order-row-2-field">香港司机
                 <select v-model="orderForm.hkDriver">
                   <option value=""></option>
                   <option v-for="driver in hongKongDriverOptions.length ? hongKongDriverOptions : activeDriverRows" :key="driver.id" :value="driver.name">{{ driver.name }}</option>
                 </select>
               </label>
-              <label v-if="orderHasTransportFields && orderUsesRelayDrivers && !orderUsesDomesticTransfer" class="order-compact-field">大陆骑师
+              <label v-if="orderHasTransportFields && orderUsesRelayDrivers && !orderUsesDomesticTransfer" class="order-compact-field order-row-2-field">大陆骑师
                 <select v-model="orderForm.mainlandDriver">
                   <option value=""></option>
                   <option v-for="driver in mainlandDriverOptions.length ? mainlandDriverOptions : activeDriverRows" :key="driver.id" :value="driver.name">{{ driver.name }}</option>
                 </select>
               </label>
-              <label v-if="orderHasTransportFields && orderUsesDomesticTransfer" class="order-compact-field">国内车牌号
+              <label v-if="orderHasTransportFields && orderUsesDomesticTransfer" class="order-compact-field order-row-2-field">国内车牌号
                 <input v-model.trim="orderForm.mainlandDriver" placeholder="例如：粤B12345" />
               </label>
-              <div v-if="orderHasTransportFields && orderUsesOutsourcedVehicle" class="order-outsourced-field">
+              <div v-if="orderHasTransportFields && orderUsesOutsourcedVehicle" class="order-outsourced-field order-row-2-field">
                 <label class="order-compact-field">
                   外派供应商
                   <span class="searchable-select order-supplier-search" @click.stop>
@@ -37370,13 +37729,16 @@ function orderDetailFeeRows(order = {}) {
                   <input v-model.trim="orderForm.plate" placeholder="外派车牌" />
                 </label>
               </div>
-              <label v-if="orderHasTransportFields && orderUsesOwnVehicle" class="order-compact-field order-own-vehicle-field">车牌
+              <label v-if="orderHasTransportFields && orderUsesOwnVehicle" class="order-compact-field order-own-vehicle-field order-row-2-field">车牌
                 <select v-model="orderForm.plate">
                   <option value=""></option>
                   <option v-for="vehicle in vehicleRows" :key="vehicle.plate" :value="vehicle.plate">{{ vehicle.plate }}</option>
                 </select>
               </label>
-              <label v-if="orderHasTransportFields" class="order-compact-field order-location-field order-location-wide">装货
+              <label class="order-compact-field order-meta-date-field">订单日期<input v-model="orderForm.date" type="date" /></label>
+              <label class="order-compact-field order-meta-status-field">状态<select v-model="orderForm.status"><option v-for="status in ORDER_STATUS_OPTIONS" :key="status">{{ status }}</option></select></label>
+              <label class="order-compact-field order-operating-unit-field">经营单位<input v-model.trim="orderForm.operatingUnit" placeholder="可不填" /></label>
+              <label v-if="orderHasTransportFields" class="order-compact-field order-location-field order-location-wide order-loading-field">装货
                 <span class="location-input-row route-tree-wrap" @click.stop>
                   <button :class="['route-tree-trigger', { 'is-empty': !orderForm.loading, active: routeTreeDropdown.open && routeTreeDropdown.target === 'loading' }]" type="button" title="选择运费模板片区" @click="toggleRouteTreeDropdown('loading')">
                     <span>{{ orderForm.loading || '点击选择片区' }}</span>
@@ -37414,7 +37776,7 @@ function orderDetailFeeRows(order = {}) {
                   </div>
                 </span>
               </label>
-              <label v-if="orderHasTransportFields" class="order-compact-field order-location-field order-location-wide">卸货
+              <label v-if="orderHasTransportFields" class="order-compact-field order-location-field order-location-wide order-unloading-field">卸货
                 <span class="location-input-row route-tree-wrap" @click.stop>
                   <button :class="['route-tree-trigger', { 'is-empty': !orderForm.unloading, active: routeTreeDropdown.open && routeTreeDropdown.target === 'unloading' }]" type="button" title="选择运费模板片区" @click="toggleRouteTreeDropdown('unloading')">
                     <span>{{ orderForm.unloading || '点击选择片区' }}</span>
@@ -37452,17 +37814,15 @@ function orderDetailFeeRows(order = {}) {
                   </div>
                 </span>
               </label>
-              <label class="order-compact-field">订单日期<input v-model="orderForm.date" type="date" /></label>
-              <label class="order-compact-field">状态<select v-model="orderForm.status"><option v-for="status in ORDER_STATUS_OPTIONS" :key="status">{{ status }}</option></select></label>
-              <label class="order-compact-field order-compact-field-wide">备注<input v-model.trim="orderForm.remark" placeholder="订单备注" /></label>
-              <div v-if="orderHasTransportFields" class="order-toggle-input">
+              <div v-if="orderHasTransportFields" class="order-toggle-input order-trip-field">
                 <label class="order-switch-field"><input v-model="orderForm.tripNoEnabled" type="checkbox" /><span>车次号</span></label>
                 <input v-if="orderForm.tripNoEnabled" v-model.trim="orderForm.tripNo" placeholder="请输入车次号" />
               </div>
-              <div v-if="orderHasTransportFields" class="order-toggle-input">
+              <div v-if="orderHasTransportFields" class="order-toggle-input order-six-sheet-field">
                 <label class="order-switch-field"><input v-model="orderForm.sixSheetEnabled" type="checkbox" /><span>六联单号</span></label>
                 <input v-if="orderForm.sixSheetEnabled" v-model.trim="orderForm.sixSheetNo" placeholder="请输入六联单号" />
               </div>
+              <label class="order-compact-field order-remark-row-field">备注<input v-model.trim="orderForm.remark" placeholder="订单备注" /></label>
             </div>
             </fieldset>
 
@@ -37643,21 +38003,25 @@ function orderDetailFeeRows(order = {}) {
 	                      </label>
 	                    </td>
 			                    <td class="invoice-driver-cell">
-			                      <div class="fee-assignee-editor" :title="orderFeeAssigneeTitle(fee)">
-			                        <input
-			                          :value="orderFeeAssigneeInputValue(fee)"
-			                          type="text"
-			                          placeholder="自动归属"
-			                          :disabled="orderReadOnlyMode || isCompanyCoveredFee(fee)"
-			                          @input="handleOrderFeeAssigneeInput(fee, $event)"
-		                        />
-		                        <button
-		                          v-if="!orderReadOnlyMode && orderFeeHasManualAssignee(fee) && !isCompanyCoveredFee(fee)"
-		                          class="fee-assignee-reset"
-		                          type="button"
-		                          title="恢复自动归属"
-		                          aria-label="恢复自动归属"
-		                          @click="resetOrderFeeAssignee(fee)"
+			                      <div
+			                        class="fee-assignee-editor"
+			                        :class="{ 'is-stacked': !orderFeeHasManualAssignee(fee) && orderFeeAssigneeLineCount(fee, orderForm) > 1 }"
+			                        :title="orderFeeAssigneeTitle(fee)"
+			                      >
+			                        <textarea
+								                          :value="orderFeeAssigneeInputValue(fee)"
+								                          :rows="orderFeeAssigneeLineCount(fee)"
+								                          placeholder="自动归属"
+								                          :disabled="orderReadOnlyMode || isCompanyCoveredFee(fee)"
+								                          @input="handleOrderFeeAssigneeInput(fee, $event)"
+			                        ></textarea>
+			                        <button
+			                          v-if="!orderReadOnlyMode && orderFeeHasManualAssignee(fee) && !isCompanyCoveredFee(fee)"
+			                          class="fee-assignee-reset"
+			                          type="button"
+			                          title="恢复自动归属"
+			                          aria-label="恢复自动归属"
+			                          @click="resetOrderFeeAssignee(fee)"
 			                        >
 			                          <IconSvg name="restore" />
 			                        </button>
@@ -38988,6 +39352,7 @@ function orderDetailFeeRows(order = {}) {
       :endpoint="fileEndpoint"
       :request-headers="apiRequestHeaders"
       @download="openStoredFile($event, 'download')"
+      @delete="deletePreviewFile($event)"
       @close="closeFilePreview"
     />
     </main>

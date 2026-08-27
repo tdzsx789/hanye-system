@@ -580,7 +580,15 @@ body.is-modal-dragging .modal-head {
 }
 
 .order-layout-grid .order-location-wide {
-  grid-column: span 3;
+  grid-column: span 4;
+}
+
+.order-layout-grid .order-loading-field {
+  grid-column: 1 / span 4;
+}
+
+.order-layout-grid .order-unloading-field {
+  grid-column: span 5;
 }
 
 .order-layout-grid .order-outsourced-field {
@@ -614,8 +622,22 @@ body.is-modal-dragging .modal-head {
   grid-column: span 2;
 }
 
+.order-layout-grid .order-meta-date-field,
+.order-layout-grid .order-meta-status-field,
+.order-layout-grid .order-operating-unit-field {
+  grid-column: span 1;
+}
+
+.order-layout-grid .order-customs-row-field {
+  order: 1;
+}
+
 .order-layout-grid .order-compact-field-wide {
   grid-column: span 1;
+}
+
+.order-layout-grid .order-remark-row-field {
+  grid-column: span 5;
 }
 
 .order-layout-grid .order-switch-field {
@@ -638,6 +660,14 @@ body.is-modal-dragging .modal-head {
   align-items: end;
   gap: 10px;
   min-width: 0;
+}
+
+.order-layout-grid .order-trip-field {
+  grid-column: 1 / span 2;
+}
+
+.order-layout-grid .order-six-sheet-field {
+  grid-column: span 2;
 }
 
 .order-toggle-input > input {
@@ -1488,17 +1518,18 @@ body.is-modal-dragging .modal-head {
 .fee-inline-tools {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  align-items: center;
+  align-items: start;
   gap: 4px;
   width: 100%;
   max-width: 100%;
   margin-top: 4px;
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .fee-inline-tools.has-address {
   grid-template-columns: minmax(0, 114px) minmax(0, 1fr);
+  align-items: start;
 }
 
 .fee-inline-tools .fee-address-input {
@@ -1527,23 +1558,24 @@ body.is-modal-dragging .modal-head {
 }
 
 .fee-inline-tools .fee-row-attachments {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
   width: 100%;
   min-width: 0;
   max-width: 100%;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .fee-inline-tools .fee-row-file-chip {
-  flex: 0 1 100%;
-  width: 100%;
+  flex: 0 0 auto;
+  width: fit-content;
   max-width: 100%;
 }
 
 .fee-inline-tools.has-address .fee-row-file-chip {
-  flex: 0 1 100%;
+  flex: 0 0 auto;
   max-width: 100%;
 }
 
@@ -1581,17 +1613,51 @@ body.is-modal-dragging .modal-head {
   min-width: 0;
 }
 
-.fee-assignee-editor input {
-  min-width: 0;
-  height: 28px;
-  padding: 0 5px;
-  color: #20324d;
-  text-overflow: ellipsis;
+.fee-assignee-editor.is-stacked {
+  align-items: center;
 }
 
+.fee-assignee-editor :is(input, textarea) {
+  min-width: 0;
+  width: 100%;
+  height: 28px;
+  padding: 0 5px;
+  border: 0;
+  background: transparent;
+  color: #20324d;
+  text-overflow: ellipsis;
+  box-shadow: none;
+  outline: none;
+}
+
+.fee-assignee-editor textarea {
+  box-sizing: border-box;
+  min-height: 28px;
+  height: auto;
+  padding-top: 0;
+  padding-bottom: 0;
+  line-height: 28px;
+  resize: none;
+  overflow: hidden;
+  white-space: pre-line;
+}
+
+.fee-assignee-editor :is(input, textarea):focus {
+  border: 0;
+  background: #f8fbff;
+  box-shadow: inset 0 0 0 1px #cfe0f4;
+  outline: none;
+}
+
+.fee-assignee-editor textarea:disabled,
 .fee-assignee-editor input:disabled {
   opacity: 1;
   color: #20324d;
+}
+
+.fee-assignee-editor.is-stacked textarea {
+  min-height: 38px;
+  line-height: 18px;
 }
 
 .fee-assignee-reset {
@@ -4326,8 +4392,8 @@ small.vehicle-repair-record-meta {
 .order-filter-group {
   flex: 0 0 auto;
   width: 100%;
-  overflow-x: auto;
-  scrollbar-width: thin;
+  flex-wrap: wrap;
+  overflow: visible;
 }
 
 .order-action-group {
@@ -4409,6 +4475,124 @@ small.vehicle-repair-record-meta {
 .order-small-filter {
   flex: 0 0 118px;
   width: 118px;
+}
+
+.order-location-filter-wrap {
+  position: relative;
+  flex: 0 0 182px;
+  min-width: 182px;
+  z-index: 20;
+}
+
+.order-location-combobox {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 34px;
+  padding: 0 8px 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  box-sizing: border-box;
+}
+
+.order-location-combobox:focus-within,
+.order-location-combobox.is-open {
+  border-color: #8bbcff;
+  box-shadow: 0 0 0 3px rgba(15, 107, 255, 0.08);
+}
+
+.order-location-search-icon {
+  flex: 0 0 auto;
+  margin-right: 0;
+  color: #94a3b8;
+}
+
+.order-location-filter-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  outline: none;
+}
+
+.order-location-filter-clear,
+.order-location-filter-toggle {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+}
+
+.order-location-dropdown {
+  width: min(380px, calc(100vw - 72px));
+}
+
+.order-location-dropdown button {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.order-location-filter-menu {
+  position: absolute;
+  z-index: 45;
+  top: calc(100% + 6px);
+  left: 0;
+  display: grid;
+  gap: 3px;
+  width: min(280px, calc(100vw - 72px));
+  max-height: 320px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid #cfe0f4;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.16);
+}
+
+.order-location-filter-menu button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #1f2a44;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  text-align: left;
+  cursor: pointer;
+}
+
+.order-location-filter-menu button:hover,
+.order-location-filter-menu button.active {
+  background: var(--list-hover-bg);
+  color: #075fc4;
+}
+
+.order-location-filter-menu strong,
+.order-location-filter-menu span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.order-location-filter-menu span,
+.order-location-filter-menu p {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.order-location-filter-menu p {
+  margin: 0;
+  padding: 8px;
 }
 
 .order-toolbar-stat {
@@ -12465,8 +12649,9 @@ tr.selected {
 }
 
 .dispatch-table .dispatch-driver-cell {
-  overflow: hidden;
-  text-overflow: ellipsis;
+  position: relative;
+  overflow: visible;
+  text-overflow: clip;
   white-space: nowrap;
 }
 
@@ -12498,6 +12683,8 @@ tr.selected {
 }
 
 .dispatch-table .dispatch-driver-select {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 0;
@@ -12514,6 +12701,7 @@ tr.selected {
 
 .dispatch-table .dispatch-driver-select:focus-within,
 .dispatch-table .dispatch-driver-select.is-open {
+  z-index: 6;
   border-color: #8bbcff;
   box-shadow: 0 0 0 3px rgba(15, 107, 255, 0.08);
 }
@@ -12554,6 +12742,7 @@ tr.selected {
 }
 
 .dispatch-driver-dropdown {
+  z-index: 50;
   width: min(360px, calc(100vw - 120px));
   max-height: 280px;
 }

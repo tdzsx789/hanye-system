@@ -718,6 +718,7 @@ async function initializeSchema() {
       receivable_hkd DOUBLE PRECISION NOT NULL DEFAULT 0,
       receivable_rmb DOUBLE PRECISION NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT '待确认',
+      operating_unit TEXT NOT NULL DEFAULT '',
       created_by_account_id BIGINT,
       created_by_username TEXT NOT NULL DEFAULT '',
       created_by_display_name TEXT NOT NULL DEFAULT '',
@@ -1186,6 +1187,7 @@ async function initializeSchema() {
 	      "charged_at TEXT NOT NULL DEFAULT ''",
 	      "loading_locations TEXT NOT NULL DEFAULT '[]'",
 	      "unloading_locations TEXT NOT NULL DEFAULT '[]'",
+	      "operating_unit TEXT NOT NULL DEFAULT ''",
 	      "created_by_account_id BIGINT",
       "created_by_username TEXT NOT NULL DEFAULT ''",
       "created_by_display_name TEXT NOT NULL DEFAULT ''"
