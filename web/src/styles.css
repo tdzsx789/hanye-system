@@ -628,6 +628,42 @@ body.is-modal-dragging .modal-head {
   grid-column: span 1;
 }
 
+.order-layout-grid .order-operating-unit-link-field {
+  grid-column: span 2;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.order-operating-unit-link-field .order-compact-field {
+  min-width: 0;
+}
+
+.order-customs-link-btn {
+  height: 34px;
+  min-width: 112px;
+  padding-inline: 12px;
+  border-color: #8bbcff;
+  background: #eef6ff;
+  color: var(--blue);
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.order-customs-link-btn:hover {
+  border-color: #0f6bff;
+  background: #e0efff;
+}
+
+.order-customs-link-btn.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  pointer-events: none;
+}
+
 .order-layout-grid .order-customs-row-field {
   order: 1;
 }
@@ -1142,6 +1178,34 @@ body.is-modal-dragging .modal-head {
   grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 12px 8px;
   padding: 12px 0 8px;
+}
+
+.customer-flag-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px 18px;
+  min-height: 34px;
+  padding: 10px 12px;
+  background: #f8fbff;
+  border: 1px solid #dce7f5;
+  border-radius: 8px;
+}
+
+.customer-flag-row .order-switch-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+}
+
+.customer-flag-row .order-switch-field input {
+  width: 16px;
+  min-width: 16px;
+}
+
+.customer-form-grid .customer-flag-row .order-switch-field {
+  min-height: 34px;
 }
 
 .customer-form-grid textarea {
@@ -3347,7 +3411,7 @@ select {
 
 .vehicle-expense-table.is-fuel th:nth-child(12),
 .vehicle-expense-table.is-fuel td:nth-child(12) {
-  width: 108px;
+  width: 92px;
 }
 
 .vehicle-expense-table.is-fuel td:nth-child(10),
@@ -3363,6 +3427,55 @@ select {
   overflow: visible;
   text-overflow: clip;
   white-space: normal;
+}
+
+.vehicle-expense-table:not(.is-fuel):not(.is-annual) th:nth-child(8),
+.vehicle-expense-table:not(.is-fuel):not(.is-annual) td:nth-child(8) {
+  width: 92px;
+}
+
+.vehicle-expense-table.is-annual th:nth-child(9),
+.vehicle-expense-table.is-annual td:nth-child(9) {
+  width: 92px;
+}
+
+.vehicle-expense-actions-head,
+.vehicle-expense-actions-cell {
+  width: 92px;
+  min-width: 92px;
+  position: sticky;
+  right: 0;
+  z-index: 4;
+  background: #fff;
+  box-shadow: -10px 0 14px -14px rgb(15 35 70 / 44%);
+}
+
+.vehicle-expense-table thead .vehicle-expense-actions-head {
+  z-index: 5;
+  background: #f6f9ff;
+  text-align: center;
+}
+
+.vehicle-expense-table tbody tr:hover .vehicle-expense-actions-cell {
+  background: var(--row-hover-bg);
+}
+
+.vehicle-expense-row-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  min-height: 32px;
+  white-space: nowrap;
+}
+
+.vehicle-expense-action-btn {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
 }
 
 .vehicle-expense-range-inputs {
@@ -6133,13 +6246,41 @@ small.vehicle-repair-record-meta {
   width: 11.5%;
 }
 
+.statement-customer-table th:nth-last-child(4),
+.statement-customer-table td:nth-last-child(4),
+.statement-supplier-table th:nth-last-child(4),
+.statement-supplier-table td:nth-last-child(4),
+.statement-customs-table th:nth-last-child(4),
+.statement-customs-table td:nth-last-child(4) {
+  width: 8%;
+}
+
+.statement-customer-table th:nth-last-child(3),
+.statement-customer-table td:nth-last-child(3),
+.statement-supplier-table th:nth-last-child(3),
+.statement-supplier-table td:nth-last-child(3),
+.statement-customs-table th:nth-last-child(3),
+.statement-customs-table td:nth-last-child(3) {
+  width: 8.5%;
+}
+
 .statement-customer-table th:nth-last-child(2),
-.statement-customer-table td:nth-last-child(2) {
+.statement-customer-table td:nth-last-child(2),
+.statement-supplier-table th:nth-last-child(2),
+.statement-supplier-table td:nth-last-child(2),
+.statement-customs-table th:nth-last-child(2),
+.statement-customs-table td:nth-last-child(2) {
+  width: 12%;
   white-space: nowrap;
 }
 
 .statement-customer-table th:last-child,
-.statement-customer-table td:last-child {
+.statement-customer-table td:last-child,
+.statement-supplier-table th:last-child,
+.statement-supplier-table td:last-child,
+.statement-customs-table th:last-child,
+.statement-customs-table td:last-child {
+  width: 11.5%;
   white-space: nowrap;
 }
 
@@ -6156,6 +6297,13 @@ small.vehicle-repair-record-meta {
   vertical-align: middle;
 }
 
+.finance-tool-card .data-table.compact.statement-supplier-table th,
+.finance-tool-card .data-table.compact.statement-supplier-table td,
+.finance-tool-card .data-table.compact.statement-customs-table th,
+.finance-tool-card .data-table.compact.statement-customs-table td {
+  padding: 7px 6px;
+}
+
 .statement-supplier-table th:first-child,
 .statement-supplier-table td:first-child {
   width: 4.5%;
@@ -6164,14 +6312,14 @@ small.vehicle-repair-record-meta {
 
 .statement-supplier-table th:nth-child(2),
 .statement-supplier-table td:nth-child(2) {
-  width: 31%;
+  width: 29%;
   white-space: normal;
   word-break: break-word;
 }
 
 .statement-supplier-table th:nth-child(3),
 .statement-supplier-table td:nth-child(3) {
-  width: 8.5%;
+  width: 6%;
   text-align: center;
 }
 
@@ -6179,18 +6327,7 @@ small.vehicle-repair-record-meta {
 .statement-supplier-table td:nth-child(4),
 .statement-supplier-table th:nth-child(5),
 .statement-supplier-table td:nth-child(5) {
-  width: 12%;
-  white-space: nowrap;
-}
-
-.statement-supplier-table th:nth-child(6),
-.statement-supplier-table td:nth-child(6) {
-  width: 16%;
-}
-
-.statement-supplier-table th:nth-child(7),
-.statement-supplier-table td:nth-child(7) {
-  width: 8.5%;
+  width: 10.25%;
   white-space: nowrap;
 }
 
@@ -6215,7 +6352,7 @@ small.vehicle-repair-record-meta {
 
 .statement-customs-table th:nth-child(2),
 .statement-customs-table td:nth-child(2) {
-  width: 32%;
+  width: 31.5%;
   white-space: normal;
   word-break: break-word;
 }
@@ -6224,24 +6361,13 @@ small.vehicle-repair-record-meta {
 .statement-customs-table td:nth-child(3),
 .statement-customs-table th:nth-child(4),
 .statement-customs-table td:nth-child(4) {
-  width: 9%;
+  width: 6.5%;
   text-align: center;
 }
 
 .statement-customs-table th:nth-child(5),
 .statement-customs-table td:nth-child(5) {
-  width: 15%;
-  white-space: nowrap;
-}
-
-.statement-customs-table th:nth-child(6),
-.statement-customs-table td:nth-child(6) {
-  width: 16%;
-}
-
-.statement-customs-table th:nth-child(7),
-.statement-customs-table td:nth-child(7) {
-  width: 8.5%;
+  width: 11%;
   white-space: nowrap;
 }
 
@@ -6384,6 +6510,56 @@ small.vehicle-repair-record-meta {
 
 .statement-customer-actions .statement-export-menu {
   z-index: 30;
+}
+
+.order-customs-statement-modal {
+  width: min(1180px, calc(100vw - 32px));
+}
+
+.order-customs-statement-body {
+  display: grid;
+  gap: 12px;
+  padding-bottom: 16px;
+}
+
+.order-customs-statement-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.order-customs-statement-summary span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 9px;
+  border: 1px solid #dbe6f4;
+  border-radius: 8px;
+  background: #f8fbff;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.order-customs-statement-table-wrap {
+  max-height: min(58vh, 560px);
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.order-customs-statement-table th,
+.order-customs-statement-table td {
+  white-space: nowrap;
+}
+
+.order-customs-statement-table .customs-business-text-col {
+  white-space: normal;
+  word-break: break-word;
+}
+
+.order-customs-statement-table .customs-business-amount-col {
+  text-align: right;
 }
 
 .statement-export-backdrop {
@@ -7447,7 +7623,7 @@ small.vehicle-repair-record-meta {
 .company-expense-create-panel {
   display: grid;
   gap: 0;
-  overflow: hidden;
+  overflow: clip;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: #fff;
@@ -7510,11 +7686,17 @@ small.vehicle-repair-record-meta {
 }
 
 .company-expense-form {
-  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  grid-template-columns: 210px 210px 210px 220px minmax(220px, 1fr) auto;
   align-items: end;
   border: 0;
   border-top: 1px solid var(--line);
   background: transparent;
+}
+
+.company-expense-submit-btn.primary-btn.small {
+  justify-self: start;
+  min-width: 120px;
+  margin-left: 0;
 }
 
 .company-expense-salary-panel {
@@ -7543,13 +7725,22 @@ small.vehicle-repair-record-meta {
 .company-expense-salary-list {
   display: grid;
   gap: 8px;
+  max-height: min(34vh, 248px);
+  overflow: auto;
+  padding-right: 4px;
 }
 
 .company-expense-salary-row {
   display: grid;
-  grid-template-columns: minmax(0, 120px) minmax(0, 96px) minmax(0, 1fr) auto;
+  grid-template-columns: 176px 126px 154px 154px 360px 32px;
   gap: 8px;
   align-items: start;
+  width: max-content;
+  max-width: 100%;
+}
+
+.company-expense-salary-row.no-settlement-date {
+  grid-template-columns: 176px 126px 154px 360px 32px;
 }
 
 .company-expense-salary-row label {
@@ -7560,9 +7751,14 @@ small.vehicle-repair-record-meta {
   font-weight: 700;
 }
 
-.company-expense-salary-row input {
+.company-expense-salary-row input,
+.company-expense-salary-row select {
   min-width: 0;
   height: 32px;
+}
+
+.company-expense-salary-settled-at.hidden {
+  display: none;
 }
 
 .company-expense-salary-note {
@@ -7572,7 +7768,8 @@ small.vehicle-repair-record-meta {
 .company-expense-salary-note textarea {
   width: 100%;
   min-width: 0;
-  min-height: 76px;
+  height: 66px;
+  min-height: 66px;
   padding-top: 6px;
   resize: vertical;
 }
@@ -7717,6 +7914,18 @@ small.vehicle-repair-record-meta {
   height: 30px;
 }
 
+.company-expense-table .row-actions {
+  gap: 8px;
+  width: auto;
+  min-width: 144px;
+}
+
+.company-expense-table .row-actions .company-expense-action-btn {
+  min-width: 64px;
+  height: 34px;
+  padding: 0 12px;
+}
+
 .company-expense-employee-cell {
   min-width: 120px;
 }
@@ -7778,6 +7987,14 @@ small.vehicle-repair-record-meta {
   .route-adjust-form,
   .company-expense-form {
     grid-template-columns: 1fr;
+  }
+
+  .company-expense-salary-row {
+    grid-template-columns: 1fr;
+  }
+
+  .company-expense-salary-settled-at.hidden {
+    display: none;
   }
 
   .finance-summary-grid {
@@ -9174,6 +9391,10 @@ tr.selected {
   align-content: start;
   margin: 10px;
   border: 1px solid #e9eef6;
+}
+
+.vehicle-maintenance-summary {
+  grid-template-columns: repeat(4, 140px minmax(0, 1fr));
 }
 
 .info-grid span,
@@ -10778,9 +10999,14 @@ tr.selected {
   min-height: 0;
 }
 
+.driver-adjustment-panel .row-actions .driver-adjustment-action-btn {
+  min-width: 76px;
+  padding: 0 14px;
+}
+
 .driver-adjustment-toolbar {
   display: grid;
-  grid-template-columns: 120px 110px 90px 110px 120px minmax(180px, 1fr) auto auto;
+  grid-template-columns: 120px 110px 90px 110px 120px 130px minmax(220px, 1fr) auto auto auto auto;
   gap: 8px;
   align-items: end;
   padding: 8px;
@@ -10797,6 +11023,14 @@ tr.selected {
   color: #607089;
   font-size: 12px;
   font-weight: 800;
+}
+
+.driver-adjustment-note-field {
+  min-width: 220px;
+}
+
+.driver-adjustment-note-field input {
+  width: 100%;
 }
 
 .driver-adjustment-toolbar input,

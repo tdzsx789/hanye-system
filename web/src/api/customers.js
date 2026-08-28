@@ -1,7 +1,11 @@
 import { apiFetch, apiFetchList } from "./client.js";
 
-export function listCustomers() {
-  return apiFetchList("/customers");
+export function listCustomers(options = {}) {
+  const params = new URLSearchParams();
+  if (options.type) params.set("type", options.type);
+  if (options.category) params.set("category", options.category);
+  const query = params.toString();
+  return apiFetchList(query ? `/customers?${query}` : "/customers");
 }
 
 export function createCustomer(payload) {

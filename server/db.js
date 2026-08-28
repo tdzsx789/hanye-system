@@ -465,6 +465,70 @@ async function backfillCustomerShortNames() {
   }
 }
 
+const LEGACY_ORDER_SIGN_REQUIREMENT_CUSTOMERS = [
+  { keywords: ["恒泰通"], tripNoRequired: true, sixSheetNoRequired: true },
+  { keywords: ["前海慧华"], tripNoRequired: true, sixSheetNoRequired: true },
+  { keywords: ["深佩"], tripNoRequired: false, sixSheetNoRequired: true }
+];
+const CUSTOMER_ORDER_REQUIREMENT_BACKFILL_KEY = "customer_order_requirement_backfill_v1";
+
+function normalizedRequirementText(value = "") {
+  return String(value || "").trim().replace(/\s+/g, "").toLowerCase();
+}
+
+function legacyOrderRequirementForCustomer(customer = {}) {
+  const values = [
+    customer?.id,
+    customer?.name,
+    customer?.short_name,
+    customer?.shortName
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  return LEGACY_ORDER_SIGN_REQUIREMENT_CUSTOMERS.find((rule) =>
+    values.some((value) =>
+      rule.keywords.some((keyword) => normalizedRequirementText(value).includes(normalizedRequirementText(keyword)))
+    )
+  ) || null;
+}
+
+async function getAppSetting(key = "") {
+  const settingKey = String(key || "").trim();
+  if (!settingKey) return "";
+  const row = await db.prepare("SELECT value FROM app_settings WHERE key = ?").get(settingKey);
+  return String(row?.value || "").trim();
+}
+
+async function setAppSetting(key = "", value = "") {
+  const settingKey = String(key || "").trim();
+  if (!settingKey) return;
+  await db.prepare(`
+    INSERT INTO app_settings (key, value)
+    VALUES (?, ?)
+    ON CONFLICT (key) DO UPDATE SET value = excluded.value
+  `).run(settingKey, String(value ?? ""));
+}
+
+async function backfillCustomerOrderRequirementFlags() {
+  if (await getAppSetting(CUSTOMER_ORDER_REQUIREMENT_BACKFILL_KEY)) return;
+  const rows = await db.prepare(`
+    SELECT id, name, short_name, trip_no_required, six_sheet_no_required
+    FROM customers
+    WHERE deleted_at IS NULL AND type = '客户'
+  `).all();
+  for (const row of rows) {
+    const requirement = legacyOrderRequirementForCustomer(row);
+    if (!requirement) continue;
+    const updates = [];
+    if (requirement.tripNoRequired && !Boolean(row.trip_no_required)) updates.push("trip_no_required = true");
+    if (requirement.sixSheetNoRequired && !Boolean(row.six_sheet_no_required)) updates.push("six_sheet_no_required = true");
+    if (updates.length) {
+      await db.prepare(`UPDATE customers SET ${updates.join(", ")} WHERE id = ?`).run(row.id);
+    }
+  }
+  await setAppSetting(CUSTOMER_ORDER_REQUIREMENT_BACKFILL_KEY, "1");
+}
+
 function localDateInputValue(date = new Date()) {
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
   return local.toISOString().slice(0, 10);
@@ -685,14 +749,23 @@ async function initializeSchema() {
       customs_export_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30,
       customs_manifest_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
       customs_verification_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
+      trip_no_required BOOLEAN NOT NULL DEFAULT false,
+      six_sheet_no_required BOOLEAN NOT NULL DEFAULT false,
+      special_customer BOOLEAN NOT NULL DEFAULT false,
       customs_custom_fields TEXT NOT NULL DEFAULT '[]',
       created_at TEXT NOT NULL DEFAULT (CURRENT_DATE::text),
       deleted_at TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL DEFAULT ''
+    );
+
     CREATE TABLE IF NOT EXISTS orders (
       no TEXT PRIMARY KEY,
       dispatch_no TEXT NOT NULL DEFAULT '',
+      dispatch_group_id TEXT NOT NULL DEFAULT '',
       customer_id TEXT REFERENCES customers(id) ON UPDATE CASCADE,
       customer TEXT NOT NULL,
       business_type TEXT NOT NULL DEFAULT '运输',
@@ -1052,6 +1125,8 @@ async function initializeSchema() {
       category TEXT NOT NULL DEFAULT '',
       employee_name TEXT NOT NULL DEFAULT '',
       amount DOUBLE PRECISION NOT NULL DEFAULT 0,
+      salary_status TEXT NOT NULL DEFAULT '工资待结算',
+      settled_at TEXT NOT NULL DEFAULT '',
       note TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
       updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
@@ -1066,6 +1141,7 @@ async function initializeSchema() {
       currency TEXT NOT NULL DEFAULT '港币',
       amount DOUBLE PRECISION NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT '待工资结算',
+      settled_at TEXT NOT NULL DEFAULT '',
       note TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
       deleted_at TEXT
@@ -1224,6 +1300,9 @@ async function initializeSchema() {
       "record_count INTEGER NOT NULL DEFAULT 0",
       "snapshot_ready BOOLEAN NOT NULL DEFAULT false"
     ],
+    orders: [
+      "dispatch_group_id TEXT NOT NULL DEFAULT ''"
+    ],
     drivers: [
       "type TEXT NOT NULL DEFAULT '香港司机'",
       "id_no TEXT NOT NULL DEFAULT ''",
@@ -1297,13 +1376,16 @@ async function initializeSchema() {
       "invoice_address_phone TEXT NOT NULL DEFAULT ''",
       "customs_home_item_count INTEGER NOT NULL DEFAULT 6",
       "customs_page_item_count INTEGER NOT NULL DEFAULT 14",
-      "customs_import_home_fee DOUBLE PRECISION NOT NULL DEFAULT 100",
-      "customs_export_home_fee DOUBLE PRECISION NOT NULL DEFAULT 150",
-      "customs_import_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30",
-      "customs_export_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30",
-      "customs_manifest_fee DOUBLE PRECISION NOT NULL DEFAULT 0",
-      "customs_verification_fee DOUBLE PRECISION NOT NULL DEFAULT 0",
-      "customs_custom_fields TEXT NOT NULL DEFAULT '[]'"
+    "customs_import_home_fee DOUBLE PRECISION NOT NULL DEFAULT 100",
+    "customs_export_home_fee DOUBLE PRECISION NOT NULL DEFAULT 150",
+    "customs_import_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30",
+    "customs_export_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30",
+    "customs_manifest_fee DOUBLE PRECISION NOT NULL DEFAULT 0",
+    "customs_verification_fee DOUBLE PRECISION NOT NULL DEFAULT 0",
+    "trip_no_required BOOLEAN NOT NULL DEFAULT false",
+    "six_sheet_no_required BOOLEAN NOT NULL DEFAULT false",
+    "special_customer BOOLEAN NOT NULL DEFAULT false",
+    "customs_custom_fields TEXT NOT NULL DEFAULT '[]'"
     ],
     files: [
       "storage_provider TEXT NOT NULL DEFAULT 'oss'",
@@ -1339,7 +1421,9 @@ async function initializeSchema() {
     ],
     company_expenses: [
       "entry_type TEXT NOT NULL DEFAULT 'expense'",
-      "employee_name TEXT NOT NULL DEFAULT ''"
+      "employee_name TEXT NOT NULL DEFAULT ''",
+      "salary_status TEXT NOT NULL DEFAULT '工资待结算'",
+      "settled_at TEXT NOT NULL DEFAULT ''"
     ]
   };
 
@@ -1348,6 +1432,20 @@ async function initializeSchema() {
       await addColumn(table, definition);
     }
   }
+
+  await addColumn("driver_adjustments", "settled_at TEXT NOT NULL DEFAULT ''");
+  await db.exec(`
+    UPDATE driver_adjustments
+    SET settled_at = LEFT(created_at, 10)
+    WHERE status = '已结算'
+      AND COALESCE(settled_at, '') = ''
+  `);
+  await db.exec(`
+    UPDATE company_expenses
+    SET salary_status = '工资待结算'
+    WHERE category = '员工工资'
+      AND COALESCE(salary_status, '') = ''
+  `);
 
   await addColumn("audit_logs", "actor TEXT NOT NULL DEFAULT 'admin'");
 
@@ -1378,6 +1476,8 @@ async function initializeSchema() {
       CHECK (category IN ('正常', '代垫'));
     ALTER TABLE files ALTER COLUMN storage_provider SET DEFAULT 'oss';
     CREATE INDEX IF NOT EXISTS idx_files_object_key ON files(storage_provider, object_key);
+    CREATE INDEX IF NOT EXISTS idx_orders_dispatch_group_id ON orders(dispatch_group_id)
+      WHERE dispatch_group_id <> '';
     CREATE INDEX IF NOT EXISTS idx_freight_rates_customer_scope
       ON freight_rates(customer_id, direction, level1, level2, level3, tonnage)
       WHERE deleted_at IS NULL;
@@ -1740,6 +1840,8 @@ async function initializeSchema() {
   if (seedDemoDataEnabled) {
     await seedDemoData();
   }
+
+  await backfillCustomerOrderRequirementFlags();
 }
 
 const DEMO_CUSTOMERS = [

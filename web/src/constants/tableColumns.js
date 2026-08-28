@@ -139,8 +139,6 @@ export function createVehicleListDetailColumns() {
     { key: "brand", label: "品牌", width: 110, min: 78 },
     { key: "model", label: "型号", width: 130, min: 90 },
     { key: "type", label: "车型", width: 80, min: 64 },
-    { key: "mainlandInsuranceDate", label: "大陆保险", width: 112, min: 88 },
-    { key: "hkInsuranceDate", label: "香港保险", width: 112, min: 88 },
     { key: "status", label: "状态", width: 86, min: 68 },
     { key: "monthlyCost", label: "本月费用", width: 104, min: 82 },
     { key: "note", label: "备注", width: 180, min: 100 },
