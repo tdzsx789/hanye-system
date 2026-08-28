@@ -1188,7 +1188,7 @@ function normalizeUserText(value = "", options = {}) {
       .replace(new RegExp(`([${USER_TEXT_CJK}])\\s*([:：])\\s*`, "gu"), "$1$2")
       .replace(new RegExp(`([:：])\\s*(?=[${USER_TEXT_CJK}\\d])`, "gu"), "$1");
   }
-  text = text.replace(/[ \t]{2,}/g, " ");
+  if (options.collapseSpaces !== false) text = text.replace(/[ \t]{2,}/g, " ");
   return options.trim === false ? text : text.trim();
 }
 
@@ -1212,7 +1212,7 @@ function normalizeLocationPartText(value = "") {
 }
 
 function normalizeLocationDetailText(value = "") {
-  return String(value ?? "").replace(/\r\n?/g, "\n");
+  return normalizeUserText(value, { trim: false, collapseSpaces: false });
 }
 
 function composeLocationEntryText(city = "", district = "", detail = "") {
@@ -7031,6 +7031,35 @@ function dispatchRowStringField(row = {}, existingRow = null, camelKey = "", sna
   return userTextValue(fallback);
 }
 
+function dispatchRowArrayField(row = {}, existingRow = null, camelKey = "", snakeKey = "") {
+  const source = Object.prototype.hasOwnProperty.call(row, camelKey)
+    ? row[camelKey]
+    : snakeKey && Object.prototype.hasOwnProperty.call(row, snakeKey)
+      ? row[snakeKey]
+      : existingRow && Object.prototype.hasOwnProperty.call(existingRow, camelKey)
+        ? existingRow[camelKey]
+        : existingRow && snakeKey && Object.prototype.hasOwnProperty.call(existingRow, snakeKey)
+          ? existingRow[snakeKey]
+          : [];
+  let values = [];
+  if (Array.isArray(source)) {
+    values = source;
+  } else {
+    const text = String(source || "").trim();
+    if (text.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(text);
+        values = Array.isArray(parsed) ? parsed : [];
+      } catch {
+        values = [];
+      }
+    } else {
+      values = text ? text.split(/[\/／,，;；、]+/) : [];
+    }
+  }
+  return Array.from(new Set(values.map((value) => userTextValue(value)).filter(Boolean)));
+}
+
 function dispatchRowBooleanField(row = {}, existingRow = null, camelKey = "", snakeKey = "", fallback = false) {
   if (Object.prototype.hasOwnProperty.call(row, camelKey)) return booleanFlag(row[camelKey], fallback);
   if (snakeKey && Object.prototype.hasOwnProperty.call(row, snakeKey)) return booleanFlag(row[snakeKey], fallback);
@@ -7261,6 +7290,10 @@ function dedupeDispatchPlanRows(rows = []) {
 function normalizeDispatchPlanRow(row = {}, existingRow = null, requestCreator = {}, fallbackDate = "") {
   const item = row && typeof row === "object" ? row : {};
   const creator = dispatchRowCreatorFields(item, existingRow, requestCreator);
+  const customerIds = dispatchRowArrayField(item, existingRow, "customerIds", "customer_ids");
+  const customerNames = dispatchRowArrayField(item, existingRow, "customerNames", "customer_names");
+  const primaryCustomerId = customerIds[0] || dispatchRowStringField(item, existingRow, "customerId", "customer_id");
+  const customerDisplay = customerNames.length ? customerNames.join(" / ") : userTextValue(item.customer);
   const loadingLocations = normalizeLocationEntriesFromPayload(
     item,
     "loading",
@@ -7279,8 +7312,10 @@ function normalizeDispatchPlanRow(row = {}, existingRow = null, requestCreator =
     date: String(fallbackDate || item.date || ""),
     dispatchNo: String(item.dispatchNo || ""),
     orderNo: String(item.orderNo || ""),
-    customerId: dispatchRowStringField(item, existingRow, "customerId", "customer_id"),
-    customer: userTextValue(item.customer),
+    customerId: primaryCustomerId,
+    customer: customerDisplay,
+    customerIds,
+    customerNames,
     businessType: dispatchRowStringField(item, existingRow, "businessType", "business_type"),
     currency: dispatchRowStringField(item, existingRow, "currency"),
     plate: normalizePlateText(item.plate),
@@ -7336,6 +7371,14 @@ function dispatchExportOptionalText(...values) {
 
 function dispatchExportShortCustomer(row = {}, customerShortNames = new Map()) {
   const order = dispatchExportNestedRow(row.order);
+  const customerIds = dispatchRowArrayField(row, order, "customerIds", "customer_ids");
+  const customerNames = dispatchRowArrayField(row, order, "customerNames", "customer_names");
+  const customerLabels = customerNames.map((name, index) => dispatchExportText(
+    customerIds[index] ? customerShortNames.get(customerIds[index]) : "",
+    name ? customerShortNames.get(name) : "",
+    name
+  )).filter(Boolean);
+  if (customerLabels.length) return Array.from(new Set(customerLabels)).join(" / ");
   const customerId = dispatchExportText(order.customerId, row.customerId);
   const customerName = dispatchExportText(order.customer, row.customer);
   const candidate = dispatchExportText(
@@ -7889,6 +7932,10 @@ function mapDispatchPlanRecord(row = {}) {
 function normalizeDispatchRecycleRow(row = {}, planDate = todayInputValue()) {
   const item = row && typeof row === "object" ? row : {};
   const creator = creatorFieldsFromRecord(item);
+  const customerIds = dispatchRowArrayField(item, null, "customerIds", "customer_ids");
+  const customerNames = dispatchRowArrayField(item, null, "customerNames", "customer_names");
+  const primaryCustomerId = customerIds[0] || String(item.customerId || item.customer_id || "");
+  const customerDisplay = customerNames.length ? customerNames.join(" / ") : userTextValue(item.customer);
   const loadingLocations = normalizeLocationEntriesFromPayload(item, "loading", item.loading);
   const unloadingLocations = normalizeLocationEntriesFromPayload(item, "unloading", item.unloading);
   return {
@@ -7896,8 +7943,10 @@ function normalizeDispatchRecycleRow(row = {}, planDate = todayInputValue()) {
     createdAt: dispatchRowCreatedAt(item, planDate),
     dispatchNo: String(item.dispatchNo || item.dispatch_no || ""),
     orderNo: String(item.orderNo || item.order_no || ""),
-    customerId: String(item.customerId || item.customer_id || ""),
-    customer: userTextValue(item.customer),
+    customerId: primaryCustomerId,
+    customer: customerDisplay,
+    customerIds,
+    customerNames,
     businessType: userTextValue(item.businessType || item.business_type),
     currency: userTextValue(item.currency),
     plate: normalizePlateText(item.plate),

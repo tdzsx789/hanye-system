@@ -268,7 +268,7 @@ function normalizeUserText(value = "", options = {}) {
       .replace(new RegExp(`([${USER_TEXT_CJK}])\\s*([:：])\\s*`, "gu"), "$1$2")
       .replace(new RegExp(`([:：])\\s*(?=[${USER_TEXT_CJK}\\d])`, "gu"), "$1");
   }
-  text = text.replace(/[ \t]{2,}/g, " ");
+  if (options.collapseSpaces !== false) text = text.replace(/[ \t]{2,}/g, " ");
   return options.trim === false ? text : text.trim();
 }
 
@@ -1941,6 +1941,7 @@ let vehicleExpenseReceiptUploadStatusTimer;
 let dispatchRecognitionStatusTimer;
 let realtimeClient = null;
 let realtimeRefreshTimer = null;
+let realtimeRefreshRunning = false;
 let dispatchPlanSavePromise = Promise.resolve();
 let dispatchPlanAutoSavePromise = Promise.resolve();
 let modalDragState = null;
@@ -2201,6 +2202,8 @@ const dispatchForm = reactive({
   date: "",
   customerId: "",
   customer: "",
+  customerIds: [],
+  customerNames: [],
   plate: "",
   port: "",
   needsWeighing: false,
@@ -4620,10 +4623,11 @@ const dispatchPlanDisplayRows = computed(() =>
         createdByName: row.createdByName || row.createdByUsername || "",
         index,
         orderMissing: Boolean(row.orderNo && !order),
+        customer: dispatchRowCustomerDisplayText(row) || row.customer || "",
         order: order || {
           no: "",
           customerId: row.customerId || "",
-          customer: row.customer || "",
+          customer: dispatchRowCustomerDisplayText(row) || row.customer || "",
           businessType: row.businessType || "",
           date: row.date || dispatchDate.value,
           port: displayPortText(row.port),
@@ -4753,11 +4757,16 @@ function normalizeDispatchPlanRows(rows = [], date = dispatchDate.value) {
     const createdAt = dispatchRowCreatedAt(row) || timestampInputValueFromRowId(row) || normalizeTimestampInputValue(date);
     const loadingLocations = normalizeStructuredDispatchLocationEntries("loading", row.loadingLocations, row.loading, { includeBlank: false });
     const unloadingLocations = normalizeStructuredDispatchLocationEntries("unloading", row.unloadingLocations, row.unloading, { includeBlank: false });
+    const customerSelection = dispatchCustomerSelectionFromRow(row, row.order || {});
     normalizedRows.push({
       ...row,
       date: row.date || date,
       createdAt,
       dispatchNo: row.dispatchNo || generateDispatchNo(date, normalizedRows),
+      customerId: customerSelection[0]?.id || row.customerId || "",
+      customer: dispatchCustomerSelectionText(customerSelection) || row.customer || "",
+      customerIds: customerSelection.map((customer) => String(customer?.id || "").trim()).filter(Boolean),
+      customerNames: customerSelection.map((customer) => String(customer?.name || "").trim()).filter(Boolean),
       driver: row.driver || "",
       loading: composeDispatchLocationEntriesText(loadingLocations) || row.loading || "",
       loadingLocations,
@@ -5576,10 +5585,12 @@ function dispatchFormDriverFields(fallback = {}) {
 function resetDispatchForm() {
   clearAllDispatchLocationDrafts();
   closeDispatchLoadMinutePicker();
-	  Object.assign(dispatchForm, {
+  Object.assign(dispatchForm, {
     date: dispatchDate.value || offsetDateInputValue(1),
     customerId: "",
     customer: "",
+    customerIds: [],
+    customerNames: [],
     plate: "",
     port: "",
     needsWeighing: false,
@@ -5618,14 +5629,17 @@ function fillDispatchFormFromPlanRow(row, fallbackDate = dispatchDate.value || o
   clearAllDispatchLocationDrafts();
   closeDispatchLoadMinutePicker();
   const order = row.order || {};
-  const customerName = order.customer || row.customer || "";
-  const customer = transportCustomerByReference(customerName, order.customerId || row.customerId || "");
+  const customerSelection = dispatchCustomerSelectionFromRow(row, order);
+  const customerName = customerSelection[0]?.name || order.customer || row.customer || "";
+  const customer = customerSelection[0] || transportCustomerByReference(customerName, order.customerId || row.customerId || "");
   const planDate = row.date || order.date || fallbackDate || dispatchDate.value || offsetDateInputValue(1);
   const transportMode = normalizeTransportMode(row.transportMode || order.transportMode || "");
   Object.assign(dispatchForm, {
     date: planDate,
-    customerId: order.customerId || row.customerId || customer?.id || "",
-    customer: customerName,
+    customerId: customer?.id || order.customerId || row.customerId || "",
+    customer: customer?.name || customerName,
+    customerIds: customerSelection.map((item) => item.id).filter(Boolean),
+    customerNames: customerSelection.map((item) => item.name).filter(Boolean),
     plate: row.plate || order.plate || "",
     port: displayPortText(order.port, row.port),
     needsWeighing: booleanFlag(row.needsWeighing, false),
@@ -5642,11 +5656,11 @@ function fillDispatchFormFromPlanRow(row, fallbackDate = dispatchDate.value || o
     driver: dispatchSingleDriverNameFromRow(row, order),
     hkDriver: row.hkDriver || order.hkDriver || "",
     mainlandDriver: row.mainlandDriver || order.mainlandDriver || "",
-	    note: row.note || order.remark || ""
-	  });
-	  setDispatchFormLocationEntriesFromRecord("loading", row, order);
-	  setDispatchFormLocationEntriesFromRecord("unloading", row, order);
-	  dispatchCustomerKeyword.value = partnerDisplayLabel(customerName, "客户") || customerName;
+    note: row.note || order.remark || ""
+  });
+  setDispatchFormLocationEntriesFromRecord("loading", row, order);
+  setDispatchFormLocationEntriesFromRecord("unloading", row, order);
+  dispatchCustomerKeyword.value = "";
   syncDispatchLoadHourDraft();
   dispatchCustomerPickerOpen.value = false;
 }
@@ -5710,13 +5724,18 @@ function createManualDispatchPlanRow() {
   const unloadingPayload = dispatchLocationPayload("unloading");
   const planDate = dispatchForm.date || dispatchDate.value;
   const createdAt = currentTimestampInputValue();
+  const selectedCustomers = dispatchCustomerSelectionForSave();
+  const primaryCustomer = selectedCustomers[0] || null;
   return {
     id: `dispatch-manual-${Date.now()}`,
     createdAt,
     date: planDate,
     dispatchNo: generateDispatchNo(planDate),
     orderNo: "",
-    customer: dispatchForm.customer,
+    customerId: primaryCustomer?.id || dispatchForm.customerId || "",
+    customer: dispatchCustomerSelectionText(selectedCustomers) || dispatchForm.customer,
+    customerIds: selectedCustomers.map((customer) => String(customer?.id || "").trim()).filter(Boolean),
+    customerNames: selectedCustomers.map((customer) => String(customer?.name || "").trim()).filter(Boolean),
     plate: dispatchForm.plate,
     port: displayPortText(dispatchForm.port),
     needsWeighing: booleanFlag(dispatchForm.needsWeighing, false),
@@ -5741,17 +5760,13 @@ async function saveEditedDispatchPlanRow() {
   commitDispatchFormLoadHourInput();
   normalizeDispatchLocationFormValuesForSave();
   normalizeDispatchFormTextValuesForSave();
+  const selectedCustomers = dispatchCustomerSelectionForSave();
+  const matchedCustomer = selectedCustomers[0] || null;
   const targetIndex = dispatchPlanRows.value.findIndex((row) => row.id === editingDispatchRowId.value);
   if (targetIndex < 0) {
     notify("找不到要编辑的排车单");
     return;
   }
-  if (!dispatchForm.customer.trim()) {
-    notify("请选择或输入客户");
-    return;
-  }
-  const matchedCustomer = transportCustomerById(dispatchForm.customerId)
-    || transportCustomerByReference(dispatchForm.customer.trim(), dispatchForm.customerId);
   if (!matchedCustomer) {
     notify("请选择客户资料中的有效客户");
     return;
@@ -5776,10 +5791,14 @@ async function saveEditedDispatchPlanRow() {
 	  });
 	  const loadingPayload = dispatchLocationPayload("loading");
 	  const unloadingPayload = dispatchLocationPayload("unloading");
-	  const updatedRow = {
+  const customerDisplay = dispatchCustomerSelectionText(selectedCustomers) || matchedCustomer.name;
+  const updatedRow = {
     ...originalRow,
     date: planDate,
-    customer: matchedCustomer.name,
+    customerId: matchedCustomer.id,
+    customer: customerDisplay,
+    customerIds: selectedCustomers.map((customer) => String(customer?.id || "").trim()).filter(Boolean),
+    customerNames: selectedCustomers.map((customer) => String(customer?.name || "").trim()).filter(Boolean),
     plate: dispatchForm.plate,
     port: displayPortText(dispatchForm.port),
     needsWeighing: booleanFlag(dispatchForm.needsWeighing, false),
@@ -5805,6 +5824,8 @@ async function saveEditedDispatchPlanRow() {
           ...currentOrder,
           customerId: matchedCustomer.id,
           customer: matchedCustomer.name,
+          dispatchCustomerIds: updatedRow.customerIds,
+          dispatchCustomerNames: updatedRow.customerNames,
           port: updatedRow.port,
           needsWeighing: updatedRow.needsWeighing,
           direction: updatedRow.direction,
@@ -5827,7 +5848,7 @@ async function saveEditedDispatchPlanRow() {
           skipSignValidation: true
         });
         orderRows.value = orderRows.value.map((order) => order.no === item.no ? item : order);
-        updatedRow.customer = item.customer || updatedRow.customer;
+        updatedRow.customer = customerDisplay || item.customer || updatedRow.customer;
       }
     }
 
@@ -5861,12 +5882,8 @@ async function saveManualDispatchPlanRow() {
     await saveEditedDispatchPlanRow();
     return;
   }
-  if (!dispatchForm.customer.trim()) {
-    notify("请选择或输入客户");
-    return;
-  }
-  const matchedCustomer = transportCustomerById(dispatchForm.customerId)
-    || transportCustomerByReference(dispatchForm.customer.trim(), dispatchForm.customerId);
+  const selectedCustomers = dispatchCustomerSelectionForSave();
+  const matchedCustomer = selectedCustomers[0] || null;
   if (!matchedCustomer) {
     notify("请选择客户资料中的有效客户");
     return;
@@ -5876,8 +5893,7 @@ async function saveManualDispatchPlanRow() {
     notify(invalidLocation);
     return;
   }
-  dispatchForm.customerId = matchedCustomer.id;
-  dispatchForm.customer = matchedCustomer.name;
+  syncDispatchCustomerSelection(selectedCustomers);
   const planDate = dispatchForm.date || dispatchDate.value;
   const row = createManualDispatchPlanRow();
   const isCopyingDispatch = Boolean(copyingDispatchRowId.value);
@@ -5889,6 +5905,8 @@ async function saveManualDispatchPlanRow() {
     const item = await ordersApi.createOrder({
       customerId: matchedCustomer.id,
       customer: matchedCustomer.name,
+      dispatchCustomerIds: row.customerIds,
+      dispatchCustomerNames: row.customerNames,
       businessType: "运输",
       port: displayPortText(row.port),
       needsWeighing: row.needsWeighing,
@@ -5915,7 +5933,7 @@ async function saveManualDispatchPlanRow() {
       skipSignValidation: true
     });
     row.orderNo = item.no;
-    row.customer = item.customer || row.customer;
+    row.customer = dispatchCustomerSelectionText(selectedCustomers) || item.customer || row.customer;
     row.dispatchNo = item.dispatchNo || row.dispatchNo;
     orderRows.value = [item, ...orderRows.value.filter((order) => order.no !== item.no)];
     selectedCustomerId.value = item.customerId || matchedCustomer.id;
@@ -5942,13 +5960,20 @@ function createDispatchPlanRow(order) {
   const mode = normalizeTransportMode(order.transportMode || "单司机") || "单司机";
   const planDate = dispatchDate.value;
   const createdAt = currentTimestampInputValue();
+  const customerSelection = dispatchCustomerSelectionFromValues(
+    [order.customerId],
+    [order.customer]
+  );
   return {
     id: `dispatch-${order.no}-${Date.now()}`,
     createdAt,
     date: planDate,
     dispatchNo: order.dispatchNo || generateDispatchNo(planDate),
     orderNo: order.no,
-    customer: order.customer || "",
+    customerId: customerSelection[0]?.id || order.customerId || "",
+    customer: dispatchCustomerSelectionText(customerSelection) || order.customer || "",
+    customerIds: customerSelection.map((customer) => String(customer?.id || "").trim()).filter(Boolean),
+    customerNames: customerSelection.map((customer) => String(customer?.name || "").trim()).filter(Boolean),
     plate: order.plate || "",
     port: displayPortText(order.port) || "-",
     needsWeighing: booleanFlag(order.needsWeighing, false),
@@ -5984,7 +6009,8 @@ function addOrderToDispatchPlan(order) {
 
 function createDispatchDuplicateDraftRow(sourceRow, index) {
   const sourceOrder = sourceRow.order || {};
-  const customerName = String(sourceOrder.customer || sourceRow.customer || "").trim();
+  const customerSelection = dispatchCustomerSelectionFromRow(sourceRow, sourceOrder);
+  const customerName = dispatchCustomerSelectionText(customerSelection) || String(sourceOrder.customer || sourceRow.customer || "").trim();
   return {
     id: `dispatch-copy-draft-${Date.now()}-${index}`,
     sourceRow,
@@ -5992,6 +6018,9 @@ function createDispatchDuplicateDraftRow(sourceRow, index) {
     sourceDispatchNo: sourceRow.dispatchNo || "",
     sourceOrderNo: sourceOrder.no || sourceRow.orderNo || "",
     customer: customerName,
+    customerId: customerSelection[0]?.id || sourceOrder.customerId || sourceRow.customerId || "",
+    customerIds: customerSelection.map((customer) => String(customer?.id || "").trim()).filter(Boolean),
+    customerNames: customerSelection.map((customer) => String(customer?.name || "").trim()).filter(Boolean),
     plate: sourceRow.plate || sourceOrder.plate || "",
     loadTime: sourceRow.loadTime || "",
     port: displayPortText(sourceOrder.port, sourceRow.port),
@@ -6059,9 +6088,11 @@ async function saveDuplicateDispatchRows() {
     for (const draft of rows) {
       const sourceRow = draft.sourceRow || {};
       const sourceOrder = draft.sourceOrder || sourceRow.order || {};
-      const customerName = String(draft.customer || sourceOrder.customer || sourceRow.customer || "").trim();
-      const matchedCustomer = transportCustomerById(sourceOrder.customerId)
-        || transportCustomerByReference(customerName, sourceOrder.customerId);
+      const customerSelection = dispatchCustomerSelectionFromRow(draft, sourceOrder);
+      const customerName = dispatchCustomerSelectionText(customerSelection) || String(draft.customer || sourceOrder.customer || sourceRow.customer || "").trim();
+      const matchedCustomer = customerSelection[0]
+        || transportCustomerById(draft.customerId || sourceOrder.customerId)
+        || transportCustomerByReference(customerName, draft.customerId || sourceOrder.customerId);
       if (!matchedCustomer) {
         notify(`找不到客户：${customerName || "未填写"}`);
         return;
@@ -6074,6 +6105,8 @@ async function saveDuplicateDispatchRows() {
         dispatchNo,
         customerId: matchedCustomer.id,
         customer: matchedCustomer.name,
+        dispatchCustomerIds: customerSelection.map((customer) => String(customer?.id || "").trim()).filter(Boolean),
+        dispatchCustomerNames: customerSelection.map((customer) => String(customer?.name || "").trim()).filter(Boolean),
         businessType: sourceOrder.businessType || "运输",
         port: displayPortText(draft.port, sourceOrder.port, sourceRow.port),
         needsWeighing: booleanFlag(draft.needsWeighing ?? sourceRow.needsWeighing, false),
@@ -6112,7 +6145,10 @@ async function saveDuplicateDispatchRows() {
         date: dispatchDate.value,
         dispatchNo,
         orderNo: item.no,
-        customer: item.customer || matchedCustomer.name,
+        customerId: matchedCustomer.id,
+        customer: customerName || item.customer || matchedCustomer.name,
+        customerIds: customerSelection.map((customer) => String(customer?.id || "").trim()).filter(Boolean),
+        customerNames: customerSelection.map((customer) => String(customer?.name || "").trim()).filter(Boolean),
         plate: draft.plate || sourceRow.plate || "",
         transportMode: draft.transportMode || sourceRow.transportMode || "",
         driver: draft.driver || sourceRow.driver || "",
@@ -6155,19 +6191,20 @@ function bindableDispatchRowsForCustomer(customerName = "") {
   const normalizedName = String(customerName || "").trim();
   if (!normalizedName) return [];
   return dispatchPlanRows.value.filter(
-    (row) => (!row.orderNo || dispatchRowHasMissingOrder(row)) && String(row.customer || "").trim() === normalizedName
+    (row) => (!row.orderNo || dispatchRowHasMissingOrder(row)) && dispatchRowCustomerNames(row).includes(normalizedName)
   );
 }
 
 function applyDispatchRowToOrderForm(row) {
   if (!row) return;
   const rowVehicleSource = normalizeVehicleSource(row.vehicleSource || "");
-  const matchedCustomer = (row.customerId ? customerRowsById.value.get(String(row.customerId || "").trim()) : null)
+  const matchedCustomer = dispatchCustomerSelectionFromRow(row)[0]
+    || (row.customerId ? customerRowsById.value.get(String(row.customerId || "").trim()) : null)
     || findPartnerByTypedLabel(row.customer || "", "客户", "运输客户");
   Object.assign(orderForm, {
     dispatchNo: row.dispatchNo || orderForm.dispatchNo,
     customerId: matchedCustomer?.id || orderForm.customerId,
-    customer: row.customer || orderForm.customer,
+    customer: matchedCustomer?.name || row.customer || orderForm.customer,
     businessType: orderForm.businessType || "运输",
     port: displayPortText(row.port, row.order?.port),
     needsWeighing: booleanFlag(row.needsWeighing, false),
@@ -6543,8 +6580,11 @@ async function exportDispatchPlanRows() {
           date: dispatchPlanDate(row),
           dispatchNo: row.dispatchNo,
           orderNo: row.orderNo,
-          customer: row.customer,
-          customerShortName: transportCustomerDisplayLabel(row.order || row),
+          customerId: row.customerId,
+          customer: dispatchRowCustomerDisplayText(row) || row.customer,
+          customerIds: row.customerIds || [],
+          customerNames: row.customerNames || [],
+          customerShortName: dispatchRowCustomerDisplayText(row) || transportCustomerDisplayLabel(row.order || row),
           plate: row.plate,
           port: displayPortText(row.port, row.order?.port),
           direction: row.direction,
@@ -13705,11 +13745,18 @@ const orderSupplierOptions = computed(() => {
 
 const dispatchCustomerOptions = computed(() => {
   const keyword = normalizeLocationText(dispatchCustomerKeyword.value);
+  const selectedIds = dispatchSelectedCustomerIdSet.value;
   return customerRows.value
     .filter((item) => customerMatchesCategory(item, "运输客户"))
     .filter((item) => {
       if (!keyword) return true;
       return normalizeLocationText([item.id, item.name, item.shortName, item.taxNo, item.mobile, item.contact, item.type].join(" ")).includes(keyword);
+    })
+    .sort((left, right) => {
+      const leftSelected = selectedIds.has(String(left.id || "").trim()) ? 1 : 0;
+      const rightSelected = selectedIds.has(String(right.id || "").trim()) ? 1 : 0;
+      if (leftSelected !== rightSelected) return rightSelected - leftSelected;
+      return String(left.name || "").localeCompare(String(right.name || ""), "zh-Hans-CN", { numeric: true, sensitivity: "base" });
     })
     .slice(0, 100);
 });
@@ -13977,17 +14024,16 @@ const orderFiltersActive = computed(() =>
   });
 });
 
-function selectDispatchCustomer(customer) {
-  dispatchForm.customerId = customer?.id || "";
-  dispatchForm.customer = customer?.name || "";
-  dispatchCustomerKeyword.value = customerShortDisplay(customer) || "";
-  dispatchCustomerPickerOpen.value = false;
+function handleDispatchCustomerInput() {
+  dispatchCustomerPickerOpen.value = true;
 }
 
-function handleDispatchCustomerInput() {
-  const customer = findPartnerByTypedLabel(dispatchCustomerKeyword.value, "客户", "运输客户");
-  dispatchForm.customer = customer?.name || dispatchCustomerKeyword.value;
-  dispatchForm.customerId = customer?.id || "";
+function confirmFirstDispatchCustomerOption() {
+  const customer = dispatchCustomerOptions.value[0];
+  if (customer) {
+    toggleDispatchCustomerSelection(customer);
+    dispatchCustomerKeyword.value = "";
+  }
   dispatchCustomerPickerOpen.value = true;
 }
 
@@ -14842,7 +14888,7 @@ function applyDispatchExcelRecognition(result = {}, options = {}) {
   const sourceLabel = options.sourceLabel || "Excel";
   const filled = new Set();
   if (result.customer) {
-    selectDispatchCustomer(result.customer);
+    addDispatchCustomerSelection(result.customer);
     filled.add("客户");
   }
   [
@@ -15348,11 +15394,12 @@ function dispatchOcrStatusLabel(status = "") {
 }
 
 async function recognizeDispatchImageFile(file) {
-  setDispatchRecognitionStatus("正在加载 OCR 识别模型", "busy");
+  setDispatchRecognitionStatus("正在加载中文 OCR 识别模型", "busy");
   const module = await import("tesseract.js");
   const Tesseract = module.default || module;
   if (!Tesseract?.createWorker) throw new Error("OCR 识别组件加载失败");
-  const worker = await Tesseract.createWorker("chi_sim+eng", 1, {
+  const worker = await Tesseract.createWorker(["chi_sim", "chi_tra", "eng"], 1, {
+    langPath: "/tessdata/4.0.0_best_int",
     logger(message = {}) {
       const label = dispatchOcrStatusLabel(message.status);
       const progress = Number(message.progress || 0);
@@ -18367,19 +18414,158 @@ const savedAddressBookOptions = computed(() =>
 
 function currentAddressBookCustomerId() {
   if (locationPicker.owner === "dispatch") {
-    const matchedCustomer = transportCustomerById(dispatchForm.customerId)
+    const matchedCustomer = dispatchSelectedCustomerRows.value[0]
+      || transportCustomerById(dispatchForm.customerId)
       || transportCustomerByReference(dispatchForm.customer, dispatchForm.customerId);
     return matchedCustomer?.id || "";
   }
   return transportCustomerById(orderForm.customerId)?.id || transportCustomerById(selectedCustomer.value?.id || "")?.id || "";
 }
 
-const dispatchCustomerSelected = computed(() => {
-  const customerName = String(dispatchForm.customer || "").trim();
-  if (!customerName && !dispatchForm.customerId) return false;
-  const byId = transportCustomerById(dispatchForm.customerId);
-  return Boolean(byId || findPartnerByTypedLabel(customerName, "客户", "运输客户"));
-});
+function normalizeDispatchCustomerSelectionValues(values = []) {
+  let source = values;
+  if (typeof source === "string") {
+    const text = source.trim();
+    if (text.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(text);
+        source = Array.isArray(parsed) ? parsed : [];
+      } catch {
+        source = [];
+      }
+    } else {
+      source = text.split(/[\/／,，;；、]+/);
+    }
+  }
+  return Array.from(new Set((Array.isArray(source) ? source : [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)));
+}
+
+function dispatchCustomerSelectionFromValues(customerIds = [], customerNames = []) {
+  const ids = normalizeDispatchCustomerSelectionValues(customerIds);
+  const names = normalizeDispatchCustomerSelectionValues(customerNames);
+  const selection = [];
+  const seen = new Set();
+  ids.forEach((id, index) => {
+    const name = names[index] || "";
+    const customer = transportCustomerById(id) || transportCustomerByReference(name, id);
+    const resolved = customer || (id || name ? { id, name: name || id, shortName: name || id } : null);
+    const key = String(resolved?.id || resolved?.name || id || name).trim();
+    if (!resolved || !key || seen.has(key)) return;
+    seen.add(key);
+    selection.push(resolved);
+  });
+  names.forEach((name) => {
+    const customer = transportCustomerByReference(name, "");
+    const resolved = customer || (name ? { id: "", name, shortName: name } : null);
+    const key = String(resolved?.id || resolved?.name || name).trim();
+    if (!resolved || !key || seen.has(key)) return;
+    seen.add(key);
+    selection.push(resolved);
+  });
+  return selection;
+}
+
+function dispatchCustomerSelectionFromRow(row = {}, order = {}) {
+  const ids = row.customerIds ?? row.customer_ids ?? [];
+  const names = row.customerNames ?? row.customer_names ?? [];
+  const selection = dispatchCustomerSelectionFromValues(ids, names);
+  if (selection.length) return selection;
+  const orderCustomer = transportCustomerById(order.customerId || row.customerId || "")
+    || transportCustomerByReference(order.customer || row.customer || "", order.customerId || row.customerId || "");
+  if (orderCustomer) return [orderCustomer];
+  const customerName = String(row.customer || order.customer || "").trim();
+  return customerName ? [{ id: String(row.customerId || order.customerId || "").trim(), name: customerName, shortName: customerName }] : [];
+}
+
+function dispatchCustomerSelectionLabel(customer = null) {
+  return customerShortDisplay(customer) || String(customer?.name || "").trim();
+}
+
+function dispatchCustomerSelectionText(customers = []) {
+  return uniqueOrderCostNames((Array.isArray(customers) ? customers : []).map((customer) => dispatchCustomerSelectionLabel(customer))).join(" / ");
+}
+
+const dispatchSelectedCustomerRows = computed(() =>
+  dispatchCustomerSelectionFromValues(dispatchForm.customerIds, dispatchForm.customerNames)
+);
+
+const dispatchSelectedCustomerIdSet = computed(() =>
+  new Set(dispatchSelectedCustomerRows.value.map((customer) => String(customer.id || "").trim()).filter(Boolean))
+);
+
+const dispatchCustomerSelected = computed(() => dispatchSelectedCustomerRows.value.length > 0);
+
+function syncDispatchCustomerSelection(customers = []) {
+  const selected = dispatchCustomerSelectionFromValues(
+    customers.map((customer) => customer?.id || ""),
+    customers.map((customer) => customer?.name || "")
+  );
+  dispatchForm.customerIds = selected.map((customer) => String(customer.id || "").trim()).filter(Boolean);
+  dispatchForm.customerNames = selected.map((customer) => String(customer.name || "").trim()).filter(Boolean);
+  dispatchForm.customerId = dispatchForm.customerIds[0] || "";
+  dispatchForm.customer = dispatchForm.customerNames[0] || "";
+  dispatchCustomerKeyword.value = "";
+}
+
+function dispatchCustomerSelectionActive(customer = {}) {
+  const customerId = String(customer?.id || "").trim();
+  if (customerId && dispatchSelectedCustomerIdSet.value.has(customerId)) return true;
+  const customerName = String(customer?.name || "").trim();
+  return Boolean(customerName && dispatchSelectedCustomerRows.value.some((item) => String(item.name || "").trim() === customerName));
+}
+
+function addDispatchCustomerSelection(customer = {}) {
+  if (!customer?.id && !customer?.name) return;
+  const next = [...dispatchSelectedCustomerRows.value];
+  const customerId = String(customer.id || "").trim();
+  const customerName = String(customer.name || "").trim();
+  const key = customerId || customerName;
+  if (key && next.some((item) => String(item.id || item.name || "").trim() === key)) return;
+  next.push(customer);
+  syncDispatchCustomerSelection(next);
+  dispatchCustomerPickerOpen.value = true;
+}
+
+function removeDispatchCustomerSelection(customer = {}) {
+  const customerId = String(customer?.id || "").trim();
+  const customerName = String(customer?.name || "").trim();
+  const next = dispatchSelectedCustomerRows.value.filter((item) => {
+    const itemId = String(item?.id || "").trim();
+    const itemName = String(item?.name || "").trim();
+    if (customerId && itemId) return itemId !== customerId;
+    if (customerName) return itemName !== customerName;
+    return true;
+  });
+  syncDispatchCustomerSelection(next);
+  dispatchCustomerPickerOpen.value = true;
+}
+
+function toggleDispatchCustomerSelection(customer = {}) {
+  if (dispatchCustomerSelectionActive(customer)) {
+    removeDispatchCustomerSelection(customer);
+  } else {
+    addDispatchCustomerSelection(customer);
+  }
+}
+
+function clearDispatchCustomerSelection() {
+  dispatchForm.customerIds = [];
+  dispatchForm.customerNames = [];
+  dispatchForm.customerId = "";
+  dispatchForm.customer = "";
+  dispatchCustomerKeyword.value = "";
+}
+
+function dispatchCustomerSelectionForSave() {
+  const selected = dispatchSelectedCustomerRows.value;
+  if (selected.length) return selected;
+  return dispatchCustomerSelectionFromValues(
+    dispatchForm.customerId ? [dispatchForm.customerId] : [],
+    [dispatchForm.customer || dispatchCustomerKeyword.value]
+  );
+}
 
 const customerContactAddressOptions = computed(() => {
   const customerId = currentAddressBookCustomerId();
@@ -19441,15 +19627,37 @@ function shouldRefreshRemindersForRealtime(event = {}) {
   return modules.has("reminders") || ["driver", "vehicle", "vehicle_expense"].includes(String(event.entityType || ""));
 }
 
+function realtimeEventTouchesActiveModule(event = {}) {
+  const modules = realtimeAffectedModules(event);
+  if (!modules.size) return true;
+  const active = normalizeRoute(activeModule.value);
+  if (modules.has(active)) return true;
+  if (active === "home") {
+    return ["customers", "dispatchBoard", "orders", "reminders"].some((moduleId) => modules.has(moduleId));
+  }
+  if (active === "vehicleDriver") {
+    return VEHICLE_DRIVER_MODULES.some((moduleId) => modules.has(moduleId));
+  }
+  if (VEHICLE_EXPENSE_MODULES.includes(active)) {
+    return modules.has("vehicleDriver") || modules.has(active);
+  }
+  if (BOSS_CENTER_MODULES.includes(active)) {
+    return BOSS_CENTER_MODULES.some((moduleId) => modules.has(moduleId));
+  }
+  return false;
+}
+
 function isDispatchPlanEditorOpen() {
   return dispatchModalOpen.value || dispatchDuplicateModalOpen.value;
 }
 
 async function flushRealtimeRefresh() {
+  if (realtimeRefreshRunning) return;
   const pending = { ...realtimePendingRefresh };
   realtimePendingRefresh.database = false;
   realtimePendingRefresh.dispatch = false;
   realtimePendingRefresh.reminders = false;
+  realtimeRefreshRunning = true;
 
   try {
     if (pending.database) {
@@ -19467,25 +19675,38 @@ async function flushRealtimeRefresh() {
     }
   } catch (error) {
     console.warn("Realtime refresh failed", error);
+  } finally {
+    realtimeRefreshRunning = false;
+    if (realtimePendingRefresh.database || realtimePendingRefresh.dispatch || realtimePendingRefresh.reminders) {
+      window.clearTimeout(realtimeRefreshTimer);
+      realtimeRefreshTimer = window.setTimeout(() => {
+        realtimeRefreshTimer = null;
+        flushRealtimeRefresh();
+      }, 1500);
+    }
   }
 }
 
 function scheduleRealtimeRefresh(event = {}) {
   if (!loggedIn.value) return;
+  if (document.visibilityState === "hidden") return;
   const modules = realtimeAffectedModules(event);
+  if (!realtimeEventTouchesActiveModule(event)) return;
+  const active = normalizeRoute(activeModule.value);
   realtimePendingRefresh.database = true;
-  realtimePendingRefresh.dispatch = realtimePendingRefresh.dispatch || modules.has("dispatchBoard");
-  realtimePendingRefresh.reminders = realtimePendingRefresh.reminders || shouldRefreshRemindersForRealtime(event);
+  realtimePendingRefresh.dispatch = realtimePendingRefresh.dispatch || (active === "dispatchBoard" && modules.has("dispatchBoard"));
+  realtimePendingRefresh.reminders = realtimePendingRefresh.reminders || (active === "home" && shouldRefreshRemindersForRealtime(event));
   window.clearTimeout(realtimeRefreshTimer);
   realtimeRefreshTimer = window.setTimeout(() => {
     realtimeRefreshTimer = null;
     flushRealtimeRefresh();
-  }, 500);
+  }, 1500);
 }
 
 function closeRealtimeConnection() {
   window.clearTimeout(realtimeRefreshTimer);
   realtimeRefreshTimer = null;
+  realtimeRefreshRunning = false;
   realtimePendingRefresh.database = false;
   realtimePendingRefresh.dispatch = false;
   realtimePendingRefresh.reminders = false;
@@ -21105,7 +21326,7 @@ function normalizeDispatchLocationText(value = "", options = {}) {
 
 function normalizeDispatchLocationDetailText(value = "") {
   if (isDispatchLocationPlaceholderText(value)) return "";
-  return String(value ?? "").replace(/\r\n?/g, "\n");
+  return normalizeUserText(value, { trim: false, collapseSpaces: false });
 }
 
 function normalizeDispatchLocationPartValue(value = "", part = "") {
@@ -30275,7 +30496,7 @@ function dispatchFilterOptionValues(rows = [], getter) {
 }
 
 function dispatchCustomerFilterValues(row = {}) {
-  return [row.order?.customer, row.customer];
+  return dispatchRowCustomerNames(row);
 }
 
 function dispatchPlateFilterValues(row = {}) {
@@ -30297,6 +30518,21 @@ function dispatchBusinessTypeFilterValues(row = {}) {
   return [row.order?.businessType, row.businessType];
 }
 
+function dispatchRowCustomerNames(row = {}) {
+  const order = row.order || {};
+  const selection = dispatchCustomerSelectionFromRow(row, order);
+  const names = selection.map((customer) => String(customer?.name || "").trim()).filter(Boolean);
+  if (names.length) return uniqueOrderCostNames(names);
+  const fallback = String(row.customer || order.customer || "").trim();
+  return fallback ? [fallback] : [];
+}
+
+function dispatchRowCustomerDisplayText(row = {}) {
+  const order = row.order || {};
+  return dispatchCustomerSelectionText(dispatchCustomerSelectionFromRow(row, order))
+    || String(row.customer || order.customer || "").trim();
+}
+
 function dispatchRowMatchesSelectFilter(row = {}, getter, filterValue = "") {
   const target = normalizedDispatchFilterText(filterValue);
   if (!target) return true;
@@ -30311,6 +30547,8 @@ function dispatchRowSearchValues(row = {}) {
     order.no,
     row.createdByName,
     row.createdByUsername,
+    ...dispatchRowCustomerNames(row),
+    dispatchRowCustomerDisplayText(row),
     order.customer,
     row.customer,
     order.businessType,
@@ -30746,7 +30984,7 @@ function orderDetailFeeRows(order = {}) {
                   <tr v-for="row in homeRecentDispatchRows" :key="row.id">
                     <td>{{ row.index + 1 }}</td>
                     <td>{{ row.dispatchNo || '-' }}</td>
-                    <td>{{ transportCustomerDisplayLabel(row.order || row) }}</td>
+                    <td>{{ dispatchRowCustomerDisplayText(row) || transportCustomerDisplayLabel(row.order || row) }}</td>
                     <td>{{ row.plate || '待定' }}</td>
                     <td>{{ row.loadTime || '未定' }}</td>
                     <td>{{ row.order.no ? '已绑定订单' : '待确认订单' }}</td>
@@ -32081,7 +32319,7 @@ function orderDetailFeeRows(order = {}) {
                         'row-actions dispatch-row-actions': column.key === 'actions'
                       }"
                       :style="dispatchStickyColumnStyle(column, index)"
-                      :title="column.key === 'customer' ? row.order.customer : column.key === 'route' ? dispatchOrderRouteText(row.order) : column.key === 'supplier' ? dispatchSupplierText(row) : column.key === 'loadTime' ? `${dispatchPlanDate(row) || '-'} ${row.loadTime || '-'}` : ''"
+                      :title="column.key === 'customer' ? (dispatchRowCustomerDisplayText(row) || row.order.customer) : column.key === 'route' ? dispatchOrderRouteText(row.order) : column.key === 'supplier' ? dispatchSupplierText(row) : column.key === 'loadTime' ? `${dispatchPlanDate(row) || '-'} ${row.loadTime || '-'}` : ''"
                     >
                       <template v-if="column.key === 'sequence'">
                         <label class="dispatch-select-label">
@@ -32102,7 +32340,7 @@ function orderDetailFeeRows(order = {}) {
 	                        <small v-else>未绑定订单</small>
 	                      </template>
 	                      <template v-else-if="column.key === 'createdByName'">{{ row.createdByName || row.createdByUsername || "-" }}</template>
-	                      <template v-else-if="column.key === 'customer'">{{ transportCustomerDisplayLabel(row.order || row) }}</template>
+	                      <template v-else-if="column.key === 'customer'">{{ dispatchRowCustomerDisplayText(row) || transportCustomerDisplayLabel(row.order || row) }}</template>
 	                      <template v-else-if="column.key === 'businessType'">{{ row.order.businessType || row.businessType || "-" }}</template>
                       <template v-else-if="column.key === 'plate'">
                         <input v-model.trim="dispatchPlanRows[row.index].plate" class="dispatch-plate-input" list="dispatchVehiclePlates" placeholder="车牌" @click.stop @input="handleDispatchPlateInput(row)" />
@@ -37072,23 +37310,56 @@ function orderDetailFeeRows(order = {}) {
               <label>排车日期<input v-model="dispatchForm.date" type="date" /></label>
             </div>
             <div class="form-grid dispatch-form-grid">
-              <label>客户
-                <span class="searchable-select dispatch-searchable-select" @click.stop>
-                  <input
-                    v-model.trim="dispatchCustomerKeyword"
-                    placeholder="搜索客户编号 / 名称 / 联系人"
-                    @focus="dispatchCustomerPickerOpen = true"
-                    @input="handleDispatchCustomerInput"
-                  />
+              <label class="dispatch-customer-field">客户
+                <span class="searchable-select dispatch-searchable-select dispatch-customer-multi-select" @click.stop>
+                  <span class="dispatch-customer-combobox" :class="{ 'is-open': dispatchCustomerPickerOpen, 'is-empty': !dispatchSelectedCustomerRows.length }">
+                    <span
+                      v-for="customer in dispatchSelectedCustomerRows"
+                      :key="`dispatch-customer-chip-${customer.id || customer.name}`"
+                      class="dispatch-customer-chip"
+                    >
+                      <span>{{ dispatchCustomerSelectionLabel(customer) }}</span>
+                      <button
+                        type="button"
+                        title="移除客户"
+                        aria-label="移除客户"
+                        @click.stop="removeDispatchCustomerSelection(customer)"
+                      ><IconSvg name="close" /></button>
+                    </span>
+                    <input
+                      v-model.trim="dispatchCustomerKeyword"
+                      placeholder="搜索客户编号 / 名称 / 联系人"
+                      @focus="dispatchCustomerPickerOpen = true"
+                      @input="handleDispatchCustomerInput"
+                      @keydown.enter.prevent="confirmFirstDispatchCustomerOption"
+                      @keydown.esc.prevent="dispatchCustomerPickerOpen = false"
+                    />
+                    <button
+                      v-if="dispatchSelectedCustomerRows.length || dispatchCustomerKeyword"
+                      class="dispatch-customer-clear"
+                      type="button"
+                      title="清空客户"
+                      aria-label="清空客户"
+                      @click.stop="clearDispatchCustomerSelection"
+                    ><IconSvg name="close" /></button>
+                    <button
+                      class="dispatch-customer-toggle"
+                      type="button"
+                      :title="dispatchCustomerPickerOpen ? '收起客户列表' : '展开客户列表'"
+                      :aria-label="dispatchCustomerPickerOpen ? '收起客户列表' : '展开客户列表'"
+                      @click.stop="dispatchCustomerPickerOpen = !dispatchCustomerPickerOpen"
+                    ><IconSvg :name="dispatchCustomerPickerOpen ? 'chevronUp' : 'chevronDown'" /></button>
+                  </span>
                   <div v-if="dispatchCustomerPickerOpen" class="searchable-select-dropdown dispatch-customer-dropdown">
                     <button
                       v-for="customer in dispatchCustomerOptions"
                       :key="customer.id"
                       type="button"
-                      :class="{ active: customer.name === dispatchForm.customer }"
-                      @click="selectDispatchCustomer(customer)"
+                      :class="{ active: dispatchCustomerSelectionActive(customer) }"
+                      @click="toggleDispatchCustomerSelection(customer)"
                     >
                       <strong>{{ customerOptionPrimaryDisplay(customer) }}</strong>
+                      <span>{{ dispatchCustomerSelectionActive(customer) ? '已选择' : customer.name }}</span>
                     </button>
                     <p v-if="dispatchCustomerOptions.length === 0">没有匹配客户</p>
                   </div>
@@ -37578,7 +37849,7 @@ function orderDetailFeeRows(order = {}) {
                       <strong>{{ row.sourceDispatchNo || '-' }}</strong>
                       <small>{{ row.sourceOrderNo || '-' }}</small>
                     </td>
-                    <td>{{ partnerDisplayLabel(row.customer || '', '客户') || '-' }}</td>
+                    <td>{{ dispatchRowCustomerDisplayText(row) || partnerDisplayLabel(row.customer || '', '客户') || '-' }}</td>
                     <td><input v-model.trim="row.plate" list="dispatchDuplicatePlateOptions" placeholder="车牌" /></td>
                     <td>
                       <select v-model="row.loadTime" @change="handleDispatchDuplicateLoadTimeChange(row)">
@@ -37909,7 +38180,7 @@ function orderDetailFeeRows(order = {}) {
                   <tr
                     v-for="(fee, index) in orderFees"
                     :key="orderFeeRowKey(fee, index)"
-                    :class="{ 'company-self-pay-row': isCompanySelfPayFee(fee), 'other-expense-cost-row': isOtherExpenseCostFee(fee) }"
+                    :class="{ 'company-covered-row': isCompanyCoveredFee(fee), 'company-self-pay-row': isCompanySelfPayFee(fee), 'other-expense-cost-row': isOtherExpenseCostFee(fee) }"
                   >
                     <td>{{ index + 1 }}</td>
 		                    <td class="invoice-name-cell">
@@ -38005,14 +38276,20 @@ function orderDetailFeeRows(order = {}) {
 			                    <td class="invoice-driver-cell">
 			                      <div
 			                        class="fee-assignee-editor"
-			                        :class="{ 'is-stacked': !orderFeeHasManualAssignee(fee) && orderFeeAssigneeLineCount(fee, orderForm) > 1 }"
+			                        :class="{ 'is-company-covered': isCompanyCoveredFee(fee), 'is-stacked': !orderFeeHasManualAssignee(fee) && orderFeeAssigneeLineCount(fee, orderForm) > 1 }"
 			                        :title="orderFeeAssigneeTitle(fee)"
 			                      >
+                              <span
+                                v-if="isCompanyCoveredFee(fee)"
+                                class="fee-assignee-static is-company-covered"
+                                aria-label="公司承担"
+                              >{{ orderFeeAssigneeInputValue(fee) }}</span>
 			                        <textarea
+                                v-else
 								                          :value="orderFeeAssigneeInputValue(fee)"
 								                          :rows="orderFeeAssigneeLineCount(fee)"
 								                          placeholder="自动归属"
-								                          :disabled="orderReadOnlyMode || isCompanyCoveredFee(fee)"
+								                          :disabled="orderReadOnlyMode"
 								                          @input="handleOrderFeeAssigneeInput(fee, $event)"
 			                        ></textarea>
 			                        <button

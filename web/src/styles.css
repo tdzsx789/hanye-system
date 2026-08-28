@@ -1,6 +1,6 @@
 :root {
   color-scheme: light;
-  font-family: Inter, "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+  font-family: "Noto Sans SC", "Noto Sans TC", Inter, "PingFang SC", "PingFang TC", "Microsoft YaHei", "Microsoft JhengHei", Arial, sans-serif;
   --blue: #0f6bff;
   --primary: #0f6bff;
   --blue-soft: #eaf3ff;
@@ -1466,8 +1466,8 @@ body.is-modal-dragging .modal-head {
 }
 
 .fee-category-badge.self-pay {
-  background: #fff1f2;
-  color: #b42318;
+  background: #fee2e2;
+  color: #991b1b;
 }
 
 .fee-category-badge.other-expense {
@@ -1476,11 +1476,11 @@ body.is-modal-dragging .modal-head {
 }
 
 .invoice-fee-table tbody tr.company-self-pay-row > td {
-  background: #fff4f4;
+  background: #ffe4e6;
 }
 
 .invoice-fee-table tbody tr.company-self-pay-row:hover > td {
-  background: #ffdada;
+  background: #fecdd3;
 }
 
 .invoice-fee-table tbody tr.other-expense-cost-row > td {
@@ -1489,6 +1489,15 @@ body.is-modal-dragging .modal-head {
 
 .invoice-fee-table tbody tr.other-expense-cost-row:hover > td {
   background: #fde68a;
+}
+
+.invoice-fee-table tbody tr.company-covered-row > td {
+  background: #ffe4e6;
+  color: #7f1d1d;
+}
+
+.invoice-fee-table tbody tr.company-covered-row:hover > td {
+  background: #fecdd3;
 }
 
 .invoice-fee-table .invoice-category-col,
@@ -1617,6 +1626,10 @@ body.is-modal-dragging .modal-head {
   align-items: center;
 }
 
+.fee-assignee-editor.is-company-covered {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .fee-assignee-editor :is(input, textarea) {
   min-width: 0;
   width: 100%;
@@ -1658,6 +1671,23 @@ body.is-modal-dragging .modal-head {
 .fee-assignee-editor.is-stacked textarea {
   min-height: 38px;
   line-height: 18px;
+}
+
+.fee-assignee-static {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 28px;
+  padding: 0 5px;
+  color: #20324d;
+  font-weight: 900;
+  line-height: 1.25;
+}
+
+.fee-assignee-static.is-company-covered {
+  color: #991b1b;
+  user-select: none;
+  pointer-events: none;
 }
 
 .fee-assignee-reset {
@@ -13458,6 +13488,113 @@ tr.selected {
 
 .dispatch-customer-dropdown {
   width: min(420px, calc(100vw - 120px));
+}
+
+.dispatch-customer-field {
+  grid-column: span 2;
+}
+
+.dispatch-customer-multi-select {
+  width: 100%;
+}
+
+.dispatch-customer-combobox {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 36px;
+  padding: 4px 64px 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  position: relative;
+}
+
+.dispatch-customer-combobox:focus-within,
+.dispatch-customer-combobox.is-open {
+  border-color: #8bbcff;
+  box-shadow: 0 0 0 3px rgba(15, 107, 255, 0.08);
+}
+
+.dispatch-customer-combobox.is-empty {
+  align-items: center;
+}
+
+.dispatch-customer-combobox input {
+  flex: 1 1 180px;
+  min-width: 140px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  outline: none;
+}
+
+.dispatch-customer-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 180px;
+  gap: 4px;
+  min-height: 24px;
+  padding: 3px 5px 3px 8px;
+  border: 1px solid #bbd7ff;
+  border-radius: 999px;
+  background: #edf5ff;
+  color: #075fc4;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.dispatch-customer-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dispatch-customer-chip button,
+.dispatch-customer-clear,
+.dispatch-customer-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #64748b;
+}
+
+.dispatch-customer-chip button:hover,
+.dispatch-customer-clear:hover,
+.dispatch-customer-toggle:hover {
+  background: #dcebff;
+  color: #0f6bff;
+}
+
+.dispatch-customer-clear,
+.dispatch-customer-toggle {
+  position: absolute;
+  top: 6px;
+}
+
+.dispatch-customer-clear {
+  right: 34px;
+}
+
+.dispatch-customer-toggle {
+  right: 8px;
+}
+
+.dispatch-customer-dropdown button {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.dispatch-customer-dropdown button.active {
+  background: #e8f7ef;
+  color: #18764a;
 }
 
 .dispatch-copy-modal {
