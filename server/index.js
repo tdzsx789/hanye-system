@@ -461,6 +461,9 @@ function mapCustomer(row) {
 
 async function loadCustomerSpecialCustomerMap(options = {}) {
   const category = String(options.category || "").trim();
+  if (!(await customerColumnExists("special_customer"))) {
+    return new Map();
+  }
   const rows = category
     ? await db.prepare(`
       SELECT id, name, short_name
@@ -6863,6 +6866,7 @@ app.patch("/api/customers/:id", async (req, res) => {
     return;
   }
 
+  const hasSpecialCustomerColumn = await customerColumnExists("special_customer");
   const hasCustomsVerificationFee = await customerColumnExists("customs_verification_fee");
   const hasCustomsManifestFee = await customerColumnExists("customs_manifest_fee");
   const hasCustomsCustomFields = await customerColumnExists("customs_custom_fields");
@@ -6897,8 +6901,8 @@ app.patch("/api/customers/:id", async (req, res) => {
         customs_import_page_fee = @customsImportPageFee,
         customs_export_page_fee = @customsExportPageFee,
         trip_no_required = @tripNoRequired,
-        six_sheet_no_required = @sixSheetNoRequired,
-        special_customer = @specialCustomer
+        six_sheet_no_required = @sixSheetNoRequired
+        ${hasSpecialCustomerColumn ? ", special_customer = @specialCustomer" : ""}
         ${hasCustomsManifestFee ? ", customs_manifest_fee = @customsManifestFee" : ""}
         ${hasCustomsVerificationFee ? ", customs_verification_fee = @customsVerificationFee" : ""}
         ${hasCustomsCustomFields ? ", customs_custom_fields = @customsCustomFieldsJson" : ""}
@@ -6939,6 +6943,7 @@ app.post("/api/customers", async (req, res) => {
     return;
   }
 
+  const hasSpecialCustomerColumn = await customerColumnExists("special_customer");
   const hasCustomsVerificationFee = await customerColumnExists("customs_verification_fee");
   const hasCustomsManifestFee = await customerColumnExists("customs_manifest_fee");
   const hasCustomsCustomFields = await customerColumnExists("customs_custom_fields");
@@ -6948,13 +6953,13 @@ app.post("/api/customers", async (req, res) => {
        tax_no, contact, mobile, driver_wage_adjust_hkd, default_template_id,
        invoice_title, invoice_tax_no, invoice_bank, invoice_account, invoice_address_phone,
        customs_home_item_count, customs_page_item_count, customs_import_home_fee, customs_export_home_fee,
-       customs_import_page_fee, customs_export_page_fee, trip_no_required, six_sheet_no_required, special_customer${hasCustomsManifestFee ? ", customs_manifest_fee" : ""}${hasCustomsVerificationFee ? ", customs_verification_fee" : ""}${hasCustomsCustomFields ? ", customs_custom_fields" : ""})
+       customs_import_page_fee, customs_export_page_fee, trip_no_required, six_sheet_no_required${hasSpecialCustomerColumn ? ", special_customer" : ""}${hasCustomsManifestFee ? ", customs_manifest_fee" : ""}${hasCustomsVerificationFee ? ", customs_verification_fee" : ""}${hasCustomsCustomFields ? ", customs_custom_fields" : ""})
     VALUES
       (@id, @type, @customerCategory, @name, @shortName, @customsCustomerType, @province, @city, @address, @term, @settlementCurrency, @receivableRMB, @receivableHKD, @recentOrder, @createdAt,
        @taxNo, @contact, @mobile, @driverWageAdjustHKD, @defaultTemplateId,
        @invoiceTitle, @invoiceTaxNo, @invoiceBank, @invoiceAccount, @invoiceAddressPhone,
        @customsHomeItemCount, @customsPageItemCount, @customsImportHomeFee, @customsExportHomeFee,
-       @customsImportPageFee, @customsExportPageFee, @tripNoRequired, @sixSheetNoRequired, @specialCustomer${hasCustomsManifestFee ? ", @customsManifestFee" : ""}${hasCustomsVerificationFee ? ", @customsVerificationFee" : ""}${hasCustomsCustomFields ? ", @customsCustomFieldsJson" : ""})
+       @customsImportPageFee, @customsExportPageFee, @tripNoRequired, @sixSheetNoRequired${hasSpecialCustomerColumn ? ", @specialCustomer" : ""}${hasCustomsManifestFee ? ", @customsManifestFee" : ""}${hasCustomsVerificationFee ? ", @customsVerificationFee" : ""}${hasCustomsCustomFields ? ", @customsCustomFieldsJson" : ""})
   `).run(item);
   await writeAudit("create", "customer", item.id, item.name);
   res.status(201).json(mapCustomer(await db.prepare("SELECT * FROM customers WHERE id = ?").get(item.id)));
@@ -9308,11 +9313,13 @@ async function orderBusinessNumberConflict(no = "", dispatchNo = "") {
 async function resolveOrderCustomer(item) {
   const customerId = String(item.customerId || "").trim();
   const customerName = String(item.customer || "").trim();
+  const hasSpecialCustomerColumn = await customerColumnExists("special_customer");
+  const specialCustomerSelect = hasSpecialCustomerColumn ? ", special_customer" : "";
   let customer = null;
 
   if (customerId) {
     customer = await db.prepare(`
-      SELECT id, name, short_name, trip_no_required, six_sheet_no_required, special_customer
+      SELECT id, name, short_name, trip_no_required, six_sheet_no_required${specialCustomerSelect}
       FROM customers
       WHERE id = ?
         AND deleted_at IS NULL
@@ -9323,7 +9330,7 @@ async function resolveOrderCustomer(item) {
 
   if (!customer && customerName) {
     customer = await db.prepare(`
-      SELECT id, name, short_name, trip_no_required, six_sheet_no_required, special_customer
+      SELECT id, name, short_name, trip_no_required, six_sheet_no_required${specialCustomerSelect}
       FROM customers
       WHERE deleted_at IS NULL
         AND type = '客户'
@@ -9344,6 +9351,15 @@ async function resolveOrderCustomer(item) {
 }
 
 async function loadSpecialCustomerOrderLookup() {
+  if (!(await customerColumnExists("special_customer"))) {
+    return {
+      ids: new Set(),
+      names: new Set(),
+      shortNames: new Set(),
+      orderNos: new Set(),
+      dispatchNos: new Set()
+    };
+  }
   const rows = await db.prepare(`
     SELECT id, name, short_name
     FROM customers
@@ -9792,6 +9808,7 @@ app.patch("/api/orders/:no/status", async (req, res) => {
   const status = String(req.body.status || "").trim();
   const skipSignValidation = booleanFlag(req.body?.skipSignValidation ?? req.body?.skip_sign_validation, false);
   const allowedStatuses = new Set(["待确认", "预排", "正常", "通关中", "已签收", "已审核", "缺票据", "费用待确认"]);
+  const hasSpecialCustomerColumn = await customerColumnExists("special_customer");
 
   if (!allowedStatuses.has(status)) {
     res.status(400).json({ message: "订单状态无效" });
@@ -9801,8 +9818,8 @@ app.patch("/api/orders/:no/status", async (req, res) => {
   const current = await db.prepare(`
     SELECT orders.*, customers.short_name AS customer_short_name,
            customers.trip_no_required AS customer_trip_no_required,
-           customers.six_sheet_no_required AS customer_six_sheet_no_required,
-           customers.special_customer AS customer_special_customer
+           customers.six_sheet_no_required AS customer_six_sheet_no_required
+           ${hasSpecialCustomerColumn ? ", customers.special_customer AS customer_special_customer" : ""}
     FROM orders
     LEFT JOIN customers ON customers.id = orders.customer_id
     WHERE orders.no = ? AND orders.deleted_at IS NULL
