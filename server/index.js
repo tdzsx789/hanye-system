@@ -252,8 +252,6 @@ const ORDER_STATUS_RANK = {
 const ORDER_SIGN_BASE_REQUIRED_FIELDS = [
   { keys: ["dispatchNo", "dispatch_no"], label: "排车单号" },
   { keys: ["businessType", "business_type"], label: "业务类型" },
-  { keys: ["port"], label: "口岸" },
-  { keys: ["direction"], label: "进出口" },
   { keys: ["tonnage"], label: "吨位" },
   { keys: ["quantity"], label: "件数/板数" },
   { keys: ["vehicleSource", "vehicle_source"], label: "车辆来源" },
@@ -9031,6 +9029,54 @@ function dispatchRowMatchesRefs(row = {}, orderNo = "", dispatchNo = "", dispatc
   );
 }
 
+function attachDispatchOrderRefs(row = {}, order = {}, sourceRow = row) {
+  const orderNo = String(order.no || order.order_no || "").trim();
+  const dispatchNo = String(order.dispatchNo || order.dispatch_no || "").trim();
+  if (orderNo) row.orderNo = orderNo;
+  if (dispatchNo) row.dispatchNo = dispatchNo;
+  row.linkedOrderNos = compactLookupValues([
+    ...dispatchRowLinkedOrderNos(sourceRow),
+    ...dispatchRowLinkedOrderNos(row),
+    orderNo
+  ]);
+  row.linkedDispatchNos = compactLookupValues([
+    ...dispatchRowLinkedDispatchNos(sourceRow),
+    ...dispatchRowLinkedDispatchNos(row),
+    dispatchNo
+  ]);
+  return row;
+}
+
+function attachDispatchOrderRefsToRows(rows = [], sourceRow = {}, order = {}) {
+  if (!Array.isArray(rows) || !rows.length) return false;
+  const rowId = String(sourceRow.id || sourceRow._id || "").trim();
+  const orderRefs = compactLookupValues([
+    sourceRow.orderNo,
+    sourceRow.order_no,
+    ...dispatchRowLinkedOrderNos(sourceRow)
+  ]);
+  const dispatchRefs = compactLookupValues([
+    sourceRow.dispatchNo,
+    sourceRow.dispatch_no,
+    ...dispatchRowLinkedDispatchNos(sourceRow)
+  ]);
+  const groupId = dispatchRowGroupId(sourceRow);
+  let changed = false;
+  rows.forEach((row) => {
+    const targetRowId = String(row.id || row._id || "").trim();
+    const matches = (
+      (rowId && targetRowId && rowId === targetRowId)
+      || (groupId && dispatchRowGroupId(row) === groupId)
+      || orderRefs.some((orderNo) => dispatchRowLinkedOrderNos(row).includes(orderNo))
+      || dispatchRefs.some((dispatchNo) => dispatchRowLinkedDispatchNos(row).includes(dispatchNo))
+    );
+    if (!matches) return;
+    attachDispatchOrderRefs(row, order, sourceRow);
+    changed = true;
+  });
+  return changed;
+}
+
 async function recycleDispatchPlanRows(planDate, rows = []) {
   const validRows = rows
     .map((row) => normalizeDispatchRecycleRow(row, planDate))
@@ -9213,6 +9259,11 @@ async function createOrderFromDispatchRowForSync(row = {}, planDate = "", orderS
     const restored = await db.prepare("SELECT * FROM orders WHERE no = ?").get(deletedOrder.no);
     return restored ? mapOrder(restored) : null;
   }
+  const existingOrders = await loadOrdersLinkedToDispatchRow(payload);
+  if (existingOrders.length) {
+    const existing = await db.prepare("SELECT * FROM orders WHERE no = ?").get(existingOrders[0].no);
+    return existing ? mapOrder(existing) : mapOrder(existingOrders[0]);
+  }
 
   const item = await readOrderPayload(payload);
   if (!(await resolveOrderCustomer(item))) return null;
@@ -9365,7 +9416,7 @@ function deletedOrderRefsPayload(orderRows = []) {
   };
 }
 
-async function syncDispatchPlanRowsToOrders(planDate, rows = []) {
+async function syncDispatchPlanRowsToOrders(planDate, rows = [], rowsForPersistence = null) {
   const rowsToSync = rows.filter((row) =>
     dispatchRowLinkedOrderNos(row).length || dispatchRowLinkedDispatchNos(row).length || dispatchRowGroupId(row)
   );
@@ -9374,6 +9425,7 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = []) {
   const plan = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(planDate);
   const persistedRows = parseDispatchPlanRowsJson(plan?.rows_json);
   const persistedLookup = dispatchRowLookup(persistedRows);
+  const persistenceRows = Array.isArray(rowsForPersistence) ? rowsForPersistence : null;
   let persistedRowsChanged = false;
   let synced = 0;
   for (const row of rowsToSync) {
@@ -9386,12 +9438,11 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = []) {
       const createdOrder = await createOrderFromDispatchRowForSync(row, planDate, normalizedDispatchStatus);
       if (createdOrder) {
         linkedOrders = [createdOrder];
-        const persistedRow = findExistingDispatchRow(row, persistedLookup);
-        if (persistedRow) {
-          persistedRow.orderNo = String(createdOrder.no || persistedRow.orderNo || "").trim();
-          persistedRow.dispatchNo = String(createdOrder.dispatchNo || persistedRow.dispatchNo || rowDispatchNo || "").trim();
-          persistedRow.linkedOrderNos = compactLookupValues([...dispatchRowLinkedOrderNos(persistedRow), createdOrder.no]);
-          persistedRow.linkedDispatchNos = compactLookupValues([...dispatchRowLinkedDispatchNos(persistedRow), createdOrder.dispatchNo]);
+        persistedRowsChanged = attachDispatchOrderRefsToRows(persistedRows, row, createdOrder) || persistedRowsChanged;
+        persistedRowsChanged = attachDispatchOrderRefsToRows(persistenceRows, row, createdOrder) || persistedRowsChanged;
+        const targetRow = findExistingDispatchRow(row, persistedLookup);
+        if (targetRow) {
+          attachDispatchOrderRefs(targetRow, createdOrder, row);
           persistedRowsChanged = true;
         }
       }
@@ -9444,11 +9495,12 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = []) {
   }
 
   if (persistedRowsChanged) {
+    const rowsJson = JSON.stringify(persistenceRows || persistedRows);
     await db.prepare(`
       UPDATE dispatch_plans
       SET rows_json = ?, updated_at = CURRENT_TIMESTAMP
       WHERE plan_date = ?
-    `).run(JSON.stringify(persistedRows), planDate);
+    `).run(rowsJson, planDate);
   }
 
   return synced;
@@ -9863,7 +9915,7 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
         ? creatorFieldsFromRecord(existingPlan)
         : requestCreator;
       await upsertDispatchPlanRow(date, rowsJson, planCreator);
-      await syncDispatchPlanRowsToOrders(date, rowsNeedingOrderSync);
+      await syncDispatchPlanRowsToOrders(date, rowsNeedingOrderSync, savedRows);
       const saved = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
 	      return { saved, incomingCount: cleanRows.length, savedCount: savedRows.length, stats: merged.stats };
     })();
