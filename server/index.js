@@ -449,6 +449,10 @@ function normalizeEffectiveDate(value = "", fallback = todayInputValue()) {
   return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : fallback;
 }
 
+function customsBusinessCustomFieldName(field = {}) {
+  return userTextValue(field?.name ?? field?.label ?? field?.key ?? "");
+}
+
 function mapCustomer(row) {
   const customerCategory = row.type === "客户" && row.customer_category === "报关客户" ? "报关客户" : row.type === "客户" ? "运输客户" : "";
   const customsDefaults = {
@@ -458,9 +462,14 @@ function mapCustomer(row) {
     customsExportHomeFee: 150,
     customsImportPageFee: 30,
     customsExportPageFee: 30,
+    customsProductionCertificateFee: 150,
     customsManifestFee: 0,
     customsVerificationFee: 0
   };
+  const customsCustomFields = normalizeCustomsBusinessCustomFields(row.customs_custom_fields);
+  const customsCustomFieldMap = new Map(
+    customsCustomFields.map((field) => [customsBusinessCustomFieldName(field), integerField(field.value)])
+  );
   return {
     id: row.id,
     type: row.type,
@@ -487,12 +496,16 @@ function mapCustomer(row) {
     customsExportHomeFee: Number(row.customs_export_home_fee ?? customsDefaults.customsExportHomeFee),
     customsImportPageFee: Number(row.customs_import_page_fee ?? customsDefaults.customsImportPageFee),
     customsExportPageFee: Number(row.customs_export_page_fee ?? customsDefaults.customsExportPageFee),
+    customsProductionCertificateFee: Number(row.customs_production_certificate_fee ?? customsCustomFieldMap.get("产证地") ?? customsDefaults.customsProductionCertificateFee),
     customsManifestFee: Number(row.customs_manifest_fee ?? customsDefaults.customsManifestFee ?? 0),
     customsVerificationFee: Number(row.customs_verification_fee ?? customsDefaults.customsVerificationFee),
     tripNoRequired: booleanFlag(row.trip_no_required, false),
     sixSheetNoRequired: booleanFlag(row.six_sheet_no_required, false),
     specialCustomer: booleanFlag(row.special_customer, false),
-    customsCustomFields: normalizeCustomsBusinessCustomFields(row.customs_custom_fields),
+    operatingUnitEnabled: booleanFlag(row.operating_unit_enabled, false),
+    newOldEnabled: booleanFlag(row.new_old_enabled, false),
+    specialCarEnabled: booleanFlag(row.special_car_enabled, false),
+    customsCustomFields: customsCustomFields.filter((field) => customsBusinessCustomFieldName(field) !== "产证地"),
     createdAt: row.created_at,
     invoice: {
       title: row.invoice_title || row.name || "",
@@ -514,9 +527,15 @@ async function loadCustomerSpecialCustomerMap(options = {}) {
     ? await db.prepare(`
       SELECT id, name, short_name
       FROM customers
-      WHERE deleted_at IS NULL AND type = '客户' AND customer_category = ? AND COALESCE(special_customer, false) = true
+      WHERE deleted_at IS NULL
+        AND type = '客户'
+        AND (
+          customer_category = ?
+          OR (? = '运输客户' AND COALESCE(customer_category, '运输客户') <> '报关客户')
+        )
+        AND COALESCE(special_customer, false) = true
       ORDER BY created_at DESC, id DESC
-    `).all(category)
+    `).all(category, category)
     : await db.prepare(`
       SELECT id, name, short_name
       FROM customers
@@ -531,6 +550,36 @@ async function loadCustomerSpecialCustomerMap(options = {}) {
     if (id) map.set(id, true);
     if (name) map.set(name, true);
     if (shortName) map.set(shortName, true);
+  });
+  return map;
+}
+
+async function loadTransportCustomerFeatureMap() {
+  const support = await customerRequirementColumnSupport();
+  const rows = await db.prepare(`
+    SELECT
+      id,
+      name,
+      short_name,
+      ${support.operatingUnitEnabled ? "operating_unit_enabled" : "false AS operating_unit_enabled"},
+      ${support.newOldEnabled ? "new_old_enabled" : "false AS new_old_enabled"},
+      ${support.specialCarEnabled ? "special_car_enabled" : "false AS special_car_enabled"}
+    FROM customers
+    WHERE deleted_at IS NULL
+      AND type = '客户'
+      AND COALESCE(customer_category, '运输客户') <> '报关客户'
+  `).all();
+  const map = new Map();
+  rows.forEach((row) => {
+    const flags = {
+      operatingUnitEnabled: booleanFlag(row.operating_unit_enabled, false),
+      newOldEnabled: booleanFlag(row.new_old_enabled, false),
+      specialCarEnabled: booleanFlag(row.special_car_enabled, false)
+    };
+    [row.id, row.name, row.short_name]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+      .forEach((key) => map.set(key, flags));
   });
   return map;
 }
@@ -566,7 +615,10 @@ async function customerRequirementColumnSupport() {
   if (customerRequirementColumnSupportCache) return customerRequirementColumnSupportCache;
   customerRequirementColumnSupportCache = {
     tripNoRequired: await customerColumnExists("trip_no_required"),
-    sixSheetNoRequired: await customerColumnExists("six_sheet_no_required")
+    sixSheetNoRequired: await customerColumnExists("six_sheet_no_required"),
+    operatingUnitEnabled: await customerColumnExists("operating_unit_enabled"),
+    newOldEnabled: await customerColumnExists("new_old_enabled"),
+    specialCarEnabled: await customerColumnExists("special_car_enabled")
   };
   return customerRequirementColumnSupportCache;
 }
@@ -602,7 +654,9 @@ async function orderWriteColumnSupport() {
     tripNo: await orderColumnExists("trip_no"),
     sixSheetEnabled: await orderColumnExists("six_sheet_enabled"),
     sixSheetNo: await orderColumnExists("six_sheet_no"),
-    chargedAt: await orderColumnExists("charged_at")
+    chargedAt: await orderColumnExists("charged_at"),
+    newOld: await orderColumnExists("new_old"),
+    specialCar: await orderColumnExists("special_car")
   };
   orderWriteColumnSupportCache = support;
   return support;
@@ -726,6 +780,7 @@ function normalizeCustomerPayload(body, id = "") {
   const taxNo = userTextValue(body.taxNo || invoice.taxNo);
   const type = body.type === "供应商" ? "供应商" : "客户";
   const customerCategory = type === "客户" && (body.customerCategory || body.customer_category) === "报关客户" ? "报关客户" : type === "客户" ? "运输客户" : "";
+  const isTransportCustomer = type === "客户" && customerCategory === "运输客户";
   const settlementCurrency = userTextValue(body.settlementCurrency);
   return {
     id,
@@ -753,11 +808,15 @@ function normalizeCustomerPayload(body, id = "") {
     customsExportHomeFee: numericOrDefault(body.customsExportHomeFee ?? body.customs_export_home_fee, 150),
     customsImportPageFee: numericOrDefault(body.customsImportPageFee ?? body.customs_import_page_fee, 30),
     customsExportPageFee: numericOrDefault(body.customsExportPageFee ?? body.customs_export_page_fee, 30),
+    customsProductionCertificateFee: numericOrDefault(body.customsProductionCertificateFee ?? body.customs_production_certificate_fee, 150),
     customsManifestFee: numericOrDefault(body.customsManifestFee ?? body.customs_manifest_fee, 0),
     customsVerificationFee: numericOrDefault(body.customsVerificationFee ?? body.customs_verification_fee, 0),
     tripNoRequired: type === "客户" ? booleanFlag(body.tripNoRequired ?? body.trip_no_required, false) : false,
     sixSheetNoRequired: type === "客户" ? booleanFlag(body.sixSheetNoRequired ?? body.six_sheet_no_required, false) : false,
     specialCustomer: type === "客户" ? booleanFlag(body.specialCustomer ?? body.special_customer, false) : false,
+    operatingUnitEnabled: isTransportCustomer ? booleanFlag(body.operatingUnitEnabled ?? body.operating_unit_enabled, false) : false,
+    newOldEnabled: isTransportCustomer ? booleanFlag(body.newOldEnabled ?? body.new_old_enabled, false) : false,
+    specialCarEnabled: isTransportCustomer ? booleanFlag(body.specialCarEnabled ?? body.special_car_enabled, false) : false,
     customsCustomFields: normalizeCustomsBusinessCustomFields(body.customsCustomFields ?? body.customs_custom_fields),
     customsCustomFieldsJson: JSON.stringify(normalizeCustomsBusinessCustomFields(body.customsCustomFields ?? body.customs_custom_fields)),
     createdAt: body.createdAt || todayInputValue(),
@@ -767,6 +826,11 @@ function normalizeCustomerPayload(body, id = "") {
     invoiceAccount: userTextValue(body.invoiceAccount || invoice.account),
     invoiceAddressPhone: userMultilineTextValue(body.invoiceAddressPhone || invoice.addressPhone || address)
   };
+}
+
+function normalizeOrderNewOld(value = "") {
+  const text = userTextValue(value);
+  return text === "新货" || text === "旧货" ? text : "";
 }
 
 function mapOrder(row) {
@@ -805,6 +869,8 @@ function mapOrder(row) {
     receivableRMB: row.receivable_rmb,
     status: userTextValue(row.status),
     operatingUnit: userTextValue(row.operating_unit),
+    newOld: normalizeOrderNewOld(row.new_old),
+    specialCar: booleanFlag(row.special_car, false),
     createdByAccountId: row.created_by_account_id || null,
     createdByUsername: row.created_by_username || "",
     createdByName,
@@ -898,6 +964,8 @@ const ORDER_EXPORT_SYSTEM_TOTAL_COLUMN_KEYS = new Set(ORDER_EXPORT_SYSTEM_TOTAL_
 const ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN = { key: "__sequence", label: "序号", width: 42, fontSize: 8, system: true };
 const ORDER_EXPORT_CHARGE_NOTE_COLUMN = { key: "__chargeNote", label: "收费备注", width: 128, fontSize: 8, system: true };
 const ORDER_EXPORT_OPERATING_UNIT_COLUMN = { key: "operatingUnit", label: "经营单位", width: 96, fontSize: 8, system: true };
+const ORDER_EXPORT_NEW_OLD_COLUMN = { key: "newOld", label: "新/旧", width: 52, fontSize: 8, system: true };
+const ORDER_EXPORT_SPECIAL_CAR_COLUMN = { key: "specialCar", label: "专车", width: 52, fontSize: 8, system: true };
 
 function normalizeExportTemplate(template = null) {
   if (!template || template.type !== "visual-export-template") return null;
@@ -1950,6 +2018,7 @@ function exportOrderColumnAmount(order, column) {
   if (key === "linkedCustomsItemCount") return Number(order?.linkedCustomsBusiness?.itemCount || 0);
   if (key === "linkedCustomsPageCount") return Number(order?.linkedCustomsBusiness?.pageCount || 0);
   if (key === "linkedCustomsPageFee") return Number(order?.linkedCustomsBusiness?.pageFee || 0);
+  if (key === "linkedCustomsProductionCertificateFee") return Number(order?.linkedCustomsBusiness?.productionCertificateFee || 0);
   if (key === "linkedCustomsCustomsFee") return Number(order?.linkedCustomsBusiness?.customsFee || 0);
   if (key === "linkedCustomsManifestFee") return Number(order?.linkedCustomsBusiness?.manifestFee || 0);
   if (key === "linkedCustomsInspectionFee") return Number(order?.linkedCustomsBusiness?.inspectionFee || 0);
@@ -1984,6 +2053,7 @@ function exportOrderColumnValue(order, column, rowIndex = 0, options = {}) {
   if (key === "linkedCustomsItemCount"
     || key === "linkedCustomsPageCount"
     || key === "linkedCustomsPageFee"
+    || key === "linkedCustomsProductionCertificateFee"
     || key === "linkedCustomsCustomsFee"
     || key === "linkedCustomsManifestFee"
     || key === "linkedCustomsInspectionFee"
@@ -1997,6 +2067,8 @@ function exportOrderColumnValue(order, column, rowIndex = 0, options = {}) {
   if (key === "loading" || key === "unloading") return shortLocationValue(order?.[key]);
   if (isExportFeeItemColumn(column)) return feeDisplayForColumn(order, column, options);
   if (key === "receivableHKD" || key === "receivableRMB") return formatExportAmount(order?.[key]);
+  if (key === "newOld") return normalizeOrderNewOld(order?.newOld ?? order?.new_old);
+  if (key === "specialCar") return booleanFlag(order?.specialCar ?? order?.special_car, false) ? "专车" : "";
   const value = order?.[key];
   if (value !== undefined && value !== null && value !== "" && Number(value) === 0) return "";
   return value ?? "";
@@ -2321,7 +2393,10 @@ function mergeExportColumnsByTemplateOrder(templateColumns = [], includedColumns
 }
 
 function ordersHaveOperatingUnit(orders = []) {
-  return orders.some((order) => textValue(order?.operatingUnit || order?.operating_unit).trim());
+  return orders.some((order) =>
+    textValue(order?.operatingUnit || order?.operating_unit).trim()
+    || orderCustomerFeatureEnabled(order, "customerOperatingUnitEnabled", "customer_operating_unit_enabled")
+  );
 }
 
 function insertOperatingUnitExportColumn(columns = []) {
@@ -2329,6 +2404,35 @@ function insertOperatingUnitExportColumn(columns = []) {
   const nextColumns = [...columns];
   const customerIndex = nextColumns.findIndex((column) => textValue(column?.key) === "customer");
   nextColumns.splice(customerIndex >= 0 ? customerIndex + 1 : Math.min(4, nextColumns.length), 0, { ...ORDER_EXPORT_OPERATING_UNIT_COLUMN });
+  return nextColumns;
+}
+
+function orderCustomerFeatureEnabled(order = {}, camelKey = "", snakeKey = "") {
+  return booleanFlag(order?.[camelKey] ?? order?.[snakeKey], false);
+}
+
+function ordersHaveNewOld(orders = []) {
+  return orders.some((order) =>
+    normalizeOrderNewOld(order?.newOld ?? order?.new_old)
+    || orderCustomerFeatureEnabled(order, "customerNewOldEnabled", "customer_new_old_enabled")
+  );
+}
+
+function ordersHaveSpecialCar(orders = []) {
+  return orders.some((order) =>
+    booleanFlag(order?.specialCar ?? order?.special_car, false)
+    || orderCustomerFeatureEnabled(order, "customerSpecialCarEnabled", "customer_special_car_enabled")
+  );
+}
+
+function insertOrderAttributeExportColumn(columns = [], columnConfig = {}, afterKeys = []) {
+  const key = textValue(columnConfig.key);
+  if (!key || columns.some((column) => textValue(column?.key) === key)) return columns;
+  const nextColumns = [...columns];
+  const anchorIndex = afterKeys
+    .map((afterKey) => nextColumns.findIndex((column) => textValue(column?.key) === afterKey))
+    .find((index) => index >= 0);
+  nextColumns.splice(anchorIndex >= 0 ? anchorIndex + 1 : Math.min(5, nextColumns.length), 0, { ...columnConfig });
   return nextColumns;
 }
 
@@ -2360,9 +2464,15 @@ function exportColumnsForOrders(templatePayload = null, orders = [], options = {
     bodyColumns,
     dynamicColumns
   );
-  const exportBodyColumns = options.includeOperatingUnitColumn && ordersHaveOperatingUnit(orders)
+  let exportBodyColumns = options.includeOperatingUnitColumn && ordersHaveOperatingUnit(orders)
     ? insertOperatingUnitExportColumn(mergedBodyColumns)
     : mergedBodyColumns;
+  if (options.includeCustomerOrderAttributeColumns && ordersHaveNewOld(orders)) {
+    exportBodyColumns = insertOrderAttributeExportColumn(exportBodyColumns, ORDER_EXPORT_NEW_OLD_COLUMN, ["operatingUnit", "customer"]);
+  }
+  if (options.includeCustomerOrderAttributeColumns && ordersHaveSpecialCar(orders)) {
+    exportBodyColumns = insertOrderAttributeExportColumn(exportBodyColumns, ORDER_EXPORT_SPECIAL_CAR_COLUMN, ["newOld", "operatingUnit", "customer"]);
+  }
   return [
     sequenceColumn || { ...ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN },
     ...exportBodyColumns,
@@ -2442,6 +2552,7 @@ const ORDER_EXPORT_LINKED_CUSTOMS_FIXED_COLUMNS = [
   { key: "linkedCustomsItemCount", label: "品名项数", width: 10, pdfWidth: 34, amount: true },
   { key: "linkedCustomsPageCount", label: "续页", width: 8, pdfWidth: 30, amount: true },
   { key: "linkedCustomsPageFee", label: "续页费", width: 11, pdfWidth: 44, amount: true },
+  { key: "linkedCustomsProductionCertificateFee", label: "产证地", width: 11, pdfWidth: 44, amount: true },
   { key: "linkedCustomsCustomsFee", label: "报关费", width: 11, pdfWidth: 44, amount: true },
   { key: "linkedCustomsManifestFee", label: "舱单费", width: 11, pdfWidth: 44, amount: true },
   { key: "linkedCustomsInspectionFee", label: "报检费", width: 11, pdfWidth: 44, amount: true },
@@ -2464,6 +2575,7 @@ function linkedCustomsBusinessFixedColumnValue(order = {}, column = {}) {
   if (key === "linkedCustomsItemCount") return Number(customs.itemCount || 0) || "";
   if (key === "linkedCustomsPageCount") return Number(customs.pageCount || 0) || "";
   if (key === "linkedCustomsPageFee") return Number(customs.pageFee || 0) || "";
+  if (key === "linkedCustomsProductionCertificateFee") return Number(customs.productionCertificateFee || 0) || "";
   if (key === "linkedCustomsCustomsFee") return Number(customs.customsFee || 0) || "";
   if (key === "linkedCustomsManifestFee") return Number(customs.manifestFee || 0) || "";
   if (key === "linkedCustomsInspectionFee") return Number(customs.inspectionFee || 0) || "";
@@ -2521,6 +2633,7 @@ async function renderOrdersCsv(orders, title = "订单导出", templatePayload =
   const columns = exportColumnsForOrders(templatePayload, exportOrders, {
     includeChargeNoteColumn: isCustomerStatement,
     includeOperatingUnitColumn: isCustomerStatement,
+    includeCustomerOrderAttributeColumns: isCustomerStatement,
     includeLinkedCustomsColumns: isCustomerStatement
   });
   const headers = columns.map(exportColumnHeaderText);
@@ -2585,6 +2698,7 @@ function exportColumnMaxWidth(column = {}) {
   if (key === "date") return 72;
   if (key === "linkedCustomsDate") return 72;
   if (["direction", "currency", "tonnage"].includes(key)) return 50;
+  if (["newOld", "specialCar"].includes(key)) return 58;
   if (["linkedCustomsDirection"].includes(key)) return 50;
   if (["quantity", "weight", "status"].includes(key)) return 68;
   if (["plate", "driver", "hkDriver", "mainlandDriver"].includes(key)) return 82;
@@ -2594,7 +2708,7 @@ function exportColumnMaxWidth(column = {}) {
   if (["linkedCustomsDeclarationNo", "linkedCustomsSixSheetNo"].includes(key)) return 98;
   if (["linkedCustomsCompany"].includes(key)) return 138;
   if (["linkedCustomsItemCount", "linkedCustomsPageCount"].includes(key)) return 68;
-  if (["linkedCustomsPageFee", "linkedCustomsCustomsFee", "linkedCustomsManifestFee", "linkedCustomsInspectionFee", "linkedCustomsCheckFee", "linkedCustomsVerificationFee", "linkedCustomsOtherFee", "linkedCustomsTotal"].includes(key)) return 76;
+  if (["linkedCustomsPageFee", "linkedCustomsProductionCertificateFee", "linkedCustomsCustomsFee", "linkedCustomsManifestFee", "linkedCustomsInspectionFee", "linkedCustomsCheckFee", "linkedCustomsVerificationFee", "linkedCustomsOtherFee", "linkedCustomsTotal"].includes(key)) return 76;
   if (key === "linkedCustomsRemark") return 150;
   if (key.startsWith("linkedCustomsCustom:")) return 112;
   if (key === "__hkdTotal" || key === "__rmbTotal" || key === "receivableHKD" || key === "receivableRMB") return 76;
@@ -2612,9 +2726,10 @@ function exportColumnFluidMaxWidth(column = {}) {
   if (key === "linkedCustomsCompany" || key === "linkedCustomsRemark") return 240;
   if (["linkedCustomsDirection"].includes(key)) return 56;
   if (["linkedCustomsItemCount", "linkedCustomsPageCount"].includes(key)) return 72;
-  if (["linkedCustomsPageFee", "linkedCustomsCustomsFee", "linkedCustomsManifestFee", "linkedCustomsInspectionFee", "linkedCustomsCheckFee", "linkedCustomsVerificationFee", "linkedCustomsOtherFee", "linkedCustomsTotal"].includes(key)) return 96;
+  if (["linkedCustomsPageFee", "linkedCustomsProductionCertificateFee", "linkedCustomsCustomsFee", "linkedCustomsManifestFee", "linkedCustomsInspectionFee", "linkedCustomsCheckFee", "linkedCustomsVerificationFee", "linkedCustomsOtherFee", "linkedCustomsTotal"].includes(key)) return 96;
   if (key.startsWith("linkedCustomsCustom:")) return 180;
   if (["direction", "currency", "tonnage"].includes(key)) return 56;
+  if (["newOld", "specialCar"].includes(key)) return 64;
   if (key === "date") return 76;
   if (key === "customer" || key === "supplier" || key === "operatingUnit") return 240;
   if (key === "loading" || key === "unloading") return 260;
@@ -3142,6 +3257,7 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
   const columns = exportColumnsForOrders(templatePayload, exportOrders, {
     includeChargeNoteColumn: isCustomerStatement,
     includeOperatingUnitColumn: isCustomerStatement,
+    includeCustomerOrderAttributeColumns: isCustomerStatement,
     includeLinkedCustomsColumns: isCustomerStatement
   });
   const headers = columns.map(exportColumnHeaderText);
@@ -4075,7 +4191,7 @@ async function loadExportOrders(orderNos = [], account = null) {
     `).all(...orderNos);
     const orderIndex = new Map(orderNos.map((no, index) => [no, index]));
     const visibleRows = await filterVisibleOrdersForAccount(rows.map(mapOrder), account, specialLookup);
-    const hydrated = await hydrateOrderFees(visibleRows);
+    const hydrated = await attachTransportCustomerFeatureFlagsToOrders(await hydrateOrderFees(visibleRows));
     return hydrated.sort((a, b) => (orderIndex.get(a.no) ?? 0) - (orderIndex.get(b.no) ?? 0));
   }
   const rows = await db.prepare(`
@@ -4084,7 +4200,7 @@ async function loadExportOrders(orderNos = [], account = null) {
     ${ORDER_DEFAULT_SORT_SQL}
   `).all();
   const visibleRows = await filterVisibleOrdersForAccount(rows.map(mapOrder), account, specialLookup);
-  return hydrateOrderFees(visibleRows);
+  return attachTransportCustomerFeatureFlagsToOrders(await hydrateOrderFees(visibleRows));
 }
 
 function normalizeExportOrderFee(fee = {}) {
@@ -4147,6 +4263,11 @@ function normalizeExportOrderSnapshot(order = {}) {
   snapshot.receivableRMB = Number(snapshot.receivableRMB ?? order.receivableRMB ?? 0);
   snapshot.status = String(snapshot.status || order.status || "");
   snapshot.operatingUnit = String(snapshot.operatingUnit || order.operatingUnit || order.operating_unit || "");
+  snapshot.newOld = normalizeOrderNewOld(snapshot.newOld || order.newOld || order.new_old || "");
+  snapshot.specialCar = normalizeExportBoolean(snapshot.specialCar ?? order.specialCar ?? order.special_car);
+  snapshot.customerOperatingUnitEnabled = normalizeExportBoolean(snapshot.customerOperatingUnitEnabled ?? order.customerOperatingUnitEnabled ?? order.customer_operating_unit_enabled);
+  snapshot.customerNewOldEnabled = normalizeExportBoolean(snapshot.customerNewOldEnabled ?? order.customerNewOldEnabled ?? order.customer_new_old_enabled);
+  snapshot.customerSpecialCarEnabled = normalizeExportBoolean(snapshot.customerSpecialCarEnabled ?? order.customerSpecialCarEnabled ?? order.customer_special_car_enabled);
   snapshot.chargedAt = normalizeOrderChargedAt(snapshot.chargedAt || order.chargedAt || order.charged_at || "");
   snapshot.remark = String(snapshot.remark || order.remark || "");
   snapshot.tripNoEnabled = normalizeExportBoolean(snapshot.tripNoEnabled ?? order.tripNoEnabled ?? order.trip_no_enabled);
@@ -4176,6 +4297,7 @@ async function renderOrdersPdf(res, orders, title = "订单导出", templatePayl
   const sourceColumns = exportColumnsForOrders(templatePayload, exportOrders, {
     includeChargeNoteColumn: isCustomerStatement,
     includeOperatingUnitColumn: isCustomerStatement,
+    includeCustomerOrderAttributeColumns: isCustomerStatement,
     includeLinkedCustomsColumns: isCustomerStatement
   });
   const tableWidth = sourceColumns.reduce((sum, column) => sum + Number(column.width || 76), 0);
@@ -4612,25 +4734,32 @@ async function syncVehicleMaintenanceReminderDate(plate) {
   const vehicle = await db.prepare("SELECT plate FROM vehicles WHERE plate = ? AND deleted_at IS NULL").get(normalizedPlate);
   if (!vehicle) return null;
   const vehicleSupport = await vehicleMaintenanceReminderWriteColumnSupport();
-  const hasMaintenanceNextKm = await vehicleExpenseHasMaintenanceNextKmColumn();
-  const selectMaintenanceNextKm = hasMaintenanceNextKm ? ", maintenance_next_km" : "";
-  const maintenanceProgressCondition = hasMaintenanceNextKm ? "OR COALESCE(maintenance_next_km, 0) > 0" : "";
+  const maintenanceSupport = await vehicleExpenseMaintenanceColumnSupport();
+  if (!maintenanceSupport.maintenanceNextDate && !maintenanceSupport.maintenanceNextKm) {
+    return { maintenanceDueDate: "", maintenanceDueKm: 0 };
+  }
+  const selectMaintenanceNextDate = maintenanceSupport.maintenanceNextDate ? "maintenance_next_date" : "NULL AS maintenance_next_date";
+  const selectMaintenanceNextKm = maintenanceSupport.maintenanceNextKm ? ", maintenance_next_km" : "";
+  const maintenanceConditions = [];
+  if (maintenanceSupport.maintenanceNextDate) {
+    maintenanceConditions.push("COALESCE(NULLIF(maintenance_next_date, ''), '') <> ''");
+  }
+  if (maintenanceSupport.maintenanceNextKm) {
+    maintenanceConditions.push("COALESCE(maintenance_next_km, 0) > 0");
+  }
   const row = await db.prepare(`
-    SELECT maintenance_next_date${selectMaintenanceNextKm}
+    SELECT ${selectMaintenanceNextDate}${selectMaintenanceNextKm}
     FROM vehicle_expenses
     WHERE deleted_at IS NULL
       AND expense_type = 'repair'
       AND COALESCE(is_maintenance, false) = true
-      AND (
-        COALESCE(NULLIF(maintenance_next_date, ''), '') <> ''
-        ${maintenanceProgressCondition}
-      )
+      AND (${maintenanceConditions.join(" OR ")})
       AND plate = ?
     ORDER BY COALESCE(NULLIF(expense_date, ''), created_at) DESC, id DESC
     LIMIT 1
   `).get(normalizedPlate);
   const maintenanceDueDate = String(row?.maintenance_next_date || "").trim();
-  const maintenanceDueKm = hasMaintenanceNextKm ? Number(row?.maintenance_next_km || 0) : 0;
+  const maintenanceDueKm = maintenanceSupport.maintenanceNextKm ? Number(row?.maintenance_next_km || 0) : 0;
   if (!vehicleSupport.maintenanceDueDate && !vehicleSupport.maintenanceDueKm) {
     return { maintenanceDueDate, maintenanceDueKm };
   }
@@ -4864,6 +4993,7 @@ async function lockVehicleExpenseCreation(item = {}) {
 }
 
 let vehicleExpenseHasMaintenanceNextKmColumnCache;
+let vehicleExpenseHasMaintenanceNextDateColumnCache;
 
 async function vehicleExpenseHasMaintenanceNextKmColumn() {
   if (vehicleExpenseHasMaintenanceNextKmColumnCache !== undefined) {
@@ -4886,29 +5016,66 @@ async function vehicleExpenseHasMaintenanceNextKmColumn() {
   return vehicleExpenseHasMaintenanceNextKmColumnCache;
 }
 
+async function vehicleExpenseHasMaintenanceNextDateColumn() {
+  if (vehicleExpenseHasMaintenanceNextDateColumnCache !== undefined) {
+    return vehicleExpenseHasMaintenanceNextDateColumnCache;
+  }
+  try {
+    const row = await db.prepare(`
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = ?
+        AND column_name = ?
+      LIMIT 1
+    `).get("vehicle_expenses", "maintenance_next_date");
+    vehicleExpenseHasMaintenanceNextDateColumnCache = Boolean(row);
+  } catch (error) {
+    console.warn("Failed to inspect vehicle_expenses schema", error);
+    vehicleExpenseHasMaintenanceNextDateColumnCache = false;
+  }
+  return vehicleExpenseHasMaintenanceNextDateColumnCache;
+}
+
+async function vehicleExpenseMaintenanceColumnSupport() {
+  const [maintenanceNextDate, maintenanceNextKm] = await Promise.all([
+    vehicleExpenseHasMaintenanceNextDateColumn(),
+    vehicleExpenseHasMaintenanceNextKmColumn()
+  ]);
+  return { maintenanceNextDate, maintenanceNextKm };
+}
+
 async function findRecentDuplicateVehicleExpense(item = {}, hasMaintenanceNextKm = true) {
+  const maintenanceSupport = await vehicleExpenseMaintenanceColumnSupport();
+  const conditions = [
+    "deleted_at IS NULL",
+    "expense_type = @type",
+    "plate = @plate",
+    "expense_date = @date",
+    "COALESCE(start_date, '') = @startDate",
+    "COALESCE(end_date, '') = @endDate",
+    "expense_year IS NOT DISTINCT FROM @year",
+    "COALESCE(name, '') = @name",
+    "COALESCE(currency, '') = @currency",
+    "ABS(COALESCE(amount, 0) - @amount) < 0.000001",
+    "ABS(COALESCE(fuel_liters, 0) - @fuelLiters) < 0.000001",
+    "ABS(COALESCE(fuel_price_per_liter, 0) - @fuelPricePerLiter) < 0.000001",
+    "ABS(COALESCE(odometer_km, 0) - @odometerKm) < 0.000001",
+    "COALESCE(is_maintenance, false) = @isMaintenance",
+    "COALESCE(repair_items_json, '[]') = @repairItemsJson",
+    "COALESCE(note, '') = @note",
+    "COALESCE(NULLIF(created_at, ''), CURRENT_TIMESTAMP::text)::timestamptz >= CURRENT_TIMESTAMP - INTERVAL '30 seconds'"
+  ];
+  if (maintenanceSupport.maintenanceNextDate) {
+    conditions.push("COALESCE(maintenance_next_date, '') = @maintenanceNextDate");
+  }
+  if (maintenanceSupport.maintenanceNextKm && hasMaintenanceNextKm) {
+    conditions.push("ABS(COALESCE(maintenance_next_km, 0) - @maintenanceNextKm) < 0.000001");
+  }
   return db.prepare(`
     SELECT *
     FROM vehicle_expenses
-    WHERE deleted_at IS NULL
-      AND expense_type = @type
-      AND plate = @plate
-      AND expense_date = @date
-      AND COALESCE(start_date, '') = @startDate
-      AND COALESCE(end_date, '') = @endDate
-      AND expense_year IS NOT DISTINCT FROM @year
-      AND COALESCE(name, '') = @name
-      AND COALESCE(currency, '') = @currency
-      AND ABS(COALESCE(amount, 0) - @amount) < 0.000001
-      AND ABS(COALESCE(fuel_liters, 0) - @fuelLiters) < 0.000001
-      AND ABS(COALESCE(fuel_price_per_liter, 0) - @fuelPricePerLiter) < 0.000001
-      AND ABS(COALESCE(odometer_km, 0) - @odometerKm) < 0.000001
-      AND COALESCE(is_maintenance, false) = @isMaintenance
-      AND COALESCE(maintenance_next_date, '') = @maintenanceNextDate
-      ${hasMaintenanceNextKm ? "AND ABS(COALESCE(maintenance_next_km, 0) - @maintenanceNextKm) < 0.000001" : ""}
-      AND COALESCE(repair_items_json, '[]') = @repairItemsJson
-      AND COALESCE(note, '') = @note
-      AND COALESCE(NULLIF(created_at, ''), CURRENT_TIMESTAMP::text)::timestamptz >= CURRENT_TIMESTAMP - INTERVAL '30 seconds'
+    WHERE ${conditions.join("\n      AND ")}
     ORDER BY id DESC
     LIMIT 1
   `).get(item);
@@ -5391,6 +5558,7 @@ function mapCustomsBusiness(row) {
     + Number(row.check_fee || 0)
     + Number(row.verification_fee || 0)
     + customsBusinessCustomFieldsTotal(customFields);
+  const productionCertificateFee = Number(row.home_fee || 0);
   return {
     id: row.id,
     date: row.business_date || "",
@@ -5400,7 +5568,8 @@ function mapCustomsBusiness(row) {
     direction: userTextValue(row.direction),
     itemCount: Number(row.item_count || 0),
     pageCount: Number(row.page_count || 0),
-    homeFee: 0,
+    homeFee: productionCertificateFee,
+    productionCertificateFee,
     customsFee: Number(row.customs_fee || 0),
     pageFee: Number(row.page_fee || 0),
     manifestFee: Number(row.manifest_fee || 0),
@@ -5748,6 +5917,7 @@ const CUSTOMS_STATEMENT_EXPORT_COLUMNS = [
   { key: "itemCount", label: "品名项数", width: 10, pdfWidth: 34, amount: true },
   { key: "pageCount", label: "续页", width: 8, pdfWidth: 30, amount: true },
   { key: "pageFee", label: "续页费", width: 11, pdfWidth: 44, amount: true },
+  { key: "productionCertificateFee", label: "产证地", width: 11, pdfWidth: 44, amount: true },
   { key: "customsFee", label: "报关费", width: 11, pdfWidth: 44, amount: true },
   { key: "manifestFee", label: "舱单费", width: 11, pdfWidth: 44, amount: true },
   { key: "inspectionFee", label: "报检费", width: 11, pdfWidth: 44, amount: true },
@@ -6152,18 +6322,27 @@ function otherBusinessCustomFieldsBreakdown(fields = []) {
 
 function normalizeCustomsBusinessPayload(body = {}) {
   const direction = userTextValue(body.direction ?? "");
-  const homeFee = 0;
-  const customsFee = integerField(body.customsFee ?? body.customs_fee);
-  const pageFee = integerField(body.pageFee ?? body.page_fee);
-  const manifestFee = integerField(body.manifestFee ?? body.manifest_fee);
-  const inspectionFee = integerField(body.inspectionFee ?? body.inspection_fee);
-  const checkFee = integerField(body.checkFee ?? body.check_fee);
-  const verificationFee = ["金二进口", "金二出口"].includes(direction)
-    ? integerField(body.verificationFee ?? body.verification_fee)
+  const isProductionCertificateDirection = direction === "产证地";
+  const homeFee = isProductionCertificateDirection
+    ? integerField(body.productionCertificateFee ?? body.homeFee ?? body.home_fee)
     : 0;
-  const otherFee = integerField(body.otherFee ?? body.other_fee);
-  const customFields = normalizeCustomsBusinessCustomFields(body.customFields ?? body.custom_fields);
-  const computedTotal = customsFee + pageFee + manifestFee + inspectionFee + checkFee + verificationFee
+  const customsFee = isProductionCertificateDirection ? 0 : integerField(body.customsFee ?? body.customs_fee);
+  const pageFee = isProductionCertificateDirection ? 0 : integerField(body.pageFee ?? body.page_fee);
+  const manifestFee = isProductionCertificateDirection ? 0 : integerField(body.manifestFee ?? body.manifest_fee);
+  const inspectionFee = isProductionCertificateDirection ? 0 : integerField(body.inspectionFee ?? body.inspection_fee);
+  const checkFee = isProductionCertificateDirection ? 0 : integerField(body.checkFee ?? body.check_fee);
+  const verificationFee = isProductionCertificateDirection
+    ? 0
+    : (["金二进口", "金二出口"].includes(direction)
+      ? integerField(body.verificationFee ?? body.verification_fee)
+      : 0);
+  const otherFee = isProductionCertificateDirection ? 0 : integerField(body.otherFee ?? body.other_fee);
+  const itemCount = isProductionCertificateDirection ? 0 : integerField(body.itemCount ?? body.item_count);
+  const pageCount = isProductionCertificateDirection ? 0 : integerField(body.pageCount ?? body.page_count);
+  const customFields = isProductionCertificateDirection
+    ? []
+    : normalizeCustomsBusinessCustomFields(body.customFields ?? body.custom_fields);
+  const computedTotal = homeFee + customsFee + pageFee + manifestFee + inspectionFee + checkFee + verificationFee
     + customsBusinessCustomFieldsTotal(customFields);
   return {
     date: normalizeCustomsBusinessDate(body.date ?? body.businessDate ?? body.business_date),
@@ -6171,8 +6350,8 @@ function normalizeCustomsBusinessPayload(body = {}) {
     sixSheetNo: userTextValue(body.sixSheetNo ?? body.six_sheet_no ?? ""),
     company: userTextValue(body.company ?? ""),
     direction,
-    itemCount: integerField(body.itemCount ?? body.item_count),
-    pageCount: integerField(body.pageCount ?? body.page_count),
+    itemCount,
+    pageCount,
     homeFee,
     customsFee,
     pageFee,
@@ -6369,9 +6548,13 @@ async function loadCustomerShortNameMap(options = {}) {
     ? await db.prepare(`
       SELECT id, name, short_name
       FROM customers
-      WHERE deleted_at IS NULL AND type = '客户' AND customer_category = ?
+      WHERE deleted_at IS NULL AND type = '客户'
+        AND (
+          customer_category = ?
+          OR (? = '运输客户' AND COALESCE(customer_category, '运输客户') <> '报关客户')
+        )
       ORDER BY created_at DESC, id DESC
-    `).all(category)
+    `).all(category, category)
     : await db.prepare(`
       SELECT id, name, short_name
       FROM customers
@@ -6446,6 +6629,23 @@ async function hydrateOrderFees(orders) {
     feeMap.get(fee.order_no).push(mapOrderFee(fee));
   });
   return orders.map((item) => ({ ...item, fees: feeMap.get(item.no) || [] }));
+}
+
+async function attachTransportCustomerFeatureFlagsToOrders(orders = []) {
+  if (!orders.length) return orders;
+  const customerFeatureMap = await loadTransportCustomerFeatureMap();
+  return orders.map((order) => {
+    const feature = customerFeatureMap.get(String(order.customerId || "").trim())
+      || customerFeatureMap.get(String(order.customer || "").trim())
+      || customerFeatureMap.get(String(order.customerShortName || "").trim())
+      || {};
+    return {
+      ...order,
+      customerOperatingUnitEnabled: Boolean(feature.operatingUnitEnabled),
+      customerNewOldEnabled: Boolean(feature.newOldEnabled),
+      customerSpecialCarEnabled: Boolean(feature.specialCarEnabled)
+    };
+  });
 }
 
 async function nextCustomerId(type) {
@@ -7019,6 +7219,7 @@ app.put("/api/customs-businesses/:id", async (req, res) => {
       { key: "sixSheetNo", label: "六联单号" },
       { key: "itemCount", label: "主页品名项" },
       { key: "pageCount", label: "续页" },
+      { label: "产证地", before: (before) => before.home_fee, after: () => item.homeFee },
       { key: "customsFee", label: "报关费" },
       { key: "manifestFee", label: "舱单费" },
       { key: "pageFee", label: "续页费" },
@@ -7517,6 +7718,7 @@ app.patch("/api/customers/:id", async (req, res) => {
   const hasCustomsCustomerTypeColumn = await customerColumnExists("customs_customer_type");
   const hasCustomsVerificationFee = await customerColumnExists("customs_verification_fee");
   const hasCustomsManifestFee = await customerColumnExists("customs_manifest_fee");
+  const hasCustomsProductionCertificateFee = await customerColumnExists("customs_production_certificate_fee");
   const hasCustomsCustomFields = await customerColumnExists("customs_custom_fields");
   const updateSets = [
     "type = @type",
@@ -7550,7 +7752,11 @@ app.patch("/api/customers/:id", async (req, res) => {
   if (hasCustomsCustomerTypeColumn) updateSets.push("customs_customer_type = @customsCustomerType");
   if (requirementSupport.tripNoRequired) updateSets.push("trip_no_required = @tripNoRequired");
   if (requirementSupport.sixSheetNoRequired) updateSets.push("six_sheet_no_required = @sixSheetNoRequired");
+  if (hasCustomsProductionCertificateFee) updateSets.push("customs_production_certificate_fee = @customsProductionCertificateFee");
   if (hasSpecialCustomerColumn) updateSets.push("special_customer = @specialCustomer");
+  if (requirementSupport.operatingUnitEnabled) updateSets.push("operating_unit_enabled = @operatingUnitEnabled");
+  if (requirementSupport.newOldEnabled) updateSets.push("new_old_enabled = @newOldEnabled");
+  if (requirementSupport.specialCarEnabled) updateSets.push("special_car_enabled = @specialCarEnabled");
   if (hasCustomsManifestFee) updateSets.push("customs_manifest_fee = @customsManifestFee");
   if (hasCustomsVerificationFee) updateSets.push("customs_verification_fee = @customsVerificationFee");
   if (hasCustomsCustomFields) updateSets.push("customs_custom_fields = @customsCustomFieldsJson");
@@ -7576,7 +7782,11 @@ app.patch("/api/customers/:id", async (req, res) => {
       { key: "mobile", label: "电话" },
       { key: "tripNoRequired", label: "车次号必须" },
       { key: "sixSheetNoRequired", label: "六联单号必须" },
-      { key: "specialCustomer", label: "特殊客户" }
+      { key: "specialCustomer", label: "特殊客户" },
+      { key: "operatingUnitEnabled", label: "经营单位" },
+      { key: "newOldEnabled", label: "新/旧" },
+      { key: "specialCarEnabled", label: "专车" },
+      { key: "customsProductionCertificateFee", label: "产证地" }
     ], { entityLabel: "客户" })
   );
   res.json(mapCustomer(await db.prepare("SELECT * FROM customers WHERE id = ?").get(id)));
@@ -7598,6 +7808,7 @@ app.post("/api/customers", async (req, res) => {
   const hasCustomsCustomerTypeColumn = await customerColumnExists("customs_customer_type");
   const hasCustomsVerificationFee = await customerColumnExists("customs_verification_fee");
   const hasCustomsManifestFee = await customerColumnExists("customs_manifest_fee");
+  const hasCustomsProductionCertificateFee = await customerColumnExists("customs_production_certificate_fee");
   const hasCustomsCustomFields = await customerColumnExists("customs_custom_fields");
   const insertColumns = [
     "id",
@@ -7679,6 +7890,18 @@ app.post("/api/customers", async (req, res) => {
     insertColumns.push("special_customer");
     insertValues.push("@specialCustomer");
   }
+  if (requirementSupport.operatingUnitEnabled) {
+    insertColumns.push("operating_unit_enabled");
+    insertValues.push("@operatingUnitEnabled");
+  }
+  if (requirementSupport.newOldEnabled) {
+    insertColumns.push("new_old_enabled");
+    insertValues.push("@newOldEnabled");
+  }
+  if (requirementSupport.specialCarEnabled) {
+    insertColumns.push("special_car_enabled");
+    insertValues.push("@specialCarEnabled");
+  }
   if (hasCustomsManifestFee) {
     insertColumns.push("customs_manifest_fee");
     insertValues.push("@customsManifestFee");
@@ -7686,6 +7909,10 @@ app.post("/api/customers", async (req, res) => {
   if (hasCustomsVerificationFee) {
     insertColumns.push("customs_verification_fee");
     insertValues.push("@customsVerificationFee");
+  }
+  if (hasCustomsProductionCertificateFee) {
+    insertColumns.push("customs_production_certificate_fee");
+    insertValues.push("@customsProductionCertificateFee");
   }
   if (hasCustomsCustomFields) {
     insertColumns.push("customs_custom_fields");
@@ -8187,18 +8414,29 @@ async function hydrateOrderRowsForApi(orders = []) {
   const rows = await hydrateOrderDispatchLoadInfo(await hydrateOrderFees(orders));
   const customerShortNames = await loadCustomerShortNameMap({ category: "运输客户" });
   const specialCustomerMap = await loadCustomerSpecialCustomerMap();
-  return rows.map((row) => ({
-    ...row,
-    customerSpecialCustomer:
-      booleanFlag(row.customerSpecialCustomer ?? row.customer_special_customer, false)
-      || specialCustomerMap.has(String(row.customerId || "").trim())
-      || specialCustomerMap.has(String(row.customer || "").trim())
-      || specialCustomerMap.has(String(row.customerShortName || "").trim()),
-    customerShortName: shortNameFromMap(row.customerId, customerShortNames)
+  const customerFeatureMap = await loadTransportCustomerFeatureMap();
+  return rows.map((row) => {
+    const customerShortName = shortNameFromMap(row.customerId, customerShortNames)
       || shortNameFromMap(row.customer, customerShortNames)
       || row.customerShortName
-      || ""
-  }));
+      || "";
+    const feature = customerFeatureMap.get(String(row.customerId || "").trim())
+      || customerFeatureMap.get(String(row.customer || "").trim())
+      || customerFeatureMap.get(String(customerShortName || "").trim())
+      || {};
+    return {
+      ...row,
+      customerSpecialCustomer:
+        booleanFlag(row.customerSpecialCustomer ?? row.customer_special_customer, false)
+        || specialCustomerMap.has(String(row.customerId || "").trim())
+        || specialCustomerMap.has(String(row.customer || "").trim())
+        || specialCustomerMap.has(String(customerShortName || "").trim()),
+      customerOperatingUnitEnabled: Boolean(feature.operatingUnitEnabled),
+      customerNewOldEnabled: Boolean(feature.newOldEnabled),
+      customerSpecialCarEnabled: Boolean(feature.specialCarEnabled),
+      customerShortName
+    };
+  });
 }
 
 function dedupeDispatchPlanRows(rows = []) {
@@ -8660,7 +8898,9 @@ async function renderDispatchPlanXlsxBuffer(rows = [], title = "", fallbackDate 
   const customerShortNameRows = await db.prepare(`
     SELECT id, name, short_name
     FROM customers
-    WHERE deleted_at IS NULL AND type = '客户' AND customer_category = '运输客户'
+    WHERE deleted_at IS NULL
+      AND type = '客户'
+      AND COALESCE(customer_category, '运输客户') <> '报关客户'
     ORDER BY created_at DESC, id DESC
   `).all();
   const customerShortNames = new Map();
@@ -10178,6 +10418,8 @@ async function readOrderPayload(body, existing = null) {
     receivableRMB: Number(pickBody(body, "receivableRMB", "rmb_receivable", existing?.receivable_rmb || 0) || 0),
     status,
     operatingUnit: userTextValue(pickBody(body, "operatingUnit", "operating_unit", existing?.operating_unit || "")),
+    newOld: normalizeOrderNewOld(pickBody(body, "newOld", "new_old", existing?.new_old || "")),
+    specialCar: booleanFlag(pickBody(body, "specialCar", "special_car", existing?.special_car || false), false),
     remark: userMultilineTextValue(pickBody(body, "remark", null, existing?.remark || "")),
     tripNoEnabled: booleanFlag(pickBody(body, "tripNoEnabled", "trip_no_enabled", existing?.trip_no_enabled || 0), false) ? 1 : 0,
     tripNo: userTextValue(pickBody(body, "tripNo", "trip_no", existing?.trip_no || "")),
@@ -10228,6 +10470,8 @@ function orderWriteEntries(item = {}, support = {}, existing = {}) {
   if (support.loadingLocations) entries.splice(entries.findIndex(([column]) => column === "loading") + 1, 0, ["loading_locations", loadingLocationsJson]);
   if (support.unloadingLocations) entries.splice(entries.findIndex(([column]) => column === "unloading") + 1, 0, ["unloading_locations", unloadingLocationsJson]);
   if (support.operatingUnit) entries.push(["operating_unit", userTextValue(item.operatingUnit ?? existing.operatingUnit ?? existing.operating_unit)]);
+  if (support.newOld) entries.push(["new_old", normalizeOrderNewOld(item.newOld ?? existing.newOld ?? existing.new_old)]);
+  if (support.specialCar) entries.push(["special_car", booleanFlag(item.specialCar ?? existing.specialCar ?? existing.special_car, false) ? 1 : 0]);
   if (support.createdByAccountId) entries.push(["created_by_account_id", item.createdByAccountId ?? existing.createdByAccountId ?? existing.created_by_account_id ?? null]);
   if (support.createdByUsername) entries.push(["created_by_username", userTextValue(item.createdByUsername ?? existing.createdByUsername ?? existing.created_by_username)]);
   if (support.createdByName) entries.push(["created_by_display_name", userTextValue(item.createdByName ?? existing.createdByName ?? existing.created_by_display_name)]);
@@ -10360,7 +10604,7 @@ async function resolveOrderCustomer(item) {
       WHERE id = ?
         AND deleted_at IS NULL
         AND type = '客户'
-        AND customer_category = '运输客户'
+        AND COALESCE(customer_category, '运输客户') <> '报关客户'
     `).get(customerId);
   }
 
@@ -10370,7 +10614,7 @@ async function resolveOrderCustomer(item) {
       FROM customers
       WHERE deleted_at IS NULL
         AND type = '客户'
-        AND customer_category = '运输客户'
+        AND COALESCE(customer_category, '运输客户') <> '报关客户'
         AND (name = ? OR short_name = ?)
       LIMIT 1
     `).get(customerName, customerName);
@@ -10801,6 +11045,8 @@ app.patch("/api/orders/:no", async (req, res) => {
       { key: "dispatchNo", label: "排车单号" },
       { key: "status", label: "状态" },
       { key: "operatingUnit", label: "经营单位" },
+      { key: "newOld", label: "新/旧" },
+      { key: "specialCar", label: "专车" },
       { key: "plate", label: "车牌" },
       { key: "driver", label: "司机" },
       { key: "supplier", label: "供应商" },
@@ -11170,7 +11416,7 @@ app.get("/api/vehicle-expenses", async (req, res) => {
 
 app.post("/api/vehicle-expenses", async (req, res) => {
   const item = normalizeVehicleExpensePayload(req.body || {});
-  const hasMaintenanceNextKm = await vehicleExpenseHasMaintenanceNextKmColumn();
+  const maintenanceSupport = await vehicleExpenseMaintenanceColumnSupport();
   if (!item.plate) {
     res.status(400).json({ message: "请选择车牌" });
     return;
@@ -11212,13 +11458,41 @@ app.post("/api/vehicle-expenses", async (req, res) => {
   }
   const transaction = db.transaction(async () => {
     await lockVehicleExpenseCreation(item);
-    const duplicate = await findRecentDuplicateVehicleExpense(item, hasMaintenanceNextKm);
+    const duplicate = await findRecentDuplicateVehicleExpense(item, maintenanceSupport.maintenanceNextKm);
     if (duplicate) {
       return { row: duplicate, created: false };
     }
+    const insertColumns = [
+      "expense_type",
+      "name",
+      "fuel_station",
+      "fuel_liters",
+      "fuel_price_per_liter",
+      "odometer_km",
+      "is_maintenance"
+    ];
+    const insertValues = [
+      "@type",
+      "@name",
+      "@fuelStation",
+      "@fuelLiters",
+      "@fuelPricePerLiter",
+      "@odometerKm",
+      "@isMaintenance"
+    ];
+    if (maintenanceSupport.maintenanceNextDate) {
+      insertColumns.push("maintenance_next_date");
+      insertValues.push("@maintenanceNextDate");
+    }
+    if (maintenanceSupport.maintenanceNextKm) {
+      insertColumns.push("maintenance_next_km");
+      insertValues.push("@maintenanceNextKm");
+    }
+    insertColumns.push("repair_items_json", "plate", "expense_date", "start_date", "end_date", "expense_year", "currency", "amount", "note");
+    insertValues.push("@repairItemsJson", "@plate", "@date", "@startDate", "@endDate", "@year", "@currency", "@amount", "@note");
     const result = await db.prepare(`
-      INSERT INTO vehicle_expenses (expense_type, name, fuel_station, fuel_liters, fuel_price_per_liter, odometer_km, is_maintenance, maintenance_next_date${hasMaintenanceNextKm ? ", maintenance_next_km" : ""}, repair_items_json, plate, expense_date, start_date, end_date, expense_year, currency, amount, note)
-      VALUES (@type, @name, @fuelStation, @fuelLiters, @fuelPricePerLiter, @odometerKm, @isMaintenance, @maintenanceNextDate${hasMaintenanceNextKm ? ", @maintenanceNextKm" : ""}, @repairItemsJson, @plate, @date, @startDate, @endDate, @year, @currency, @amount, @note)
+      INSERT INTO vehicle_expenses (${insertColumns.join(", ")})
+      VALUES (${insertValues.join(", ")})
     `).run(item);
     return {
       row: await db.prepare("SELECT * FROM vehicle_expenses WHERE id = ?").get(result.lastInsertId),
@@ -11255,7 +11529,7 @@ app.post("/api/vehicle-expenses", async (req, res) => {
 app.patch("/api/vehicle-expenses/:id", async (req, res) => {
   const id = Number(req.params.id || 0);
   const current = await db.prepare("SELECT * FROM vehicle_expenses WHERE id = ? AND deleted_at IS NULL").get(id);
-  const hasMaintenanceNextKm = await vehicleExpenseHasMaintenanceNextKmColumn();
+  const maintenanceSupport = await vehicleExpenseMaintenanceColumnSupport();
   if (!current) {
     res.status(404).json({ message: "费用记录不存在或已删除" });
     return;
@@ -11300,27 +11574,36 @@ app.patch("/api/vehicle-expenses/:id", async (req, res) => {
       return;
     }
   }
+  const updateParts = [
+    "expense_type = @type",
+    "name = @name",
+    "fuel_station = @fuelStation",
+    "fuel_liters = @fuelLiters",
+    "fuel_price_per_liter = @fuelPricePerLiter",
+    "odometer_km = @odometerKm",
+    "is_maintenance = @isMaintenance"
+  ];
+  if (maintenanceSupport.maintenanceNextDate) {
+    updateParts.push("maintenance_next_date = @maintenanceNextDate");
+  }
+  if (maintenanceSupport.maintenanceNextKm) {
+    updateParts.push("maintenance_next_km = @maintenanceNextKm");
+  }
+  updateParts.push(
+    "repair_items_json = @repairItemsJson",
+    "plate = @plate",
+    "expense_date = @date",
+    "start_date = @startDate",
+    "end_date = @endDate",
+    "expense_year = @year",
+    "currency = @currency",
+    "amount = @amount",
+    "note = @note",
+    "updated_at = CURRENT_TIMESTAMP"
+  );
   await db.prepare(`
     UPDATE vehicle_expenses
-    SET expense_type = @type,
-        name = @name,
-        fuel_station = @fuelStation,
-        fuel_liters = @fuelLiters,
-        fuel_price_per_liter = @fuelPricePerLiter,
-        odometer_km = @odometerKm,
-        is_maintenance = @isMaintenance,
-        maintenance_next_date = @maintenanceNextDate,
-        ${hasMaintenanceNextKm ? "maintenance_next_km = @maintenanceNextKm," : ""}
-        repair_items_json = @repairItemsJson,
-        plate = @plate,
-        expense_date = @date,
-        start_date = @startDate,
-        end_date = @endDate,
-        expense_year = @year,
-        currency = @currency,
-        amount = @amount,
-        note = @note,
-        updated_at = CURRENT_TIMESTAMP
+    SET ${updateParts.join(",\n        ")}
     WHERE id = @id AND deleted_at IS NULL
     `).run({ id, ...item });
   if (current.expense_type === "annual" || item.type === "annual") {

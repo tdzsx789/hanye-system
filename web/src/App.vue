@@ -372,7 +372,8 @@ const DRIVER_EMPLOYMENT_STATUS_OPTIONS = ["在职", "离职"];
 const CUSTOMER_CATEGORY_OPTIONS = ["运输客户", "报关客户"];
 const CUSTOMER_CUSTOMS_FEE_FIELD_NAMES = {
   customsImportDeclarationFee: "进口报关费",
-  customsExportDeclarationFee: "出口报关费"
+  customsExportDeclarationFee: "出口报关费",
+  customsProductionCertificateFee: "产证地"
 };
 const CUSTOMER_CUSTOMS_FEE_FIELD_NAME_SET = new Set(["舱单费", ...Object.values(CUSTOMER_CUSTOMS_FEE_FIELD_NAMES)]);
 const DEFAULT_CUSTOMS_CUSTOMER_CONFIG = {
@@ -384,6 +385,7 @@ const DEFAULT_CUSTOMS_CUSTOMER_CONFIG = {
   customsExportDeclarationFee: 0,
   customsImportPageFee: 30,
   customsExportPageFee: 30,
+  customsProductionCertificateFee: 150,
   customsManifestFee: 0,
   customsVerificationFee: 0
 };
@@ -418,6 +420,7 @@ const CUSTOMS_BUSINESS_COMPACT_WIDTHS = {
   itemCount: 68,
   pageCount: 56,
   pageFee: 78,
+  productionCertificateFee: 78,
   customsFee: 78,
   manifestFee: 78,
   inspectionFee: 78,
@@ -436,6 +439,7 @@ const CUSTOMS_BUSINESS_PREFIX_COLUMNS = [
   { key: "itemCount", label: "品名项数", width: 68, min: 52 },
   { key: "pageCount", label: "续页", width: 56, min: 42 },
   { key: "pageFee", label: "续页费", width: 78, min: 60, amount: true },
+  { key: "productionCertificateFee", label: "产证地", width: 78, min: 60, amount: true },
   { key: "customsFee", label: "报关费", width: 78, min: 60, amount: true },
   { key: "manifestFee", label: "舱单费", width: 78, min: 60, amount: true },
   { key: "inspectionFee", label: "报检费", width: 78, min: 60, amount: true },
@@ -926,9 +930,16 @@ function normalizeCustomerCustomsConfig(source = {}) {
     source.customsExportDeclarationFee ?? source.customs_export_declaration_fee ?? customsCustomFieldMap.get(CUSTOMER_CUSTOMS_FEE_FIELD_NAMES.customsExportDeclarationFee),
     DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportDeclarationFee
   );
+  const customsProductionCertificateFee = customerConfigNumber(
+    source.customsProductionCertificateFee
+      ?? source.customs_production_certificate_fee
+      ?? customsCustomFieldMap.get(CUSTOMER_CUSTOMS_FEE_FIELD_NAMES.customsProductionCertificateFee),
+    DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsProductionCertificateFee
+  );
   return {
     customsImportDeclarationFee,
     customsExportDeclarationFee,
+    customsProductionCertificateFee,
     customsCustomFields: customsCustomFields.filter((field) => !CUSTOMER_CUSTOMS_FEE_FIELD_NAME_SET.has(customsBusinessCustomFieldName(field)))
   };
 }
@@ -949,11 +960,15 @@ function normalizeCustomerRecord(customer = {}) {
     customsExportDeclarationFee: customsConfig.customsExportDeclarationFee,
     customsImportPageFee: Number(row.customsImportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee),
     customsExportPageFee: Number(row.customsExportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee),
+    customsProductionCertificateFee: Number(row.customsProductionCertificateFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsProductionCertificateFee),
     customsManifestFee: Number(row.customsManifestFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsManifestFee),
     customsVerificationFee: Number(row.customsVerificationFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee),
     tripNoRequired: booleanFlag(row.tripNoRequired ?? row.trip_no_required, false),
     sixSheetNoRequired: booleanFlag(row.sixSheetNoRequired ?? row.six_sheet_no_required, false),
     specialCustomer: booleanFlag(row.specialCustomer ?? row.special_customer, false),
+    operatingUnitEnabled: booleanFlag(row.operatingUnitEnabled ?? row.operating_unit_enabled, false),
+    newOldEnabled: booleanFlag(row.newOldEnabled ?? row.new_old_enabled, false),
+    specialCarEnabled: booleanFlag(row.specialCarEnabled ?? row.special_car_enabled, false),
     customsCustomFields: customsConfig.customsCustomFields
   };
 }
@@ -1148,8 +1163,29 @@ function currentOrderSignRequirement() {
   return orderSignRequirementForCustomer(customer, orderForm.customer || orderCustomerKeyword.value);
 }
 
+function currentOrderCustomerFeatureEnabled(camelKey = "", snakeKey = "") {
+  const customer = currentOrderCustomerRecord();
+  return booleanFlag(customer?.[camelKey] ?? customer?.[snakeKey], false);
+}
+
 const currentOrderTripNoRequired = computed(() => Boolean(currentOrderSignRequirement()?.tripNo));
 const currentOrderSixSheetNoRequired = computed(() => Boolean(currentOrderSignRequirement()?.sixSheetNo));
+const currentOrderOperatingUnitEnabled = computed(() => currentOrderCustomerFeatureEnabled("operatingUnitEnabled", "operating_unit_enabled"));
+const currentOrderNewOldEnabled = computed(() => currentOrderCustomerFeatureEnabled("newOldEnabled", "new_old_enabled"));
+const currentOrderSpecialCarEnabled = computed(() => currentOrderCustomerFeatureEnabled("specialCarEnabled", "special_car_enabled"));
+
+function normalizeOrderNewOld(value = "") {
+  const text = String(value || "").trim();
+  return text === "新货" || text === "旧货" ? text : "";
+}
+
+function syncOrderCustomerFeatureFields({ preserveExisting = false } = {}) {
+  if (!orderHasTransportFields.value) return;
+  if (!currentOrderOperatingUnitEnabled.value && !preserveExisting) orderForm.operatingUnit = "";
+  if (!currentOrderNewOldEnabled.value && !preserveExisting) orderForm.newOld = "";
+  else orderForm.newOld = normalizeOrderNewOld(orderForm.newOld);
+  if (!currentOrderSpecialCarEnabled.value && !preserveExisting) orderForm.specialCar = false;
+}
 
 function orderSignRequirementKey(requirement = null) {
   if (!requirement) return "";
@@ -1175,7 +1211,7 @@ function applyOrderRequiredFieldDefaults({ force = false } = {}) {
 }
 
 function missingOrderSignRequiredFieldLabels() {
-  const source = orderForm;
+  const source = orderDisplaySource(orderForm) || orderForm;
   const labels = [];
   ORDER_SIGN_BASE_REQUIRED_FIELDS.forEach((field) => {
     if (!String(source[field.key] ?? "").trim()) labels.push(field.label);
@@ -2183,6 +2219,7 @@ function blankCustomsBusinessForm() {
     direction: "",
     itemCount: 0,
     pageCount: 0,
+    productionCertificateFee: 0,
     customsFee: 0,
     pageFee: 0,
     inspectionFee: 0,
@@ -2197,6 +2234,7 @@ function blankCustomsBusinessForm() {
 
 const customsBusinessForm = reactive(blankCustomsBusinessForm());
 const customsBusinessAutoCharges = reactive({
+  productionCertificateFee: 0,
   customsFee: 0,
   pageCount: 0,
   pageFee: 0,
@@ -2254,11 +2292,15 @@ const customerForm = reactive({
   customsExportDeclarationFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportDeclarationFee,
   customsImportPageFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee,
   customsExportPageFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee,
+  customsProductionCertificateFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsProductionCertificateFee,
   customsManifestFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsManifestFee,
   customsVerificationFee: DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee,
   tripNoRequired: false,
   sixSheetNoRequired: false,
   specialCustomer: false,
+  operatingUnitEnabled: false,
+  newOldEnabled: false,
+  specialCarEnabled: false,
   customsCustomFields: [],
   invoicePasteText: ""
 });
@@ -2435,6 +2477,8 @@ const orderForm = reactive({
   receivableRMB: 0,
   status: "",
   operatingUnit: "",
+  newOld: "",
+  specialCar: false,
   remark: "",
   tripNoEnabled: false,
   tripNo: "",
@@ -7938,13 +7982,32 @@ function orderCustomerReceivableBreakdown(order = {}) {
 function customerStatementOrderSnapshot(order = {}) {
   const fees = orderFeesWithCurrentFx(order);
   const totals = orderCustomerReceivableBreakdown({ ...order, fees });
+  const customer = transportCustomerByReference(order.customer || "", order.customerId || "") || null;
   return {
     ...order,
     receivableHKD: totals.hkd,
     receivableRMB: totals.rmb,
+    newOld: normalizeOrderNewOld(order.newOld || order.new_old),
+    specialCar: booleanFlag(order.specialCar ?? order.special_car, false),
+    customerOperatingUnitEnabled: booleanFlag(order.customerOperatingUnitEnabled ?? customer?.operatingUnitEnabled, false),
+    customerNewOldEnabled: booleanFlag(order.customerNewOldEnabled ?? customer?.newOldEnabled, false),
+    customerSpecialCarEnabled: booleanFlag(order.customerSpecialCarEnabled ?? customer?.specialCarEnabled, false),
     chargedAt: order.chargedAt || "",
     fees
   };
+}
+
+function orderCustomerFeatureFlag(order = {}, camelKey = "", snakeKey = "") {
+  const customer = transportCustomerByReference(order.customer || "", order.customerId || "") || null;
+  return booleanFlag(order?.[camelKey] ?? order?.[snakeKey] ?? customer?.[camelKey] ?? customer?.[snakeKey], false);
+}
+
+function orderStatementNewOldText(order = {}) {
+  return normalizeOrderNewOld(order.newOld || order.new_old);
+}
+
+function orderStatementSpecialCarText(order = {}) {
+  return booleanFlag(order.specialCar ?? order.special_car, false) ? "专车" : "";
 }
 
 function isChargedOrder(order = {}) {
@@ -8261,6 +8324,7 @@ function normalizeCustomsBusinessFormIntegers() {
   [
     "itemCount",
     "pageCount",
+    "productionCertificateFee",
     "customsFee",
     "pageFee",
     "manifestFee",
@@ -8349,15 +8413,17 @@ function removeCustomerCustomsCustomField(index) {
 }
 
 const customsBusinessFormTotal = computed(() =>
-  Number(customsBusinessForm.pageFee || 0)
-  + Number(customsBusinessForm.customsFee || 0)
-  + Number(customsBusinessForm.manifestFee || 0)
-  + Number(customsBusinessForm.inspectionFee || 0)
-  + Number(customsBusinessForm.checkFee || 0)
-  + (customsBusinessShowsVerificationFee.value ? Number(customsBusinessForm.verificationFee || 0) : 0)
-  + Number(customsBusinessForm.fajian3cFee || 0)
-  + normalizeCustomsBusinessCustomFields(customsBusinessForm.customFields)
-    .reduce((sum, field) => sum + customsBusinessCustomFieldAmount(field), 0)
+  customsBusinessDirectionFeeType() === "production"
+    ? Number(customsBusinessForm.productionCertificateFee || 0)
+    : Number(customsBusinessForm.pageFee || 0)
+      + Number(customsBusinessForm.customsFee || 0)
+      + Number(customsBusinessForm.manifestFee || 0)
+      + Number(customsBusinessForm.inspectionFee || 0)
+      + Number(customsBusinessForm.checkFee || 0)
+      + (customsBusinessShowsVerificationFee.value ? Number(customsBusinessForm.verificationFee || 0) : 0)
+      + Number(customsBusinessForm.fajian3cFee || 0)
+      + normalizeCustomsBusinessCustomFields(customsBusinessForm.customFields)
+        .reduce((sum, field) => sum + customsBusinessCustomFieldAmount(field), 0)
 );
 
 const customsBusinessCustomerOptions = computed(() =>
@@ -8461,6 +8527,7 @@ const customsBusinessShowsVerificationFee = computed(() =>
 
 function customsBusinessDirectionFeeType(direction = customsBusinessForm.direction) {
   const text = String(direction || "").trim();
+  if (text === "产证地") return "production";
   if (text.includes("进口")) return "import";
   if (text.includes("出口")) return "export";
   return "";
@@ -8480,6 +8547,7 @@ const customsBusinessPageUnitFee = computed(() => {
   const customer = customsBusinessSelectedCustomer.value;
   const feeType = customsBusinessDirectionFeeType();
   if (!customer || !feeType) return 0;
+  if (feeType === "production") return 0;
   const key = feeType === "import" ? "customsImportPageFee" : "customsExportPageFee";
   return Number(customer[key] ?? 0) || 0;
 });
@@ -8488,9 +8556,15 @@ const customsBusinessDeclarationUnitFee = computed(() => {
   const customer = customsBusinessSelectedCustomer.value;
   const feeType = customsBusinessDirectionFeeType();
   if (!customer || !feeType) return 0;
+  if (feeType === "production") return 0;
   const key = feeType === "import" ? "customsImportDeclarationFee" : "customsExportDeclarationFee";
   return Number(customer[key] ?? 0) || 0;
 });
+
+function customsBusinessConfiguredProductionCertificateFee() {
+  const customer = customsBusinessSelectedCustomer.value;
+  return customsBusinessIntegerValue(customer?.customsProductionCertificateFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsProductionCertificateFee);
+}
 
 function customsBusinessConfiguredVerificationFee() {
   if (!customsBusinessShowsVerificationFee.value) return 0;
@@ -8519,7 +8593,19 @@ const calculatedCustomsBusinessPageFee = computed(() =>
 
 function calculatedCustomsBusinessChargeValues() {
   const feeType = customsBusinessDirectionFeeType();
+  if (feeType === "production") {
+    const productionCertificateFee = customsBusinessConfiguredProductionCertificateFee();
+    return {
+      productionCertificateFee,
+      customsFee: 0,
+      pageCount: 0,
+      pageFee: 0,
+      manifestFee: 0,
+      verificationFee: 0
+    };
+  }
   return {
+    productionCertificateFee: 0,
     customsFee: feeType ? customsBusinessDeclarationUnitFee.value : 0,
     pageCount: feeType ? calculatedCustomsBusinessPageCount.value : 0,
     pageFee: feeType ? calculatedCustomsBusinessPageFee.value : 0,
@@ -8529,6 +8615,7 @@ function calculatedCustomsBusinessChargeValues() {
 }
 
 function setCustomsBusinessAutoChargeBaseline(values = {}) {
+  customsBusinessAutoCharges.productionCertificateFee = customsBusinessIntegerValue(values.productionCertificateFee);
   customsBusinessAutoCharges.customsFee = customsBusinessIntegerValue(values.customsFee);
   customsBusinessAutoCharges.pageCount = customsBusinessIntegerValue(values.pageCount);
   customsBusinessAutoCharges.pageFee = customsBusinessIntegerValue(values.pageFee);
@@ -8551,12 +8638,33 @@ function maybeApplyCustomsBusinessAutoCharge(key, value, options = {}) {
 
 function syncCalculatedCustomsBusinessCharges(options = {}) {
   const calculated = calculatedCustomsBusinessChargeValues();
+  maybeApplyCustomsBusinessAutoCharge("productionCertificateFee", calculated.productionCertificateFee, options);
   maybeApplyCustomsBusinessAutoCharge("customsFee", calculated.customsFee, options);
   maybeApplyCustomsBusinessAutoCharge("manifestFee", calculated.manifestFee, options);
   maybeApplyCustomsBusinessAutoCharge("verificationFee", calculated.verificationFee, options);
   const feeType = customsBusinessDirectionFeeType();
+  if (feeType === "production") {
+    customsBusinessAutoCharges.customsFee = 0;
+    customsBusinessAutoCharges.pageCount = 0;
+    customsBusinessAutoCharges.pageFee = 0;
+    customsBusinessAutoCharges.manifestFee = 0;
+    customsBusinessAutoCharges.verificationFee = 0;
+    customsBusinessForm.customsFee = 0;
+    customsBusinessForm.pageCount = 0;
+    customsBusinessForm.pageFee = 0;
+    customsBusinessForm.manifestFee = 0;
+    customsBusinessForm.verificationFee = 0;
+    customsBusinessForm.itemCount = 0;
+    customsBusinessForm.inspectionFee = 0;
+    customsBusinessForm.checkFee = 0;
+    customsBusinessForm.fajian3cFee = 0;
+    customsBusinessForm.otherFee = 0;
+    customsBusinessForm.customFields = [];
+    return;
+  }
   if (!feeType) {
     if (!String(customsBusinessForm.direction || "").trim()) {
+      maybeApplyCustomsBusinessAutoCharge("productionCertificateFee", 0, options);
       maybeApplyCustomsBusinessAutoCharge("pageCount", 0, options);
       maybeApplyCustomsBusinessAutoCharge("pageFee", 0, options);
     }
@@ -8573,6 +8681,7 @@ watch(
     () => customsBusinessForm.itemCount,
     () => customsBusinessSelectedCustomer.value?.customsHomeItemCount,
     () => customsBusinessSelectedCustomer.value?.customsPageItemCount,
+    () => customsBusinessSelectedCustomer.value?.customsProductionCertificateFee,
     () => customsBusinessSelectedCustomer.value?.customsImportDeclarationFee,
     () => customsBusinessSelectedCustomer.value?.customsExportDeclarationFee,
     () => customsBusinessSelectedCustomer.value?.customsImportPageFee,
@@ -8737,6 +8846,7 @@ function customsBusinessCellText(row = {}, column = {}) {
     direction: row.direction || "",
     itemCount: row.itemCount || "",
     pageCount: row.pageCount || "",
+    productionCertificateFee: money(row.productionCertificateFee ?? row.homeFee),
     customsFee: money(row.customsFee),
     pageFee: money(row.pageFee),
     manifestFee: money(row.manifestFee),
@@ -12616,6 +12726,7 @@ const bossDashboardCustomsRevenueRows = computed(() =>
       direction: row.direction || "-",
       customsFee: moneyRmbDisplay(row.customsFee || 0),
       pageFee: moneyRmbDisplay(row.pageFee || 0),
+      productionCertificateFee: moneyRmbDisplay(row.productionCertificateFee || row.homeFee || 0),
       manifestFee: moneyRmbDisplay(row.manifestFee || 0),
       verificationFee: moneyRmbDisplay(row.verificationFee || 0),
       otherFee: moneyRmbDisplay(Number(row.inspectionFee || 0) + Number(row.checkFee || 0) + Number(row.otherFee || 0)),
@@ -13228,6 +13339,7 @@ function buildCustomsStatementRows(sourceRows = []) {
       declarationCount: 0,
       customsFee: 0,
       pageFee: 0,
+      productionCertificateFee: 0,
       manifestFee: 0,
       inspectionFee: 0,
       checkFee: 0,
@@ -13239,6 +13351,7 @@ function buildCustomsStatementRows(sourceRows = []) {
     if (item.declarationNo || item.sixSheetNo) row.declarationCount += 1;
     row.customsFee += Number(item.customsFee || 0);
     row.pageFee += Number(item.pageFee || 0);
+    row.productionCertificateFee += Number(item.productionCertificateFee || item.homeFee || 0);
     row.manifestFee += Number(item.manifestFee || 0);
     row.inspectionFee += Number(item.inspectionFee || 0);
     row.checkFee += Number(item.checkFee || 0);
@@ -13569,7 +13682,7 @@ function openCustomsBusinessFromOrderStatement() {
     || (company ? customsCustomerByReference(company) : null);
   openCustomsBusinessModal();
   customsBusinessForm.date = orderForm.date || todayInputValue();
-  customsBusinessForm.direction = ["进口", "出口", "金二进口", "金二出口"].includes(orderForm.direction)
+  customsBusinessForm.direction = ["进口", "出口", "金二进口", "金二出口", "产证地"].includes(orderForm.direction)
     ? orderForm.direction
     : "";
   customsBusinessForm.declarationNo = String(orderForm.customsNo || "").trim();
@@ -14710,12 +14823,12 @@ function orderBelongsToPartner(order, partner) {
 }
 
 function orderDispatchPlanRow(order = {}) {
-  const orderNo = String(order?.no || "").trim();
+  const orderNo = String(order?.no || editingOrderNo.value || "").trim();
   return orderNo ? dispatchPlanRowsByOrderNo.value.get(orderNo) || null : null;
 }
 
 function orderDisplaySource(order = {}) {
-  const liveOrderNo = String(order?.no || "").trim();
+  const liveOrderNo = String(order?.no || editingOrderNo.value || "").trim();
   const liveOrder = liveOrderNo
     ? orderRows.value.find((item) => String(item.no || "").trim() === liveOrderNo) || null
     : null;
@@ -14854,6 +14967,7 @@ const customerPageColumns = computed(() => {
       { key: "customsExportDeclarationFee", label: "出口报关费" },
       { key: "customsImportPageFee", label: "进口续页费用" },
       { key: "customsExportPageFee", label: "出口续页费用" },
+      { key: "customsProductionCertificateFee", label: "产证地" },
       { key: "customsManifestFee", label: "舱单费" },
       { key: "customsVerificationFee", label: "核注费" },
       { key: "createdAt", label: "创建日期" }
@@ -15111,6 +15225,8 @@ function orderRowSearchValues(order = {}) {
     relatedOrderRouteText(source),
     orderDispatchLoadDateTimeText(source),
     source.status,
+    source.newOld,
+    booleanFlag(source.specialCar ?? source.special_car, false) ? "专车" : "",
     source.remark,
     source.tripNo,
     source.sixSheetNo
@@ -16768,6 +16884,7 @@ const CUSTOMS_CUSTOMER_DETAIL_KEYS = new Set([
   "customsPageItemCount",
   "customsImportPageFee",
   "customsExportPageFee",
+  "customsProductionCertificateFee",
   "customsManifestFee",
   "customsVerificationFee"
 ]);
@@ -22161,6 +22278,8 @@ function customerOrderCellText(order, key) {
     direction: order.direction,
     tonnage: order.tonnage,
     currency: order.currency,
+    newOld: normalizeOrderNewOld(order.newOld || order.new_old),
+    specialCar: booleanFlag(order.specialCar ?? order.special_car, false) ? "专车" : "",
     quantity: order.quantity,
     weight: order.weight,
     tripNo: order.tripNo,
@@ -22185,6 +22304,8 @@ function orderCellText(order, key, index = -1) {
     no: source.no,
     dispatchNo: source.dispatchNo || "",
     customer: orderCustomerDisplay(source),
+    newOld: normalizeOrderNewOld(source.newOld || source.new_old),
+    specialCar: booleanFlag(source.specialCar ?? source.special_car, false) ? "专车" : "",
     businessType: source.businessType,
     port: displayPortText(source.port),
     direction: source.direction,
@@ -22245,6 +22366,7 @@ function customerListDetailCellText(item = {}, key = "") {
     customsExportDeclarationFee: `人民币 ${Number(item.customsExportDeclarationFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportDeclarationFee).toLocaleString()}`,
     customsImportPageFee: `人民币 ${Number(item.customsImportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee).toLocaleString()}`,
     customsExportPageFee: `人民币 ${Number(item.customsExportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee).toLocaleString()}`,
+    customsProductionCertificateFee: `人民币 ${Number(item.customsProductionCertificateFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsProductionCertificateFee).toLocaleString()}`,
     customsManifestFee: `人民币 ${Number(item.customsManifestFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsManifestFee).toLocaleString()}`,
     customsVerificationFee: `人民币 ${Number(item.customsVerificationFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee).toLocaleString()}`,
     createdAt: item.createdAt || "-"
@@ -23158,6 +23280,7 @@ function buildNormalizedOrderPayload() {
     "unloadingPhone",
     "status",
     "operatingUnit",
+    "newOld",
     "tripNo",
     "sixSheetNo",
     "customsNo",
@@ -23171,6 +23294,8 @@ function buildNormalizedOrderPayload() {
   payload.transportMode = normalizeTransportMode(
     payload.transportMode || (normalizeVehicleSource(payload.vehicleSource) === OWN_VEHICLE_SOURCE ? "单司机" : "")
   );
+  payload.newOld = currentOrderNewOldEnabled.value || payload.newOld ? normalizeOrderNewOld(payload.newOld) : "";
+  payload.specialCar = currentOrderSpecialCarEnabled.value || payload.specialCar ? booleanFlag(payload.specialCar, false) : false;
   payload.linkedCustomsBusinessId = String(payload.linkedCustomsBusinessId || "").trim();
 		  payload.plate = normalizePlateText(payload.plate);
 		  const loadingText = normalizeDispatchLocationDetailText(payload.loading).trim();
@@ -23717,6 +23842,7 @@ function assignCustomsBusinessForm(row = {}) {
     direction: row.direction || "",
     itemCount: customsBusinessIntegerValue(row.itemCount),
     pageCount: customsBusinessIntegerValue(row.pageCount),
+    productionCertificateFee: customsBusinessIntegerValue(row.productionCertificateFee ?? row.homeFee),
     customsFee: customsBusinessIntegerValue(row.customsFee),
     pageFee: customsBusinessIntegerValue(row.pageFee),
     manifestFee: customsBusinessIntegerValue(row.manifestFee),
@@ -23812,7 +23938,10 @@ async function saveCustomsBusiness() {
     return;
   }
   normalizeCustomsBusinessFormIntegers();
-  const customFields = customsBusinessCustomFieldsForSave(customsBusinessForm.customFields, customsBusinessForm.fajian3cFee);
+  const isProductionCertificateBusiness = customsBusinessDirectionFeeType() === "production";
+  const customFields = isProductionCertificateBusiness
+    ? []
+    : customsBusinessCustomFieldsForSave(customsBusinessForm.customFields, customsBusinessForm.fajian3cFee);
   try {
     customsBusinessSaving.value = true;
     const isCopying = Boolean(copyingCustomsBusinessId.value);
@@ -25187,11 +25316,20 @@ watch(() => customerForm.type, (type) => {
     customerForm.tripNoRequired = false;
     customerForm.sixSheetNoRequired = false;
     customerForm.specialCustomer = false;
+    customerForm.operatingUnitEnabled = false;
+    customerForm.newOldEnabled = false;
+    customerForm.specialCarEnabled = false;
   }
 });
 
 watch(() => customerForm.customerCategory, (category) => {
-  if (customerForm.type !== "客户" || normalizeCustomerCategory(category) !== "报关客户") return;
+  if (customerForm.type !== "客户") return;
+  if (normalizeCustomerCategory(category) !== "运输客户") {
+    customerForm.operatingUnitEnabled = false;
+    customerForm.newOldEnabled = false;
+    customerForm.specialCarEnabled = false;
+  }
+  if (normalizeCustomerCategory(category) !== "报关客户") return;
   Object.entries(DEFAULT_CUSTOMS_CUSTOMER_CONFIG).forEach(([key, value]) => {
     if (customerForm[key] === "" || customerForm[key] === null || customerForm[key] === undefined) {
       customerForm[key] = value;
@@ -25248,11 +25386,21 @@ function buildCustomerPayload() {
     customsExportDeclarationFee: customsConfig.customsExportDeclarationFee,
     customsImportPageFee: customerConfigNumber(customerForm.customsImportPageFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee),
     customsExportPageFee: customerConfigNumber(customerForm.customsExportPageFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee),
+    customsProductionCertificateFee: customerConfigNumber(customerForm.customsProductionCertificateFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsProductionCertificateFee),
     customsManifestFee: customerConfigNumber(customerForm.customsManifestFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsManifestFee),
     customsVerificationFee: customerConfigNumber(customerForm.customsVerificationFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee),
     tripNoRequired: booleanFlag(customerForm.tripNoRequired, false),
     sixSheetNoRequired: booleanFlag(customerForm.sixSheetNoRequired, false),
     specialCustomer: booleanFlag(customerForm.specialCustomer, false),
+    operatingUnitEnabled: customerForm.type === "客户" && normalizeCustomerCategory(customerForm.customerCategory) === "运输客户"
+      ? booleanFlag(customerForm.operatingUnitEnabled, false)
+      : false,
+    newOldEnabled: customerForm.type === "客户" && normalizeCustomerCategory(customerForm.customerCategory) === "运输客户"
+      ? booleanFlag(customerForm.newOldEnabled, false)
+      : false,
+    specialCarEnabled: customerForm.type === "客户" && normalizeCustomerCategory(customerForm.customerCategory) === "运输客户"
+      ? booleanFlag(customerForm.specialCarEnabled, false)
+      : false,
     customsCustomFields: [
       {
         name: CUSTOMER_CUSTOMS_FEE_FIELD_NAMES.customsImportDeclarationFee,
@@ -25387,11 +25535,15 @@ function openCustomerModal(customer = null, createType = activePartnerType.value
     customsExportDeclarationFee: customsConfig.customsExportDeclarationFee,
     customsImportPageFee: Number(normalizedCustomer?.customsImportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsImportPageFee),
     customsExportPageFee: Number(normalizedCustomer?.customsExportPageFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsExportPageFee),
+    customsProductionCertificateFee: Number(normalizedCustomer?.customsProductionCertificateFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsProductionCertificateFee),
     customsManifestFee: Number(normalizedCustomer?.customsManifestFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsManifestFee),
     customsVerificationFee: Number(normalizedCustomer?.customsVerificationFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee),
     tripNoRequired: booleanFlag(normalizedCustomer?.tripNoRequired ?? normalizedCustomer?.trip_no_required, false),
     sixSheetNoRequired: booleanFlag(normalizedCustomer?.sixSheetNoRequired ?? normalizedCustomer?.six_sheet_no_required, false),
     specialCustomer: booleanFlag(normalizedCustomer?.specialCustomer ?? normalizedCustomer?.special_customer, false),
+    operatingUnitEnabled: booleanFlag(normalizedCustomer?.operatingUnitEnabled ?? normalizedCustomer?.operating_unit_enabled, false),
+    newOldEnabled: booleanFlag(normalizedCustomer?.newOldEnabled ?? normalizedCustomer?.new_old_enabled, false),
+    specialCarEnabled: booleanFlag(normalizedCustomer?.specialCarEnabled ?? normalizedCustomer?.special_car_enabled, false),
     customsCustomFields: customsConfig.customsCustomFields
       .map((field) => ({ name: field.name, value: customsBusinessIntegerValue(field.value) })),
     invoicePasteText: ""
@@ -25466,6 +25618,8 @@ function resetOrderForm() {
     receivableRMB: 0,
     status: "待确认",
     operatingUnit: "",
+    newOld: "",
+    specialCar: false,
     remark: "",
     tripNoEnabled: false,
     tripNo: "",
@@ -25496,6 +25650,7 @@ function handleOrderCustomerInput() {
   orderForm.customer = customer?.name || orderCustomerKeyword.value;
   orderCustomerPickerOpen.value = true;
   applyOrderRequiredFieldDefaults();
+  syncOrderCustomerFeatureFields();
   scheduleAutoFreightSync();
   scheduleOrderFeeCostSync();
 }
@@ -25516,6 +25671,7 @@ function selectOrderCustomer(customer) {
   }
   scheduleAutoFreightSync();
   scheduleOrderFeeCostSync();
+  syncOrderCustomerFeatureFields();
 }
 
 function isHongKongLocation(value = "") {
@@ -25595,7 +25751,9 @@ function clearOrderTransportFields() {
     tripNoEnabled: false,
     tripNo: "",
     sixSheetEnabled: false,
-    sixSheetNo: ""
+    sixSheetNo: "",
+    newOld: "",
+    specialCar: false
   });
   closeRouteTreeDropdown();
 }
@@ -25785,6 +25943,8 @@ async function openOrderModal(customer = null, order = null, options = {}) {
       receivableRMB: Number(displayOrder.receivableRMB || 0),
       status: displayOrder.status || "",
       operatingUnit: displayOrder.operatingUnit || displayOrder.operating_unit || "",
+      newOld: normalizeOrderNewOld(displayOrder.newOld || displayOrder.new_old || ""),
+      specialCar: booleanFlag(displayOrder.specialCar ?? displayOrder.special_car, false),
       remark: displayOrder.remark || "",
       tripNoEnabled: Boolean(displayOrder.tripNoEnabled),
       tripNo: displayOrder.tripNo || "",
@@ -25805,6 +25965,7 @@ async function openOrderModal(customer = null, order = null, options = {}) {
     loadCustomsFieldsFromRemark(displayOrder.remark || "");
     orderCustomsStatementSelectedId.value = String(displayOrder.linkedCustomsBusinessId || "").trim();
     applyOrderRequiredFieldDefaults({ force: true });
+    syncOrderCustomerFeatureFields({ preserveExisting: true });
     orderFees.value = (order.fees?.length ? order.fees : [
       {
         feeItemId: "",
@@ -25884,6 +26045,7 @@ async function openOrderModal(customer = null, order = null, options = {}) {
       orderForm.customer = customer.name || "";
     }
     applyOrderRequiredFieldDefaults({ force: true });
+    syncOrderCustomerFeatureFields();
     const bindableRows = bindableDispatchRowsForCustomer(orderForm.customer);
     if (bindableRows.length) {
       const targetRow = bindableRows[0];
@@ -26069,7 +26231,6 @@ function orderStatusActionDisabled(targetStatus = "") {
   const status = orderModalStatusValue();
   if (status === "已签收") return true;
   if (targetStatus === "异常滞留" && ["异常滞留", "费用待确认"].includes(status)) return true;
-  if (targetStatus === "已签收" && orderSignRequiredMissingLabels.value.length) return true;
   return false;
 }
 
@@ -26084,7 +26245,6 @@ async function auditOrderFromOrderModal() {
 async function completeOrderFromOrderModal(targetStatus = "") {
   if (orderViewMode.value || orderAuditMode.value) return;
   if (orderStatusActionDisabled(targetStatus)) {
-    if (targetStatus === "已签收" && orderSignRequiredMessage.value) notify(orderSignRequiredMessage.value);
     return;
   }
   const orderStatus = targetStatus === "异常滞留" ? "费用待确认" : targetStatus;
@@ -26532,6 +26692,7 @@ watch(
   () => {
     if (!orderModalOpen.value || orderReadOnlyMode.value) return;
     applyOrderRequiredFieldDefaults();
+    syncOrderCustomerFeatureFields({ preserveExisting: Boolean(editingOrderNo.value) });
   }
 );
 
@@ -28975,7 +29136,16 @@ async function exportStatementCsv() {
       return;
     }
 
-    const includeOperatingUnit = orders.some((order) => String(order.operatingUnit || order.operating_unit || "").trim());
+    const includeOperatingUnit = orders.some((order) =>
+      String(order.operatingUnit || order.operating_unit || "").trim()
+      || orderCustomerFeatureFlag(order, "customerOperatingUnitEnabled", "customer_operating_unit_enabled")
+    );
+    const includeNewOld = orders.some((order) =>
+      orderStatementNewOldText(order) || orderCustomerFeatureFlag(order, "customerNewOldEnabled", "customer_new_old_enabled")
+    );
+    const includeSpecialCar = orders.some((order) =>
+      orderStatementSpecialCarText(order) || orderCustomerFeatureFlag(order, "customerSpecialCarEnabled", "customer_special_car_enabled")
+    );
     const attachmentTexts = await Promise.all(orders.map((order) => statementAttachmentText(order)));
     const headers = [
       "序号",
@@ -28984,6 +29154,8 @@ async function exportStatementCsv() {
       "日期",
       "客户",
       ...(includeOperatingUnit ? ["经营单位"] : []),
+      ...(includeNewOld ? ["新/旧"] : []),
+      ...(includeSpecialCar ? ["专车"] : []),
       "口岸",
       "进出口",
       "吨位",
@@ -29005,6 +29177,8 @@ async function exportStatementCsv() {
       order.date || "",
       order.customer || "",
       ...(includeOperatingUnit ? [order.operatingUnit || order.operating_unit || ""] : []),
+      ...(includeNewOld ? [orderStatementNewOldText(order)] : []),
+      ...(includeSpecialCar ? [orderStatementSpecialCarText(order)] : []),
       displayPortText(order.port) || "",
       order.direction || "",
       order.tonnage || "",
@@ -35964,7 +36138,7 @@ function orderDetailFeeRows(order = {}) {
                   </div>
                   <div class="boss-dashboard-detail-table-wrap">
                     <table class="data-table compact">
-	                      <thead><tr><th>日期</th><th>单号</th><th>客户</th><th>进出口</th><th>报关费</th><th>舱单费</th><th>续页费</th><th>核注费</th><th>其他报关费用</th><th>合计</th></tr></thead>
+	                      <thead><tr><th>日期</th><th>单号</th><th>客户</th><th>进出口</th><th>报关费</th><th>舱单费</th><th>续页费</th><th>产证地</th><th>核注费</th><th>其他报关费用</th><th>合计</th></tr></thead>
                       <tbody>
                         <tr v-for="row in bossDashboardCustomsRevenueRows" :key="row.id">
                           <td>{{ row.date }}</td>
@@ -35974,11 +36148,12 @@ function orderDetailFeeRows(order = {}) {
 	                          <td>{{ row.customsFee }}</td>
 	                          <td>{{ row.manifestFee }}</td>
 	                          <td>{{ row.pageFee }}</td>
+                          <td>{{ row.productionCertificateFee }}</td>
                           <td>{{ row.verificationFee }}</td>
                           <td>{{ row.otherFee }}</td>
                           <td><strong>{{ row.total }}</strong></td>
                         </tr>
-	                        <tr v-if="bossDashboardCustomsRevenueRows.length === 0"><td colspan="10">暂无报关利润</td></tr>
+	                        <tr v-if="bossDashboardCustomsRevenueRows.length === 0"><td colspan="11">暂无报关利润</td></tr>
                       </tbody>
                     </table>
                   </div>
@@ -38888,6 +39063,9 @@ function orderDetailFeeRows(order = {}) {
                 <label class="order-switch-field"><input v-model="customerForm.tripNoRequired" type="checkbox" />车次号必须</label>
                 <label class="order-switch-field"><input v-model="customerForm.sixSheetNoRequired" type="checkbox" />六联单号必须</label>
                 <label v-if="currentAccountCanViewSpecialCustomerOrders" class="order-switch-field"><input v-model="customerForm.specialCustomer" type="checkbox" />特殊客户</label>
+                <label v-if="normalizeCustomerCategory(customerForm.customerCategory) === '运输客户'" class="order-switch-field"><input v-model="customerForm.operatingUnitEnabled" type="checkbox" />经营单位</label>
+                <label v-if="normalizeCustomerCategory(customerForm.customerCategory) === '运输客户'" class="order-switch-field"><input v-model="customerForm.newOldEnabled" type="checkbox" />新/旧</label>
+                <label v-if="normalizeCustomerCategory(customerForm.customerCategory) === '运输客户'" class="order-switch-field"><input v-model="customerForm.specialCarEnabled" type="checkbox" />专车</label>
               </div>
               <label v-if="customerForm.type === '客户' && normalizeCustomerCategory(customerForm.customerCategory) === '报关客户'">客户类型
                 <input v-model.trim="customerForm.customsCustomerType" placeholder="例如：一般贸易 / 跨境电商" />
@@ -38942,6 +39120,9 @@ function orderDetailFeeRows(order = {}) {
                 </label>
                 <label>出口续页费用
                   <input v-model.number="customerForm.customsExportPageFee" type="number" min="0" step="0.01" />
+                </label>
+                <label>产证地
+                  <input v-model.number="customerForm.customsProductionCertificateFee" type="number" min="0" step="0.01" />
                 </label>
                 <label>舱单费
                   <input v-model.number="customerForm.customsManifestFee" type="number" min="0" step="0.01" />
@@ -39766,7 +39947,18 @@ function orderDetailFeeRows(order = {}) {
               <label class="order-compact-field order-meta-date-field">订单日期<input v-model="orderForm.date" type="date" /></label>
               <label class="order-compact-field order-meta-status-field">状态<select v-model="orderForm.status"><option v-for="status in ORDER_STATUS_OPTIONS" :key="status">{{ status }}</option></select></label>
               <div class="order-operating-unit-field order-operating-unit-link-field">
-                <label class="order-compact-field">经营单位<input v-model.trim="orderForm.operatingUnit" placeholder="可不填" /></label>
+                <label v-if="currentOrderOperatingUnitEnabled" class="order-compact-field">经营单位<input v-model.trim="orderForm.operatingUnit" placeholder="可不填" /></label>
+                <label v-if="currentOrderNewOldEnabled" class="order-compact-field order-new-old-field">新/旧
+                  <select v-model="orderForm.newOld">
+                    <option value="">请选择</option>
+                    <option>新货</option>
+                    <option>旧货</option>
+                  </select>
+                </label>
+                <label v-if="currentOrderSpecialCarEnabled" class="order-switch-field order-special-car-field">
+                  <input v-model="orderForm.specialCar" type="checkbox" />
+                  <span>专车</span>
+                </label>
                 <button
                   class="ghost-btn order-customs-link-btn"
                   :class="{ 'is-disabled': !canOpenOrderCustomsStatement, 'is-linked': orderCustomsStatementHasSelection }"
@@ -40521,7 +40713,7 @@ function orderDetailFeeRows(order = {}) {
             v-if="editingOrderNo && !orderReadOnlyMode && orderHasTransportFields"
             type="button"
             class="ghost-btn order-status-action-btn dispatch-status-signed"
-            :title="orderSignRequiredMessage || '标记为已签收'"
+            title="标记为已签收"
             :disabled="loading || orderStatusActionDisabled('已签收')"
             @click="completeOrderFromOrderModal('已签收')"
           >
@@ -41216,22 +41408,27 @@ function orderDetailFeeRows(order = {}) {
 	              </div>
 	            </span>
 	          </label>
-	          <label>进出口<select v-model="customsBusinessForm.direction"><option value=""></option><option>进口</option><option>出口</option><option>金二进口</option><option>金二出口</option></select></label>
-	          <label>品名项数<input v-model.number="customsBusinessForm.itemCount" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'itemCount', $event)" /></label>
-	          <label>续页<input v-model.number="customsBusinessForm.pageCount" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'pageCount', $event)" /></label>
-	          <label>续页费<input v-model.number="customsBusinessForm.pageFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'pageFee', $event)" /></label>
-	          <label>报关费<input v-model.number="customsBusinessForm.customsFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'customsFee', $event)" /></label>
-	          <label>舱单费<input v-model.number="customsBusinessForm.manifestFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'manifestFee', $event)" /></label>
-	          <label>报检费<input v-model.number="customsBusinessForm.inspectionFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'inspectionFee', $event)" /></label>
-	          <label>查验费<input v-model.number="customsBusinessForm.checkFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'checkFee', $event)" /></label>
-	          <label v-if="customsBusinessShowsVerificationFee">核注费<input v-model.number="customsBusinessForm.verificationFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'verificationFee', $event)" /></label>
-	          <label>法检/3C商检<input v-model.number="customsBusinessForm.fajian3cFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'fajian3cFee', $event)" /></label>
-	          <label>其他费用<input v-model.number="customsBusinessForm.otherFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'otherFee', $event)" /></label>
-	          <div class="span-4 customs-business-custom-fields">
-	            <div class="customs-business-custom-head">
-	              <span>自定义类目</span>
-	              <button class="ghost-btn small" type="button" @click="addCustomsBusinessCustomField"><IconSvg name="plus" />新增类目</button>
-	            </div>
+          <label>进出口<select v-model="customsBusinessForm.direction"><option value=""></option><option>进口</option><option>出口</option><option>金二进口</option><option>金二出口</option><option>产证地</option></select></label>
+          <label>品名项数<input v-model.number="customsBusinessForm.itemCount" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'itemCount', $event)" /></label>
+          <label>续页<input v-model.number="customsBusinessForm.pageCount" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'pageCount', $event)" /></label>
+          <template v-if="customsBusinessDirectionFeeType() === 'production'">
+            <label>产证地<input v-model.number="customsBusinessForm.productionCertificateFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'productionCertificateFee', $event)" /></label>
+          </template>
+          <template v-else>
+            <label>续页费<input v-model.number="customsBusinessForm.pageFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'pageFee', $event)" /></label>
+            <label>报关费<input v-model.number="customsBusinessForm.customsFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'customsFee', $event)" /></label>
+            <label>舱单费<input v-model.number="customsBusinessForm.manifestFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'manifestFee', $event)" /></label>
+            <label>报检费<input v-model.number="customsBusinessForm.inspectionFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'inspectionFee', $event)" /></label>
+            <label>查验费<input v-model.number="customsBusinessForm.checkFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'checkFee', $event)" /></label>
+            <label v-if="customsBusinessShowsVerificationFee">核注费<input v-model.number="customsBusinessForm.verificationFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'verificationFee', $event)" /></label>
+            <label>法检/3C商检<input v-model.number="customsBusinessForm.fajian3cFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'fajian3cFee', $event)" /></label>
+            <label>其他费用<input v-model.number="customsBusinessForm.otherFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'otherFee', $event)" /></label>
+          </template>
+          <div v-if="customsBusinessDirectionFeeType() !== 'production'" class="span-4 customs-business-custom-fields">
+            <div class="customs-business-custom-head">
+              <span>自定义类目</span>
+              <button class="ghost-btn small" type="button" @click="addCustomsBusinessCustomField"><IconSvg name="plus" />新增类目</button>
+            </div>
 	            <div v-if="customsBusinessForm.customFields.length" class="customs-business-custom-list">
 	              <div v-for="(field, index) in customsBusinessForm.customFields" :key="index" class="customs-business-custom-row">
 	                <label>类目名称<input v-model.trim="field.name" placeholder="类目名称" /></label>

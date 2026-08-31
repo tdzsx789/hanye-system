@@ -509,8 +509,19 @@ async function setAppSetting(key = "", value = "") {
 
 async function backfillCustomerOrderRequirementFlags() {
   if (await getAppSetting(CUSTOMER_ORDER_REQUIREMENT_BACKFILL_KEY)) return;
+  const hasTripNoRequiredColumn = await hasColumn("customers", "trip_no_required");
+  const hasSixSheetNoRequiredColumn = await hasColumn("customers", "six_sheet_no_required");
+  if (!hasTripNoRequiredColumn && !hasSixSheetNoRequiredColumn) {
+    await setAppSetting(CUSTOMER_ORDER_REQUIREMENT_BACKFILL_KEY, "1");
+    return;
+  }
   const rows = await db.prepare(`
-    SELECT id, name, short_name, trip_no_required, six_sheet_no_required
+    SELECT
+      id,
+      name,
+      short_name,
+      ${hasTripNoRequiredColumn ? "trip_no_required" : "false AS trip_no_required"},
+      ${hasSixSheetNoRequiredColumn ? "six_sheet_no_required" : "false AS six_sheet_no_required"}
     FROM customers
     WHERE deleted_at IS NULL AND type = '客户'
   `).all();
@@ -716,6 +727,12 @@ async function ensureRuntimeSchemaCompatibility() {
   const definitions = [
     ["orders", "dispatch_group_id TEXT NOT NULL DEFAULT ''"],
     ["orders", "linked_customs_business_id BIGINT"],
+    ["orders", "new_old TEXT NOT NULL DEFAULT ''"],
+    ["orders", "special_car BOOLEAN NOT NULL DEFAULT false"],
+    ["customers", "operating_unit_enabled BOOLEAN NOT NULL DEFAULT false"],
+    ["customers", "new_old_enabled BOOLEAN NOT NULL DEFAULT false"],
+    ["customers", "special_car_enabled BOOLEAN NOT NULL DEFAULT false"],
+    ["customers", "customs_production_certificate_fee DOUBLE PRECISION NOT NULL DEFAULT 150"],
     ["order_fees", "cost_hkd DOUBLE PRECISION DEFAULT NULL"],
     ["order_fees", "cost_rmb DOUBLE PRECISION DEFAULT NULL"],
     ["order_fees", "cost_parts_json TEXT NOT NULL DEFAULT '[]'"],
@@ -783,11 +800,15 @@ async function initializeSchema() {
       customs_export_home_fee DOUBLE PRECISION NOT NULL DEFAULT 150,
       customs_import_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30,
       customs_export_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30,
+      customs_production_certificate_fee DOUBLE PRECISION NOT NULL DEFAULT 150,
       customs_manifest_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
       customs_verification_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
       trip_no_required BOOLEAN NOT NULL DEFAULT false,
       six_sheet_no_required BOOLEAN NOT NULL DEFAULT false,
       special_customer BOOLEAN NOT NULL DEFAULT false,
+      operating_unit_enabled BOOLEAN NOT NULL DEFAULT false,
+      new_old_enabled BOOLEAN NOT NULL DEFAULT false,
+      special_car_enabled BOOLEAN NOT NULL DEFAULT false,
       customs_custom_fields TEXT NOT NULL DEFAULT '[]',
       created_at TEXT NOT NULL DEFAULT (CURRENT_DATE::text),
       deleted_at TEXT
@@ -829,6 +850,8 @@ async function initializeSchema() {
       receivable_rmb DOUBLE PRECISION NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT '待确认',
       operating_unit TEXT NOT NULL DEFAULT '',
+      new_old TEXT NOT NULL DEFAULT '',
+      special_car BOOLEAN NOT NULL DEFAULT false,
       created_by_account_id BIGINT,
       created_by_username TEXT NOT NULL DEFAULT '',
       created_by_display_name TEXT NOT NULL DEFAULT '',
@@ -1310,9 +1333,11 @@ async function initializeSchema() {
 	      "six_sheet_enabled INTEGER NOT NULL DEFAULT 0",
 	      "six_sheet_no TEXT NOT NULL DEFAULT ''",
 	      "charged_at TEXT NOT NULL DEFAULT ''",
-	      "loading_locations TEXT NOT NULL DEFAULT '[]'",
-	      "unloading_locations TEXT NOT NULL DEFAULT '[]'",
-	      "operating_unit TEXT NOT NULL DEFAULT ''",
+      "loading_locations TEXT NOT NULL DEFAULT '[]'",
+      "unloading_locations TEXT NOT NULL DEFAULT '[]'",
+      "operating_unit TEXT NOT NULL DEFAULT ''",
+      "new_old TEXT NOT NULL DEFAULT ''",
+      "special_car BOOLEAN NOT NULL DEFAULT false",
 	      "created_by_account_id BIGINT",
       "created_by_username TEXT NOT NULL DEFAULT ''",
       "created_by_display_name TEXT NOT NULL DEFAULT ''"
@@ -1430,11 +1455,15 @@ async function initializeSchema() {
     "customs_export_home_fee DOUBLE PRECISION NOT NULL DEFAULT 150",
     "customs_import_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30",
     "customs_export_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30",
+    "customs_production_certificate_fee DOUBLE PRECISION NOT NULL DEFAULT 150",
     "customs_manifest_fee DOUBLE PRECISION NOT NULL DEFAULT 0",
     "customs_verification_fee DOUBLE PRECISION NOT NULL DEFAULT 0",
     "trip_no_required BOOLEAN NOT NULL DEFAULT false",
     "six_sheet_no_required BOOLEAN NOT NULL DEFAULT false",
     "special_customer BOOLEAN NOT NULL DEFAULT false",
+    "operating_unit_enabled BOOLEAN NOT NULL DEFAULT false",
+    "new_old_enabled BOOLEAN NOT NULL DEFAULT false",
+    "special_car_enabled BOOLEAN NOT NULL DEFAULT false",
     "customs_custom_fields TEXT NOT NULL DEFAULT '[]'"
     ],
     files: [

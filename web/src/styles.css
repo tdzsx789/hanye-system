@@ -632,9 +632,9 @@ body.is-modal-dragging .modal-head {
 }
 
 .order-layout-grid .order-operating-unit-link-field {
-  grid-column: span 2;
+  grid-column: span 5;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1.2fr) minmax(86px, 0.7fr) minmax(72px, auto) auto;
   align-items: end;
   gap: 8px;
   min-width: 0;
@@ -644,7 +644,37 @@ body.is-modal-dragging .modal-head {
   min-width: 0;
 }
 
+.order-operating-unit-link-field .order-new-old-field {
+  min-width: 86px;
+}
+
+.order-operating-unit-link-field .order-special-car-field {
+  align-self: end;
+  width: max-content;
+  min-height: 34px;
+  height: 34px;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 12px;
+  border: 1px solid #d7e2f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.order-operating-unit-link-field .order-special-car-field input {
+  width: 15px;
+  min-width: 15px;
+  height: 15px;
+  margin: 0;
+}
+
 .order-customs-link-btn {
+  justify-self: start;
+  width: max-content;
   height: 34px;
   min-width: 112px;
   padding-inline: 12px;
