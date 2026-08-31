@@ -9438,13 +9438,18 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = [], rowsForPersiste
       const createdOrder = await createOrderFromDispatchRowForSync(row, planDate, normalizedDispatchStatus);
       if (createdOrder) {
         linkedOrders = [createdOrder];
-        persistedRowsChanged = attachDispatchOrderRefsToRows(persistedRows, row, createdOrder) || persistedRowsChanged;
-        persistedRowsChanged = attachDispatchOrderRefsToRows(persistenceRows, row, createdOrder) || persistedRowsChanged;
+        const rowsChanged = persistenceRows
+          ? (attachDispatchOrderRefsToRows(persistenceRows, row, createdOrder)
+            || (() => {
+              const fallbackRow = findExistingDispatchRow(row, persistedLookup);
+              return fallbackRow ? attachDispatchOrderRefsToRows(persistenceRows, fallbackRow, createdOrder) : false;
+            })())
+          : attachDispatchOrderRefsToRows(persistedRows, row, createdOrder);
         const targetRow = findExistingDispatchRow(row, persistedLookup);
         if (targetRow) {
           attachDispatchOrderRefs(targetRow, createdOrder, row);
-          persistedRowsChanged = true;
         }
+        persistedRowsChanged = rowsChanged || persistedRowsChanged;
       }
     }
     for (const order of linkedOrders) {
