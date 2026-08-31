@@ -78,7 +78,8 @@ export function createFinanceWageTableColumns() {
     { key: "advanceFee", label: "代垫费", width: 150, min: 110 },
     { key: "adjustments", label: "预支/报销", width: 150, min: 110 },
     { key: "total", label: "应付合计", width: 160, min: 120 },
-    { key: "status", label: "状态", width: 80, min: 64 },
+    { key: "status", label: "结算状态", width: 96, min: 76 },
+    { key: "settledAt", label: "结算时间", width: 118, min: 92 },
     { key: "actions", label: "操作", width: 86, min: 76, locked: true, exportable: false }
   ]);
 }

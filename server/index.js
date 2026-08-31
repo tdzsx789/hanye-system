@@ -6,7 +6,6 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
-import zlib from "node:zlib";
 import {
   ACCOUNT_ROLES,
   accountPermissionsForAccount,
@@ -294,13 +293,75 @@ function orderSignRequirementForCustomer(customer = {}, fallbackName = "") {
   return tripNo || sixSheetNo ? { tripNo, sixSheetNo } : null;
 }
 
-function missingOrderSignRequiredFieldLabels(order = {}, customer = {}) {
+async function orderDispatchSignFallbackValues(order = {}) {
+  const orderNo = String(order.no || order.order_no || "").trim();
+  const dispatchNo = String(order.dispatchNo || order.dispatch_no || "").trim();
+  const dispatchGroupId = String(order.dispatchGroupId || order.dispatch_group_id || "").trim();
+  if (!orderNo && !dispatchNo && !dispatchGroupId) return {};
+
+  let matched = null;
+  const consider = (row = {}, planDate = "", priority = 0) => {
+    if (!dispatchRowMatchesRefs(row, orderNo, dispatchNo, dispatchGroupId)) return;
+    const candidate = {
+      dispatchNo: String(row.dispatchNo || row.dispatch_no || "").trim(),
+      businessType: userTextValue(row.businessType || row.business_type || ""),
+      port: normalizePortText(row.port || ""),
+      direction: userTextValue(row.direction),
+      tonnage: userTextValue(row.tonnage),
+      quantity: userTextValue(row.quantity),
+      vehicleSource: normalizeVehicleSource(row.vehicleSource || row.vehicle_source || ""),
+      plate: normalizePlateText(row.plate),
+      date: dispatchRowBusinessDate(row, planDate),
+      createdAt: dispatchRowCreatedAt(row, planDate),
+      priority,
+      statusRank: dispatchRowStatusRank(row)
+    };
+    if (isPreferredDispatchDateCandidate(candidate, matched)) matched = candidate;
+  };
+
+  const plans = await db.prepare("SELECT plan_date, rows_json FROM dispatch_plans").all();
+  for (const plan of plans) {
+    parseDispatchPlanRowsJson(plan.rows_json).forEach((row) => consider(row, plan.plan_date, 2));
+  }
+  const recycleRows = await db.prepare(`
+    SELECT plan_date, row_json
+    FROM dispatch_plan_recycle
+    ORDER BY restored_at NULLS FIRST, deleted_at DESC, id DESC
+  `).all();
+  for (const recycle of recycleRows) {
+    const row = normalizeDispatchRecycleRow(parseDispatchPlanRowJson(recycle.row_json), recycle.plan_date);
+    consider(row, recycle.plan_date, 1);
+  }
+
+  if (!matched) return {};
+  return {
+    dispatchNo: matched.dispatchNo || "",
+    dispatch_no: matched.dispatchNo || "",
+    businessType: matched.businessType || "",
+    business_type: matched.businessType || "",
+    port: matched.port || "",
+    direction: matched.direction || "",
+    tonnage: matched.tonnage || "",
+    quantity: matched.quantity || "",
+    vehicleSource: matched.vehicleSource || "",
+    vehicle_source: matched.vehicleSource || "",
+    plate: matched.plate || "",
+    date: matched.date || "",
+    order_date: matched.date || ""
+  };
+}
+
+async function missingOrderSignRequiredFieldLabels(order = {}, customer = {}) {
+  const fallback = await orderDispatchSignFallbackValues(order);
   const labels = ORDER_SIGN_BASE_REQUIRED_FIELDS
     .filter((field) => {
       const sourceKey = field.keys[0];
       const values = order?._signRequiredValues && Object.prototype.hasOwnProperty.call(order._signRequiredValues, sourceKey)
         ? [order._signRequiredValues[sourceKey]]
-        : field.keys.map((key) => order?.[key]);
+        : field.keys.map((key) => {
+            const currentValue = order?.[key];
+            return String(currentValue ?? "").trim() ? currentValue : fallback?.[key];
+          });
       return !values.some((value) => String(value ?? "").trim());
     })
     .map((field) => field.label);
@@ -357,7 +418,7 @@ app.use(cors({
       /^http:\/\/10\.\d{1,3}\.\d{1,3}\.\d{1,3}:5173$/.test(origin) ||
       /^http:\/\/172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}:5173$/.test(origin);
 
-    callback(allowed ? null : new Error("Not allowed by CORS"), allowed);
+    callback(null, allowed);
   }
 }));
 app.use((req, res, next) => {
@@ -369,19 +430,6 @@ app.use((req, res, next) => {
   next();
 });
 app.use((req, res, next) => {
-  const originalJson = res.json.bind(res);
-  res.json = (payload) => {
-    const acceptsGzip = /\bgzip\b/.test(String(req.headers["accept-encoding"] || ""));
-    if (!acceptsGzip) return originalJson(payload);
-    const body = Buffer.from(JSON.stringify(payload));
-    if (body.length < 1024) return originalJson(payload);
-    const gzipped = zlib.gzipSync(body);
-    res.setHeader("Content-Type", "application/json; charset=utf-8");
-    res.setHeader("Content-Encoding", "gzip");
-    res.setHeader("Vary", "Accept-Encoding");
-    res.setHeader("Content-Length", String(gzipped.length));
-    return res.send(gzipped);
-  };
   next();
 });
 app.use(express.json({ limit: "12mb" }));
@@ -514,20 +562,125 @@ async function customerColumnExists(column) {
   return tableColumnExists("customers", column);
 }
 
+let customerRequirementColumnSupportCache = null;
+
+async function customerRequirementColumnSupport() {
+  if (customerRequirementColumnSupportCache) return customerRequirementColumnSupportCache;
+  customerRequirementColumnSupportCache = {
+    tripNoRequired: await customerColumnExists("trip_no_required"),
+    sixSheetNoRequired: await customerColumnExists("six_sheet_no_required")
+  };
+  return customerRequirementColumnSupportCache;
+}
+
 async function customsBusinessColumnExists(column) {
   return tableColumnExists("customs_businesses", column);
 }
 
-let customerCustomsCustomerTypeColumnReady = false;
+async function orderColumnExists(column) {
+  return tableColumnExists("orders", column);
+}
 
-async function ensureCustomerCustomsCustomerTypeColumn() {
-  if (customerCustomsCustomerTypeColumnReady) return;
-  await db.exec(`
-    ALTER TABLE customers
-    ADD COLUMN IF NOT EXISTS customs_customer_type TEXT NOT NULL DEFAULT '';
-  `);
-  customerColumnAvailability.set("customers.customs_customer_type", true);
-  customerCustomsCustomerTypeColumnReady = true;
+async function dispatchPlanColumnExists(column) {
+  return tableColumnExists("dispatch_plans", column);
+}
+
+let orderWriteColumnSupportCache = null;
+let dispatchPlanWriteColumnSupportCache = null;
+
+async function orderWriteColumnSupport() {
+  if (orderWriteColumnSupportCache) return orderWriteColumnSupportCache;
+  const support = {
+    dispatchNo: await orderColumnExists("dispatch_no"),
+    dispatchGroupId: await orderColumnExists("dispatch_group_id"),
+    linkedCustomsBusinessId: await orderColumnExists("linked_customs_business_id"),
+    loadingLocations: await orderColumnExists("loading_locations"),
+    unloadingLocations: await orderColumnExists("unloading_locations"),
+    operatingUnit: await orderColumnExists("operating_unit"),
+    createdByAccountId: await orderColumnExists("created_by_account_id"),
+    createdByUsername: await orderColumnExists("created_by_username"),
+    createdByName: await orderColumnExists("created_by_display_name"),
+    tripNoEnabled: await orderColumnExists("trip_no_enabled"),
+    tripNo: await orderColumnExists("trip_no"),
+    sixSheetEnabled: await orderColumnExists("six_sheet_enabled"),
+    sixSheetNo: await orderColumnExists("six_sheet_no"),
+    chargedAt: await orderColumnExists("charged_at")
+  };
+  orderWriteColumnSupportCache = support;
+  return support;
+}
+
+async function dispatchPlanWriteColumnSupport() {
+  if (dispatchPlanWriteColumnSupportCache) return dispatchPlanWriteColumnSupportCache;
+  const support = {
+    createdByAccountId: await dispatchPlanColumnExists("created_by_account_id"),
+    createdByUsername: await dispatchPlanColumnExists("created_by_username"),
+    createdByName: await dispatchPlanColumnExists("created_by_display_name"),
+    updatedAt: await dispatchPlanColumnExists("updated_at")
+  };
+  dispatchPlanWriteColumnSupportCache = support;
+  return support;
+}
+
+let companyExpenseWriteColumnSupportCache = null;
+
+async function companyExpenseWriteColumnSupport() {
+  if (companyExpenseWriteColumnSupportCache) return companyExpenseWriteColumnSupportCache;
+  companyExpenseWriteColumnSupportCache = {
+    salaryStatus: await tableColumnExists("company_expenses", "salary_status"),
+    settledAt: await tableColumnExists("company_expenses", "settled_at")
+  };
+  return companyExpenseWriteColumnSupportCache;
+}
+
+let driverAdjustmentWriteColumnSupportCache = null;
+
+async function driverAdjustmentWriteColumnSupport() {
+  if (driverAdjustmentWriteColumnSupportCache) return driverAdjustmentWriteColumnSupportCache;
+  driverAdjustmentWriteColumnSupportCache = {
+    settledAt: await tableColumnExists("driver_adjustments", "settled_at")
+  };
+  return driverAdjustmentWriteColumnSupportCache;
+}
+
+let vehicleMaintenanceReminderWriteColumnSupportCache = null;
+
+async function vehicleMaintenanceReminderWriteColumnSupport() {
+  if (vehicleMaintenanceReminderWriteColumnSupportCache) return vehicleMaintenanceReminderWriteColumnSupportCache;
+  vehicleMaintenanceReminderWriteColumnSupportCache = {
+    maintenanceDueDate: await tableColumnExists("vehicles", "maintenance_due_date"),
+    maintenanceDueKm: await tableColumnExists("vehicles", "maintenance_due_km")
+  };
+  return vehicleMaintenanceReminderWriteColumnSupportCache;
+}
+
+let driverWageSettlementTableAvailableCache = null;
+
+async function driverWageSettlementTableAvailable() {
+  if (driverWageSettlementTableAvailableCache !== null) return driverWageSettlementTableAvailableCache;
+  try {
+    const row = await db.prepare(`
+      SELECT 1
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+        AND table_name = ?
+      LIMIT 1
+    `).get("driver_wage_settlements");
+    driverWageSettlementTableAvailableCache = Boolean(row);
+  } catch (error) {
+    console.warn("Failed to inspect driver_wage_settlements schema", error);
+    driverWageSettlementTableAvailableCache = false;
+  }
+  return driverWageSettlementTableAvailableCache;
+}
+
+function buildNamedColumns(entries = []) {
+  const filtered = entries.filter(Boolean);
+  return {
+    columnSql: filtered.map(([column]) => column).join(", "),
+    valueSql: filtered.map(([, key]) => `@${key}`).join(", "),
+    updateSql: filtered.map(([column, key]) => `${column} = @${key}`).join(",\n      ")
+  };
 }
 
 let orderFeeCostCurrencyColumnReady = false;
@@ -626,6 +779,7 @@ function mapOrder(row) {
     no: row.no,
     dispatchNo: row.dispatch_no || "",
     dispatchGroupId: row.dispatch_group_id || "",
+    linkedCustomsBusinessId: row.linked_customs_business_id || null,
     customerId: row.customer_id,
     customer: userTextValue(row.customer),
     businessType: userTextValue(row.business_type),
@@ -1783,6 +1937,7 @@ function isExportAmountColumn(column) {
     || key === "__rmbTotal"
     || key === "receivableHKD"
     || key === "receivableRMB"
+    || column.amount === true
     || key.startsWith("fee-item-")
     || isExportFeeItemColumn(column)
     || /金额|应收|港币|人民币|运费|税金|过磅费|停车费|登记费|等候费|装货费|卸货费/.test(label);
@@ -1794,6 +1949,21 @@ function exportOrderColumnAmount(order, column) {
   if (key === "__chargeNote") return 0;
   if (key === "__hkdTotal") return Number(order?.receivableHKD || 0);
   if (key === "__rmbTotal") return Number(order?.receivableRMB || 0);
+  if (key === "linkedCustomsItemCount") return Number(order?.linkedCustomsBusiness?.itemCount || 0);
+  if (key === "linkedCustomsPageCount") return Number(order?.linkedCustomsBusiness?.pageCount || 0);
+  if (key === "linkedCustomsPageFee") return Number(order?.linkedCustomsBusiness?.pageFee || 0);
+  if (key === "linkedCustomsCustomsFee") return Number(order?.linkedCustomsBusiness?.customsFee || 0);
+  if (key === "linkedCustomsManifestFee") return Number(order?.linkedCustomsBusiness?.manifestFee || 0);
+  if (key === "linkedCustomsInspectionFee") return Number(order?.linkedCustomsBusiness?.inspectionFee || 0);
+  if (key === "linkedCustomsCheckFee") return Number(order?.linkedCustomsBusiness?.checkFee || 0);
+  if (key === "linkedCustomsVerificationFee") return Number(order?.linkedCustomsBusiness?.verificationFee || 0);
+  if (key === "linkedCustomsOtherFee") return Number(order?.linkedCustomsBusiness?.otherFee || 0);
+  if (key === "linkedCustomsTotal") return Number(order?.linkedCustomsBusiness?.total || 0);
+  if (key.startsWith("linkedCustomsCustom:")) {
+    const name = key.slice("linkedCustomsCustom:".length);
+    const field = normalizeCustomsBusinessCustomFields(order?.linkedCustomsBusiness?.customFields).find((item) => item.name === name);
+    return field ? Number(field.value || 0) : 0;
+  }
   if (isExportFeeItemColumn(column)) return feeAmountForColumn(order, column);
   if (key === "receivableHKD" || key === "receivableRMB") return Number(order?.[key] || 0);
   return Number(order?.[key] || 0);
@@ -1805,6 +1975,27 @@ function exportOrderColumnValue(order, column, rowIndex = 0, options = {}) {
   if (key === "__chargeNote") return orderChargeNoteText(order);
   if (key === "__hkdTotal") return formatExportAmount(order?.receivableHKD);
   if (key === "__rmbTotal") return formatExportAmount(order?.receivableRMB);
+  if (key === "linkedCustomsDate"
+    || key === "linkedCustomsDeclarationNo"
+    || key === "linkedCustomsSixSheetNo"
+    || key === "linkedCustomsCompany"
+    || key === "linkedCustomsDirection"
+    || key === "linkedCustomsRemark") {
+    return linkedCustomsBusinessFixedColumnValue(order, column);
+  }
+  if (key === "linkedCustomsItemCount"
+    || key === "linkedCustomsPageCount"
+    || key === "linkedCustomsPageFee"
+    || key === "linkedCustomsCustomsFee"
+    || key === "linkedCustomsManifestFee"
+    || key === "linkedCustomsInspectionFee"
+    || key === "linkedCustomsCheckFee"
+    || key === "linkedCustomsVerificationFee"
+    || key === "linkedCustomsOtherFee"
+    || key === "linkedCustomsTotal"
+    || key.startsWith("linkedCustomsCustom:")) {
+    return formatExportAmount(exportOrderColumnAmount(order, column));
+  }
   if (key === "loading" || key === "unloading") return shortLocationValue(order?.[key]);
   if (isExportFeeItemColumn(column)) return feeDisplayForColumn(order, column, options);
   if (key === "receivableHKD" || key === "receivableRMB") return formatExportAmount(order?.[key]);
@@ -2163,6 +2354,9 @@ function exportColumnsForOrders(templatePayload = null, orders = [], options = {
   const chargeNoteColumns = options.includeChargeNoteColumn && orders.some(orderIsCharged)
     ? [{ ...ORDER_EXPORT_CHARGE_NOTE_COLUMN }]
     : [];
+  const linkedCustomsColumns = options.includeLinkedCustomsColumns
+    ? linkedCustomsBusinessExportColumns(orders)
+    : [];
   const mergedBodyColumns = mergeExportColumnsByTemplateOrder(
     templateBodyColumns,
     bodyColumns,
@@ -2174,6 +2368,7 @@ function exportColumnsForOrders(templatePayload = null, orders = [], options = {
   return [
     sequenceColumn || { ...ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN },
     ...exportBodyColumns,
+    ...linkedCustomsColumns,
     ...totalColumns,
     ...chargeNoteColumns
   ].map((column) => ({
@@ -2211,14 +2406,127 @@ function exportTemplateTextRows(templatePayload = null, title = "订单导出") 
   };
 }
 
-function renderOrdersCsv(orders, title = "订单导出", templatePayload = null, exchange = null) {
+function orderLinkedCustomsBusinessId(order = {}) {
+  return String(order?.linkedCustomsBusinessId || order?.linked_customs_business_id || "").trim();
+}
+
+async function loadLinkedCustomsBusinessesByIds(ids = []) {
+  const uniqueIds = [...new Set(ids.map((value) => String(value || "").trim()).filter(Boolean))];
+  if (!uniqueIds.length) return new Map();
+  const placeholders = uniqueIds.map(() => "?").join(",");
+  const rows = await db.prepare(`
+    SELECT * FROM customs_businesses
+    WHERE deleted_at IS NULL
+      AND id IN (${placeholders})
+  `).all(...uniqueIds);
+  return new Map(rows.map((row) => [String(row.id || "").trim(), mapCustomsBusiness(row)]));
+}
+
+async function loadLinkedCustomsBusinessIdSet() {
+  if (!(await orderColumnExists("linked_customs_business_id"))) {
+    return new Set();
+  }
+  const rows = await db.prepare(`
+    SELECT DISTINCT linked_customs_business_id AS id
+    FROM orders
+    WHERE deleted_at IS NULL
+      AND linked_customs_business_id IS NOT NULL
+  `).all();
+  return new Set(rows.map((row) => String(row.id || "").trim()).filter(Boolean));
+}
+
+const ORDER_EXPORT_LINKED_CUSTOMS_FIXED_COLUMNS = [
+  { key: "linkedCustomsDate", label: "报关日期", width: 12, pdfWidth: 52 },
+  { key: "linkedCustomsDeclarationNo", label: "报关单号", width: 18, pdfWidth: 70 },
+  { key: "linkedCustomsSixSheetNo", label: "六联单号", width: 16, pdfWidth: 60 },
+  { key: "linkedCustomsCompany", label: "报关客户", width: 28, pdfWidth: 110 },
+  { key: "linkedCustomsDirection", label: "进出口", width: 10, pdfWidth: 42 },
+  { key: "linkedCustomsItemCount", label: "品名项数", width: 10, pdfWidth: 34, amount: true },
+  { key: "linkedCustomsPageCount", label: "续页", width: 8, pdfWidth: 30, amount: true },
+  { key: "linkedCustomsPageFee", label: "续页费", width: 11, pdfWidth: 44, amount: true },
+  { key: "linkedCustomsCustomsFee", label: "报关费", width: 11, pdfWidth: 44, amount: true },
+  { key: "linkedCustomsManifestFee", label: "舱单费", width: 11, pdfWidth: 44, amount: true },
+  { key: "linkedCustomsInspectionFee", label: "报检费", width: 11, pdfWidth: 44, amount: true },
+  { key: "linkedCustomsCheckFee", label: "查验费", width: 11, pdfWidth: 44, amount: true },
+  { key: "linkedCustomsVerificationFee", label: "核注费", width: 11, pdfWidth: 44, amount: true },
+  { key: "linkedCustomsOtherFee", label: "其他费用", width: 12, pdfWidth: 44, amount: true },
+  { key: "linkedCustomsTotal", label: "合计", width: 12, pdfWidth: 48, amount: true },
+  { key: "linkedCustomsRemark", label: "备注", width: 20, pdfWidth: 66 }
+];
+
+function linkedCustomsBusinessFixedColumnValue(order = {}, column = {}) {
+  const customs = order?.linkedCustomsBusiness || null;
+  if (!customs) return "";
+  const key = textValue(column?.key);
+  if (key === "linkedCustomsDate") return customs.date || "";
+  if (key === "linkedCustomsDeclarationNo") return customs.declarationNo || "";
+  if (key === "linkedCustomsSixSheetNo") return customs.sixSheetNo || "";
+  if (key === "linkedCustomsCompany") return customs.company || "";
+  if (key === "linkedCustomsDirection") return customs.direction || "";
+  if (key === "linkedCustomsItemCount") return Number(customs.itemCount || 0) || "";
+  if (key === "linkedCustomsPageCount") return Number(customs.pageCount || 0) || "";
+  if (key === "linkedCustomsPageFee") return Number(customs.pageFee || 0) || "";
+  if (key === "linkedCustomsCustomsFee") return Number(customs.customsFee || 0) || "";
+  if (key === "linkedCustomsManifestFee") return Number(customs.manifestFee || 0) || "";
+  if (key === "linkedCustomsInspectionFee") return Number(customs.inspectionFee || 0) || "";
+  if (key === "linkedCustomsCheckFee") return Number(customs.checkFee || 0) || "";
+  if (key === "linkedCustomsVerificationFee") return Number(customs.verificationFee || 0) || "";
+  if (key === "linkedCustomsOtherFee") return Number(customs.otherFee || 0) || "";
+  if (key === "linkedCustomsTotal") return Number(customs.total || 0) || "";
+  if (key === "linkedCustomsRemark") return customs.remark || "";
+  return "";
+}
+
+function linkedCustomsBusinessCustomFieldValue(order = {}, fieldName = "") {
+  const customs = order?.linkedCustomsBusiness || null;
+  if (!customs) return "";
+  const target = String(fieldName || "").trim();
+  if (!target) return "";
+  const field = normalizeCustomsBusinessCustomFields(customs.customFields).find((item) => item.name === target);
+  return field ? Number(field.value || 0) || "" : "";
+}
+
+function linkedCustomsBusinessExportColumns(orders = []) {
+  const ordersWithCustoms = orders.filter((order) => Boolean(order?.linkedCustomsBusiness));
+  if (!ordersWithCustoms.length) return [];
+  const visibleFixedColumns = ORDER_EXPORT_LINKED_CUSTOMS_FIXED_COLUMNS.filter((column) =>
+    ordersWithCustoms.some((order) => {
+      const value = linkedCustomsBusinessFixedColumnValue(order, column);
+      return value !== "" && value !== null && value !== undefined;
+    })
+  );
+  const customFieldNames = [];
+  const seenFieldNames = new Set();
+  ordersWithCustoms.forEach((order) => {
+    normalizeCustomsBusinessCustomFields(order.linkedCustomsBusiness?.customFields).forEach((field) => {
+      const name = textValue(field.name).trim();
+      if (!name || seenFieldNames.has(name)) return;
+      if (!ordersWithCustoms.some((item) => Number(linkedCustomsBusinessCustomFieldValue(item, name) || 0) !== 0)) return;
+      seenFieldNames.add(name);
+      customFieldNames.push(name);
+    });
+  });
+  const customColumns = customFieldNames.map((name) => ({
+    key: `linkedCustomsCustom:${name}`,
+    label: name,
+    width: Math.max(10, Math.min(24, Math.ceil(stringDisplayWidth(name) * 1.6 + 6))),
+    pdfWidth: 44,
+    amount: true,
+    custom: true
+  }));
+  return [...visibleFixedColumns, ...customColumns];
+}
+
+async function renderOrdersCsv(orders, title = "订单导出", templatePayload = null, exchange = null) {
   const isCustomerStatement = isCustomerStatementExportTitle(title);
-  const columns = exportColumnsForOrders(templatePayload, orders, {
+  const exportOrders = isCustomerStatement ? await attachLinkedCustomsBusinessesToOrders(orders) : orders;
+  const columns = exportColumnsForOrders(templatePayload, exportOrders, {
     includeChargeNoteColumn: isCustomerStatement,
-    includeOperatingUnitColumn: isCustomerStatement
+    includeOperatingUnitColumn: isCustomerStatement,
+    includeLinkedCustomsColumns: isCustomerStatement
   });
   const headers = columns.map(exportColumnHeaderText);
-  const rows = exportTableRows(orders, columns, exchange, {
+  const rows = exportTableRows(exportOrders, columns, exchange, {
     includeSettlementTotal: shouldIncludeSettlementTotal(title, exchange),
     includeAdvanceAddress: isCustomerStatement,
     excludeChargedFromTotals: isCustomerStatement
@@ -2277,12 +2585,20 @@ function exportColumnMaxWidth(column = {}) {
   if (key === ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key) return 42;
   if (key === ORDER_EXPORT_CHARGE_NOTE_COLUMN.key) return 138;
   if (key === "date") return 72;
+  if (key === "linkedCustomsDate") return 72;
   if (["direction", "currency", "tonnage"].includes(key)) return 50;
+  if (["linkedCustomsDirection"].includes(key)) return 50;
   if (["quantity", "weight", "status"].includes(key)) return 68;
   if (["plate", "driver", "hkDriver", "mainlandDriver"].includes(key)) return 82;
   if (["dispatchNo", "no", "sixSheetNo", "tripNo"].includes(key)) return 98;
   if (["customer", "supplier", "operatingUnit"].includes(key)) return 138;
   if (["loading", "unloading"].includes(key)) return 132;
+  if (["linkedCustomsDeclarationNo", "linkedCustomsSixSheetNo"].includes(key)) return 98;
+  if (["linkedCustomsCompany"].includes(key)) return 138;
+  if (["linkedCustomsItemCount", "linkedCustomsPageCount"].includes(key)) return 68;
+  if (["linkedCustomsPageFee", "linkedCustomsCustomsFee", "linkedCustomsManifestFee", "linkedCustomsInspectionFee", "linkedCustomsCheckFee", "linkedCustomsVerificationFee", "linkedCustomsOtherFee", "linkedCustomsTotal"].includes(key)) return 76;
+  if (key === "linkedCustomsRemark") return 150;
+  if (key.startsWith("linkedCustomsCustom:")) return 112;
   if (key === "__hkdTotal" || key === "__rmbTotal" || key === "receivableHKD" || key === "receivableRMB") return 76;
   if (exportLocationFeeType(column)) return 150;
   if (isExportFeeItemColumn(column)) return 112;
@@ -2293,6 +2609,13 @@ function exportColumnFluidMaxWidth(column = {}) {
   const key = textValue(column.key);
   if (key === ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key) return 42;
   if (key === ORDER_EXPORT_CHARGE_NOTE_COLUMN.key) return 180;
+  if (key === "linkedCustomsDate") return 76;
+  if (["linkedCustomsDeclarationNo", "linkedCustomsSixSheetNo"].includes(key)) return 120;
+  if (key === "linkedCustomsCompany" || key === "linkedCustomsRemark") return 240;
+  if (["linkedCustomsDirection"].includes(key)) return 56;
+  if (["linkedCustomsItemCount", "linkedCustomsPageCount"].includes(key)) return 72;
+  if (["linkedCustomsPageFee", "linkedCustomsCustomsFee", "linkedCustomsManifestFee", "linkedCustomsInspectionFee", "linkedCustomsCheckFee", "linkedCustomsVerificationFee", "linkedCustomsOtherFee", "linkedCustomsTotal"].includes(key)) return 96;
+  if (key.startsWith("linkedCustomsCustom:")) return 180;
   if (["direction", "currency", "tonnage"].includes(key)) return 56;
   if (key === "date") return 76;
   if (key === "customer" || key === "supplier" || key === "operatingUnit") return 240;
@@ -2798,16 +3121,34 @@ function pdfFooterItemY(item = {}, template = null) {
   return Math.max(0, Math.min(rawY, footerHeight - 4));
 }
 
+async function attachLinkedCustomsBusinessesToOrders(orders = []) {
+  const linkedIds = [...new Set(orders.map(orderLinkedCustomsBusinessId).filter(Boolean))];
+  if (!linkedIds.length) {
+    return orders.map((order) => ({ ...order, linkedCustomsBusiness: null }));
+  }
+  const linkedBusinesses = await loadLinkedCustomsBusinessesByIds(linkedIds);
+  return orders.map((order) => {
+    const linkedCustomsBusinessId = orderLinkedCustomsBusinessId(order);
+    return {
+      ...order,
+      linkedCustomsBusinessId: linkedCustomsBusinessId || order.linkedCustomsBusinessId || order.linked_customs_business_id || null,
+      linkedCustomsBusiness: linkedCustomsBusinessId ? linkedBusinesses.get(linkedCustomsBusinessId) || null : null
+    };
+  });
+}
+
 async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePayload = null, exchange = null, options = {}) {
   const template = normalizeExportTemplate(templatePayload);
   const isCustomerStatement = isCustomerStatementExportTitle(title);
-  const columns = exportColumnsForOrders(templatePayload, orders, {
+  const exportOrders = isCustomerStatement ? await attachLinkedCustomsBusinessesToOrders(orders) : orders;
+  const columns = exportColumnsForOrders(templatePayload, exportOrders, {
     includeChargeNoteColumn: isCustomerStatement,
-    includeOperatingUnitColumn: isCustomerStatement
+    includeOperatingUnitColumn: isCustomerStatement,
+    includeLinkedCustomsColumns: isCustomerStatement
   });
   const headers = columns.map(exportColumnHeaderText);
   const includeSettlementTotal = shouldIncludeSettlementTotal(title, exchange);
-  const tableData = exportTableRowData(orders, columns, exchange, {
+  const tableData = exportTableRowData(exportOrders, columns, exchange, {
     includeSettlementTotal,
     includeAdvanceAddress: isCustomerStatement,
     excludeChargedFromTotals: isCustomerStatement
@@ -3045,7 +3386,7 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
 
   const shouldIncludeReceiptSheet = Boolean(options.includeReceiptSheet) || String(title || "").startsWith("客户对账单");
   if (shouldIncludeReceiptSheet) {
-    await addStatementReceiptSheet(workbook, orders);
+    await addStatementReceiptSheet(workbook, exportOrders);
   }
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }
@@ -3382,12 +3723,14 @@ async function renderKenfaStatementXlsxBuffer(orders, title = "客户对账单",
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 
-function renderOrdersExcelHtml(orders, title = "订单导出", templatePayload = null, exchange = null) {
+async function renderOrdersExcelHtml(orders, title = "订单导出", templatePayload = null, exchange = null) {
   const template = normalizeExportTemplate(templatePayload);
   const isCustomerStatement = isCustomerStatementExportTitle(title);
-  const columns = exportColumnsForOrders(templatePayload, orders, {
+  const exportOrders = isCustomerStatement ? await attachLinkedCustomsBusinessesToOrders(orders) : orders;
+  const columns = exportColumnsForOrders(templatePayload, exportOrders, {
     includeChargeNoteColumn: isCustomerStatement,
-    includeOperatingUnitColumn: isCustomerStatement
+    includeOperatingUnitColumn: isCustomerStatement,
+    includeLinkedCustomsColumns: isCustomerStatement
   });
   const context = {
     title,
@@ -3402,7 +3745,7 @@ function renderOrdersExcelHtml(orders, title = "订单导出", templatePayload =
         ? template.headerTextItems
         : [{ text: template.header || "{{title}}\n日期：{{date}}", color: template.headerTextColor, fontSize: template.headerFontSize }]
     )
-    : [{ text: title }, { text: `导出时间：${todayInputValue()}    订单数：${orders.length}` }];
+    : [{ text: title }, { text: `导出时间：${todayInputValue()}    订单数：${exportOrders.length}` }];
   const footerItems = exportTemplateFooterItems(template, template?.footerTextColor);
   const headerHtml = headerItems
     .filter((item) => item?.text)
@@ -3434,7 +3777,7 @@ function renderOrdersExcelHtml(orders, title = "订单导出", templatePayload =
   const tableAlign = template?.tableAlign || "left";
   const tablePixelWidth = columns.reduce((sum, column) => sum + Number(column.width || 76), 0);
   const tableWidthCss = template?.orientation === "fluid" ? `${Math.max(1, tablePixelWidth)}px` : "100%";
-  const tableData = exportTableRowData(orders, columns, exchange, {
+  const tableData = exportTableRowData(exportOrders, columns, exchange, {
     includeSettlementTotal: shouldIncludeSettlementTotal(title, exchange),
     includeAdvanceAddress: isCustomerStatement,
     excludeChargedFromTotals: isCustomerStatement
@@ -3476,8 +3819,243 @@ function renderOrdersExcelHtml(orders, title = "订单导出", templatePayload =
     <tbody>${rowsHtml}</tbody>
   </table>
   <div class="footer">${footerHtml}</div>
-</body>
+  </body>
 </html>`;
+}
+
+const DRIVER_WAGE_TEMPLATE_FILE_URL = new URL("./assets/driver-wage-template.xlsx", import.meta.url);
+const DRIVER_WAGE_TEMPLATE_MERGES = ["V81:Y82", "V75:X75", "P76:T76", "P77:T77", "K78:T78", "P80:U80", "V80:Y80", "U76:U78"];
+const DRIVER_WAGE_TEMPLATE_HEADER_LABELS = {
+  1: "序号",
+  2: "时间",
+  3: "客户",
+  4: "装/卸",
+  5: "进口/出口",
+  6: "汽车器材",
+  7: "油费",
+  8: "香港坐车",
+  9: "香港停车费",
+  10: "存放叉车",
+  11: "打的接车",
+  12: "大陆停车费",
+  13: "深圳湾停车费",
+  14: "洗车/加油",
+  15: "其它",
+  16: "杂费合计HKD",
+  17: "杂费合计RMB",
+  18: "运费合计HKD",
+  19: "",
+  20: "加点费HKD",
+  21: "备注"
+};
+
+function cloneExcelStyle(value) {
+  return value ? JSON.parse(JSON.stringify(value)) : value;
+}
+
+function copyExcelCellStyle(targetCell, sourceCell) {
+  targetCell.font = cloneExcelStyle(sourceCell.font);
+  targetCell.alignment = cloneExcelStyle(sourceCell.alignment);
+  targetCell.border = cloneExcelStyle(sourceCell.border);
+  targetCell.fill = cloneExcelStyle(sourceCell.fill);
+  targetCell.numFmt = sourceCell.numFmt;
+  targetCell.protection = cloneExcelStyle(sourceCell.protection);
+}
+
+function copyExcelRowStyle(targetRow, sourceRow, columnCount = 25) {
+  targetRow.height = sourceRow.height;
+  for (let column = 1; column <= columnCount; column += 1) {
+    copyExcelCellStyle(targetRow.getCell(column), sourceRow.getCell(column));
+  }
+}
+
+function shiftA1RangeRows(range = "", offset = 0) {
+  if (!offset) return range;
+  return String(range || "").replace(/([A-Z]+)(\d+)/g, (_match, column, row) => `${column}${Number(row || 0) + Number(offset)}`);
+}
+
+function formatDriverWageNoteNumber(value = 0) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number)) return "0";
+  const text = number.toFixed(2);
+  return text.replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
+}
+
+function sumNumericRowColumn(rows = [], columnIndex = 0) {
+  return Number(rows.reduce((sum, row) => sum + Number(row?.[columnIndex] ?? 0), 0).toFixed(2));
+}
+
+function setDriverWageNumberFormat(cell) {
+  if (!cell) return;
+  cell.numFmt = "0";
+}
+
+async function renderDriverWageSettlementXlsxBuffer(payload = {}) {
+  const templateBuffer = DRIVER_WAGE_TEMPLATE_FILE_URL && fs.existsSync(DRIVER_WAGE_TEMPLATE_FILE_URL)
+    ? fs.readFileSync(DRIVER_WAGE_TEMPLATE_FILE_URL)
+    : null;
+  if (!templateBuffer) {
+    throw new Error("司机工资单模板缺失");
+  }
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(templateBuffer);
+  const worksheet = workbook.worksheets[0];
+  if (!worksheet) {
+    throw new Error("司机工资单模板无可用工作表");
+  }
+
+  const rawRows = Array.isArray(payload.rows) ? payload.rows : [];
+  const rows = rawRows.map((row) => {
+    const values = Array.isArray(row) ? [...row] : [];
+    while (values.length < 22) values.push("");
+    return values.slice(0, 22);
+  });
+  const extraRows = Math.max(0, rows.length - 73);
+  if (extraRows > 0) {
+    worksheet.spliceRows(75, 0, ...Array.from({ length: extraRows }, () => []));
+    const styleSourceRow = worksheet.getRow(74);
+    for (let rowNumber = 75; rowNumber < 75 + extraRows; rowNumber += 1) {
+      copyExcelRowStyle(worksheet.getRow(rowNumber), styleSourceRow);
+    }
+    DRIVER_WAGE_TEMPLATE_MERGES.forEach((range) => {
+      worksheet.unMergeCells(range);
+    });
+    DRIVER_WAGE_TEMPLATE_MERGES.forEach((range) => {
+      worksheet.mergeCells(shiftA1RangeRows(range, extraRows));
+    });
+  }
+
+  const summaryRowNumber = 75 + extraRows;
+  const noteRow1 = summaryRowNumber + 1;
+  const noteRow2 = summaryRowNumber + 2;
+  const noteRow3 = summaryRowNumber + 3;
+  const noteRow4 = summaryRowNumber + 4;
+  const noteRow5 = summaryRowNumber + 5;
+  const paymentRow = summaryRowNumber + 9;
+
+  worksheet.getColumn(19).hidden = true;
+  worksheet.getCell(1, 19).value = null;
+  for (const [index, label] of Object.entries(DRIVER_WAGE_TEMPLATE_HEADER_LABELS)) {
+    worksheet.getCell(1, Number(index)).value = label;
+  }
+  worksheet.getRow(1).height = 28;
+  worksheet.getRow(1).alignment = {
+    vertical: "middle",
+    horizontal: "center",
+    wrapText: false
+  };
+
+  const clearCellVisualStyle = (cell) => {
+    const nextFont = cloneExcelStyle(cell.font) || {};
+    nextFont.color = { argb: "FF000000" };
+    cell.font = nextFont;
+    cell.fill = undefined;
+  };
+
+  for (let rowNumber = 1; rowNumber <= paymentRow; rowNumber += 1) {
+    for (let column = 1; column <= 25; column += 1) {
+      clearCellVisualStyle(worksheet.getRow(rowNumber).getCell(column));
+    }
+  }
+
+  for (let rowNumber = 2; rowNumber < summaryRowNumber; rowNumber += 1) {
+    const row = worksheet.getRow(rowNumber);
+    if (rowNumber <= rows.length + 1) continue;
+    for (let column = 1; column <= 22; column += 1) {
+      row.getCell(column).value = null;
+    }
+  }
+
+  rows.forEach((values, index) => {
+    const rowNumber = index + 2;
+    const row = worksheet.getRow(rowNumber);
+    row.height = row.height || 22.5;
+    values.forEach((value, columnIndex) => {
+      const cell = row.getCell(columnIndex + 1);
+      if (columnIndex === 1 && value) {
+        const date = value instanceof Date
+          ? value
+          : (String(value || "").includes("-") ? new Date(`${String(value).slice(0, 10)}T00:00:00`) : null);
+        cell.value = date || value;
+        if (date) cell.numFmt = "m/d/yy";
+        return;
+      }
+      cell.value = value === "" ? null : value;
+    });
+    [1, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20].forEach((column) => {
+      setDriverWageNumberFormat(row.getCell(column));
+    });
+  });
+
+  const totalP = sumNumericRowColumn(rows, 15);
+  const totalQ = sumNumericRowColumn(rows, 16);
+  const totalR = sumNumericRowColumn(rows, 17);
+  const totalT = sumNumericRowColumn(rows, 19);
+  const advanceHKD = Number(payload.advanceHKD ?? payload.adjustmentsHKD ?? 0);
+  const exchangeRate = Number(payload.exchangeRate ?? 0);
+  const convertedRMB = exchangeRate ? Number((totalQ * exchangeRate).toFixed(2)) : 0;
+  const payableTotal = Number((totalR + totalT + advanceHKD + convertedRMB).toFixed(2));
+  const summaryNote = String(payload.summaryNote || `${rows.length}车骑师/口岸过车`).trim();
+  const noteLines = Array.isArray(payload.noteLines) ? payload.noteLines : [];
+  const defaultNotes = [
+    `人民币无预支，司机代垫${formatDriverWageNoteNumber(totalQ)}`,
+    `预支HKD${formatDriverWageNoteNumber(advanceHKD)}，司机代垫${formatDriverWageNoteNumber(advanceHKD)}`,
+    payload.periodLabel ? `${String(payload.periodLabel).trim()}预支杂费${formatDriverWageNoteNumber(totalQ)}` : "",
+    exchangeRate ? `${formatDriverWageNoteNumber(totalQ)}/${formatDriverWageNoteNumber(exchangeRate)}=港币${formatDriverWageNoteNumber(convertedRMB)}` : "",
+    `运费${formatDriverWageNoteNumber(totalR)}+装卸过海加点${formatDriverWageNoteNumber(totalT)}+司机代垫${formatDriverWageNoteNumber(advanceHKD)}+杂费${formatDriverWageNoteNumber(convertedRMB)}=应付${formatDriverWageNoteNumber(payableTotal)}`
+  ];
+  const notes = defaultNotes.map((fallback, index) => String(noteLines[index] || fallback || "").trim());
+  const paymentLabel = String(payload.paymentLabel || "").trim();
+
+  worksheet.getCell(`P${summaryRowNumber}`).value = totalP;
+  worksheet.getCell(`Q${summaryRowNumber}`).value = totalQ;
+  worksheet.getCell(`R${summaryRowNumber}`).value = totalR;
+  worksheet.getCell(`T${summaryRowNumber}`).value = totalT;
+  worksheet.getCell(`V${summaryRowNumber}`).value = summaryNote;
+  worksheet.getCell(`S${summaryRowNumber}`).value = null;
+  [16, 17, 18, 20].forEach((column) => {
+    setDriverWageNumberFormat(worksheet.getRow(summaryRowNumber).getCell(column));
+  });
+
+  worksheet.getCell(`B${noteRow1}`).value = "备注：";
+  worksheet.getCell(`P${noteRow1}`).value = notes[0];
+  worksheet.getCell(`P${noteRow2}`).value = notes[1];
+  worksheet.getCell(`K${noteRow3}`).value = notes[2];
+  worksheet.getCell(`Q${noteRow4}`).value = notes[3];
+  worksheet.getCell(`P${noteRow5}`).value = notes[4];
+  worksheet.getCell(`U${paymentRow}`).value = paymentLabel;
+
+  worksheet.getRow(summaryRowNumber).height = worksheet.getRow(summaryRowNumber).height || 22.5;
+  worksheet.getRow(noteRow2).height = worksheet.getRow(noteRow2).height || 20.25;
+  worksheet.getRow(paymentRow).height = worksheet.getRow(paymentRow).height || 22.5;
+
+  const columnWidths = {
+    1: 5,
+    2: 11.75,
+    3: 22.375,
+    4: 31,
+    5: 11.125,
+    6: 9.5,
+    7: 8,
+    8: 9.5,
+    9: 11,
+    10: 10,
+    11: 9,
+    12: 10.5,
+    13: 11,
+    14: 10,
+    15: 8,
+    16: 11,
+    17: 11,
+    18: 11,
+    20: 11,
+    21: 36
+  };
+  Object.entries(columnWidths).forEach(([index, width]) => {
+    worksheet.getColumn(Number(index)).width = width;
+  });
+
+  return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 
 const ORDER_DEFAULT_SORT_SQL = `
@@ -3563,6 +4141,7 @@ function normalizeExportOrderSnapshot(order = {}) {
   snapshot.mainlandDriver = String(snapshot.mainlandDriver || order.mainlandDriver || order.mainland_driver || "");
   snapshot.transportMode = String(snapshot.transportMode || order.transportMode || "");
   snapshot.supplier = String(snapshot.supplier || order.supplier || "");
+  snapshot.linkedCustomsBusinessId = String(snapshot.linkedCustomsBusinessId || order.linkedCustomsBusinessId || order.linked_customs_business_id || "");
   snapshot.loading = String(snapshot.loading || order.loading || "");
   snapshot.unloading = String(snapshot.unloading || order.unloading || "");
   snapshot.date = String(snapshot.date || order.date || "");
@@ -3592,12 +4171,14 @@ async function loadExportOrdersFromRequest(body = {}, orderNos = [], account = n
   return loadExportOrders(orderNos, account);
 }
 
-function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = null, filename = "", exchange = null) {
+async function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = null, filename = "", exchange = null) {
   const template = normalizeExportTemplate(templatePayload);
   const isCustomerStatement = isCustomerStatementExportTitle(title);
-  const sourceColumns = exportColumnsForOrders(templatePayload, orders, {
+  const exportOrders = isCustomerStatement ? await attachLinkedCustomsBusinessesToOrders(orders) : orders;
+  const sourceColumns = exportColumnsForOrders(templatePayload, exportOrders, {
     includeChargeNoteColumn: isCustomerStatement,
-    includeOperatingUnitColumn: isCustomerStatement
+    includeOperatingUnitColumn: isCustomerStatement,
+    includeLinkedCustomsColumns: isCustomerStatement
   });
   const tableWidth = sourceColumns.reduce((sum, column) => sum + Number(column.width || 76), 0);
   const fluidPageWidth = Math.max(842, Math.ceil(tableWidth + 48));
@@ -3703,7 +4284,7 @@ function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = 
     } else {
       usePdfFont();
       doc.fontSize(15).fillColor("#17233c").text(title, startX, 18, { continued: false });
-      doc.fontSize(9).fillColor("#64748b").text(`导出时间：${todayInputValue()}    订单数：${orders.length}`, startX, 38);
+      doc.fontSize(9).fillColor("#64748b").text(`导出时间：${todayInputValue()}    订单数：${exportOrders.length}`, startX, 38);
     }
     let x = startX;
     const y = doc.page.margins.top + headerHeight;
@@ -3737,7 +4318,7 @@ function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = 
   }
 
   const includeSettlementTotal = shouldIncludeSettlementTotal(title, exchange);
-  const { rows: pdfRows } = exportTableRowData(orders, columns, exchange, {
+  const { rows: pdfRows } = exportTableRowData(exportOrders, columns, exchange, {
     includeSettlementTotal,
     includeAdvanceAddress: isCustomerStatement,
     excludeChargedFromTotals: isCustomerStatement
@@ -4032,6 +4613,7 @@ async function syncVehicleMaintenanceReminderDate(plate) {
   if (!normalizedPlate) return null;
   const vehicle = await db.prepare("SELECT plate FROM vehicles WHERE plate = ? AND deleted_at IS NULL").get(normalizedPlate);
   if (!vehicle) return null;
+  const vehicleSupport = await vehicleMaintenanceReminderWriteColumnSupport();
   const hasMaintenanceNextKm = await vehicleExpenseHasMaintenanceNextKmColumn();
   const selectMaintenanceNextKm = hasMaintenanceNextKm ? ", maintenance_next_km" : "";
   const maintenanceProgressCondition = hasMaintenanceNextKm ? "OR COALESCE(maintenance_next_km, 0) > 0" : "";
@@ -4051,13 +4633,26 @@ async function syncVehicleMaintenanceReminderDate(plate) {
   `).get(normalizedPlate);
   const maintenanceDueDate = String(row?.maintenance_next_date || "").trim();
   const maintenanceDueKm = hasMaintenanceNextKm ? Number(row?.maintenance_next_km || 0) : 0;
+  if (!vehicleSupport.maintenanceDueDate && !vehicleSupport.maintenanceDueKm) {
+    return { maintenanceDueDate, maintenanceDueKm };
+  }
+  const updateParts = [];
+  const updateValues = [];
+  if (vehicleSupport.maintenanceDueDate) {
+    updateParts.push("maintenance_due_date = ?");
+    updateValues.push(maintenanceDueDate);
+  }
+  if (vehicleSupport.maintenanceDueKm) {
+    updateParts.push("maintenance_due_km = ?");
+    updateValues.push(maintenanceDueKm);
+  }
+  updateParts.push("updated_at = CURRENT_TIMESTAMP");
+  updateValues.push(normalizedPlate);
   await db.prepare(`
     UPDATE vehicles
-    SET maintenance_due_date = ?,
-        maintenance_due_km = ?,
-        updated_at = CURRENT_TIMESTAMP
+    SET ${updateParts.join(",\n        ")}
     WHERE plate = ? AND deleted_at IS NULL
-  `).run(maintenanceDueDate, maintenanceDueKm, normalizedPlate);
+  `).run(...updateValues);
   return { maintenanceDueDate, maintenanceDueKm };
 }
 
@@ -4592,6 +5187,20 @@ function normalizeCompanyExpenseForSave(item = {}) {
   };
 }
 
+function companyExpenseWriteEntries(support = {}) {
+  const entries = [
+    ["entry_type", "entryType"],
+    ["period_month", "periodMonth"],
+    ["category", "category"],
+    ["employee_name", "employeeName"],
+    ["amount", "amount"]
+  ];
+  if (support.salaryStatus) entries.push(["salary_status", "salaryStatus"]);
+  if (support.settledAt) entries.push(["settled_at", "settledAt"]);
+  entries.push(["note", "note"]);
+  return entries;
+}
+
 function validateCompanyExpensePayload(item = {}) {
   if (!item.periodMonth) return "请选择有效月份";
   if (!item.category) return "请填写项目名称";
@@ -4651,6 +5260,45 @@ function mapDriverAdjustment(row) {
     note: row.note,
     createdAt: row.created_at
   };
+}
+
+const DRIVER_WAGE_SETTLEMENT_PENDING_STATUS = "未结算";
+const DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS = "已结算";
+
+function normalizeDriverWageSettlementStatus(value = "") {
+  return String(value || "").trim() === DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS
+    ? DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS
+    : DRIVER_WAGE_SETTLEMENT_PENDING_STATUS;
+}
+
+function mapDriverWageSettlement(row) {
+  return {
+    id: row.id,
+    periodKey: row.period_key || "",
+    driverId: row.driver_id,
+    status: normalizeDriverWageSettlementStatus(row.status),
+    settledAt: row.settled_at || "",
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || row.created_at || ""
+  };
+}
+
+function readDriverWageSettlementPayload(body = {}, current = null) {
+  return {
+    periodKey: String(body.periodKey ?? body.period_key ?? current?.period_key ?? "").trim(),
+    driverId: Number(body.driverId ?? body.driver_id ?? current?.driver_id ?? 0),
+    status: normalizeDriverWageSettlementStatus(body.status ?? body.settlementStatus ?? body.settlement_status ?? current?.status ?? ""),
+    settledAt: String(body.settledAt ?? body.settled_at ?? current?.settled_at ?? "").trim()
+  };
+}
+
+function validateDriverWageSettlementPayload(item = {}) {
+  if (!item.periodKey) return "请选择统计期间";
+  if (!item.driverId) return "请选择司机";
+  if (item.status === DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS && !String(item.settledAt || "").trim()) {
+    return "请选择结算时间";
+  }
+  return "";
 }
 
 function parseJsonArrayText(value) {
@@ -5186,6 +5834,7 @@ async function loadCustomsStatementExportRows(company = "", period = "") {
   const { start, end } = customsBusinessPeriodBounds({ period });
   const dateWhere = start && end ? "AND business_date >= ? AND business_date < ?" : "";
   const params = start && end ? [start, end] : [];
+  const linkedIds = await loadLinkedCustomsBusinessIdSet();
   const rows = await db.prepare(`
     SELECT * FROM customs_businesses
     WHERE deleted_at IS NULL
@@ -5194,7 +5843,8 @@ async function loadCustomsStatementExportRows(company = "", period = "") {
   `).all(...params);
   return rows
     .map(mapCustomsBusiness)
-    .filter((row) => customsStatementSafeCompany(row.company) === targetCompany);
+    .filter((row) => customsStatementSafeCompany(row.company) === targetCompany)
+    .filter((row) => !linkedIds.has(String(row.id || "").trim()));
 }
 
 function customsStatementExportContext(body = {}) {
@@ -6794,7 +7444,6 @@ app.delete("/api/files/:id/permanent", async (req, res) => {
 });
 
 app.get("/api/customers", async (req, res) => {
-  await ensureCustomerCustomsCustomerTypeColumn();
   const type = req.query.type === "供应商" ? "供应商" : req.query.type === "客户" ? "客户" : null;
   const category = req.query.category === "报关客户" || req.query.category === "运输客户" ? req.query.category : null;
   let rows;
@@ -6849,7 +7498,6 @@ app.get("/api/customers", async (req, res) => {
 });
 
 app.patch("/api/customers/:id", async (req, res) => {
-  await ensureCustomerCustomsCustomerTypeColumn();
   const id = String(req.params.id || "").trim();
   const existing = await db.prepare("SELECT * FROM customers WHERE id = ? AND deleted_at IS NULL").get(id);
   if (!existing) {
@@ -6867,45 +7515,50 @@ app.patch("/api/customers/:id", async (req, res) => {
   }
 
   const hasSpecialCustomerColumn = await customerColumnExists("special_customer");
+  const requirementSupport = await customerRequirementColumnSupport();
+  const hasCustomsCustomerTypeColumn = await customerColumnExists("customs_customer_type");
   const hasCustomsVerificationFee = await customerColumnExists("customs_verification_fee");
   const hasCustomsManifestFee = await customerColumnExists("customs_manifest_fee");
   const hasCustomsCustomFields = await customerColumnExists("customs_custom_fields");
+  const updateSets = [
+    "type = @type",
+    "customer_category = @customerCategory",
+    "name = @name",
+    "short_name = @shortName",
+    "province = @province",
+    "city = @city",
+    "address = @address",
+    "term = @term",
+    "settlement_currency = @settlementCurrency",
+    "receivable_rmb = @receivableRMB",
+    "receivable_hkd = @receivableHKD",
+    "tax_no = @taxNo",
+    "contact = @contact",
+    "mobile = @mobile",
+    "driver_wage_adjust_hkd = @driverWageAdjustHKD",
+    "default_template_id = @defaultTemplateId",
+    "invoice_title = @invoiceTitle",
+    "invoice_tax_no = @invoiceTaxNo",
+    "invoice_bank = @invoiceBank",
+    "invoice_account = @invoiceAccount",
+    "invoice_address_phone = @invoiceAddressPhone",
+    "customs_home_item_count = @customsHomeItemCount",
+    "customs_page_item_count = @customsPageItemCount",
+    "customs_import_home_fee = @customsImportHomeFee",
+    "customs_export_home_fee = @customsExportHomeFee",
+    "customs_import_page_fee = @customsImportPageFee",
+    "customs_export_page_fee = @customsExportPageFee"
+  ];
+  if (hasCustomsCustomerTypeColumn) updateSets.push("customs_customer_type = @customsCustomerType");
+  if (requirementSupport.tripNoRequired) updateSets.push("trip_no_required = @tripNoRequired");
+  if (requirementSupport.sixSheetNoRequired) updateSets.push("six_sheet_no_required = @sixSheetNoRequired");
+  if (hasSpecialCustomerColumn) updateSets.push("special_customer = @specialCustomer");
+  if (hasCustomsManifestFee) updateSets.push("customs_manifest_fee = @customsManifestFee");
+  if (hasCustomsVerificationFee) updateSets.push("customs_verification_fee = @customsVerificationFee");
+  if (hasCustomsCustomFields) updateSets.push("customs_custom_fields = @customsCustomFieldsJson");
   const result = await db.prepare(`
     UPDATE customers
-    SET type = @type,
-        customer_category = @customerCategory,
-        name = @name,
-        short_name = @shortName,
-        customs_customer_type = @customsCustomerType,
-        province = @province,
-        city = @city,
-        address = @address,
-        term = @term,
-        settlement_currency = @settlementCurrency,
-        receivable_rmb = @receivableRMB,
-        receivable_hkd = @receivableHKD,
-        tax_no = @taxNo,
-        contact = @contact,
-        mobile = @mobile,
-        driver_wage_adjust_hkd = @driverWageAdjustHKD,
-        default_template_id = @defaultTemplateId,
-        invoice_title = @invoiceTitle,
-        invoice_tax_no = @invoiceTaxNo,
-        invoice_bank = @invoiceBank,
-        invoice_account = @invoiceAccount,
-        invoice_address_phone = @invoiceAddressPhone,
-        customs_home_item_count = @customsHomeItemCount,
-        customs_page_item_count = @customsPageItemCount,
-        customs_import_home_fee = @customsImportHomeFee,
-        customs_export_home_fee = @customsExportHomeFee,
-        customs_import_page_fee = @customsImportPageFee,
-        customs_export_page_fee = @customsExportPageFee,
-        trip_no_required = @tripNoRequired,
-        six_sheet_no_required = @sixSheetNoRequired
-        ${hasSpecialCustomerColumn ? ", special_customer = @specialCustomer" : ""}
-        ${hasCustomsManifestFee ? ", customs_manifest_fee = @customsManifestFee" : ""}
-        ${hasCustomsVerificationFee ? ", customs_verification_fee = @customsVerificationFee" : ""}
-        ${hasCustomsCustomFields ? ", customs_custom_fields = @customsCustomFieldsJson" : ""}
+    SET ${updateSets.join(", ")}
     WHERE id = @id AND deleted_at IS NULL
   `).run(item);
   if (result.changes === 0) {
@@ -6932,7 +7585,6 @@ app.patch("/api/customers/:id", async (req, res) => {
 });
 
 app.post("/api/customers", async (req, res) => {
-  await ensureCustomerCustomsCustomerTypeColumn();
   const item = normalizeCustomerPayload(req.body, req.body.id || (await nextCustomerId(req.body.type)));
   if (!requestCanViewSpecialCustomerOrders(req)) {
     item.specialCustomer = false;
@@ -6944,22 +7596,108 @@ app.post("/api/customers", async (req, res) => {
   }
 
   const hasSpecialCustomerColumn = await customerColumnExists("special_customer");
+  const requirementSupport = await customerRequirementColumnSupport();
+  const hasCustomsCustomerTypeColumn = await customerColumnExists("customs_customer_type");
   const hasCustomsVerificationFee = await customerColumnExists("customs_verification_fee");
   const hasCustomsManifestFee = await customerColumnExists("customs_manifest_fee");
   const hasCustomsCustomFields = await customerColumnExists("customs_custom_fields");
+  const insertColumns = [
+    "id",
+    "type",
+    "customer_category",
+    "name",
+    "short_name",
+    "province",
+    "city",
+    "address",
+    "term",
+    "settlement_currency",
+    "receivable_rmb",
+    "receivable_hkd",
+    "recent_order",
+    "created_at",
+    "tax_no",
+    "contact",
+    "mobile",
+    "driver_wage_adjust_hkd",
+    "default_template_id",
+    "invoice_title",
+    "invoice_tax_no",
+    "invoice_bank",
+    "invoice_account",
+    "invoice_address_phone",
+    "customs_home_item_count",
+    "customs_page_item_count",
+    "customs_import_home_fee",
+    "customs_export_home_fee",
+    "customs_import_page_fee",
+    "customs_export_page_fee"
+  ];
+  const insertValues = [
+    "@id",
+    "@type",
+    "@customerCategory",
+    "@name",
+    "@shortName",
+    "@province",
+    "@city",
+    "@address",
+    "@term",
+    "@settlementCurrency",
+    "@receivableRMB",
+    "@receivableHKD",
+    "@recentOrder",
+    "@createdAt",
+    "@taxNo",
+    "@contact",
+    "@mobile",
+    "@driverWageAdjustHKD",
+    "@defaultTemplateId",
+    "@invoiceTitle",
+    "@invoiceTaxNo",
+    "@invoiceBank",
+    "@invoiceAccount",
+    "@invoiceAddressPhone",
+    "@customsHomeItemCount",
+    "@customsPageItemCount",
+    "@customsImportHomeFee",
+    "@customsExportHomeFee",
+    "@customsImportPageFee",
+    "@customsExportPageFee"
+  ];
+  if (hasCustomsCustomerTypeColumn) {
+    insertColumns.splice(5, 0, "customs_customer_type");
+    insertValues.splice(5, 0, "@customsCustomerType");
+  }
+  if (requirementSupport.tripNoRequired) {
+    insertColumns.push("trip_no_required");
+    insertValues.push("@tripNoRequired");
+  }
+  if (requirementSupport.sixSheetNoRequired) {
+    insertColumns.push("six_sheet_no_required");
+    insertValues.push("@sixSheetNoRequired");
+  }
+  if (hasSpecialCustomerColumn) {
+    insertColumns.push("special_customer");
+    insertValues.push("@specialCustomer");
+  }
+  if (hasCustomsManifestFee) {
+    insertColumns.push("customs_manifest_fee");
+    insertValues.push("@customsManifestFee");
+  }
+  if (hasCustomsVerificationFee) {
+    insertColumns.push("customs_verification_fee");
+    insertValues.push("@customsVerificationFee");
+  }
+  if (hasCustomsCustomFields) {
+    insertColumns.push("customs_custom_fields");
+    insertValues.push("@customsCustomFieldsJson");
+  }
   await db.prepare(`
     INSERT INTO customers
-      (id, type, customer_category, name, short_name, customs_customer_type, province, city, address, term, settlement_currency, receivable_rmb, receivable_hkd, recent_order, created_at,
-       tax_no, contact, mobile, driver_wage_adjust_hkd, default_template_id,
-       invoice_title, invoice_tax_no, invoice_bank, invoice_account, invoice_address_phone,
-       customs_home_item_count, customs_page_item_count, customs_import_home_fee, customs_export_home_fee,
-       customs_import_page_fee, customs_export_page_fee, trip_no_required, six_sheet_no_required${hasSpecialCustomerColumn ? ", special_customer" : ""}${hasCustomsManifestFee ? ", customs_manifest_fee" : ""}${hasCustomsVerificationFee ? ", customs_verification_fee" : ""}${hasCustomsCustomFields ? ", customs_custom_fields" : ""})
+      (${insertColumns.join(", ")})
     VALUES
-      (@id, @type, @customerCategory, @name, @shortName, @customsCustomerType, @province, @city, @address, @term, @settlementCurrency, @receivableRMB, @receivableHKD, @recentOrder, @createdAt,
-       @taxNo, @contact, @mobile, @driverWageAdjustHKD, @defaultTemplateId,
-       @invoiceTitle, @invoiceTaxNo, @invoiceBank, @invoiceAccount, @invoiceAddressPhone,
-       @customsHomeItemCount, @customsPageItemCount, @customsImportHomeFee, @customsExportHomeFee,
-       @customsImportPageFee, @customsExportPageFee, @tripNoRequired, @sixSheetNoRequired${hasSpecialCustomerColumn ? ", @specialCustomer" : ""}${hasCustomsManifestFee ? ", @customsManifestFee" : ""}${hasCustomsVerificationFee ? ", @customsVerificationFee" : ""}${hasCustomsCustomFields ? ", @customsCustomFieldsJson" : ""})
+      (${insertValues.join(", ")})
   `).run(item);
   await writeAudit("create", "customer", item.id, item.name);
   res.status(201).json(mapCustomer(await db.prepare("SELECT * FROM customers WHERE id = ?").get(item.id)));
@@ -7367,6 +8105,17 @@ function recordOrderDispatchLoadInfoCandidate(lookup = new Map(), row = {}, plan
     createdAt: dispatchRowCreatedAt(row, planDate),
     priority,
     statusRank: dispatchRowStatusRank(row),
+    dispatchNo: dispatchRowDispatchNo(row),
+    businessType: userTextValue(row.businessType || row.business_type || ""),
+    port: normalizePortText(row.port || ""),
+    direction: userTextValue(row.direction),
+    tonnage: userTextValue(row.tonnage),
+    quantity: userTextValue(row.quantity),
+    weight: userTextValue(row.weight),
+    vehicleSource: normalizeVehicleSource(row.vehicleSource || row.vehicle_source || ""),
+    plate: normalizePlateText(row.plate),
+    loading: userTextValue(row.loading),
+    unloading: userTextValue(row.unloading),
     driverText: [
       dispatchRowText(row, "driver"),
       dispatchRowText(row, "hkDriver"),
@@ -7418,6 +8167,17 @@ async function hydrateOrderDispatchLoadInfo(orders = []) {
     , null);
     return {
       ...order,
+      dispatchNo: String(order?.dispatchNo || matched?.dispatchNo || "").trim(),
+      businessType: String(order?.businessType || matched?.businessType || "").trim(),
+      port: String(order?.port || matched?.port || "").trim(),
+      direction: String(order?.direction || matched?.direction || "").trim(),
+      tonnage: String(order?.tonnage || matched?.tonnage || "").trim(),
+      quantity: String(order?.quantity || matched?.quantity || "").trim(),
+      weight: String(order?.weight || matched?.weight || "").trim(),
+      vehicleSource: normalizeVehicleSource(order?.vehicleSource || matched?.vehicleSource || ""),
+      plate: normalizePlateText(order?.plate || matched?.plate || ""),
+      loading: String(order?.loading || "").trim() || String(matched?.loading || "").trim(),
+      unloading: String(order?.unloading || "").trim() || String(matched?.unloading || "").trim(),
       dispatchLoadDate: matched?.date || String(order?.date || "").trim().slice(0, 10),
       dispatchLoadTime: matched?.loadTime || "",
       dispatchDriver: matched?.driverText || ""
@@ -8309,27 +9069,8 @@ async function restoreDispatchRecycleRecord(recycleId) {
   );
   const nextRows = alreadyExists ? existingRows : [...existingRows, restoredRow];
   const rowsJson = JSON.stringify(nextRows);
-  if (plan) {
-    await db.prepare(`
-      UPDATE dispatch_plans
-      SET rows_json = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE plan_date = ?
-    `).run(rowsJson, planDate);
-  } else {
-    const creator = creatorFieldsFromRecord(restoredRow);
-    await db.prepare(`
-      INSERT INTO dispatch_plans
-        (plan_date, rows_json, created_by_account_id, created_by_username, created_by_display_name, updated_at)
-      VALUES
-        (@planDate, @rowsJson, @createdByAccountId, @createdByUsername, @createdByName, CURRENT_TIMESTAMP)
-    `).run({
-      planDate,
-      rowsJson,
-      createdByAccountId: creator.createdByAccountId,
-      createdByUsername: creator.createdByUsername,
-      createdByName: creator.createdByName
-    });
-  }
+  const creator = creatorFieldsFromRecord(restoredRow);
+  await upsertDispatchPlanRow(planDate, rowsJson, creator);
 
   await db.prepare("UPDATE dispatch_plan_recycle SET restored_at = CURRENT_TIMESTAMP WHERE id = ?").run(recycleId);
   const updatedRecycleRow = await db.prepare("SELECT * FROM dispatch_plan_recycle WHERE id = ?").get(recycleId);
@@ -8414,6 +9155,106 @@ async function syncDispatchPlanRowsStatusForOrder(orderRow = {}, dispatchStatus 
     `).run(JSON.stringify(nextRows), plan.plan_date);
   }
   return changed;
+}
+
+function dispatchRowSingleCustomerReference(row = {}) {
+  const customerIds = dispatchRowArrayField(row, null, "customerIds", "customer_ids");
+  const customerNames = dispatchRowArrayField(row, null, "customerNames", "customer_names");
+  if (customerIds.length > 1 || customerNames.length > 1) return null;
+  const customerId = String(row.customerId || row.customer_id || customerIds[0] || "").trim();
+  const customerName = String(row.customer || row.customer_name || customerNames[0] || "").trim();
+  if (!customerId && !customerName) return null;
+  return { customerId, customerName };
+}
+
+async function createOrderFromDispatchRowForSync(row = {}, planDate = "", orderStatus = "通关中") {
+  const customerRef = dispatchRowSingleCustomerReference(row);
+  if (!customerRef) return null;
+  const normalizedStatus = normalizeOrderStatus(orderStatus || "通关中", "通关中");
+  const payload = {
+    no: String(row.orderNo || row.order_no || "").trim(),
+    dispatchNo: String(row.dispatchNo || row.dispatch_no || "").trim(),
+    dispatchGroupId: dispatchRowGroupId(row),
+    date: dispatchRowBusinessDate(row, planDate || todayInputValue()) || String(planDate || todayInputValue()).trim().slice(0, 10),
+    customerId: customerRef.customerId,
+    customer: customerRef.customerName,
+    businessType: userTextValue(row.businessType || row.business_type || "运输"),
+    port: normalizePortText(row.port || ""),
+    needsWeighing: booleanFlag(row.needsWeighing ?? row.needs_weighing, false),
+    direction: userTextValue(row.direction),
+    tonnage: userTextValue(row.tonnage),
+    currency: userTextValue(row.currency || "港币") || "港币",
+    quantity: userTextValue(row.quantity),
+    weight: userTextValue(row.weight),
+    vehicleSource: normalizeVehicleSource(row.vehicleSource || row.vehicle_source || ""),
+    supplier: userTextValue(row.supplier),
+    plate: normalizePlateText(row.plate),
+    driver: userTextValue(row.driver),
+    hkDriver: userTextValue(row.hkDriver || row.hk_driver),
+    mainlandDriver: userTextValue(row.mainlandDriver || row.mainland_driver),
+    transportMode: normalizeTransportMode(row.transportMode || row.transport_mode || ""),
+    loading: userTextValue(row.loading),
+    loadingLocations: normalizeLocationEntriesFromPayload(row, "loading", row.loading),
+    unloading: userTextValue(row.unloading),
+    unloadingLocations: normalizeLocationEntriesFromPayload(row, "unloading", row.unloading),
+    status: normalizedStatus,
+    remark: userMultilineTextValue(row.note || row.remark || ""),
+    tripNoEnabled: booleanFlag(row.tripNoEnabled ?? row.trip_no_enabled, false) ? 1 : 0,
+    tripNo: userTextValue(row.tripNo || row.trip_no),
+    sixSheetEnabled: booleanFlag(row.sixSheetEnabled ?? row.six_sheet_enabled, false) ? 1 : 0,
+    sixSheetNo: userTextValue(row.sixSheetNo || row.six_sheet_no),
+    fees: []
+  };
+
+  await lockOrderCreation();
+  const deletedOrder = await loadDeletedOrderLinkedToDispatchRow(payload);
+  if (deletedOrder) {
+    await db.prepare("UPDATE orders SET deleted_at = NULL WHERE no = ? AND deleted_at IS NOT NULL").run(deletedOrder.no);
+    const restored = await db.prepare("SELECT * FROM orders WHERE no = ?").get(deletedOrder.no);
+    return restored ? mapOrder(restored) : null;
+  }
+
+  const item = await readOrderPayload(payload);
+  if (!(await resolveOrderCustomer(item))) return null;
+  item.fees = [];
+  await assignOrderBusinessNumbers(item, payload.no, payload.dispatchNo);
+  const conflict = await orderBusinessNumberConflict(item.no, item.dispatchNo);
+  if (conflict) {
+    throw createDispatchPlanConflictError(conflict);
+  }
+  await writeOrderRow(item, { includeNo: true });
+  await saveOrderFees(item.no, item.fees, item.currency);
+  const created = await db.prepare("SELECT * FROM orders WHERE no = ?").get(item.no);
+  return created ? mapOrder(created) : null;
+}
+
+async function loadDeletedOrderLinkedToDispatchRow(row = {}) {
+  const orderNo = String(row.orderNo || row.order_no || "").trim();
+  const dispatchNo = String(row.dispatchNo || row.dispatch_no || "").trim();
+  const dispatchGroupId = String(row.dispatchGroupId || row.dispatch_group_id || "").trim();
+  const conditions = [];
+  const params = {};
+  if (orderNo) {
+    conditions.push("no = @orderNo");
+    params.orderNo = orderNo;
+  }
+  if (dispatchNo) {
+    conditions.push("dispatch_no = @dispatchNo");
+    params.dispatchNo = dispatchNo;
+  }
+  if (dispatchGroupId) {
+    conditions.push("dispatch_group_id = @dispatchGroupId");
+    params.dispatchGroupId = dispatchGroupId;
+  }
+  if (!conditions.length) return null;
+  return db.prepare(`
+    SELECT *
+    FROM orders
+    WHERE deleted_at IS NOT NULL
+      AND (${conditions.join(" OR ")})
+    ORDER BY deleted_at DESC, order_date DESC
+    LIMIT 1
+  `).get(params);
 }
 
 function dispatchRecycleRowFromOrder(order = {}) {
@@ -8530,43 +9371,42 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = []) {
   );
   if (!rowsToSync.length) return 0;
 
+  const plan = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(planDate);
+  const persistedRows = parseDispatchPlanRowsJson(plan?.rows_json);
+  const persistedLookup = dispatchRowLookup(persistedRows);
+  let persistedRowsChanged = false;
   let synced = 0;
-  const updateOrder = await db.prepare(`
-    UPDATE orders
-    SET dispatch_no = @dispatchNo,
-        dispatch_group_id = @dispatchGroupId,
-        needs_weighing = @needsWeighing,
-        vehicle_source = @vehicleSource,
-        supplier = @supplier,
-        plate = @plate,
-	        driver = @driver,
-	        hk_driver = @hkDriver,
-	        mainland_driver = @mainlandDriver,
-	        transport_mode = @transportMode,
-	        loading = @loading,
-	        loading_locations = @loadingLocationsJson,
-	        unloading = @unloading,
-	        unloading_locations = @unloadingLocationsJson,
-	        status = @status,
-	        order_date = @orderDate
-    WHERE no = @no AND deleted_at IS NULL
-  `);
-
   for (const row of rowsToSync) {
     const orderNo = dispatchRowText(row, "orderNo");
     const rowDispatchNo = dispatchRowText(row, "dispatchNo");
     const dispatchGroupId = dispatchRowGroupId(row);
-    const linkedOrders = await loadOrdersLinkedToDispatchRow(row);
+    let linkedOrders = await loadOrdersLinkedToDispatchRow(row);
+    const normalizedDispatchStatus = normalizeDispatchPlanStatus(row.status);
+    if (!linkedOrders.length && normalizedDispatchStatus === "通关中") {
+      const createdOrder = await createOrderFromDispatchRowForSync(row, planDate, normalizedDispatchStatus);
+      if (createdOrder) {
+        linkedOrders = [createdOrder];
+        const persistedRow = findExistingDispatchRow(row, persistedLookup);
+        if (persistedRow) {
+          persistedRow.orderNo = String(createdOrder.no || persistedRow.orderNo || "").trim();
+          persistedRow.dispatchNo = String(createdOrder.dispatchNo || persistedRow.dispatchNo || rowDispatchNo || "").trim();
+          persistedRow.linkedOrderNos = compactLookupValues([...dispatchRowLinkedOrderNos(persistedRow), createdOrder.no]);
+          persistedRow.linkedDispatchNos = compactLookupValues([...dispatchRowLinkedDispatchNos(persistedRow), createdOrder.dispatchNo]);
+          persistedRowsChanged = true;
+        }
+      }
+    }
     for (const order of linkedOrders) {
       if (!order || order.status === "已审核") continue;
 
+      const currentOrder = mapOrder(order);
       const transportMode = normalizeTransportMode(row.transportMode || order.transport_mode || "") || order.transport_mode || "";
       const isSingleDriver = transportMode === "单司机";
       const rowDriver = dispatchRowText(row, "driver");
       const rowHkDriver = dispatchRowText(row, "hkDriver");
       const rowMainlandDriver = dispatchRowText(row, "mainlandDriver");
       const driver = isSingleDriver
-        ? (rowDriver || rowHkDriver || order.driver || "")
+        ? (rowDriver || rowHkDriver || currentOrder.driver || "")
         : [rowHkDriver || rowDriver, rowMainlandDriver].filter(Boolean).join(" / ");
       const mappedOrderStatus = DISPATCH_STATUS_TO_ORDER_STATUS[normalizeDispatchPlanStatus(row.status)] || order.status || "预排";
       const orderStatus = shouldPreventOrderStatusDowngrade(order.status, mappedOrderStatus)
@@ -8574,12 +9414,18 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = []) {
         : mappedOrderStatus;
       const shouldUseRowDispatchNo = (orderNo && order.no === orderNo) || (rowDispatchNo && order.dispatch_no === rowDispatchNo);
 
-      await updateOrder.run({
-        no: order.no,
-        dispatchNo: shouldUseRowDispatchNo ? (rowDispatchNo || order.dispatch_no || "") : (order.dispatch_no || ""),
-        dispatchGroupId: dispatchGroupId || order.dispatch_group_id || "",
-        needsWeighing: booleanFlag(row.needsWeighing ?? order.needs_weighing, false) ? 1 : 0,
-        vehicleSource: normalizeVehicleSource(dispatchRowText(row, "vehicleSource") || order.vehicle_source || ""),
+      await updateOrderRow(order.no, {
+        ...currentOrder,
+        dispatchNo: shouldUseRowDispatchNo ? (rowDispatchNo || currentOrder.dispatchNo || "") : (currentOrder.dispatchNo || ""),
+        dispatchGroupId: dispatchGroupId || currentOrder.dispatchGroupId || "",
+        businessType: dispatchRowText(row, "businessType") || currentOrder.businessType || "",
+        port: normalizePortText(dispatchRowText(row, "port") || currentOrder.port || ""),
+        direction: dispatchRowText(row, "direction") || currentOrder.direction || "",
+        tonnage: dispatchRowText(row, "tonnage") || currentOrder.tonnage || "",
+        quantity: dispatchRowText(row, "quantity") || currentOrder.quantity || "",
+        weight: dispatchRowText(row, "weight") || currentOrder.weight || "",
+        needsWeighing: booleanFlag(row.needsWeighing ?? order.needs_weighing, false),
+        vehicleSource: normalizeVehicleSource(dispatchRowText(row, "vehicleSource") || currentOrder.vehicleSource || ""),
         supplier: normalizeVehicleSource(dispatchRowText(row, "vehicleSource")) === "外派车辆" ? dispatchRowText(row, "supplier") : "",
         plate: dispatchRowText(row, "plate"),
         driver,
@@ -8591,10 +9437,18 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = []) {
         unloading: dispatchRowText(row, "unloading"),
         unloadingLocationsJson: locationEntriesJson(row.unloadingLocations),
         status: orderStatus,
-        orderDate: dispatchRowBusinessDate(row, planDate || order.order_date)
+        date: dispatchRowBusinessDate(row, planDate || currentOrder.date)
       });
       synced += 1;
     }
+  }
+
+  if (persistedRowsChanged) {
+    await db.prepare(`
+      UPDATE dispatch_plans
+      SET rows_json = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE plan_date = ?
+    `).run(JSON.stringify(persistedRows), planDate);
   }
 
   return synced;
@@ -8765,11 +9619,7 @@ app.post("/api/dispatch-plans/recycle", async (req, res) => {
     await recycleDispatchPlanRows(planDate, rowsToRecycle);
     if (matchedRows.length && plan) {
       const nextRows = rows.filter((item) => !dispatchRowMatchesRef(item, row));
-      await db.prepare(`
-        UPDATE dispatch_plans
-        SET rows_json = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE plan_date = ?
-      `).run(JSON.stringify(nextRows), planDate);
+      await upsertDispatchPlanRow(planDate, JSON.stringify(nextRows));
     }
     const latest = await db.prepare(`
       SELECT * FROM dispatch_plan_recycle
@@ -8848,18 +9698,7 @@ app.delete("/api/dispatch-plans/:date/rows", async (req, res) => {
       }
       const nextRows = rows.filter((row) => !rowsToRecycle.includes(row));
       const rowsJson = JSON.stringify(nextRows);
-      if (plan) {
-        await db.prepare(`
-          UPDATE dispatch_plans
-          SET rows_json = ?, updated_at = CURRENT_TIMESTAMP
-          WHERE plan_date = ?
-        `).run(rowsJson, date);
-      } else {
-        await db.prepare(`
-          INSERT INTO dispatch_plans (plan_date, rows_json, updated_at)
-          VALUES (?, ?, CURRENT_TIMESTAMP)
-        `).run(date, rowsJson);
-      }
+      await upsertDispatchPlanRow(date, rowsJson);
       const saved = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
       return { removed: rowsToRecycle.length, saved: mapDispatchPlanRecord(saved), deletedOrders: linkedOrders };
     })();
@@ -8909,6 +9748,37 @@ app.post("/api/dispatch-plans/export/xlsx", async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).type("text/plain").send("排车表 Excel 导出失败");
+  }
+});
+
+app.post("/api/driver-wage-settlements/export/xlsx", async (req, res) => {
+  if (!canAccessModule(req.account, "financeWages")) {
+    res.status(403).json({ message: "无权导出司机工资单" });
+    return;
+  }
+  const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+  if (!rows.length) {
+    res.status(400).type("text/plain").send("没有可导出的司机工资数据");
+    return;
+  }
+  try {
+    const buffer = await renderDriverWageSettlementXlsxBuffer({
+      rows,
+      periodLabel: req.body?.periodLabel,
+      summaryNote: req.body?.summaryNote,
+      noteLines: req.body?.noteLines,
+      paymentLabel: req.body?.paymentLabel,
+      exchangeRate: req.body?.exchangeRate,
+      advanceHKD: req.body?.advanceHKD,
+      adjustmentsHKD: req.body?.adjustmentsHKD
+    });
+    const filename = String(req.body?.filename || "").trim() || `司机工资单_${exportFilenamePart(req.body?.driverName || "司机")}.xlsx`;
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+    res.send(buffer);
+  } catch (error) {
+    console.error(error);
+    res.status(500).type("text/plain").send(error.message || "司机工资单 Excel 导出失败");
   }
 });
 
@@ -8992,21 +9862,7 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
       const planCreator = existingPlan && creatorFieldsHaveValue(creatorFieldsFromRecord(existingPlan))
         ? creatorFieldsFromRecord(existingPlan)
         : requestCreator;
-      await db.prepare(`
-        INSERT INTO dispatch_plans
-          (plan_date, rows_json, created_by_account_id, created_by_username, created_by_display_name, updated_at)
-        VALUES
-          (@date, @rowsJson, @createdByAccountId, @createdByUsername, @createdByName, CURRENT_TIMESTAMP)
-        ON CONFLICT(plan_date) DO UPDATE SET
-          rows_json = excluded.rows_json,
-          updated_at = CURRENT_TIMESTAMP
-      `).run({
-        date,
-        rowsJson,
-        createdByAccountId: planCreator.createdByAccountId,
-        createdByUsername: planCreator.createdByUsername,
-        createdByName: planCreator.createdByName
-      });
+      await upsertDispatchPlanRow(date, rowsJson, planCreator);
       await syncDispatchPlanRowsToOrders(date, rowsNeedingOrderSync);
       const saved = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
 	      return { saved, incomingCount: cleanRows.length, savedCount: savedRows.length, stats: merged.stats };
@@ -9062,7 +9918,7 @@ app.get("/api/orders/export/csv", async (req, res) => {
     res.status(400).type("text/plain").send("没有可导出的订单");
     return;
   }
-  const body = `\ufeff${renderOrdersCsv(orders, title, template, exchange)}`;
+  const body = `\ufeff${await renderOrdersCsv(orders, title, template, exchange)}`;
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(orderExportFilename(orders, "csv"))}`);
   await writeAudit("export", "order", orderNos.join(",") || "all", `CSV ${orders.length} 条`);
@@ -9143,7 +9999,7 @@ app.post("/api/orders/export/pdf", async (req, res) => {
     return;
   }
   await writeAudit("export", "order", orderNos.join(",") || "all", `PDF ${orders.length} 条`);
-  renderOrdersPdf(res, orders, title, template, orderExportFilename(orders, "pdf"), exchange);
+  await renderOrdersPdf(res, orders, title, template, orderExportFilename(orders, "pdf"), exchange);
 });
 
 app.post("/api/orders/audit", async (req, res) => {
@@ -9219,6 +10075,15 @@ async function readOrderPayload(body, existing = null) {
   const transportModeInput = userTextValue(pickBody(body, "transportMode", "transport_mode", existing?.transport_mode || ""));
   const transportMode = normalizeTransportMode(transportModeInput || (vehicleSource === OWN_VEHICLE_SOURCE ? "单司机" : ""))
     || (vehicleSource === OWN_VEHICLE_SOURCE ? "单司机" : "");
+  const linkedCustomsBusinessIdInput = pickBody(
+    body,
+    "linkedCustomsBusinessId",
+    "linked_customs_business_id",
+    existing?.linked_customs_business_id ?? existing?.linkedCustomsBusinessId ?? null
+  );
+  const linkedCustomsBusinessId = String(linkedCustomsBusinessIdInput ?? "").trim()
+    ? Number(linkedCustomsBusinessIdInput)
+    : null;
   const loadingText = pickBody(body, "loading", "loading_place", existing?.loading || "");
   const unloadingText = pickBody(body, "unloading", "unloading_place", existing?.unloading || "");
   const loadingLocations = normalizeLocationEntriesFromPayload(body, "loading", loadingText, existing?.loading_locations || "");
@@ -9227,6 +10092,7 @@ async function readOrderPayload(body, existing = null) {
     no,
     dispatchNo: resolvedDispatchNo,
     dispatchGroupId,
+    linkedCustomsBusinessId: Number.isFinite(linkedCustomsBusinessId) && linkedCustomsBusinessId > 0 ? linkedCustomsBusinessId : null,
     customerId: pickBody(body, "customerId", "customer_id", existing?.customer_id || null),
     customer: userTextValue(pickBody(body, "customer", "customer_name", existing?.customer || "")),
     businessType: userTextValue(businessTypeInput || "运输"),
@@ -9267,6 +10133,114 @@ async function readOrderPayload(body, existing = null) {
       date: userTextValue(submittedDateInput)
     }
   };
+}
+
+function orderWriteEntries(item = {}, support = {}, existing = {}) {
+  const loadingLocationsJson = item.loadingLocationsJson || locationEntriesJson(item.loadingLocations || item.loading_locations || []);
+  const unloadingLocationsJson = item.unloadingLocationsJson || locationEntriesJson(item.unloadingLocations || item.unloading_locations || []);
+  const entries = [
+    ["customer_id", item.customerId ?? null],
+    ["customer", userTextValue(item.customer)],
+    ["business_type", userTextValue(item.businessType || "运输")],
+    ["port", normalizePortText(item.port)],
+    ["needs_weighing", booleanFlag(item.needsWeighing, false) ? 1 : 0],
+    ["direction", userTextValue(item.direction)],
+    ["tonnage", userTextValue(item.tonnage)],
+    ["currency", userTextValue(item.currency)],
+    ["quantity", userTextValue(item.quantity)],
+    ["weight", userTextValue(item.weight)],
+    ["vehicle_source", normalizeVehicleSource(item.vehicleSource)],
+    ["supplier", userTextValue(item.supplier)],
+    ["plate", normalizePlateText(item.plate)],
+    ["driver", userTextValue(item.driver)],
+    ["hk_driver", userTextValue(item.hkDriver)],
+    ["mainland_driver", userTextValue(item.mainlandDriver)],
+    ["transport_mode", userTextValue(item.transportMode)],
+    ["loading", userTextValue(item.loading)],
+    ["unloading", userTextValue(item.unloading)],
+    ["order_date", String(item.date || "").trim()],
+    ["receivable_hkd", Number(item.receivableHKD || 0)],
+    ["receivable_rmb", Number(item.receivableRMB || 0)],
+    ["status", normalizeOrderStatus(item.status, "待确认")],
+    ["remark", userMultilineTextValue(item.remark)]
+  ];
+
+  if (support.dispatchNo) entries.splice(1, 0, ["dispatch_no", userTextValue(item.dispatchNo ?? existing.dispatchNo ?? existing.dispatch_no)]);
+  if (support.dispatchGroupId) entries.splice(2, 0, ["dispatch_group_id", userTextValue(item.dispatchGroupId ?? existing.dispatchGroupId ?? existing.dispatch_group_id)]);
+  if (support.linkedCustomsBusinessId) entries.splice(entries.findIndex(([column]) => column === "vehicle_source") + 1, 0, ["linked_customs_business_id", item.linkedCustomsBusinessId ?? existing.linkedCustomsBusinessId ?? existing.linked_customs_business_id ?? null]);
+  if (support.loadingLocations) entries.splice(entries.findIndex(([column]) => column === "loading") + 1, 0, ["loading_locations", loadingLocationsJson]);
+  if (support.unloadingLocations) entries.splice(entries.findIndex(([column]) => column === "unloading") + 1, 0, ["unloading_locations", unloadingLocationsJson]);
+  if (support.operatingUnit) entries.push(["operating_unit", userTextValue(item.operatingUnit ?? existing.operatingUnit ?? existing.operating_unit)]);
+  if (support.createdByAccountId) entries.push(["created_by_account_id", item.createdByAccountId ?? existing.createdByAccountId ?? existing.created_by_account_id ?? null]);
+  if (support.createdByUsername) entries.push(["created_by_username", userTextValue(item.createdByUsername ?? existing.createdByUsername ?? existing.created_by_username)]);
+  if (support.createdByName) entries.push(["created_by_display_name", userTextValue(item.createdByName ?? existing.createdByName ?? existing.created_by_display_name)]);
+  if (support.tripNoEnabled) entries.push(["trip_no_enabled", booleanFlag(item.tripNoEnabled, false) ? 1 : 0]);
+  if (support.tripNo) entries.push(["trip_no", userTextValue(item.tripNo)]);
+  if (support.sixSheetEnabled) entries.push(["six_sheet_enabled", booleanFlag(item.sixSheetEnabled, false) ? 1 : 0]);
+  if (support.sixSheetNo) entries.push(["six_sheet_no", userTextValue(item.sixSheetNo)]);
+  if (support.chargedAt) entries.push(["charged_at", userTextValue(item.chargedAt ?? existing.chargedAt ?? existing.charged_at)]);
+  return entries;
+}
+
+async function writeOrderRow(item = {}, { includeNo = false } = {}) {
+  const support = await orderWriteColumnSupport();
+  const entries = orderWriteEntries(item, support);
+  if (includeNo) entries.unshift(["no", userTextValue(item.no)]);
+  const columns = entries.map(([column]) => column);
+  const params = Object.fromEntries(entries.map(([column, value]) => [column, value]));
+  const placeholders = columns.map((column) => `@${column}`);
+  await db.prepare(`
+    INSERT INTO orders (${columns.join(", ")})
+    VALUES (${placeholders.join(", ")})
+  `).run(params);
+}
+
+async function updateOrderRow(no, item = {}, { existing = null, includeChargedAt = false } = {}) {
+  const support = await orderWriteColumnSupport();
+  const entries = orderWriteEntries(item, support, existing || item)
+    .filter(([column]) => column !== "no" && (includeChargedAt || column !== "charged_at"));
+  const columns = entries.map(([column]) => column);
+  const params = Object.fromEntries(entries.map(([column, value]) => [column, value]));
+  params.no = userTextValue(no);
+  if (!columns.length) return { changes: 0 };
+  const assignments = columns.map((column) => `${column} = @${column}`);
+  return db.prepare(`
+    UPDATE orders
+    SET ${assignments.join(", ")}
+    WHERE no = @no AND deleted_at IS NULL
+  `).run(params);
+}
+
+async function upsertDispatchPlanRow(date = "", rowsJson = "[]", creator = {}) {
+  const support = await dispatchPlanWriteColumnSupport();
+  const columns = ["plan_date", "rows_json"];
+  const values = ["@planDate", "@rowsJson"];
+  const params = {
+    planDate: String(date || "").trim(),
+    rowsJson: String(rowsJson || "[]")
+  };
+  if (support.createdByAccountId) {
+    columns.push("created_by_account_id");
+    values.push("@createdByAccountId");
+    params.createdByAccountId = creator.createdByAccountId ?? null;
+  }
+  if (support.createdByUsername) {
+    columns.push("created_by_username");
+    values.push("@createdByUsername");
+    params.createdByUsername = userTextValue(creator.createdByUsername);
+  }
+  if (support.createdByName) {
+    columns.push("created_by_display_name");
+    values.push("@createdByName");
+    params.createdByName = userTextValue(creator.createdByName);
+  }
+  const updateSets = ["rows_json = excluded.rows_json"];
+  if (support.updatedAt) updateSets.push("updated_at = CURRENT_TIMESTAMP");
+  await db.prepare(`
+    INSERT INTO dispatch_plans (${columns.join(", ")})
+    VALUES (${values.join(", ")})
+    ON CONFLICT(plan_date) DO UPDATE SET ${updateSets.join(", ")}
+  `).run(params);
 }
 
 async function assignOrderBusinessNumbers(item, requestedNo = "", requestedDispatchNo = "") {
@@ -9314,12 +10288,17 @@ async function resolveOrderCustomer(item) {
   const customerId = String(item.customerId || "").trim();
   const customerName = String(item.customer || "").trim();
   const hasSpecialCustomerColumn = await customerColumnExists("special_customer");
+  const requirementSupport = await customerRequirementColumnSupport();
+  const customerRequirementSelect = [
+    requirementSupport.tripNoRequired ? "trip_no_required" : "NULL AS trip_no_required",
+    requirementSupport.sixSheetNoRequired ? "six_sheet_no_required" : "NULL AS six_sheet_no_required"
+  ].join(", ");
   const specialCustomerSelect = hasSpecialCustomerColumn ? ", special_customer" : "";
   let customer = null;
 
   if (customerId) {
     customer = await db.prepare(`
-      SELECT id, name, short_name, trip_no_required, six_sheet_no_required${specialCustomerSelect}
+      SELECT id, name, short_name, ${customerRequirementSelect}${specialCustomerSelect}
       FROM customers
       WHERE id = ?
         AND deleted_at IS NULL
@@ -9330,7 +10309,7 @@ async function resolveOrderCustomer(item) {
 
   if (!customer && customerName) {
     customer = await db.prepare(`
-      SELECT id, name, short_name, trip_no_required, six_sheet_no_required${specialCustomerSelect}
+      SELECT id, name, short_name, ${customerRequirementSelect}${specialCustomerSelect}
       FROM customers
       WHERE deleted_at IS NULL
         AND type = '客户'
@@ -9474,9 +10453,9 @@ async function assertOrderVisibleForAccount(order = {}, req, lookup = null) {
   return visibleOrders.length > 0;
 }
 
-function validateOrderReadyForSignedStatus(item = {}, customer = item?._resolvedCustomer || {}) {
+async function validateOrderReadyForSignedStatus(item = {}, customer = item?._resolvedCustomer || {}) {
   if (normalizeOrderStatus(item.status, "") !== "已签收") return "";
-  return orderSignRequiredMessage(missingOrderSignRequiredFieldLabels(item, customer));
+  return orderSignRequiredMessage(await missingOrderSignRequiredFieldLabels(item, customer));
 }
 
 app.post("/api/orders", async (req, res) => {
@@ -9505,18 +10484,7 @@ app.post("/api/orders", async (req, res) => {
     if (conflict) {
       throw createDispatchPlanConflictError(conflict);
     }
-    await db.prepare(`
-	      INSERT INTO orders
-	        (no, dispatch_no, dispatch_group_id, customer_id, customer, business_type, port, direction, tonnage, currency, quantity,
-	         needs_weighing, weight, vehicle_source, supplier, plate, driver, hk_driver, mainland_driver, transport_mode, loading, loading_locations, unloading, unloading_locations, order_date, receivable_hkd,
-	         receivable_rmb, status, operating_unit, created_by_account_id, created_by_username, created_by_display_name, remark,
-	         trip_no_enabled, trip_no, six_sheet_enabled, six_sheet_no)
-	      VALUES
-	        (@no, @dispatchNo, @dispatchGroupId, @customerId, @customer, @businessType, @port, @direction, @tonnage, @currency,
-	         @quantity, @needsWeighing, @weight, @vehicleSource, @supplier, @plate, @driver, @hkDriver, @mainlandDriver, @transportMode, @loading, @loadingLocationsJson, @unloading, @unloadingLocationsJson, @date,
-	         @receivableHKD, @receivableRMB, @status, @operatingUnit, @createdByAccountId, @createdByUsername, @createdByName, @remark, @tripNoEnabled, @tripNo,
-	         @sixSheetEnabled, @sixSheetNo)
-    `).run(item);
+    await writeOrderRow(item, { includeNo: true });
     await saveOrderFees(item.no, item.fees, item.currency);
   });
   try {
@@ -9762,22 +10730,7 @@ app.patch("/api/orders/:no", async (req, res) => {
   }
 
   const transaction = db.transaction(async () => {
-    await db.prepare(`
-      UPDATE orders
-      SET dispatch_no = @dispatchNo,
-          dispatch_group_id = @dispatchGroupId,
-          customer_id = @customerId, customer = @customer, business_type = @businessType,
-          port = @port, needs_weighing = @needsWeighing, direction = @direction, tonnage = @tonnage, currency = @currency,
-          quantity = @quantity, weight = @weight, vehicle_source = @vehicleSource,
-          supplier = @supplier, plate = @plate, driver = @driver, hk_driver = @hkDriver,
-          mainland_driver = @mainlandDriver, transport_mode = @transportMode,
-	          loading = @loading, loading_locations = @loadingLocationsJson,
-	          unloading = @unloading, unloading_locations = @unloadingLocationsJson,
-          order_date = @date, receivable_hkd = @receivableHKD, receivable_rmb = @receivableRMB,
-          status = @status, operating_unit = @operatingUnit, remark = @remark, trip_no_enabled = @tripNoEnabled,
-          trip_no = @tripNo, six_sheet_enabled = @sixSheetEnabled, six_sheet_no = @sixSheetNo
-      WHERE no = @no AND deleted_at IS NULL
-    `).run(item);
+    await updateOrderRow(no, item, { existing: mapOrder(existing) });
     await saveOrderFees(no, item.fees, item.currency);
   });
 
@@ -9809,17 +10762,27 @@ app.patch("/api/orders/:no/status", async (req, res) => {
   const skipSignValidation = booleanFlag(req.body?.skipSignValidation ?? req.body?.skip_sign_validation, false);
   const allowedStatuses = new Set(["待确认", "预排", "正常", "通关中", "已签收", "已审核", "缺票据", "费用待确认"]);
   const hasSpecialCustomerColumn = await customerColumnExists("special_customer");
+  const requirementSupport = await customerRequirementColumnSupport();
 
   if (!allowedStatuses.has(status)) {
     res.status(400).json({ message: "订单状态无效" });
     return;
   }
 
+  const customerSelectColumns = [
+    "customers.short_name AS customer_short_name",
+    requirementSupport.tripNoRequired
+      ? "customers.trip_no_required AS customer_trip_no_required"
+      : "NULL AS customer_trip_no_required",
+    requirementSupport.sixSheetNoRequired
+      ? "customers.six_sheet_no_required AS customer_six_sheet_no_required"
+      : "NULL AS customer_six_sheet_no_required"
+  ];
+  if (hasSpecialCustomerColumn) {
+    customerSelectColumns.push("customers.special_customer AS customer_special_customer");
+  }
   const current = await db.prepare(`
-    SELECT orders.*, customers.short_name AS customer_short_name,
-           customers.trip_no_required AS customer_trip_no_required,
-           customers.six_sheet_no_required AS customer_six_sheet_no_required
-           ${hasSpecialCustomerColumn ? ", customers.special_customer AS customer_special_customer" : ""}
+    SELECT orders.*, ${customerSelectColumns.join(", ")}
     FROM orders
     LEFT JOIN customers ON customers.id = orders.customer_id
     WHERE orders.no = ? AND orders.deleted_at IS NULL
@@ -9850,7 +10813,7 @@ app.patch("/api/orders/:no/status", async (req, res) => {
     return;
   }
   if (!skipSignValidation && status === "已签收" && current.status !== "已审核") {
-    const labels = missingOrderSignRequiredFieldLabels(current, {
+    const labels = await missingOrderSignRequiredFieldLabels(current, {
       id: current.customer_id,
       name: current.customer,
       short_name: current.customer_short_name,
@@ -9906,7 +10869,7 @@ app.patch("/api/orders/:no/charge", async (req, res) => {
     res.status(400).json({ message: "收费日期格式应为 YYYY-MM-DD" });
     return;
   }
-  await db.prepare("UPDATE orders SET charged_at = ? WHERE no = ? AND deleted_at IS NULL").run(chargedAt, no);
+  await updateOrderRow(no, { ...mapOrder(current), chargedAt }, { includeChargedAt: true });
   await writeAudit(chargedAt ? "mark_charged" : "cancel_charged", "order", no, chargedAt ? `收费日期 ${chargedAt}` : "取消已收费");
   const row = await db.prepare("SELECT * FROM orders WHERE no = ?").get(no);
   res.json((await hydrateOrderRowsForApi([mapOrder(row)]))[0]);
@@ -10848,9 +11811,11 @@ app.post("/api/company-expenses", async (req, res) => {
     res.status(400).json({ message: validationMessage });
     return;
   }
+  const support = await companyExpenseWriteColumnSupport();
+  const { columnSql, valueSql } = buildNamedColumns(companyExpenseWriteEntries(support));
   const row = await db.prepare(`
-    INSERT INTO company_expenses (entry_type, period_month, category, employee_name, amount, salary_status, settled_at, note)
-    VALUES (@entryType, @periodMonth, @category, @employeeName, @amount, @salaryStatus, @settledAt, @note)
+    INSERT INTO company_expenses (${columnSql})
+    VALUES (${valueSql})
     RETURNING *
   `).get(item);
   await writeAudit("create", "company_expense", String(row.id), `${item.entryType}/${item.periodMonth}/${item.category}${item.employeeName ? `/${item.employeeName}` : ""}/${item.amount}`);
@@ -10872,9 +11837,11 @@ app.post("/api/company-expenses/batch", async (req, res) => {
     }
   }
   const rows = [];
+  const support = await companyExpenseWriteColumnSupport();
+  const { columnSql, valueSql } = buildNamedColumns(companyExpenseWriteEntries(support));
   const insert = await db.prepare(`
-    INSERT INTO company_expenses (entry_type, period_month, category, employee_name, amount, salary_status, settled_at, note)
-    VALUES (@entryType, @periodMonth, @category, @employeeName, @amount, @salaryStatus, @settledAt, @note)
+    INSERT INTO company_expenses (${columnSql})
+    VALUES (${valueSql})
     RETURNING *
   `);
   const transaction = db.transaction(async (batchItems) => {
@@ -10911,16 +11878,11 @@ app.patch("/api/company-expenses/:id", async (req, res) => {
     res.status(400).json({ message: validationMessage });
     return;
   }
+  const support = await companyExpenseWriteColumnSupport();
+  const { updateSql } = buildNamedColumns(companyExpenseWriteEntries(support));
   await db.prepare(`
     UPDATE company_expenses
-    SET entry_type = @entryType,
-        period_month = @periodMonth,
-        category = @category,
-        employee_name = @employeeName,
-        amount = @amount,
-        salary_status = @salaryStatus,
-        settled_at = @settledAt,
-        note = @note,
+    SET ${updateSql},
         updated_at = CURRENT_TIMESTAMP
     WHERE id = @id AND deleted_at IS NULL
   `).run({ id, ...item });
@@ -11003,9 +11965,21 @@ app.post("/api/driver-adjustments", async (req, res) => {
     res.status(400).json({ message: "请选择结算日期" });
     return;
   }
+  const support = await driverAdjustmentWriteColumnSupport();
+  const entries = [
+    ["driver_id", "driverId"],
+    ["date", "date"],
+    ["type", "type"],
+    ["currency", "currency"],
+    ["amount", "amount"],
+    ["status", "status"],
+    ...(support.settledAt ? [["settled_at", "settledAt"]] : []),
+    ["note", "note"]
+  ];
+  const { columnSql, valueSql } = buildNamedColumns(entries);
   const result = await db.prepare(`
-    INSERT INTO driver_adjustments (driver_id, date, type, currency, amount, status, settled_at, note)
-    VALUES (@driverId, @date, @type, @currency, @amount, @status, @settledAt, @note)
+    INSERT INTO driver_adjustments (${columnSql})
+    VALUES (${valueSql})
   `).run({ ...item, settledAt });
   await writeAudit("create", "driver_adjustment", String(result.lastInsertId), `${driver.name}/${item.type}`);
   res.status(201).json(mapDriverAdjustment(await db.prepare("SELECT * FROM driver_adjustments WHERE id = ?").get(result.lastInsertId)));
@@ -11032,10 +12006,22 @@ app.patch("/api/driver-adjustments/:id", async (req, res) => {
     res.status(400).json({ message: "请选择结算日期" });
     return;
   }
+  const support = await driverAdjustmentWriteColumnSupport();
+  const entries = [
+    ["driver_id", "driverId"],
+    ["date", "date"],
+    ["type", "type"],
+    ["currency", "currency"],
+    ["amount", "amount"],
+    ["status", "status"],
+    ...(support.settledAt ? [["settled_at", "settledAt"]] : []),
+    ["note", "note"]
+  ];
+  const { updateSql } = buildNamedColumns(entries);
   await db.prepare(`
     UPDATE driver_adjustments
-    SET driver_id = @driverId, date = @date, type = @type, currency = @currency,
-        amount = @amount, status = @status, settled_at = @settledAt, note = @note
+    SET ${updateSql},
+        updated_at = CURRENT_TIMESTAMP
     WHERE id = @id AND deleted_at IS NULL
   `).run({ ...item, settledAt });
   await writeAudit(
@@ -11064,6 +12050,72 @@ app.delete("/api/driver-adjustments/:id", async (req, res) => {
   }
   await writeAudit("delete", "driver_adjustment", String(id), "移入回收站");
   res.json({ ok: true });
+});
+
+app.get("/api/driver-wage-settlements", async (req, res) => {
+  if (!(await driverWageSettlementTableAvailable())) {
+    res.json([]);
+    return;
+  }
+  const periodKey = String(req.query.periodKey ?? req.query.period_key ?? "").trim();
+  const rows = periodKey
+    ? await db.prepare(`
+        SELECT * FROM driver_wage_settlements
+        WHERE period_key = ?
+        ORDER BY driver_id ASC, id ASC
+      `).all(periodKey)
+    : await db.prepare(`
+        SELECT * FROM driver_wage_settlements
+        ORDER BY period_key DESC, driver_id ASC, id ASC
+      `).all();
+  res.json(rows.map(mapDriverWageSettlement));
+});
+
+app.post("/api/driver-wage-settlements", async (req, res) => {
+  if (!(await driverWageSettlementTableAvailable())) {
+    res.status(503).json({ message: "司机工资结算表未就绪" });
+    return;
+  }
+  const incoming = readDriverWageSettlementPayload(req.body || {});
+  const item = {
+    ...incoming,
+    settledAt: incoming.status === DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS ? incoming.settledAt : ""
+  };
+  const validationMessage = validateDriverWageSettlementPayload(item);
+  if (validationMessage) {
+    res.status(400).json({ message: validationMessage });
+    return;
+  }
+  const driver = await db.prepare("SELECT id, name FROM drivers WHERE id = ? AND deleted_at IS NULL").get(item.driverId);
+  if (!driver) {
+    res.status(404).json({ message: "司机不存在或已删除" });
+    return;
+  }
+  const current = await db.prepare(`
+    SELECT * FROM driver_wage_settlements
+    WHERE period_key = ? AND driver_id = ?
+  `).get(item.periodKey, item.driverId);
+  await db.prepare(`
+    INSERT INTO driver_wage_settlements (period_key, driver_id, status, settled_at)
+    VALUES (@periodKey, @driverId, @status, @settledAt)
+    ON CONFLICT (period_key, driver_id)
+    DO UPDATE SET
+      status = excluded.status,
+      settled_at = excluded.settled_at,
+      updated_at = CURRENT_TIMESTAMP
+    RETURNING *
+  `).run(item);
+  const row = await db.prepare(`
+    SELECT * FROM driver_wage_settlements
+    WHERE period_key = ? AND driver_id = ?
+  `).get(item.periodKey, item.driverId);
+  await writeAudit(
+    current ? "update" : "create",
+    "driver_wage_settlement",
+    `${item.periodKey}/${driver.id}`,
+    `${item.periodKey}/${driver.name}/${item.status}${item.settledAt ? `/${item.settledAt}` : ""}`
+  );
+  res.json(mapDriverWageSettlement(row));
 });
 
 function readDriverRouteAdjustRulePayload(body, current = null) {
@@ -12300,14 +13352,25 @@ app.post("/api/address-history-hidden", async (req, res) => {
 app.get("/api/audit-logs", async (req, res) => {
   const requestedPage = Number(req.query.page || 1);
   const requestedPageSize = Number(req.query.pageSize || 100);
-  const pageSize = Math.min(1000, Math.max(1, Number.isFinite(requestedPageSize) ? Math.floor(requestedPageSize) : 100));
+  const pageSize = Math.min(100, Math.max(1, Number.isFinite(requestedPageSize) ? Math.floor(requestedPageSize) : 100));
   const totalRow = await db.prepare("SELECT COUNT(*) AS count FROM audit_logs").get();
-  const total = Number(totalRow?.count || 0);
+  const total = Math.min(1000, Number(totalRow?.count || 0));
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const page = Math.min(Math.max(1, Number.isFinite(requestedPage) ? Math.floor(requestedPage) : 1), totalPages);
   const offset = (page - 1) * pageSize;
   const rows = total > 0
-    ? await db.prepare("SELECT * FROM audit_logs ORDER BY id DESC LIMIT ? OFFSET ?").all(pageSize, offset)
+    ? await db.prepare(`
+        WITH latest_audit_logs AS (
+          SELECT *
+          FROM audit_logs
+          ORDER BY id DESC
+          LIMIT 1000
+        )
+        SELECT *
+        FROM latest_audit_logs
+        ORDER BY id DESC
+        LIMIT ? OFFSET ?
+      `).all(pageSize, offset)
     : [];
   res.json({
     items: rows.map(mapAuditLog),
@@ -12355,6 +13418,10 @@ function backfillDispatchRowLocations(row = {}) {
 }
 
 async function backfillOrderLocationColumns() {
+  const hasLoadingLocations = await orderColumnExists("loading_locations");
+  const hasUnloadingLocations = await orderColumnExists("unloading_locations");
+  if (!hasLoadingLocations && !hasUnloadingLocations) return 0;
+  if (!hasLoadingLocations || !hasUnloadingLocations) return 0;
   const rows = await db.prepare(`
     SELECT no, loading, loading_locations, unloading, unloading_locations
     FROM orders

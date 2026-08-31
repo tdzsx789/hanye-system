@@ -53,6 +53,9 @@ function modulesForEntity(entityType = "", action = "") {
   if (type === "driver" || type === "driver_adjustment") {
     return ["vehicleDriver", "dispatchBoard", "orders", "financeWages", "bossDashboard", "bossCompanyProfit", "bossVehicleProfit", "reminders"];
   }
+  if (type === "driver_wage_settlement") {
+    return ["financeWages"];
+  }
   if (type === "driver_wage_rule" || type === "driver_route_adjust_rule") {
     return ["financeWages", "financeCostCenter", "vehicleDriver", "orders"];
   }

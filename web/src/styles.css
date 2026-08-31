@@ -15,6 +15,9 @@
   --charged-row-bg: #ecf8ef;
   --charged-row-hover-bg: #e0f3e6;
   --charged-row-accent: #2f8f5b;
+  --linked-customs-row-bg: #eefcf9;
+  --linked-customs-row-hover-bg: #e0faf4;
+  --linked-customs-row-accent: #0f766e;
 }
 
 * {
@@ -656,6 +659,21 @@ body.is-modal-dragging .modal-head {
 .order-customs-link-btn:hover {
   border-color: #0f6bff;
   background: #e0efff;
+}
+
+.order-customs-link-btn.is-linked {
+  min-width: 92px;
+  height: 30px;
+  padding-inline: 10px;
+  border-color: #10b981;
+  background: #10b981;
+  color: #fff;
+}
+
+.order-customs-link-btn.is-linked:hover {
+  border-color: #10b981;
+  background: #10b981;
+  color: #fff;
 }
 
 .order-customs-link-btn.is-disabled {
@@ -6562,6 +6580,55 @@ small.vehicle-repair-record-meta {
   text-align: right;
 }
 
+.order-customs-statement-table tbody tr.is-selected {
+  background: #ecfdf5;
+}
+
+.order-customs-statement-table tbody tr.is-selected td {
+  background: #ecfdf5;
+}
+
+.order-customs-statement-table tbody tr {
+  cursor: pointer;
+}
+
+.order-customs-statement-table tbody tr.is-selected .customs-business-actions-col {
+  background: #d1fae5;
+}
+
+.order-customs-statement-table .order-customs-select-btn {
+  min-width: 92px;
+  height: 30px;
+  padding-inline: 10px;
+}
+
+.order-customs-statement-table .order-customs-select-btn.is-linked {
+  border-color: #10b981;
+  background: #10b981;
+  color: #fff;
+}
+
+.order-customs-select-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.order-customs-cancel-btn {
+  min-width: 54px;
+  height: 30px;
+  padding-inline: 10px;
+  border-color: #cbd5e1;
+  background: #fff;
+  color: #475569;
+}
+
+.order-customs-cancel-btn:hover {
+  border-color: #94a3b8;
+  background: #f8fafc;
+  color: #334155;
+}
+
 .statement-export-backdrop {
   z-index: 120;
 }
@@ -8205,6 +8272,17 @@ small.vehicle-repair-record-meta {
   white-space: nowrap;
 }
 
+.finance-wage-table .finance-wage-settlement-status,
+.finance-wage-table .finance-wage-settlement-date {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  height: 28px;
+  padding: 0 6px;
+  box-sizing: border-box;
+  font-size: 12px;
+}
+
 @media (max-width: 1180px) {
   .finance-summary-grid {
     grid-template-columns: repeat(2, minmax(160px, 1fr));
@@ -9085,6 +9163,38 @@ tr.selected {
 
 .order-table tbody tr.charged-row td:first-child {
   box-shadow: inset 4px 0 0 var(--charged-row-accent);
+}
+
+.customer-order-table tbody tr.linked-customs-row:not(.selected) td,
+.order-table tbody tr.linked-customs-row:not(.selected) td,
+.order-list-detail-table tbody tr.linked-customs-row:not(.selected) td {
+  background: var(--linked-customs-row-bg);
+}
+
+.customer-order-table tbody tr.linked-customs-row:not(.selected):hover td,
+.order-table tbody tr.linked-customs-row:not(.selected):hover td,
+.order-list-detail-table tbody tr.linked-customs-row:not(.selected):hover td {
+  background: var(--linked-customs-row-hover-bg);
+}
+
+.customer-order-table tbody tr.linked-customs-row:not(.selected) .sticky-managed-column,
+.order-table tbody tr.linked-customs-row:not(.selected) .sticky-managed-column,
+.order-table tbody tr.linked-customs-row:not(.selected) .sticky-order-right-column,
+.order-list-detail-table tbody tr.linked-customs-row:not(.selected) .sticky-data-table-column {
+  background: var(--linked-customs-row-bg);
+}
+
+.customer-order-table tbody tr.linked-customs-row:not(.selected):hover .sticky-managed-column,
+.order-table tbody tr.linked-customs-row:not(.selected):hover .sticky-managed-column,
+.order-table tbody tr.linked-customs-row:not(.selected):hover .sticky-order-right-column,
+.order-list-detail-table tbody tr.linked-customs-row:not(.selected):hover .sticky-data-table-column {
+  background: var(--linked-customs-row-hover-bg);
+}
+
+.customer-order-table tbody tr.linked-customs-row td:first-child,
+.order-table tbody tr.linked-customs-row td:first-child,
+.order-list-detail-table tbody tr.linked-customs-row td:first-child {
+  box-shadow: inset 4px 0 0 var(--linked-customs-row-accent);
 }
 
 .table-link-btn {

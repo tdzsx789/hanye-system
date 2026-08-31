@@ -144,6 +144,7 @@ const idReturningTables = new Set([
   "other_businesses",
   "driver_wage_rules",
   "driver_adjustments",
+  "driver_wage_settlements",
   "address_book",
   "customer_contacts",
   "driver_route_adjust_rules",
@@ -404,10 +405,7 @@ async function columnDataType(table, column) {
 }
 
 async function addColumn(table, definition) {
-  const column = definition.split(/\s+/)[0];
-  if (!(await hasColumn(table, column))) {
-    await db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
-  }
+  await db.exec(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${definition}`);
 }
 
 async function ensureTextColumn(table, column, defaultValue = "''") {
@@ -714,6 +712,44 @@ async function dropColumnIfExists(table, column) {
   }
 }
 
+async function ensureRuntimeSchemaCompatibility() {
+  const definitions = [
+    ["orders", "dispatch_group_id TEXT NOT NULL DEFAULT ''"],
+    ["orders", "linked_customs_business_id BIGINT"],
+    ["order_fees", "cost_hkd DOUBLE PRECISION DEFAULT NULL"],
+    ["order_fees", "cost_rmb DOUBLE PRECISION DEFAULT NULL"],
+    ["order_fees", "cost_parts_json TEXT NOT NULL DEFAULT '[]'"],
+    ["vehicle_expenses", "maintenance_next_km DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["vehicles", "maintenance_due_km DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["company_expenses", "salary_status TEXT NOT NULL DEFAULT '工资待结算'"],
+    ["company_expenses", "settled_at TEXT NOT NULL DEFAULT ''"],
+    ["driver_adjustments", "settled_at TEXT NOT NULL DEFAULT ''"],
+    ["statement_downloads", "period_key TEXT NOT NULL DEFAULT ''"],
+    ["statement_downloads", "period_mode TEXT NOT NULL DEFAULT ''"],
+    ["statement_downloads", "amount_hkd DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["statement_downloads", "amount_rmb DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["statement_downloads", "record_count INTEGER NOT NULL DEFAULT 0"],
+    ["statement_downloads", "snapshot_ready BOOLEAN NOT NULL DEFAULT false"]
+  ];
+  for (const [table, definition] of definitions) {
+    await addColumn(table, definition);
+  }
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS driver_wage_settlements (
+      id BIGSERIAL PRIMARY KEY,
+      period_key TEXT NOT NULL DEFAULT '',
+      driver_id BIGINT REFERENCES drivers(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT '未结算',
+      settled_at TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      UNIQUE(period_key, driver_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_driver_wage_settlements_period ON driver_wage_settlements(period_key, driver_id);
+  `);
+}
+
 async function initializeSchema() {
   await db.exec(`
     CREATE TABLE IF NOT EXISTS customers (
@@ -766,6 +802,7 @@ async function initializeSchema() {
       no TEXT PRIMARY KEY,
       dispatch_no TEXT NOT NULL DEFAULT '',
       dispatch_group_id TEXT NOT NULL DEFAULT '',
+      linked_customs_business_id BIGINT,
       customer_id TEXT REFERENCES customers(id) ON UPDATE CASCADE,
       customer TEXT NOT NULL,
       business_type TEXT NOT NULL DEFAULT '运输',
@@ -1147,6 +1184,17 @@ async function initializeSchema() {
       deleted_at TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS driver_wage_settlements (
+      id BIGSERIAL PRIMARY KEY,
+      period_key TEXT NOT NULL DEFAULT '',
+      driver_id BIGINT REFERENCES drivers(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT '未结算',
+      settled_at TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+      UNIQUE(period_key, driver_id)
+    );
+
     CREATE TABLE IF NOT EXISTS address_book (
       id BIGSERIAL PRIMARY KEY,
       area TEXT NOT NULL DEFAULT '',
@@ -1243,6 +1291,7 @@ async function initializeSchema() {
     CREATE INDEX IF NOT EXISTS idx_cost_center_rates_source ON cost_center_rates(source, deleted_at, entity_name);
     CREATE INDEX IF NOT EXISTS idx_vehicle_profit_exchange_rates_month ON vehicle_profit_exchange_rates(period_month);
     CREATE INDEX IF NOT EXISTS idx_company_expenses_period ON company_expenses(deleted_at, period_month);
+    CREATE INDEX IF NOT EXISTS idx_driver_wage_settlements_period ON driver_wage_settlements(period_key, driver_id);
     CREATE INDEX IF NOT EXISTS idx_reminder_ack_account_key ON reminder_acknowledgements(account_id, reminder_key);
   `);
 
@@ -1301,7 +1350,8 @@ async function initializeSchema() {
       "snapshot_ready BOOLEAN NOT NULL DEFAULT false"
     ],
     orders: [
-      "dispatch_group_id TEXT NOT NULL DEFAULT ''"
+      "dispatch_group_id TEXT NOT NULL DEFAULT ''",
+      "linked_customs_business_id BIGINT"
     ],
     drivers: [
       "type TEXT NOT NULL DEFAULT '香港司机'",
@@ -2835,6 +2885,7 @@ if (startupDatabaseMaintenanceEnabled) {
     await transactionClient.run(initClient, async () => {
       await initializeSchema();
       await ensureProtectedTemplates();
+      await ensureRuntimeSchemaCompatibility();
     });
   } finally {
     await initClient.query("SELECT pg_advisory_unlock(524458)");

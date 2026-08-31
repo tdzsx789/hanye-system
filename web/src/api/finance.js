@@ -1,4 +1,4 @@
-import { apiFetch, apiFetchList } from "./client.js";
+import { API_BASE, apiDownloadErrorMessage, apiFetch, apiFetchList, apiRequestHeaders } from "./client.js";
 
 export function listStatementDownloads() {
   return apiFetchList("/statement-downloads");
@@ -79,6 +79,30 @@ export function saveVehicleProfitExchangeRate(payload) {
     method: "POST",
     body: JSON.stringify(payload)
   });
+}
+
+export function listDriverWageSettlements(periodKey = "") {
+  const query = periodKey ? `?periodKey=${encodeURIComponent(periodKey)}` : "";
+  return apiFetchList(`/driver-wage-settlements${query}`);
+}
+
+export function saveDriverWageSettlement(payload) {
+  return apiFetch("/driver-wage-settlements", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function exportDriverWageSettlement(payload = {}) {
+  const response = await fetch(`${API_BASE}/driver-wage-settlements/export/xlsx`, {
+    method: "POST",
+    headers: apiRequestHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    throw new Error(await apiDownloadErrorMessage(response, "司机工资单导出失败"));
+  }
+  return response.blob();
 }
 
 export function listCompanyExpenses() {

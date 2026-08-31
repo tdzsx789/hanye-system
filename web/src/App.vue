@@ -358,6 +358,9 @@ const COMPANY_INCOME_CATEGORY_OPTIONS = ["其他收入", "利息收入", "补贴
 const COMPANY_EXPENSE_SALARY_PENDING_STATUS = "工资待结算";
 const COMPANY_EXPENSE_SALARY_SETTLED_STATUS = "已结算";
 const COMPANY_EXPENSE_SALARY_STATUS_OPTIONS = [COMPANY_EXPENSE_SALARY_PENDING_STATUS, COMPANY_EXPENSE_SALARY_SETTLED_STATUS];
+const DRIVER_WAGE_SETTLEMENT_PENDING_STATUS = "未结算";
+const DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS = "已结算";
+const DRIVER_WAGE_SETTLEMENT_STATUS_OPTIONS = [DRIVER_WAGE_SETTLEMENT_PENDING_STATUS, DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS];
 const OWN_VEHICLE_SOURCE = "汉业物流";
 const LEGACY_OWN_VEHICLE_SOURCE = "本公司车辆";
 const COMPANY_ENTRY_TYPE_OPTIONS = [
@@ -387,8 +390,6 @@ const DEFAULT_CUSTOMS_CUSTOMER_CONFIG = {
 const ORDER_SIGN_BASE_REQUIRED_FIELDS = [
   { key: "dispatchNo", label: "排车单号" },
   { key: "businessType", label: "业务类型" },
-  { key: "port", label: "口岸" },
-  { key: "direction", label: "进出口" },
   { key: "tonnage", label: "吨位" },
   { key: "quantity", label: "件数/板数" },
   { key: "vehicleSource", label: "车辆来源" },
@@ -1174,13 +1175,14 @@ function applyOrderRequiredFieldDefaults({ force = false } = {}) {
 }
 
 function missingOrderSignRequiredFieldLabels() {
+  const source = orderForm;
   const labels = [];
   ORDER_SIGN_BASE_REQUIRED_FIELDS.forEach((field) => {
-    if (!String(orderForm[field.key] ?? "").trim()) labels.push(field.label);
+    if (!String(source[field.key] ?? "").trim()) labels.push(field.label);
   });
   const requirement = currentOrderSignRequirement();
-  if (requirement?.tripNo && (!orderForm.tripNoEnabled || !String(orderForm.tripNo || "").trim())) labels.push("车次号");
-  if (requirement?.sixSheetNo && (!orderForm.sixSheetEnabled || !String(orderForm.sixSheetNo || "").trim())) labels.push("六联单号");
+  if (requirement?.tripNo && (!source.tripNoEnabled || !String(source.tripNo || "").trim())) labels.push("车次号");
+  if (requirement?.sixSheetNo && (!source.sixSheetEnabled || !String(source.sixSheetNo || "").trim())) labels.push("六联单号");
   return Array.from(new Set(labels));
 }
 
@@ -1274,6 +1276,12 @@ function inputDateLabel(value) {
   const date = parseInputDate(value);
   if (!date) return String(value || "").trim() || "-";
   return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
+}
+
+function inputDateMonthDayLabel(value) {
+  const date = parseInputDate(value);
+  if (!date) return String(value || "").trim() || "-";
+  return `${date.getMonth() + 1}月${date.getDate()}日`;
 }
 
 function inputDateUtcValue(value) {
@@ -1676,6 +1684,8 @@ const vehicleExpenseOtherPlateFilter = ref(localStorage.getItem("hanye_vehicle_e
 const selectedVehicleRepairPlate = ref(localStorage.getItem("hanye_vehicle_repair_selected_plate") || "");
 const expandedVehicleRepairIds = ref(new Set());
 const financeWageDetailDriverId = ref(null);
+const financeWageSettlementRows = ref([]);
+let financeWageSettlementLoadRequestId = 0;
 const selectedFinanceWageDetailOrderNo = ref("");
 const activeFinanceWageCard = ref("wages");
 const routeAdjustDriverPickerOpen = ref(false);
@@ -1697,6 +1707,22 @@ const customsBusinessRecycleRows = ref([]);
 const otherBusinessRows = ref([]);
 const otherBusinessAllRows = ref([]);
 const otherBusinessRecycleRows = ref([]);
+const linkedCustomsBusinessIdSet = computed(() => {
+  const ids = new Set();
+  orderRows.value.forEach((order) => {
+    const id = String(order.linkedCustomsBusinessId || order.linked_customs_business_id || "").trim();
+    if (id) ids.add(id);
+  });
+  return ids;
+});
+const customsBusinessRowsById = computed(() => {
+  const sourceRows = customsBusinessAllRows.value.length ? customsBusinessAllRows.value : customsBusinessRows.value;
+  return new Map(
+    sourceRows
+      .map((row) => [String(row.id || "").trim(), row])
+      .filter(([id]) => id)
+  );
+});
 const editingCustomsBusinessId = ref("");
 const copyingCustomsBusinessId = ref("");
 const editingOtherBusinessId = ref("");
@@ -1756,6 +1782,7 @@ const dispatchPlanRows = ref([]);
 const dispatchLoadedDates = ref([dispatchDate.value]);
 const dispatchPlanBaseRowsByDate = reactive({});
 const dispatchPlanUpdatedAtByDate = reactive({});
+const dispatchStatusBeforeChangeByRowKey = new Map();
 const selectedDispatchPlanIds = ref([]);
 const selectedDispatchPlanIdSet = computed(() => new Set(selectedDispatchPlanIds.value.map((id) => String(id))));
 const dispatchModalOpen = ref(false);
@@ -1906,9 +1933,9 @@ const accountRows = ref([]);
 const auditRows = ref([]);
 const auditLoading = ref(false);
 const auditPage = ref(1);
-const auditPageSize = ref(100);
+const auditPageSize = ref(20);
 const auditTotal = ref(0);
-const auditPageSizeOptions = [100, 200, 500, 1000];
+const auditPageSizeOptions = [20, 50, 100];
 const auditPageCount = computed(() => Math.max(1, Math.ceil((Number(auditTotal.value) || 0) / (Number(auditPageSize.value) || 1))));
 const auditPageStart = computed(() => (Number(auditTotal.value) || 0) === 0 ? 0 : ((Math.min(Number(auditPage.value) || 1, auditPageCount.value) - 1) * Number(auditPageSize.value || 1)) + 1);
 const auditPageEnd = computed(() => (Number(auditTotal.value) || 0) === 0 ? 0 : Math.min(Number(auditTotal.value) || 0, (Number(auditPage.value) || 1) * Number(auditPageSize.value || 1)));
@@ -2033,10 +2060,12 @@ let draggedDispatchTableColumnKey = "";
 let draggedCustomsBusinessColumnKey = "";
 let draggedOtherBusinessColumnKey = "";
 const realtimePendingRefresh = {
-  database: false,
-  dispatch: false,
-  reminders: false
+  buckets: new Set()
 };
+
+function hasPendingRealtimeRefresh() {
+  return realtimePendingRefresh.buckets.size > 0;
+}
 
 const customerModalOpen = ref(false);
 const contactModalOpen = ref(false);
@@ -2047,6 +2076,7 @@ const orderViewMode = ref(false);
 const orderCustomsStatementModalOpen = ref(false);
 const orderCustomsStatementLoading = ref(false);
 const orderCustomsStatementCompany = ref("");
+const orderCustomsStatementSelectedId = ref("");
 const orderDetailNo = ref("");
 const orderListDetailOpen = ref(false);
 const orderListDetailScope = ref("orders");
@@ -2376,6 +2406,7 @@ const orderForm = reactive({
   dispatchNo: "",
   customerId: "",
   customer: "",
+  linkedCustomsBusinessId: "",
   businessType: "",
   port: "",
   needsWeighing: false,
@@ -3441,7 +3472,7 @@ const orderUsesRelayDrivers = computed(() => orderUsesOwnVehicle.value && ["双�
 const CUSTOMS_REMARK_PREFIX = "报关信息：";
 
 function orderHasTransportFieldsForOrder(order = {}) {
-  return order.businessType !== "报关";
+  return orderDisplaySource(order).businessType !== "报关";
 }
 
 const selectedDriverWageRules = computed(() => {
@@ -5005,6 +5036,7 @@ function dispatchRowRef(row = {}) {
 function applyDispatchPlanRows(rows = [], date = dispatchDate.value, loadedDates = [date]) {
   const normalizedRows = normalizeDispatchPlanRows(rows, date);
   closeDispatchDriverPicker();
+  dispatchStatusBeforeChangeByRowKey.clear();
   dispatchPlanRows.value = normalizedRows;
   dispatchLoadedDates.value = loadedDates.length ? loadedDates : [date];
   selectedDispatchPlanIds.value = selectedDispatchPlanIds.value.filter((id) =>
@@ -5051,42 +5083,43 @@ function applyDispatchRowsToLocalOrders(rows = dispatchPlanRows.value) {
       (linkedOrderNos.length && linkedOrderNos.includes(String(order.no || "").trim()))
       || (linkedDispatchNos.length && linkedDispatchNos.includes(String(order.dispatchNo || "").trim()))
       || (dispatchGroupId && String(order.dispatchGroupId || order.dispatch_group_id || "").trim() === dispatchGroupId)
-	    );
-	    if (!currentOrders.length) return;
-	    const rowDriver = dispatchRowText(row, "driver");
-	    const rowHkDriver = dispatchRowText(row, "hkDriver");
-	    const rowMainlandDriver = dispatchRowText(row, "mainlandDriver");
-	    currentOrders.forEach((currentOrder) => {
-	      const currentOrderNo = String(currentOrder.no || "").trim();
-	      const currentDispatchNo = String(currentOrder.dispatchNo || "").trim();
-	      const transportMode = normalizeTransportMode(row.transportMode || currentOrder.transportMode || "") || currentOrder.transportMode || "";
-	      const isSingleDriver = transportMode === "单司机";
-	      const isOutsourced = normalizeVehicleSource(row.vehicleSource || currentOrder.vehicleSource || "") === "外派车辆";
+    );
+    if (!currentOrders.length) return;
+    const rowDriver = dispatchRowText(row, "driver");
+    const rowHkDriver = dispatchRowText(row, "hkDriver");
+    const rowMainlandDriver = dispatchRowText(row, "mainlandDriver");
+    currentOrders.forEach((currentOrder) => {
+      const currentOrderNo = String(currentOrder.no || "").trim();
+      const currentDispatchNo = String(currentOrder.dispatchNo || "").trim();
+      const transportMode = normalizeTransportMode(row.transportMode || currentOrder.transportMode || "") || currentOrder.transportMode || "";
+      const isSingleDriver = transportMode === "单司机";
+      const isOutsourced = normalizeVehicleSource(row.vehicleSource || currentOrder.vehicleSource || "") === "外派车辆";
       const shouldUseRowDispatchNo = currentOrderNo === dispatchRowText(row, "orderNo")
         || currentDispatchNo === dispatchRowText(row, "dispatchNo");
       patches.set(currentOrderNo, {
-      ...currentOrder,
-      dispatchNo: shouldUseRowDispatchNo ? (dispatchRowText(row, "dispatchNo") || currentOrder.dispatchNo || "") : currentOrder.dispatchNo || "",
-      dispatchGroupId: dispatchGroupId || currentOrder.dispatchGroupId || "",
-      vehicleSource: dispatchRowText(row, "vehicleSource") || currentOrder.vehicleSource || "",
-      supplier: dispatchRowText(row, "vehicleSource") === "外派车辆" ? dispatchRowText(row, "supplier") : "",
-      plate: dispatchRowText(row, "plate"),
-      transportMode,
-      driver: isOutsourced
-        ? (rowDriver || currentOrder.driver || "")
-        : (isSingleDriver
-          ? (rowDriver || rowHkDriver || currentOrder.driver || "")
-          : [rowHkDriver || rowDriver, rowMainlandDriver].filter(Boolean).join(" / ")),
-	      hkDriver: isOutsourced ? "" : (isSingleDriver ? "" : (rowHkDriver || rowDriver)),
-	      mainlandDriver: isOutsourced ? "" : (isSingleDriver ? "" : rowMainlandDriver),
-	      loading: row.loading || currentOrder.loading || "",
-	      loadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(row, "loading", currentOrder)),
-	      unloading: row.unloading || currentOrder.unloading || "",
-	      unloadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(row, "unloading", currentOrder)),
-      date: dispatchPlanDate(row),
-      dispatchLoadDate: dispatchPlanDate(row),
-      dispatchLoadTime: row.loadTime || currentOrder.dispatchLoadTime || ""
-    });
+        ...currentOrder,
+        dispatchNo: shouldUseRowDispatchNo ? (dispatchRowText(row, "dispatchNo") || currentOrder.dispatchNo || "") : currentOrder.dispatchNo || "",
+        dispatchGroupId: dispatchGroupId || currentOrder.dispatchGroupId || "",
+        vehicleSource: dispatchRowText(row, "vehicleSource") || currentOrder.vehicleSource || "",
+        supplier: dispatchRowText(row, "vehicleSource") === "外派车辆" ? dispatchRowText(row, "supplier") : "",
+        plate: dispatchRowText(row, "plate"),
+        transportMode,
+        status: DISPATCH_STATUS_TO_ORDER_STATUS[dispatchStatusValueForRow(row)] || currentOrder.status || "",
+        driver: isOutsourced
+          ? (rowDriver || currentOrder.driver || "")
+          : (isSingleDriver
+            ? (rowDriver || rowHkDriver || currentOrder.driver || "")
+            : [rowHkDriver || rowDriver, rowMainlandDriver].filter(Boolean).join(" / ")),
+        hkDriver: isOutsourced ? "" : (isSingleDriver ? "" : (rowHkDriver || rowDriver)),
+        mainlandDriver: isOutsourced ? "" : (isSingleDriver ? "" : rowMainlandDriver),
+        loading: row.loading || currentOrder.loading || "",
+        loadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(row, "loading", currentOrder)),
+        unloading: row.unloading || currentOrder.unloading || "",
+        unloadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(row, "unloading", currentOrder)),
+        date: dispatchPlanDate(row),
+        dispatchLoadDate: dispatchPlanDate(row),
+        dispatchLoadTime: row.loadTime || currentOrder.dispatchLoadTime || ""
+      });
     });
   });
   if (!patches.size) return;
@@ -5575,6 +5608,31 @@ function dispatchStatusClass(status) {
   };
 }
 
+function dispatchStatusChangeSnapshotKey(row = {}) {
+  const target = dispatchPlanRows.value[row?.index] || row || {};
+  return String(target.id || target.dispatchNo || target.orderNo || row?.id || row?.dispatchNo || row?.orderNo || "").trim();
+}
+
+function rememberDispatchStatusBeforeChange(row = {}) {
+  const key = dispatchStatusChangeSnapshotKey(row);
+  if (!key) return;
+  const target = dispatchPlanRows.value[row.index] || row || {};
+  dispatchStatusBeforeChangeByRowKey.set(key, {
+    status: dispatchStatusValueForRow(target),
+    previousStatus: String(target.previousStatus || "").trim()
+  });
+}
+
+function dispatchStatusChangeSnapshot(row = {}) {
+  const key = dispatchStatusChangeSnapshotKey(row);
+  const snapshot = key ? dispatchStatusBeforeChangeByRowKey.get(key) : null;
+  if (key) dispatchStatusBeforeChangeByRowKey.delete(key);
+  return snapshot || {
+    status: dispatchStatusValueForRow(row),
+    previousStatus: String(row.previousStatus || "").trim()
+  };
+}
+
 async function syncDispatchRowOrderStatus(row, status) {
   const orderStatus = DISPATCH_STATUS_TO_ORDER_STATUS[status];
   if (!orderStatus) return;
@@ -5669,14 +5727,18 @@ async function handleDispatchDriverChange(row, driverName) {
   }
 }
 
-async function handleDispatchStatusChange(row) {
+async function handleDispatchStatusChange(row, event = null) {
   closeDispatchDriverPicker();
   const target = dispatchPlanRows.value[row.index];
   if (!target) return;
-  const previousStatus = dispatchStatusValueForRow(row);
-  const previousRecordedStatus = target.previousStatus || "";
-  const currentStatusOptions = dispatchStatusOptionsForRow(row);
-  const nextStatus = dispatchStatusValueForRow(target);
+  const snapshot = dispatchStatusChangeSnapshot(row);
+  const previousStatus = snapshot.status || dispatchStatusValueForRow(row);
+  const previousRecordedStatus = snapshot.previousStatus || target.previousStatus || "";
+  const nextStatus = normalizeDispatchPlanStatus(
+    event?.target?.value || target.status || row.status || DISPATCH_PLAN_DEFAULT_STATUS
+  );
+  const currentStatusOptions = dispatchStatusOptionsForRow({ ...target, status: previousStatus, previousStatus: previousRecordedStatus });
+  target.status = nextStatus;
   if (previousStatus === DISPATCH_LOCKED_STATUS && nextStatus === "已派车") {
     target.status = DISPATCH_LOCKED_STATUS;
     notify("通关中的订单不能退回已派车");
@@ -5724,6 +5786,7 @@ async function handleDispatchStatusChange(row) {
         dispatchPlanRows.value.splice(row.index, 1, target);
         selectedDispatchPlanIds.value = [target.id].filter(Boolean);
         await saveDispatchPlan({ silent: true, throwOnError: true });
+        await syncDispatchRowOrderStatus(target, nextStatus);
         await refreshOrderRows();
         activeDispatchStatusPool.value = DISPATCH_LOCKED_STATUS;
         notify(`已按 ${selectedCustomers.length} 个客户生成 ${selectedCustomers.length} 张通关中订单`);
@@ -5740,6 +5803,7 @@ async function handleDispatchStatusChange(row) {
   try {
     if (nextStatus !== previousStatus) target.previousStatus = previousStatus;
     await saveDispatchPlan({ silent: true, throwOnError: true });
+    await syncDispatchRowOrderStatus(target, nextStatus);
     await refreshOrderRows();
   } catch (error) {
     target.status = previousStatus;
@@ -5763,6 +5827,7 @@ async function returnDispatchRowStatus(row) {
     target.status = previousStatus;
     target.previousStatus = "";
     await saveDispatchPlan({ silent: true, throwOnError: true });
+    await syncDispatchRowOrderStatus(target, previousStatus);
     await refreshOrderRows();
     activeDispatchStatusPool.value = previousStatus;
     notify(`排车状态已返回到${previousStatus}`);
@@ -5779,10 +5844,11 @@ function closeDispatchModal(options = {}) {
   closeDispatchLoadMinutePicker();
   clearAllDispatchLocationDrafts();
   clearDispatchRecognitionStatus();
+  dispatchStatusBeforeChangeByRowKey.clear();
   dispatchModalOpen.value = false;
   editingDispatchRowId.value = "";
   copyingDispatchRowId.value = "";
-  if (loggedIn.value && (realtimePendingRefresh.database || realtimePendingRefresh.dispatch || realtimePendingRefresh.reminders)) {
+  if (loggedIn.value && hasPendingRealtimeRefresh()) {
     window.clearTimeout(realtimeRefreshTimer);
     realtimeRefreshTimer = window.setTimeout(() => {
       realtimeRefreshTimer = null;
@@ -6456,7 +6522,7 @@ function closeDispatchDuplicateModal() {
   if (loading.value) return;
   dispatchDuplicateModalOpen.value = false;
   dispatchDuplicateDraftRows.value = [];
-  if (loggedIn.value && (realtimePendingRefresh.database || realtimePendingRefresh.dispatch || realtimePendingRefresh.reminders)) {
+  if (loggedIn.value && hasPendingRealtimeRefresh()) {
     window.clearTimeout(realtimeRefreshTimer);
     realtimeRefreshTimer = window.setTimeout(() => {
       realtimeRefreshTimer = null;
@@ -7395,18 +7461,18 @@ function driverFinanceAdvanceBreakdown(order = {}, driver = null) {
 function driverFinanceWageOrderBreakdown(order = {}, driver = null) {
   const costCenter = driverCostCenterFeeBreakdown(order, driver);
   const advance = driverFinanceAdvanceBreakdown(order, driver);
-  const adjust = driverCustomerTripAdjustBreakdown(order, driver);
+  const routeAdjust = driverCustomerTripAdjustBreakdown(order, driver);
   return {
-    hkd: costCenter.hkd + advance.hkd + adjust.hkd,
-    rmb: costCenter.rmb + advance.rmb + adjust.rmb,
+    hkd: costCenter.hkd + advance.hkd,
+    rmb: costCenter.rmb + advance.rmb,
     costCenterHKD: costCenter.hkd,
     costCenterRMB: costCenter.rmb,
     costCenterMatchedCount: costCenter.matchedCount,
     costCenterMissingCount: costCenter.missingCount,
     advanceHKD: advance.hkd,
     advanceRMB: advance.rmb,
-    adjustmentsHKD: adjust.hkd,
-    adjustmentsRMB: adjust.rmb,
+    routeAdjustmentsHKD: routeAdjust.hkd,
+    routeAdjustmentsRMB: routeAdjust.rmb,
     costCenterDetails: costCenter.details
   };
 }
@@ -7851,17 +7917,22 @@ function orderFeesWithCurrentFx(order = {}) {
 function orderCustomerReceivableBreakdown(order = {}) {
   const fees = orderFeesWithCurrentFx(order);
   const namedFees = fees.filter((fee) => String(fee?.name || "").trim());
+  const linkedCustomsRMB = orderLinkedCustomsBusinessAmount(order);
   if (!namedFees.length) {
     return {
       hkd: Number(order.receivableHKD || 0),
-      rmb: Number(order.receivableRMB || 0)
+      rmb: Number(order.receivableRMB || 0) + linkedCustomsRMB
     };
   }
-  return namedFees
+  const totals = namedFees
     .reduce((sum, fee) => ({
       hkd: sum.hkd + feeAmountHKD(fee),
       rmb: sum.rmb + feeAmountRMB(fee)
     }), { hkd: 0, rmb: 0 });
+  return {
+    hkd: totals.hkd,
+    rmb: totals.rmb + linkedCustomsRMB
+  };
 }
 
 function customerStatementOrderSnapshot(order = {}) {
@@ -7890,6 +7961,24 @@ function customerStatementOrderDisplayChargeNote(order = {}) {
   const matched = chargedAt.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!matched) return "";
   return `于${matched[1]}年${matched[2]}月${matched[3]}日已收费`;
+}
+
+function orderLinkedCustomsBusinessId(order = {}) {
+  return String(order?.linkedCustomsBusinessId || order?.linked_customs_business_id || "").trim();
+}
+
+function orderLinkedCustomsBusinessRow(order = {}) {
+  const linkedId = orderLinkedCustomsBusinessId(order);
+  if (!linkedId) return null;
+  return customsBusinessRowsById.value.get(linkedId) || null;
+}
+
+function orderLinkedCustomsBusinessAmount(order = {}) {
+  return Number(orderLinkedCustomsBusinessRow(order)?.total || 0);
+}
+
+function customsBusinessRowsForStatement(sourceRows = []) {
+  return sourceRows.filter((row) => !linkedCustomsBusinessIdSet.value.has(String(row.id || "").trim()));
 }
 
 function orderDriverNameByRole(order, role = "") {
@@ -9922,6 +10011,130 @@ function financeDateRangeLabel() {
   return periodFilterLabel(financePeriodFilter.value);
 }
 
+watch(financePeriodFilter, () => {
+  if (loggedIn.value && activeModule.value === "financeWages") {
+    loadFinanceWageSettlements({ silent: true }).catch((error) => notify(error.message || "司机工资结算加载失败"));
+  }
+});
+
+function normalizeFinanceWageSettlementRow(item = {}) {
+  return {
+    id: item.id,
+    periodKey: String(item.periodKey || item.period_key || "").trim(),
+    driverId: Number(item.driverId || item.driver_id || 0),
+    status: String(item.status || "").trim() === DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS
+      ? DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS
+      : DRIVER_WAGE_SETTLEMENT_PENDING_STATUS,
+    settledAt: String(item.settledAt || item.settled_at || "").trim(),
+    createdAt: String(item.createdAt || item.created_at || "").trim(),
+    updatedAt: String(item.updatedAt || item.updated_at || item.createdAt || item.created_at || "").trim()
+  };
+}
+
+function financeWageSettlementPeriodKey() {
+  return normalizePeriodFilter(financePeriodFilter.value);
+}
+
+function financeWageSettlementKey(periodKey = financeWageSettlementPeriodKey(), driverId = "") {
+  return `${String(periodKey || "").trim()}::${String(driverId || "").trim()}`;
+}
+
+function financeWageSettlementRowFor(row = {}) {
+  const periodKey = financeWageSettlementPeriodKey();
+  return financeWageSettlementRows.value.find((item) =>
+    financeWageSettlementKey(item.periodKey, item.driverId) === financeWageSettlementKey(periodKey, row?.driver?.id)
+  ) || null;
+}
+
+function financeWageSettlementStatusText(row = {}) {
+  const settlement = financeWageSettlementRowFor(row);
+  return settlement?.status === DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS
+    ? DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS
+    : DRIVER_WAGE_SETTLEMENT_PENDING_STATUS;
+}
+
+function financeWageSettlementDateText(row = {}) {
+  return financeWageSettlementRowFor(row)?.settledAt || "";
+}
+
+function financeWageSettlementDateDisplay(row = {}) {
+  const settledAt = financeWageSettlementDateText(row);
+  return settledAt ? inputDateLabel(settledAt) : "-";
+}
+
+function financeWageSettlementDateInputValue(row = {}) {
+  const settledAt = financeWageSettlementDateText(row);
+  if (settledAt) return settledAt;
+  if (financeWageSettlementStatusText(row) === DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS) return todayInputValue();
+  return "";
+}
+
+function upsertFinanceWageSettlementRow(item = {}) {
+  const row = normalizeFinanceWageSettlementRow(item);
+  if (!row.periodKey || !row.driverId) return;
+  const key = financeWageSettlementKey(row.periodKey, row.driverId);
+  const next = financeWageSettlementRows.value.some((current) =>
+    financeWageSettlementKey(current.periodKey, current.driverId) === key
+  )
+    ? financeWageSettlementRows.value.map((current) =>
+      financeWageSettlementKey(current.periodKey, current.driverId) === key ? { ...current, ...row } : current
+    )
+    : [row, ...financeWageSettlementRows.value];
+  financeWageSettlementRows.value = next;
+}
+
+async function loadFinanceWageSettlements(options = {}) {
+  if (!loggedIn.value || !canAccessModule("financeWages")) {
+    financeWageSettlementRows.value = [];
+    return [];
+  }
+  const requestId = financeWageSettlementLoadRequestId + 1;
+  financeWageSettlementLoadRequestId = requestId;
+  financeWageSettlementRows.value = [];
+  const rows = await apiFetchListFrom(
+    () => financeApi.listDriverWageSettlements(financeWageSettlementPeriodKey()),
+    "司机工资结算",
+    options
+  );
+  if (requestId !== financeWageSettlementLoadRequestId) {
+    return financeWageSettlementRows.value;
+  }
+  financeWageSettlementRows.value = rows.map(normalizeFinanceWageSettlementRow);
+  return financeWageSettlementRows.value;
+}
+
+async function saveFinanceWageSettlement(row = {}, status = financeWageSettlementStatusText(row), settledAt = financeWageSettlementDateText(row)) {
+  const driverId = Number(row?.driver?.id || 0);
+  const periodKey = financeWageSettlementPeriodKey();
+  if (!driverId || !periodKey) return null;
+  const nextStatus = status === DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS
+    ? DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS
+    : DRIVER_WAGE_SETTLEMENT_PENDING_STATUS;
+  const nextSettledAt = nextStatus === DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS
+    ? String(settledAt || "").trim() || todayInputValue()
+    : "";
+  try {
+    upsertFinanceWageSettlementRow({
+      periodKey,
+      driverId,
+      status: nextStatus,
+      settledAt: nextSettledAt
+    });
+    const item = await financeApi.saveDriverWageSettlement({
+      periodKey,
+      driverId,
+      status: nextStatus,
+      settledAt: nextSettledAt
+    });
+    upsertFinanceWageSettlementRow(item);
+    return item;
+  } catch (error) {
+    loadFinanceWageSettlements({ silent: true }).catch(() => {});
+    notify(error.message || "司机工资结算保存失败");
+    return null;
+  }
+}
+
 const activeFinanceWageDetailRow = computed(() =>
   financeWageRows.value.find((row) => row.driver.id === financeWageDetailDriverId.value) || null
 );
@@ -10329,7 +10542,12 @@ function resetFinanceWageDetailColumnOrder() {
   notify("已恢复默认列顺序");
 }
 
-function buildFinanceWageRows(sourceOrders, sourceAdjustments) {
+function buildFinanceWageRows(sourceOrders, sourceAdjustments, sourceSettlements = []) {
+  const settlementMap = new Map(
+    (Array.isArray(sourceSettlements) ? sourceSettlements : [])
+      .map((item) => [String(item?.driverId || item?.driver_id || ""), item])
+      .filter(([key]) => key)
+  );
   return sortRowsByTable(driverRows.value.map((driver) => {
     const orders = sourceOrders.filter((order) => orderMatchesDriverForWage(order, driver));
     const wageBreakdown = orders.reduce((sum, order) => {
@@ -10339,8 +10557,8 @@ function buildFinanceWageRows(sourceOrders, sourceAdjustments) {
         costCenterRMB: sum.costCenterRMB + amount.costCenterRMB,
         advanceHKD: sum.advanceHKD + amount.advanceHKD,
         advanceRMB: sum.advanceRMB + amount.advanceRMB,
-        adjustmentsHKD: sum.adjustmentsHKD + amount.adjustmentsHKD,
-        adjustmentsRMB: sum.adjustmentsRMB + amount.adjustmentsRMB,
+        adjustmentsHKD: sum.adjustmentsHKD + amount.routeAdjustmentsHKD,
+        adjustmentsRMB: sum.adjustmentsRMB + amount.routeAdjustmentsRMB,
         costCenterMatchedCount: sum.costCenterMatchedCount + amount.costCenterMatchedCount,
         costCenterMissingCount: sum.costCenterMissingCount + amount.costCenterMissingCount
       };
@@ -10363,6 +10581,9 @@ function buildFinanceWageRows(sourceOrders, sourceAdjustments) {
           rmb: sum.rmb + (currency === "RMB" ? Number(item.amount || 0) : 0)
         };
       }, { hkd: 0, rmb: 0 });
+    const settlement = settlementMap.get(String(driver.id)) || null;
+    const totalHKD = Math.max(0, Number((wageBreakdown.hkd - adjustmentBreakdown.hkd).toFixed(2)));
+    const totalRMB = Math.max(0, Number((wageBreakdown.rmb - adjustmentBreakdown.rmb).toFixed(2)));
     return {
       driver,
       orders,
@@ -10373,17 +10594,21 @@ function buildFinanceWageRows(sourceOrders, sourceAdjustments) {
       advanceFeeRMB: wageBreakdown.advanceRMB,
       adjustments: adjustmentBreakdown.hkd,
       adjustmentsRMB: adjustmentBreakdown.rmb,
-      routeAdjustments: wageBreakdown.adjustmentsHKD,
-      routeAdjustmentsRMB: wageBreakdown.adjustmentsRMB,
-      total: wageBreakdown.costCenterHKD + wageBreakdown.advanceHKD + wageBreakdown.adjustmentsHKD + adjustmentBreakdown.hkd,
-      totalRMB: wageBreakdown.costCenterRMB + wageBreakdown.advanceRMB + wageBreakdown.adjustmentsRMB + adjustmentBreakdown.rmb,
+      routeAdjustments: wageBreakdown.routeAdjustmentsHKD,
+      routeAdjustmentsRMB: wageBreakdown.routeAdjustmentsRMB,
+      total: totalHKD,
+      totalRMB: totalRMB,
       costCenterMatchedCount: wageBreakdown.costCenterMatchedCount,
-      costCenterMissingCount: wageBreakdown.costCenterMissingCount
+      costCenterMissingCount: wageBreakdown.costCenterMissingCount,
+      settlementStatus: settlement?.status === DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS
+        ? DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS
+        : DRIVER_WAGE_SETTLEMENT_PENDING_STATUS,
+      settledAt: String(settlement?.settledAt || settlement?.settled_at || "").trim()
     };
   }).filter((row) => row.orderCount || row.payable || row.payableRMB || row.advanceFee || row.advanceFeeRMB || row.adjustments || row.adjustmentsRMB), "financeWages");
 }
 
-const financeWageRows = computed(() => buildFinanceWageRows(financeOrderRows.value, financeAdjustmentRows.value));
+const financeWageRows = computed(() => buildFinanceWageRows(financeOrderRows.value, financeAdjustmentRows.value, financeWageSettlementRows.value));
 const statementWageRows = computed(() => buildFinanceWageRows(statementBillableOrderRows.value, statementAdjustmentRows.value));
 
 watch(activeFinanceWageDetailRow, (row) => {
@@ -10445,7 +10670,7 @@ const bossOrderRows = computed(() =>
 );
 
 const bossCustomsBusinessRows = computed(() =>
-  customsBusinessAllRows.value.filter((row) =>
+  customsBusinessRowsForStatement(customsBusinessAllRows.value).filter((row) =>
     dateMatchesPeriodFilter(row.date, bossPeriodFilter.value)
   )
 );
@@ -12593,7 +12818,7 @@ function buildBossUnreceivedCustomsRows(filterKey = bossPeriodFilter.value) {
         const entityName = String(record.entityName || "").trim();
         if (!entityName || entityName === "全部") return null;
         const { start, end } = statementRecordRange(record);
-        const sourceRows = customsBusinessAllRows.value.filter((row) =>
+        const sourceRows = customsBusinessRowsForStatement(customsBusinessAllRows.value).filter((row) =>
           statementCustomsRowMatchesEntity(row, entityName) &&
           orderInDateRange(row.date, start, end)
         );
@@ -12993,8 +13218,9 @@ const statementSupplierSummary = computed(() => ({
 }));
 
 function buildCustomsStatementRows(sourceRows = []) {
+  const visibleRows = customsBusinessRowsForStatement(sourceRows);
   const groups = new Map();
-  sourceRows.forEach((item) => {
+  visibleRows.forEach((item) => {
     const company = String(item.company || "").trim() || "未填写客户";
     const row = groups.get(company) || {
       company,
@@ -13061,7 +13287,7 @@ function customsStatementDateRangeBounds() {
 
 function customsStatementRowsForCompany(company = "") {
   const target = String(company || "").trim() || "未填写客户";
-  return customsBusinessRows.value
+  return customsBusinessRowsForStatement(customsBusinessRows.value)
     .filter((row) => (String(row.company || "").trim() || "未填写客户") === target)
     .sort((left, right) =>
       String(left.date || "").localeCompare(String(right.date || ""))
@@ -13197,6 +13423,25 @@ const linkedOrderCustomsBusinessRows = computed(() => {
   );
 });
 
+const currentOrderLinkedCustomsBusinessId = computed(() =>
+  String(orderForm.linkedCustomsBusinessId || orderCustomsStatementSelectedId.value || "").trim()
+);
+
+const linkedOrderCustomsBusinessSelectedRow = computed(() =>
+  linkedOrderCustomsBusinessRows.value.find((row) => String(row.id || "").trim() === currentOrderLinkedCustomsBusinessId.value) || null
+);
+
+const orderCustomsStatementHasSelection = computed(() => Boolean(currentOrderLinkedCustomsBusinessId.value));
+
+function orderLinkedCustomsBusinessIdValue(order = {}) {
+  const source = orderDisplaySource(order);
+  return String(source?.linkedCustomsBusinessId || source?.linked_customs_business_id || "").trim();
+}
+
+function orderHasLinkedCustomsBusiness(order = {}) {
+  return Boolean(orderLinkedCustomsBusinessIdValue(order));
+}
+
 const linkedOrderCustomsStatementSummary = computed(() => ({
   recordCount: linkedOrderCustomsBusinessRows.value.length,
   declarationCount: linkedOrderCustomsBusinessRows.value.reduce((sum, row) => sum + ((row.declarationNo || row.sixSheetNo) ? 1 : 0), 0),
@@ -13224,7 +13469,8 @@ const linkedOrderCustomsBusinessColumns = computed(() => {
   const columns = [
     ...CUSTOMS_BUSINESS_PREFIX_COLUMNS,
     ...customColumns,
-    ...CUSTOMS_BUSINESS_SUFFIX_COLUMNS.filter((column) => column.key !== "actions")
+    ...CUSTOMS_BUSINESS_SUFFIX_COLUMNS.filter((column) => column.key !== "actions"),
+    { key: "actions", label: "操作", width: 120, min: 100, exportable: false }
   ].map((column, index) => ({ ...column, defaultIndex: index }));
   const byKey = new Map(columns.map((column) => [column.key, column]));
   const ordered = orderedCustomsBusinessColumns.value
@@ -13232,13 +13478,14 @@ const linkedOrderCustomsBusinessColumns = computed(() => {
     .map((column) => byKey.get(column.key));
   const used = new Set(ordered.map((column) => column.key));
   columns
-    .filter((column) => !used.has(column.key))
+    .filter((column) => !used.has(column.key) && column.key !== "actions")
     .forEach((column) => {
       const insertIndex = ordered.findIndex((item) => (item.defaultIndex ?? 999) > (column.defaultIndex ?? 999));
       if (insertIndex >= 0) ordered.splice(insertIndex, 0, column);
       else ordered.push(column);
     });
-  return ordered;
+  const actionsColumn = byKey.get("actions");
+  return actionsColumn ? [...ordered, actionsColumn] : ordered;
 });
 
 const linkedOrderCustomsStatementCompanyLabel = computed(() => {
@@ -13275,6 +13522,7 @@ async function openOrderCustomsStatementModal() {
     return;
   }
   orderCustomsStatementCompany.value = company;
+  orderCustomsStatementSelectedId.value = currentOrderLinkedCustomsBusinessId.value;
   orderCustomsStatementModalOpen.value = true;
   if (!customsBusinessAllRows.value.length) {
     try {
@@ -13286,6 +13534,31 @@ async function openOrderCustomsStatementModal() {
   }
 }
 
+async function persistOrderCustomsStatementAssociation(rowId = "") {
+  const nextId = String(rowId || "").trim();
+  const previousId = String(orderForm.linkedCustomsBusinessId || "").trim();
+  orderForm.linkedCustomsBusinessId = nextId;
+  orderCustomsStatementSelectedId.value = nextId;
+  try {
+    if (!editingOrderNo.value) {
+      return nextId;
+    }
+    const updated = await ordersApi.updateOrder(editingOrderNo.value, { linkedCustomsBusinessId: nextId });
+    const persistedLinkedCustomsBusinessId = String(updated?.linkedCustomsBusinessId || nextId).trim();
+    replaceOrder({
+      ...updated,
+      linkedCustomsBusinessId: persistedLinkedCustomsBusinessId
+    });
+    orderForm.linkedCustomsBusinessId = persistedLinkedCustomsBusinessId;
+    orderCustomsStatementSelectedId.value = persistedLinkedCustomsBusinessId;
+    return persistedLinkedCustomsBusinessId;
+  } catch (error) {
+    orderForm.linkedCustomsBusinessId = previousId;
+    orderCustomsStatementSelectedId.value = previousId;
+    throw error;
+  }
+}
+
 function openCustomsBusinessFromOrderStatement() {
   if (!canAccessModule("customsBusiness")) {
     notify("当前账号没有新建报关业务权限");
@@ -13294,7 +13567,6 @@ function openCustomsBusinessFromOrderStatement() {
   const company = orderCustomsStatementTargetCompany.value;
   const customer = orderCustomsStatementMatchedCustomer.value
     || (company ? customsCustomerByReference(company) : null);
-  closeOrderCustomsStatementModal();
   openCustomsBusinessModal();
   customsBusinessForm.date = orderForm.date || todayInputValue();
   customsBusinessForm.direction = ["进口", "出口", "金二进口", "金二出口"].includes(orderForm.direction)
@@ -13311,6 +13583,28 @@ function openCustomsBusinessFromOrderStatement() {
     customsBusinessCompanyPickerOpen.value = true;
   }
   syncCalculatedCustomsBusinessCharges({ force: true });
+}
+
+async function selectOrderCustomsStatement(row = {}) {
+  const rowId = String(row?.id || "").trim();
+  if (!rowId) return;
+  try {
+    await persistOrderCustomsStatementAssociation(rowId);
+    closeOrderCustomsStatementModal();
+    notify("已关联报关单");
+  } catch (error) {
+    notify(error.message);
+  }
+}
+
+async function clearOrderCustomsStatementAssociation() {
+  if (!orderCustomsStatementHasSelection.value && !String(orderForm.linkedCustomsBusinessId || "").trim()) return;
+  try {
+    await persistOrderCustomsStatementAssociation("");
+    notify("已取消关联");
+  } catch (error) {
+    notify(error.message);
+  }
 }
 
 function statementCustomerRecordForFilter(row = {}, filterKey = activeStatementMonthFilter.value) {
@@ -13444,7 +13738,7 @@ function statementDownloadSnapshotForRecord(record = {}) {
     };
   }
   if (type === "customs") {
-    const sourceRows = customsBusinessAllRows.value.filter((row) =>
+    const sourceRows = customsBusinessRowsForStatement(customsBusinessAllRows.value).filter((row) =>
       statementCustomsRowMatchesEntity(row, entityName) &&
       orderInDateRange(row.date, start, end)
     );
@@ -14420,6 +14714,42 @@ function orderDispatchPlanRow(order = {}) {
   return orderNo ? dispatchPlanRowsByOrderNo.value.get(orderNo) || null : null;
 }
 
+function orderDisplaySource(order = {}) {
+  const liveOrderNo = String(order?.no || "").trim();
+  const liveOrder = liveOrderNo
+    ? orderRows.value.find((item) => String(item.no || "").trim() === liveOrderNo) || null
+    : null;
+  const sourceOrder = liveOrder || order;
+  const dispatchRow = orderDispatchPlanRow(sourceOrder);
+  if (!dispatchRow) return sourceOrder;
+  return {
+    ...sourceOrder,
+    linkedCustomsBusinessId: sourceOrder.linkedCustomsBusinessId || sourceOrder.linked_customs_business_id || "",
+    dispatchNo: String(sourceOrder.dispatchNo || dispatchRow.dispatchNo || "").trim(),
+    businessType: String(sourceOrder.businessType || dispatchRow.businessType || "").trim(),
+    port: displayPortText(sourceOrder.port || dispatchRow.port || ""),
+    direction: String(sourceOrder.direction || dispatchRow.direction || "").trim(),
+    tonnage: String(sourceOrder.tonnage || dispatchRow.tonnage || "").trim(),
+    quantity: String(sourceOrder.quantity || dispatchRow.quantity || "").trim(),
+    weight: String(sourceOrder.weight || dispatchRow.weight || "").trim(),
+    vehicleSource: normalizeVehicleSource(sourceOrder.vehicleSource || dispatchRow.vehicleSource || ""),
+    supplier: String(sourceOrder.supplier || dispatchRow.supplier || "").trim(),
+    plate: normalizePlateText(sourceOrder.plate || dispatchRow.plate || ""),
+    driver: String(sourceOrder.driver || dispatchRow.driver || "").trim(),
+    hkDriver: String(sourceOrder.hkDriver || dispatchRow.hkDriver || "").trim(),
+    mainlandDriver: String(sourceOrder.mainlandDriver || dispatchRow.mainlandDriver || "").trim(),
+    transportMode: normalizeTransportMode(sourceOrder.transportMode || dispatchRow.transportMode || ""),
+    loading: String(sourceOrder.loading || dispatchRow.loading || "").trim(),
+    loadingLocations: Array.isArray(sourceOrder.loadingLocations) && sourceOrder.loadingLocations.length ? sourceOrder.loadingLocations : (dispatchRow.loadingLocations || []),
+    unloading: String(sourceOrder.unloading || dispatchRow.unloading || "").trim(),
+    unloadingLocations: Array.isArray(sourceOrder.unloadingLocations) && sourceOrder.unloadingLocations.length ? sourceOrder.unloadingLocations : (dispatchRow.unloadingLocations || []),
+    date: String(sourceOrder.date || dispatchPlanDate(dispatchRow) || dispatchRow.date || "").trim(),
+    dispatchLoadDate: String(sourceOrder.dispatchLoadDate || dispatchPlanDate(dispatchRow) || dispatchRow.date || "").trim(),
+    dispatchLoadTime: String(sourceOrder.dispatchLoadTime || dispatchRow.loadTime || "").trim(),
+    dispatchDriver: String(sourceOrder.dispatchDriver || dispatchRow.driver || "").trim()
+  };
+}
+
 function orderDispatchLoadDate(order = {}) {
   const dispatchRow = orderDispatchPlanRow(order);
   return String((dispatchRow ? dispatchPlanDate(dispatchRow) : order.dispatchLoadDate) || order.date || "").trim().slice(0, 10);
@@ -14611,22 +14941,23 @@ function normalizedOrderSearchText(value = "") {
 }
 
 function orderDriverFilterValues(order = {}) {
+  const source = orderDisplaySource(order);
   return uniqueOrderCostNames([
-    order.driver,
-    order.dispatchDriver,
-    order.hkDriver,
-    order.mainlandDriver,
-    ...String(order.driver || "").split(/[\/／|｜、]+/),
-    ...String(order.dispatchDriver || "").split(/[\/／|｜、]+/)
+    source.driver,
+    source.dispatchDriver,
+    source.hkDriver,
+    source.mainlandDriver,
+    ...String(source.driver || "").split(/[\/／|｜、]+/),
+    ...String(source.dispatchDriver || "").split(/[\/／|｜、]+/)
   ]);
 }
 
 function orderPlateFilterValues(order = {}) {
-  return [order.plate];
+  return [orderDisplaySource(order).plate];
 }
 
 function orderBusinessTypeFilterValues(order = {}) {
-  return [order.businessType];
+  return [orderDisplaySource(order).businessType];
 }
 
 function orderLocationFilterEntryLabel(entry = {}) {
@@ -14640,11 +14971,12 @@ function orderLocationFilterEntryLabel(entry = {}) {
 }
 
 function orderLocationFilterValues(order = {}, target = "loading") {
-  const labels = recordDispatchLocationEntries(order, target)
+  const source = orderDisplaySource(order);
+  const labels = recordDispatchLocationEntries(source, target)
     .map(orderLocationFilterEntryLabel)
     .filter(Boolean);
   if (labels.length) return uniqueOrderCostNames(labels);
-  const fallback = relatedOrderLocationText(order?.[target] || "");
+  const fallback = relatedOrderLocationText(source?.[target] || "");
   return fallback && fallback !== "-" ? [fallback] : [];
 }
 
@@ -14747,40 +15079,41 @@ function partnerOrderSearchValues(value = "", type = "", id = "") {
 }
 
 function orderRowSearchValues(order = {}) {
+  const source = orderDisplaySource(order);
   const customerValues = partnerOrderSearchValues(
-    order.customer || order.customerName || "",
+    source.customer || source.customerName || "",
     "客户",
-    order.customerId || order.customer_id || ""
+    source.customerId || source.customer_id || ""
   );
-  const supplierValues = partnerOrderSearchValues(order.supplier || "", "供应商");
+  const supplierValues = partnerOrderSearchValues(source.supplier || "", "供应商");
   return [
-    order.no,
-    order.dispatchNo,
-    order.createdByName,
-    order.createdByUsername,
+    source.no,
+    source.dispatchNo,
+    source.createdByName,
+    source.createdByUsername,
     ...customerValues,
-    order.businessType,
-    order.plate,
-    order.driver,
-    order.dispatchDriver,
-    order.hkDriver,
-    order.mainlandDriver,
-    order.port,
-    order.direction,
-    order.tonnage,
-    order.quantity,
-    order.weight,
-    order.vehicleSource,
+    source.businessType,
+    source.plate,
+    source.driver,
+    source.dispatchDriver,
+    source.hkDriver,
+    source.mainlandDriver,
+    source.port,
+    source.direction,
+    source.tonnage,
+    source.quantity,
+    source.weight,
+    source.vehicleSource,
     ...supplierValues,
-    order.transportMode,
-    order.loading,
-    order.unloading,
-    relatedOrderRouteText(order),
-    orderDispatchLoadDateTimeText(order),
-    order.status,
-    order.remark,
-    order.tripNo,
-    order.sixSheetNo
+    source.transportMode,
+    source.loading,
+    source.unloading,
+    relatedOrderRouteText(source),
+    orderDispatchLoadDateTimeText(source),
+    source.status,
+    source.remark,
+    source.tripNo,
+    source.sixSheetNo
   ];
 }
 
@@ -20517,37 +20850,135 @@ function realtimeEventTouchesActiveModule(event = {}) {
   return false;
 }
 
+function realtimeRefreshBucketsForEvent(event = {}) {
+  const active = normalizeRoute(activeModule.value);
+  const entityType = String(event.entityType || "").trim();
+  const buckets = new Set();
+  let handled = true;
+
+  switch (entityType) {
+    case "account":
+    case "account_password":
+    case "account_profile":
+      buckets.add("accounts");
+      break;
+    case "address_book":
+    case "address_history":
+      buckets.add("addressBook");
+      break;
+    case "customer":
+    case "customer_contact":
+      buckets.add("customers");
+      if (["customers", "orders", "dispatchBoard"].includes(active)) buckets.add("addressBook");
+      break;
+    case "customs_business":
+      buckets.add("customsBusiness");
+      if (["financeCustomsStatements", ...BOSS_CENTER_MODULES].includes(active)) buckets.add("customsBusinessAll");
+      break;
+    case "dispatch_plan":
+      buckets.add("orders");
+      if (["home", "dispatchBoard"].includes(active)) buckets.add("dispatch");
+      break;
+    case "driver":
+    case "vehicle":
+      buckets.add("vehicleDriver");
+      if (active === "home") buckets.add("reminders");
+      break;
+    case "driver_adjustment":
+      buckets.add("vehicleDriver");
+      break;
+    case "driver_wage_settlement":
+      buckets.add("financeWageSettlements");
+      break;
+    case "driver_route_adjust_rule":
+      buckets.add("driverRouteAdjustRules");
+      break;
+    case "driver_wage_rule":
+      buckets.add("driverWageRules");
+      break;
+    case "fee_item":
+    case "fee_item_order":
+      buckets.add("feeItems");
+      break;
+    case "file":
+      break;
+    case "freight_rate":
+      buckets.add("freightRates");
+      break;
+    case "master_data":
+      buckets.add("masterData");
+      break;
+    case "other_business":
+      buckets.add("otherBusiness");
+      if (BOSS_CENTER_MODULES.includes(active)) buckets.add("otherBusinessAll");
+      break;
+    case "order":
+      buckets.add("orders");
+      break;
+    case "statement":
+      buckets.add("statementDownloads");
+      break;
+    case "template":
+      buckets.add("templates");
+      break;
+    case "vehicle_expense":
+      buckets.add("vehicleExpenses");
+      break;
+    case "vehicle_profit_exchange_rate":
+      buckets.add("bossVehicleExchangeRates");
+      break;
+    case "cost_center_rate":
+      buckets.add("costCenterRates");
+      break;
+    case "company_expense":
+      buckets.add("companyExpenses");
+      break;
+    default:
+      handled = false;
+      break;
+  }
+
+  if (!handled) return null;
+  return buckets;
+}
+
 function isDispatchPlanEditorOpen() {
   return dispatchModalOpen.value || dispatchDuplicateModalOpen.value;
 }
 
 async function flushRealtimeRefresh() {
   if (realtimeRefreshRunning) return;
-  const pending = { ...realtimePendingRefresh };
-  realtimePendingRefresh.database = false;
-  realtimePendingRefresh.dispatch = false;
-  realtimePendingRefresh.reminders = false;
+  const pending = new Set(realtimePendingRefresh.buckets);
+  realtimePendingRefresh.buckets.clear();
   realtimeRefreshRunning = true;
 
   try {
-    if (pending.database) {
+    const shouldReloadDatabase = pending.has("database");
+    if (shouldReloadDatabase) {
       await loadDatabaseData({ preserveSelection: true, silent: true, moduleScope: "active" });
-    }
-    if (pending.reminders && loggedIn.value) {
-      await loadExpiryReminders({ silent: true, showPopup: activeModule.value === "home" });
-    }
-    if (pending.dispatch && loggedIn.value && canAccessModule("dispatchBoard")) {
-      if (isDispatchPlanEditorOpen()) {
-        realtimePendingRefresh.dispatch = true;
-        return;
+    } else if (pending.size > 0) {
+      const shouldReloadDispatch = pending.has("dispatch") && loggedIn.value && canAccessModule("dispatchBoard");
+      const shouldReloadReminders = pending.has("reminders") && loggedIn.value;
+      if (shouldReloadDispatch && isDispatchPlanEditorOpen()) {
+        pending.delete("dispatch");
+        realtimePendingRefresh.buckets.add("dispatch");
       }
-      await loadDispatchPlansForCurrentFilter();
+      const refreshBuckets = new Set(Array.from(pending).filter((bucket) => !["dispatch", "reminders"].includes(bucket)));
+      if (refreshBuckets.size > 0) {
+        await loadDatabaseData({ preserveSelection: true, silent: true, moduleScope: "active", refreshBuckets });
+      }
+      if (shouldReloadReminders) {
+        await loadExpiryReminders({ silent: true, showPopup: activeModule.value === "home" });
+      }
+      if (shouldReloadDispatch && !isDispatchPlanEditorOpen()) {
+        await loadDispatchPlansForCurrentFilter();
+      }
     }
   } catch (error) {
     console.warn("Realtime refresh failed", error);
   } finally {
     realtimeRefreshRunning = false;
-    if (realtimePendingRefresh.database || realtimePendingRefresh.dispatch || realtimePendingRefresh.reminders) {
+    if (hasPendingRealtimeRefresh()) {
       window.clearTimeout(realtimeRefreshTimer);
       realtimeRefreshTimer = window.setTimeout(() => {
         realtimeRefreshTimer = null;
@@ -20560,12 +20991,13 @@ async function flushRealtimeRefresh() {
 function scheduleRealtimeRefresh(event = {}) {
   if (!loggedIn.value) return;
   if (document.visibilityState === "hidden") return;
-  const modules = realtimeAffectedModules(event);
   if (!realtimeEventTouchesActiveModule(event)) return;
-  const active = normalizeRoute(activeModule.value);
-  realtimePendingRefresh.database = true;
-  realtimePendingRefresh.dispatch = realtimePendingRefresh.dispatch || (active === "dispatchBoard" && modules.has("dispatchBoard"));
-  realtimePendingRefresh.reminders = realtimePendingRefresh.reminders || (active === "home" && shouldRefreshRemindersForRealtime(event));
+  const buckets = realtimeRefreshBucketsForEvent(event);
+  if (!buckets) {
+    realtimePendingRefresh.buckets.add("database");
+  } else if (buckets.size > 0) {
+    buckets.forEach((bucket) => realtimePendingRefresh.buckets.add(bucket));
+  }
   window.clearTimeout(realtimeRefreshTimer);
   realtimeRefreshTimer = window.setTimeout(() => {
     realtimeRefreshTimer = null;
@@ -20577,9 +21009,7 @@ function closeRealtimeConnection() {
   window.clearTimeout(realtimeRefreshTimer);
   realtimeRefreshTimer = null;
   realtimeRefreshRunning = false;
-  realtimePendingRefresh.database = false;
-  realtimePendingRefresh.dispatch = false;
-  realtimePendingRefresh.reminders = false;
+  realtimePendingRefresh.buckets.clear();
   if (realtimeClient) {
     realtimeClient.disconnect();
     realtimeClient = null;
@@ -20660,7 +21090,7 @@ function tableSortValue(row = {}, key = "") {
   if (key === "date" && (row.no || row.order?.no)) return orderDispatchLoadSortValue(row.order || row);
   if (key === "driver" && row.driver) return row.driver.name || "";
   if (key === "type" && row.driver) return row.driver.type || "";
-  if (key === "status" && row.driver) return row.driver.status || "";
+  if (key === "status" && (row.settlementStatus || row.driver)) return row.settlementStatus || row.driver.status || "";
   if (key === "expiry") return vehicleExpenseAnnualEndDate(row);
   if (key === "orderCount") return row.orderCount ?? "";
   if (key === "tripFee") return (row.payable ?? 0) + (row.payableRMB ?? 0);
@@ -21749,39 +22179,41 @@ function customerOrderCellText(order, key) {
 }
 
 function orderCellText(order, key, index = -1) {
+  const source = orderDisplaySource(order);
   const values = {
     sequence: index >= 0 ? index + 1 : "",
-    no: order.no,
-    dispatchNo: order.dispatchNo || "",
-    customer: orderCustomerDisplay(order),
-    businessType: order.businessType,
-    port: displayPortText(order.port),
-    direction: order.direction,
-    tonnage: order.tonnage,
-    currency: order.currency,
-    quantity: order.quantity,
-    weight: order.weight,
-    vehicleSource: order.vehicleSource,
-    plate: order.plate || "-",
-    driver: orderDetailDriverText(order),
-    createdByName: order.createdByName || order.createdByUsername || "-",
-    transportMode: normalizeTransportMode(order.transportMode || "") || "-",
-    supplier: supplierDisplayLabel(order.supplier),
-    loading: relatedOrderLocationText(order.loading),
-    unloading: relatedOrderLocationText(order.unloading),
-    date: orderDispatchLoadDateTimeText(order),
-    receivableHKD: `港币 ${Number(order.receivableHKD || 0).toLocaleString()}`,
-    receivableRMB: `人民币 ${Number(order.receivableRMB || 0).toLocaleString()}`
+    no: source.no,
+    dispatchNo: source.dispatchNo || "",
+    customer: orderCustomerDisplay(source),
+    businessType: source.businessType,
+    port: displayPortText(source.port),
+    direction: source.direction,
+    tonnage: source.tonnage,
+    currency: source.currency,
+    quantity: source.quantity,
+    weight: source.weight,
+    vehicleSource: source.vehicleSource,
+    plate: source.plate || "-",
+    driver: orderDetailDriverText(source),
+    createdByName: source.createdByName || source.createdByUsername || "-",
+    transportMode: normalizeTransportMode(source.transportMode || "") || "-",
+    supplier: supplierDisplayLabel(source.supplier),
+    loading: relatedOrderLocationText(source.loading),
+    unloading: relatedOrderLocationText(source.unloading),
+    date: orderDispatchLoadDateTimeText(source),
+    receivableHKD: `港币 ${Number(source.receivableHKD || 0).toLocaleString()}`,
+    receivableRMB: `人民币 ${Number(source.receivableRMB || 0).toLocaleString()}`
   };
   return values[key] ?? "";
 }
 
 function orderTableCellTitle(order, key) {
-  if (key === "customer") return order?.customer || "";
-  if (key === "supplier") return order?.supplier || "";
-  if (key === "driver") return orderDetailDriverText(order);
-  if (key === "loading" || key === "unloading") return relatedOrderLocationText(order?.[key]);
-  if (isOrderFullDisplayColumn(key)) return orderCellText(order, key);
+  const source = orderDisplaySource(order);
+  if (key === "customer") return source?.customer || "";
+  if (key === "supplier") return source?.supplier || "";
+  if (key === "driver") return orderDetailDriverText(source);
+  if (key === "loading" || key === "unloading") return relatedOrderLocationText(source?.[key]);
+  if (isOrderFullDisplayColumn(key)) return orderCellText(source, key);
   return "";
 }
 
@@ -22739,6 +23171,7 @@ function buildNormalizedOrderPayload() {
   payload.transportMode = normalizeTransportMode(
     payload.transportMode || (normalizeVehicleSource(payload.vehicleSource) === OWN_VEHICLE_SOURCE ? "单司机" : "")
   );
+  payload.linkedCustomsBusinessId = String(payload.linkedCustomsBusinessId || "").trim();
 		  payload.plate = normalizePlateText(payload.plate);
 		  const loadingText = normalizeDispatchLocationDetailText(payload.loading).trim();
 		  const unloadingText = normalizeDispatchLocationDetailText(payload.unloading).trim();
@@ -23174,6 +23607,13 @@ function moneyPairSuffix(hkd = 0, rmb = 0) {
   return parts.join(" / ") || "-";
 }
 
+function driverWagePayableText(hkd = 0, rmb = 0) {
+  const payableHKD = Math.max(0, Number(hkd || 0));
+  const payableRMB = Math.max(0, Number(rmb || 0));
+  if (!payableHKD && !payableRMB) return "不需要应付";
+  return moneyPair(payableHKD, payableRMB);
+}
+
 function quantityNumber(value) {
   const match = String(value ?? "").replace(/,/g, "").match(/-?\d+(?:\.\d+)?/);
   return match ? Number(match[0]) : 0;
@@ -23193,15 +23633,15 @@ async function apiFetchListFrom(request, label, options = {}) {
 }
 
 function clampAuditPageSize(value = auditPageSize.value) {
-  const next = Math.floor(Number(value || 100));
-  return Math.min(1000, Math.max(1, Number.isFinite(next) ? next : 100));
+  const next = Math.floor(Number(value || 20));
+  return auditPageSizeOptions.includes(next) ? next : 20;
 }
 
 function applyAuditLogPageResult(data = {}, fallback = {}) {
   const legacyRows = Array.isArray(data) ? data : null;
   const items = legacyRows || (Array.isArray(data.items) ? data.items : []);
   const nextPageSize = clampAuditPageSize(data.pageSize ?? fallback.pageSize ?? auditPageSize.value);
-  const total = Number.isFinite(Number(data.total)) ? Number(data.total) : items.length;
+  const total = Math.min(1000, Number.isFinite(Number(data.total)) ? Number(data.total) : items.length);
   const totalPages = Math.max(1, Math.ceil(Math.max(0, total) / nextPageSize));
   const nextPageRaw = data.page ?? fallback.page ?? auditPage.value ?? 1;
   const nextPage = Math.min(
@@ -24148,8 +24588,143 @@ function currentAuditDataSnapshot() {
   };
 }
 
+async function loadDatabaseDataRefreshBuckets(refreshBuckets = new Set(), options = {}) {
+  const buckets = refreshBuckets instanceof Set
+    ? refreshBuckets
+    : new Set(Array.isArray(refreshBuckets) ? refreshBuckets.map((item) => String(item || "").trim()).filter(Boolean) : []);
+  if (!buckets.size) return;
+  const { silent = false } = options;
+  const active = normalizeRoute(activeModule.value);
+  if (!silent) loading.value = true;
+  try {
+    if (buckets.has("customers")) {
+      const [customerData, customerContactData] = await Promise.all([
+        apiFetchListFrom(customersApi.listCustomers, "客户/供应商", { silent: true }),
+        apiFetchListFrom(customersApi.listCustomerContacts, "联系人", { silent: true })
+      ]);
+      customerRows.value = customerData.map(normalizeCustomerRecord);
+      customerContactRows.value = customerContactData;
+    }
+
+    if (buckets.has("addressBook")) {
+      const [addressBookData, hiddenAddressHistoryData] = await Promise.all([
+        apiFetchListFrom(customersApi.listAddressBook, "地址本", { silent: true }),
+        apiFetchListFrom(customersApi.listHiddenAddressHistory, "隐藏历史地址", { silent: true })
+      ]);
+      addressBookRows.value = addressBookData;
+      hiddenAddressHistoryRows.value = hiddenAddressHistoryData;
+    }
+
+    if (buckets.has("orders")) {
+      orderRows.value = await apiFetchListFrom(ordersApi.listOrders, "订单", { silent: true });
+    }
+
+    if (buckets.has("dispatch")) {
+      await loadDispatchPlansForCurrentFilter();
+    }
+
+    if (buckets.has("vehicleDriver")) {
+      const [vehicleData, vehicleExpenseData, driverData, driverAdjustmentData] = await Promise.all([
+        apiFetchListFrom(vehiclesApi.listVehicles, "车辆", { silent: true }),
+        apiFetchListFrom(vehiclesApi.listVehicleExpenses, "车辆支出", { silent: true }),
+        apiFetchListFrom(vehiclesApi.listDrivers, "司机", { silent: true }),
+        apiFetchListFrom(vehiclesApi.listDriverAdjustments, "司机预支/报销", { silent: true })
+      ]);
+      vehicleRows.value = vehicleData;
+      vehicleExpenseRows.value = vehicleExpenseData;
+      driverRows.value = driverData.map(normalizeDriverRecord);
+      driverAdjustmentRows.value = driverAdjustmentData;
+    } else if (buckets.has("vehicleExpenses")) {
+      vehicleExpenseRows.value = await apiFetchListFrom(vehiclesApi.listVehicleExpenses, "车辆支出", { silent: true });
+    }
+
+    if (buckets.has("driverWageRules")) {
+      driverWageRuleRows.value = await apiFetchListFrom(vehiclesApi.listDriverWageRules, "司机费用规则", { silent: true });
+    }
+
+    if (buckets.has("driverRouteAdjustRules")) {
+      driverRouteAdjustRules.value = await apiFetchListFrom(financeApi.listDriverRouteAdjustRules, "司机路线扣减规则", { silent: true });
+    }
+
+    if (buckets.has("financeWageSettlements") && active === "financeWages") {
+      financeWageSettlementRows.value = await apiFetchListFrom(
+        () => financeApi.listDriverWageSettlements(financeWageSettlementPeriodKey()),
+        "司机工资结算",
+        { silent: true }
+      );
+    }
+
+    if (buckets.has("costCenterRates")) {
+      costCenterRateRows.value = await apiFetchListFrom(financeApi.listCostCenterRates, "成本中心", { silent: true });
+    }
+
+    if (buckets.has("bossVehicleExchangeRates")) {
+      bossVehicleExchangeRateRows.value = await apiFetchListFrom(financeApi.listVehicleProfitExchangeRates, "车辆利润汇率", { silent: true });
+      syncBossVehicleExchangeRateFromRows();
+    }
+
+    if (buckets.has("feeItems")) {
+      feeItemRows.value = sortFeeItems(await apiFetchListFrom(masterDataApi.listFeeItems, "收费项目", { silent: true }));
+    }
+
+    if (buckets.has("freightRates")) {
+      freightRateRows.value = await apiFetchListFrom(masterDataApi.listFreightRates, "运费模板", { silent: true });
+    }
+
+    if (buckets.has("masterData")) {
+      masterRows.value = await apiFetchListFrom(masterDataApi.listMasterData, "基础数据", { silent: true });
+    }
+
+    if (buckets.has("accounts")) {
+      accountRows.value = await apiFetchListFrom(accountsApi.listAccounts, "权限账号", { silent: true });
+    }
+
+    if (buckets.has("customsBusiness")) {
+      const scope = active === "financeCustomsStatements" ? "customsStatement" : "customsBusiness";
+      customsBusinessRows.value = await loadCustomsBusinesses({ silent: true, scope });
+      customsBusinessAllRows.value = await loadAllCustomsBusinesses({ silent: true });
+    }
+
+    if (buckets.has("otherBusiness")) {
+      otherBusinessRows.value = await loadOtherBusinesses({ silent: true });
+      otherBusinessAllRows.value = await loadAllOtherBusinesses({ silent: true });
+    }
+
+    if (buckets.has("companyExpenses")) {
+      bossCompanyExpenseRows.value = sortBossCompanyExpenseRows(await apiFetchListFrom(financeApi.listCompanyExpenses, "公司级收支", { silent: true }));
+    }
+
+    if (buckets.has("statementDownloads")) {
+      statementDownloadRows.value = await apiFetchListFrom(financeApi.listStatementDownloads, "对账下载记录", { silent: true });
+    }
+
+    if (buckets.has("templates")) {
+      await reloadTemplateRows({ silent: true });
+    }
+
+    if (buckets.has("reminders")) {
+      await loadExpiryReminders({ silent: true, showPopup: active === "home" });
+    }
+
+    if (buckets.has("auditLogs")) {
+      await fetchAuditLogPage(auditPage.value, auditPageSize.value, { loading: false, silent: true });
+    }
+  } finally {
+    if (!silent) loading.value = false;
+  }
+}
+
 async function loadDatabaseData(options = {}) {
   const { preserveSelection = false, silent = false, moduleScope = "all" } = options;
+  const refreshBuckets = options.refreshBuckets instanceof Set
+    ? options.refreshBuckets
+    : new Set(Array.isArray(options.refreshBuckets)
+      ? options.refreshBuckets.map((item) => String(item || "").trim()).filter(Boolean)
+      : []);
+  if (refreshBuckets.size > 0 && !refreshBuckets.has("database")) {
+    await loadDatabaseDataRefreshBuckets(refreshBuckets, { silent });
+    return;
+  }
   const scope = dataLoadActiveScope(moduleScope);
   const canLoadBossCenterData = BOSS_CENTER_MODULES.some((moduleId) => canAccessModule(moduleId));
   const scopedLoad = moduleScope !== "all";
@@ -24176,6 +24751,7 @@ async function loadDatabaseData(options = {}) {
   const canReadAccounts = canAccessModule("accounts");
   const canReadAuditLogs = canAccessModule("security");
   const canReadDriverRouteAdjustRules = canAccessModule("financeWages");
+  const canReadFinanceWageSettlements = canAccessModule("financeWages");
   const canReadStatementDownloads = canAccessModule("financeCosts") || canAccessModule("financeSupplierStatements") || canAccessModule("financeCustomsStatements") || canLoadBossCenterData;
   const canLoadCustomers = canReadCustomers && shouldLoadCustomers;
   const canLoadOrders = canReadOrders && shouldLoadOrders;
@@ -24192,6 +24768,7 @@ async function loadDatabaseData(options = {}) {
   const canLoadAccounts = canReadAccounts && dataLoadScopeMatches(moduleScope, ["accounts"]);
   const canLoadAuditLogs = canReadAuditLogs && dataLoadScopeMatches(moduleScope, ["security"]);
   const canLoadDriverRouteAdjustRules = canReadDriverRouteAdjustRules && dataLoadScopeMatches(moduleScope, ["orders", "financeWages"]);
+  const canLoadFinanceWageSettlements = canReadFinanceWageSettlements && dataLoadScopeMatches(moduleScope, ["financeWages"]);
   const canLoadStatementDownloads = canReadStatementDownloads
     && dataLoadScopeMatches(moduleScope, ["financeCosts", "financeSupplierStatements", "financeCustomsStatements", ...BOSS_CENTER_MODULES]);
   const canLoadFeeItems = shouldLoadFreightConfig;
@@ -24230,6 +24807,7 @@ async function loadDatabaseData(options = {}) {
       costCenterRateData,
       bossVehicleExchangeRateData,
       driverAdjustmentData,
+      financeWageSettlementData,
       feeItemData,
       freightRateData,
       masterData,
@@ -24256,6 +24834,7 @@ async function loadDatabaseData(options = {}) {
       canLoadCostCenterRates ? apiFetchListFrom(financeApi.listCostCenterRates, "成本中心") : Promise.resolve(skippedRows(canReadCostCenterRates, costCenterRateRows.value)),
       canLoadBossVehicleExchangeRates ? apiFetchListFrom(financeApi.listVehicleProfitExchangeRates, "车辆利润汇率") : Promise.resolve(skippedRows(canReadBossVehicleExchangeRates, bossVehicleExchangeRateRows.value)),
       canLoadVehicleDriver ? apiFetchListFrom(vehiclesApi.listDriverAdjustments, "司机预支/报销") : Promise.resolve(skippedRows(canReadVehicleDriver, driverAdjustmentRows.value)),
+      canLoadFinanceWageSettlements ? apiFetchListFrom(() => financeApi.listDriverWageSettlements(financeWageSettlementPeriodKey()), "司机工资结算") : Promise.resolve(skippedRows(canReadFinanceWageSettlements, financeWageSettlementRows.value)),
       canLoadFeeItems ? apiFetchListFrom(masterDataApi.listFeeItems, "收费项目") : Promise.resolve(scopedLoad ? feeItemRows.value : []),
       canLoadFreightRates ? apiFetchListFrom(masterDataApi.listFreightRates, "运费模板") : Promise.resolve(scopedLoad ? freightRateRows.value : []),
       canLoadMasterData ? apiFetchListFrom(masterDataApi.listMasterData, "基础数据") : Promise.resolve(skippedRows(canReadMasterData, masterRows.value)),
@@ -24286,6 +24865,7 @@ async function loadDatabaseData(options = {}) {
     bossVehicleExchangeRateRows.value = bossVehicleExchangeRateData;
     syncBossVehicleExchangeRateFromRows();
     driverAdjustmentRows.value = driverAdjustmentData;
+    financeWageSettlementRows.value = financeWageSettlementData.map(normalizeFinanceWageSettlementRow);
     feeItemRows.value = sortFeeItems(feeItemData);
     freightRateRows.value = freightRateData;
     ruleRows.value = ruleData;
@@ -24857,6 +25437,7 @@ function resetOrderForm() {
     dispatchNo: "",
     customerId: "",
     customer: "",
+    linkedCustomsBusinessId: "",
     businessType: "",
     port: "",
     needsWeighing: false,
@@ -25158,6 +25739,7 @@ function normalizeOrderDriversForSave() {
 async function openOrderModal(customer = null, order = null, options = {}) {
   await ensureReferenceDataLoaded();
   closeOrderDetail();
+  orderCustomsStatementSelectedId.value = "";
   if (customer && !customerMatchesCategory(customer, "运输客户")) customer = null;
   orderAuditMode.value = Boolean(options.audit && order);
   orderViewMode.value = Boolean(order && !orderAuditMode.value && (options.view || !canEditOrder(order)));
@@ -25168,44 +25750,46 @@ async function openOrderModal(customer = null, order = null, options = {}) {
   orderAttachmentUploading.value = false;
   clearOrderAttachmentUploadStatus();
   if (order) {
-    const orderVehicleSource = normalizeVehicleSource(order.vehicleSource || "");
+    const displayOrder = orderDisplaySource(order);
+    const orderVehicleSource = normalizeVehicleSource(displayOrder.vehicleSource || "");
     Object.assign(orderForm, {
-      dispatchNo: order.dispatchNo || "",
-      customerId: order.customerId || "",
-      customer: order.customer || "",
-      businessType: order.businessType || "",
-      port: displayPortText(order.port),
-      needsWeighing: booleanFlag(order.needsWeighing, false),
-      direction: order.direction || "",
-      tonnage: order.tonnage || "",
-      currency: order.currency || "",
-      quantity: String(order.quantity || ""),
-      weight: order.weight || "",
+      dispatchNo: displayOrder.dispatchNo || "",
+      customerId: displayOrder.customerId || "",
+      customer: displayOrder.customer || "",
+      linkedCustomsBusinessId: String(displayOrder.linkedCustomsBusinessId || "").trim(),
+      businessType: displayOrder.businessType || "",
+      port: displayPortText(displayOrder.port),
+      needsWeighing: booleanFlag(displayOrder.needsWeighing, false),
+      direction: displayOrder.direction || "",
+      tonnage: displayOrder.tonnage || "",
+      currency: displayOrder.currency || "",
+      quantity: String(displayOrder.quantity || ""),
+      weight: displayOrder.weight || "",
       vehicleSource: orderVehicleSource,
-      supplier: order.supplier || "",
-      plate: order.plate || "",
-      driver: order.driver || "",
-      hkDriver: order.hkDriver || "",
-      mainlandDriver: order.mainlandDriver || "",
-	      transportMode: normalizeTransportMode(order.transportMode || (orderVehicleSource === OWN_VEHICLE_SOURCE ? "单司机" : "")),
-	      loading: order.loading || "",
-	      loadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(order, "loading")),
+      supplier: displayOrder.supplier || "",
+      plate: displayOrder.plate || "",
+      driver: displayOrder.driver || "",
+      hkDriver: displayOrder.hkDriver || "",
+      mainlandDriver: displayOrder.mainlandDriver || "",
+	      transportMode: normalizeTransportMode(displayOrder.transportMode || (orderVehicleSource === OWN_VEHICLE_SOURCE ? "单司机" : "")),
+	      loading: displayOrder.loading || "",
+	      loadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(displayOrder, "loading")),
 	      loadingContact: order.loadingContact || "",
 	      loadingPhone: order.loadingPhone || "",
-	      unloading: order.unloading || "",
-	      unloadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(order, "unloading")),
+	      unloading: displayOrder.unloading || "",
+	      unloadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(displayOrder, "unloading")),
       unloadingContact: order.unloadingContact || "",
       unloadingPhone: order.unloadingPhone || "",
-      date: order.date || "",
-      receivableHKD: Number(order.receivableHKD || 0),
-      receivableRMB: Number(order.receivableRMB || 0),
-      status: order.status || "",
-      operatingUnit: order.operatingUnit || order.operating_unit || "",
-      remark: order.remark || "",
-      tripNoEnabled: Boolean(order.tripNoEnabled),
-      tripNo: order.tripNo || "",
-      sixSheetEnabled: Boolean(order.sixSheetEnabled),
-      sixSheetNo: order.sixSheetNo || "",
+      date: displayOrder.date || "",
+      receivableHKD: Number(displayOrder.receivableHKD || 0),
+      receivableRMB: Number(displayOrder.receivableRMB || 0),
+      status: displayOrder.status || "",
+      operatingUnit: displayOrder.operatingUnit || displayOrder.operating_unit || "",
+      remark: displayOrder.remark || "",
+      tripNoEnabled: Boolean(displayOrder.tripNoEnabled),
+      tripNo: displayOrder.tripNo || "",
+      sixSheetEnabled: Boolean(displayOrder.sixSheetEnabled),
+      sixSheetNo: displayOrder.sixSheetNo || "",
       customsNo: "",
       customsUnit: "",
       customsItemCount: "",
@@ -25218,7 +25802,8 @@ async function openOrderModal(customer = null, order = null, options = {}) {
       orderForm.mainlandDriver = mainlandDriver.trim();
       orderForm.driver = "";
     }
-    loadCustomsFieldsFromRemark(order.remark || "");
+    loadCustomsFieldsFromRemark(displayOrder.remark || "");
+    orderCustomsStatementSelectedId.value = String(displayOrder.linkedCustomsBusinessId || "").trim();
     applyOrderRequiredFieldDefaults({ force: true });
     orderFees.value = (order.fees?.length ? order.fees : [
       {
@@ -25322,6 +25907,8 @@ function closeOrderModal() {
   orderAuditMode.value = false;
   orderViewMode.value = false;
   closeOrderCustomsStatementModal();
+  closeCustomsBusinessModal();
+  orderCustomsStatementSelectedId.value = "";
   closeOrderFeeFxContextMenu();
   closeOrderFeeNamePicker();
   orderSupplierPickerOpen.value = false;
@@ -25896,7 +26483,14 @@ function moveFeeRow(index, offset) {
 }
 
 function replaceOrder(updatedOrder) {
-  orderRows.value = orderRows.value.map((item) => item.no === updatedOrder.no ? updatedOrder : item);
+  const nextNo = String(updatedOrder?.no || "").trim();
+  if (!nextNo) return;
+  const currentOrder = orderRows.value.find((item) => String(item.no || "").trim() === nextNo) || {};
+  const mergedOrder = {
+    ...currentOrder,
+    ...updatedOrder
+  };
+  orderRows.value = orderRows.value.map((item) => String(item.no || "").trim() === nextNo ? mergedOrder : item);
 }
 
 function canManageOrderAudit() {
@@ -28029,8 +28623,9 @@ function financeWageExportValue(row, key) {
     tripFee: moneyPair(row.payable, row.payableRMB),
     advanceFee: moneyPair(row.advanceFee, row.advanceFeeRMB),
     adjustments: moneyPair(row.adjustments, row.adjustmentsRMB),
-    total: moneyPair(row.total, row.totalRMB),
-    status: row.driver.status || "-"
+    total: driverWagePayableText(row.total, row.totalRMB),
+    status: row.settlementStatus || DRIVER_WAGE_SETTLEMENT_PENDING_STATUS,
+    settledAt: row.settledAt ? inputDateLabel(row.settledAt) : "-"
   };
   return values[key] ?? "";
 }
@@ -28065,6 +28660,106 @@ async function exportFinanceWages(rows = financeWageRows.value) {
     "司机工资统计"
   );
   notify("已导出司机工资统计");
+}
+
+function formatDriverWageNumber(value = 0) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number)) return "0";
+  const text = number.toFixed(2);
+  return text.replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
+}
+
+function financeWageStatementFeeTotal(order = {}, keywords = [], currency = "") {
+  const names = Array.isArray(keywords) ? keywords : [keywords];
+  return (Array.isArray(order?.fees) ? order.fees : [])
+    .filter((fee) => !isAdvanceFee(fee))
+    .filter((fee) => Number(fee?.amount || 0) !== 0)
+    .filter((fee) => names.some((name) => String(fee?.name || "").includes(String(name || "").trim())))
+    .filter((fee) => !currency || currencyCodeDisplay(fee.currency || "港币") === currency)
+    .reduce((sum, fee) => sum + Number(fee.amount || 0), 0);
+}
+
+function financeWageStatementRemarkText(order = {}) {
+  const remarks = (Array.isArray(order?.fees) ? order.fees : [])
+    .map((fee) => String(fee?.remark || "").trim())
+    .filter(Boolean);
+  const orderRemarks = [
+    String(order?.note || "").trim(),
+    String(order?.remark || "").trim()
+  ].filter(Boolean);
+  return Array.from(new Set([...orderRemarks, ...remarks])).join("；");
+}
+
+function financeWageStatementRows(row = {}) {
+  const driver = row?.driver || {};
+  const orders = [...(row?.orders || [])].sort((left, right) => {
+    const leftDate = inputDateUtcValue(left?.date) ?? 0;
+    const rightDate = inputDateUtcValue(right?.date) ?? 0;
+    if (leftDate !== rightDate) return leftDate - rightDate;
+    return String(left?.no || "").localeCompare(String(right?.no || ""), "zh-Hans-CN", { numeric: true, sensitivity: "base" });
+  });
+  return orders.map((order, index) => {
+    const hkTotal = financeWageStatementFeeTotal(order, ["汽车器材", "油费", "香港坐车", "香港停车费", "香港/停车费/过磅费/登记费", "存放叉车"], "HKD");
+    const rmbTotal = financeWageStatementFeeTotal(order, ["打的接车", "大陆停车费", "大陆/停车费/过磅费", "深圳湾停车场费", "洗车", "大陆加油", "其它", "其他"], "RMB");
+    const extraFee = driver ? driverExtraTripFeeTotal(order, driver) : 0;
+    return [
+      index + 1,
+      parseInputDate(order.date) || order.date || "",
+      order.customer || "",
+      relatedOrderRouteText(order),
+      order.direction || "",
+      financeWageStatementFeeTotal(order, ["汽车器材"], "HKD") || "",
+      financeWageStatementFeeTotal(order, ["油费"], "HKD") || "",
+      financeWageStatementFeeTotal(order, ["香港坐车"], "HKD") || "",
+      financeWageStatementFeeTotal(order, ["香港停车费", "香港/停车费/过磅费/登记费", "过磅费", "登记费"], "HKD") || "",
+      financeWageStatementFeeTotal(order, ["存放叉车"], "HKD") || "",
+      financeWageStatementFeeTotal(order, ["打的接车"], "RMB") || "",
+      financeWageStatementFeeTotal(order, ["大陆停车费", "大陆/停车费/过磅费", "过磅费"], "RMB") || "",
+      financeWageStatementFeeTotal(order, ["深圳湾停车场费"], "RMB") || "",
+      financeWageStatementFeeTotal(order, ["洗车", "大陆加油"], "RMB") || "",
+      financeWageStatementFeeTotal(order, ["其它", "其他"], "RMB") || "",
+      Number(hkTotal || 0),
+      Number(rmbTotal || 0),
+      Number(order.receivableHKD || 0),
+      orderDetailDriverText(order),
+      Number(extraFee || 0),
+      financeWageStatementRemarkText(order),
+      ""
+    ];
+  });
+}
+
+function buildFinanceWageStatementExportPayload(row = {}) {
+  const rows = financeWageStatementRows(row);
+  const rmbTotal = rows.reduce((sum, item) => sum + Number(item[16] || 0), 0);
+  const freightTotal = rows.reduce((sum, item) => sum + Number(item[17] || 0), 0);
+  const extraTotal = rows.reduce((sum, item) => sum + Number(item[19] || 0), 0);
+  const advanceHKD = Number(row.adjustments || 0);
+  const exchangeRate = Number(monthlyExchangeRateInputValue(monthlyExchangeRatePeriodMonth("finance")) || 0);
+  const convertedRMB = exchangeRate ? Number((rmbTotal * exchangeRate).toFixed(2)) : 0;
+  const payableTotal = Number((freightTotal + extraTotal + advanceHKD + convertedRMB).toFixed(2));
+  const paymentDate = financeWageSettlementDateText(row);
+  const paymentLabel = paymentDate ? `${inputDateLabel(paymentDate)}已付款` : "";
+  const filenamePaymentLabel = paymentDate ? `${inputDateMonthDayLabel(paymentDate)}已付款` : "";
+  const filename = `${financeDateRangeLabel()}${exportFilenamePart(row?.driver?.name || "司机")}登记表${filenamePaymentLabel ? `（${filenamePaymentLabel}）` : ""}.xlsx`;
+  return {
+    rows,
+    driverName: row?.driver?.name || "司机",
+    periodLabel: financeDateRangeLabel(),
+    summaryNote: `${rows.length}车骑师/口岸过车`,
+    noteLines: [
+      `人民币无预支，司机代垫${formatDriverWageNumber(rmbTotal)}`,
+      `预支HKD${formatDriverWageNumber(advanceHKD)}，司机代垫${formatDriverWageNumber(advanceHKD)}`,
+      `${financeDateRangeLabel()}预支杂费${formatDriverWageNumber(Number(row.adjustmentsRMB || 0))}`,
+      exchangeRate ? `${formatDriverWageNumber(rmbTotal)}/${formatDriverWageNumber(exchangeRate)}=港币${formatDriverWageNumber(convertedRMB)}` : "",
+      `运费${formatDriverWageNumber(freightTotal)}+装卸过海加点${formatDriverWageNumber(extraTotal)}+司机代垫${formatDriverWageNumber(advanceHKD)}+杂费${formatDriverWageNumber(convertedRMB)}=应付${formatDriverWageNumber(payableTotal)}`
+    ],
+    paymentLabel,
+    exchangeRate,
+    advanceHKD,
+    adjustmentsHKD: advanceHKD,
+    filename
+  };
 }
 
 const FINANCE_WAGE_AUDIT_FEE_COLUMN_LABELS = ["香港停车费", "香港登记费", "加点费", "大陆停车费", "装货等候费"];
@@ -28165,58 +28860,18 @@ async function exportFinanceWageRow(row) {
     notify("该司机当前期间暂无可导出的订单明细");
     return;
   }
-  const costCenterTotal = row.orders.reduce((sum, order) => {
-    const amount = driverCostCenterFeeBreakdown(order, row.driver);
-    return { hkd: sum.hkd + amount.hkd, rmb: sum.rmb + amount.rmb };
-  }, { hkd: 0, rmb: 0 });
-  const baseTotal = row.orders.reduce((sum, order) => {
-    const amount = financeWageAuditBaseCostBreakdown(driverCostCenterFeeBreakdown(order, row.driver));
-    return { hkd: sum.hkd + amount.hkd, rmb: sum.rmb + amount.rmb };
-  }, { hkd: 0, rmb: 0 });
-  const otherTotalHKD = Number((costCenterTotal.hkd - baseTotal.hkd).toFixed(2));
-  const advanceTotal = row.orders.reduce((sum, order) => {
-    const amount = driverFinanceAdvanceBreakdown(order, row.driver);
-    return { hkd: sum.hkd + amount.hkd, rmb: sum.rmb + amount.rmb };
-  }, { hkd: 0, rmb: 0 });
-  const customerAdjustTotal = row.orders.reduce((sum, order) => {
-    const amount = driverCustomerTripAdjustBreakdown(order, row.driver);
-    return sum + amount.hkd;
-  }, 0);
-  const wageTotal = row.orders.reduce((sum, order) => {
-    const amount = driverFinanceWageOrderBreakdown(order, row.driver);
-    return { hkd: sum.hkd + amount.hkd, rmb: sum.rmb + amount.rmb };
-  }, { hkd: 0, rmb: 0 });
-  const totalRow = [
-    "合计",
-    "",
-    "",
-    `${detailRows.length} 单`,
-    "",
-    "",
-    "",
-    "",
-    "",
-    money(baseTotal.hkd),
-    money(baseTotal.rmb || costCenterTotal.rmb),
-    money(otherTotalHKD),
-    money(advanceTotal.hkd),
-    money(advanceTotal.rmb),
-    "",
-    ...FINANCE_WAGE_AUDIT_FEE_COLUMN_LABELS.map(() => ""),
-    money(customerAdjustTotal),
-    money(row.adjustments),
-    money(row.adjustmentsRMB),
-    money(wageTotal.hkd + Number(row.adjustments || 0)),
-    money(wageTotal.rmb + Number(row.adjustmentsRMB || 0)),
-    ""
-  ];
-  await exportXlsx(
-    `工资核对-${row.driver.name}-${financeDateRangeLabel()}-${todayInputValue()}.xlsx`,
-    FINANCE_WAGE_AUDIT_HEADERS,
-    [...detailRows, totalRow],
-    "工资核对"
-  );
-  notify(`已导出${row.driver.name}的订单核对明细`);
+  const payload = buildFinanceWageStatementExportPayload(row);
+  const driverName = row?.driver?.name || "司机";
+  try {
+    loading.value = true;
+    const blob = await financeApi.exportDriverWageSettlement(payload);
+    downloadBlob(blob, payload.filename || `${financeDateRangeLabel()}${exportFilenamePart(row?.driver?.name || "司机")}登记表.xlsx`);
+    notify(`已导出${driverName}工资单（登记表）`);
+  } catch (error) {
+    notify(error.message || "司机工资单导出失败");
+  } finally {
+    loading.value = false;
+  }
 }
 
 async function exportStatementCsv() {
@@ -31763,13 +32418,14 @@ function closeDispatchDetail() {
 }
 
 function orderDetailDriverText(order = {}) {
-  const mode = normalizeTransportMode(order.transportMode || "");
-  const dispatchDriver = String(order.dispatchDriver || "").trim();
+  const source = orderDisplaySource(order);
+  const mode = normalizeTransportMode(source.transportMode || "");
+  const dispatchDriver = String(source.dispatchDriver || "").trim();
   const rawNames = mode === "双司机"
-    ? [dispatchDriver, order.hkDriver, order.mainlandDriver, order.driver]
+    ? [dispatchDriver, source.hkDriver, source.mainlandDriver, source.driver]
     : isDomesticTransferMode(mode)
-      ? [dispatchDriver, order.hkDriver, order.driver, order.mainlandDriver]
-      : [dispatchDriver, order.driver, order.hkDriver, order.mainlandDriver];
+      ? [dispatchDriver, source.hkDriver, source.driver, source.mainlandDriver]
+      : [dispatchDriver, source.driver, source.hkDriver, source.mainlandDriver];
   const names = rawNames
     .flatMap((value) => String(value || "").split(/[\/／|｜、]+/))
     .map((value) => String(value || "").trim())
@@ -32426,7 +33082,7 @@ function orderDetailFeeRows(order = {}) {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="order in selectedCustomerOrders" :key="order.no">
+                  <tr v-for="order in selectedCustomerOrders" :key="order.no" :class="{ 'linked-customs-row': orderHasLinkedCustomsBusiness(order) }">
                     <td
                       v-for="(column, index) in visibleCustomerOrderColumns"
                       :key="column.key"
@@ -33015,10 +33671,10 @@ function orderDetailFeeRows(order = {}) {
                 </tr>
               </thead>
               <tbody>
-                <tr
+                  <tr
                   v-for="(order, orderIndex) in filteredOrders"
                   :key="order.no"
-                  :class="{ selected: selectedOrderRowNo === order.no, 'charged-row': isChargedOrder(order) }"
+                  :class="{ selected: selectedOrderRowNo === order.no, 'charged-row': isChargedOrder(order), 'linked-customs-row': orderHasLinkedCustomsBusiness(order) }"
                   @click="selectedOrderRowNo = selectedOrderRowNo === order.no ? '' : order.no"
                   @dblclick="openOrderModal(null, order)"
                 >
@@ -33416,7 +34072,7 @@ function orderDetailFeeRows(order = {}) {
                       <template v-else-if="column.key === 'weight'">{{ row.order.weight || "-" }}</template>
                       <template v-else-if="column.key === 'route'">{{ dispatchOrderRouteText(row.order) }}</template>
                       <template v-else-if="column.key === 'status'">
-                        <select v-model="dispatchPlanRows[row.index].status" :class="['dispatch-status-select', dispatchStatusClass(dispatchPlanRows[row.index].status)]" :disabled="isDispatchStatusSelectDisabled(row)" @click.stop @change="handleDispatchStatusChange(row)">
+                        <select v-model="dispatchPlanRows[row.index].status" :class="['dispatch-status-select', dispatchStatusClass(dispatchPlanRows[row.index].status)]" :disabled="isDispatchStatusSelectDisabled(row)" @click.stop @focus="rememberDispatchStatusBeforeChange(row)" @pointerdown="rememberDispatchStatusBeforeChange(row)" @change="handleDispatchStatusChange(row, $event)">
                           <option v-if="!dispatchStatusOptionsForRow(row).includes(dispatchStatusValueForRow(row))" :value="dispatchStatusValueForRow(row)" hidden>{{ dispatchStatusValueForRow(row) }}</option>
                           <option v-for="status in dispatchStatusOptionsForRow(row)" :key="status" :value="status">{{ status }}</option>
                         </select>
@@ -34070,7 +34726,7 @@ function orderDetailFeeRows(order = {}) {
           <div class="finance-summary-card"><span>统计期间</span><strong>{{ financeDateRangeLabel() }}</strong></div>
           <div class="finance-summary-card"><span>司机人数</span><strong>{{ financeWageRows.length }}</strong></div>
           <div class="finance-summary-card"><span>关联订单</span><strong>{{ financeSummary.orderCount }}</strong></div>
-          <div class="finance-summary-card"><span>司机成本</span><strong>{{ moneyPair(financeSummary.driverPayableHKD, financeSummary.driverPayableRMB) }}</strong></div>
+          <div class="finance-summary-card"><span>司机成本</span><strong>{{ driverWagePayableText(financeSummary.driverPayableHKD, financeSummary.driverPayableRMB) }}</strong></div>
           <div class="finance-summary-card"><span>司机代垫</span><strong>{{ moneyPair(financeSummary.driverAdvanceHKD, financeSummary.driverAdvanceRMB) }}</strong></div>
           <div class="finance-summary-card"><span>预支/报销</span><strong>{{ moneyPair(financeWageRows.reduce((sum, row) => sum + row.adjustments, 0), financeWageRows.reduce((sum, row) => sum + row.adjustmentsRMB, 0)) }}</strong></div>
           <div class="finance-summary-card"><span>供应商代垫</span><strong>{{ moneyPair(financeSummary.supplierAdvanceHKD, financeSummary.supplierAdvanceRMB) }}</strong></div>
@@ -34141,10 +34797,30 @@ function orderDetailFeeRows(order = {}) {
 	                    <template v-else-if="column.key === 'tripFee'">{{ moneyPair(row.payable, row.payableRMB) }}</template>
 	                    <template v-else-if="column.key === 'advanceFee'">{{ moneyPair(row.advanceFee, row.advanceFeeRMB) }}</template>
 	                    <template v-else-if="column.key === 'adjustments'">{{ moneyPair(row.adjustments, row.adjustmentsRMB) }}</template>
-	                    <template v-else-if="column.key === 'total'"><strong>{{ moneyPair(row.total, row.totalRMB) }}</strong></template>
-	                    <template v-else-if="column.key === 'status'">{{ row.driver.status || '-' }}</template>
+	                    <template v-else-if="column.key === 'total'"><strong>{{ driverWagePayableText(row.total, row.totalRMB) }}</strong></template>
+	                    <template v-else-if="column.key === 'status'">
+	                      <select
+	                        class="finance-wage-settlement-status"
+	                        :value="financeWageSettlementStatusText(row)"
+	                        @click.stop
+	                        @change="saveFinanceWageSettlement(row, $event.target.value, financeWageSettlementDateInputValue(row))"
+	                      >
+	                        <option v-for="status in DRIVER_WAGE_SETTLEMENT_STATUS_OPTIONS" :key="status" :value="status">{{ status }}</option>
+	                      </select>
+	                    </template>
+	                    <template v-else-if="column.key === 'settledAt'">
+	                      <input
+	                        v-if="financeWageSettlementStatusText(row) === DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS"
+	                        class="finance-wage-settlement-date"
+	                        type="date"
+	                        :value="financeWageSettlementDateInputValue(row)"
+	                        @click.stop
+	                        @change="saveFinanceWageSettlement(row, financeWageSettlementStatusText(row), $event.target.value)"
+	                      />
+	                      <span v-else>-</span>
+	                    </template>
 	                    <template v-else-if="column.key === 'actions'">
-	                      <button class="icon-btn icon-only" type="button" title="导出此司机核对数据" aria-label="导出此司机核对数据" @click.stop="exportFinanceWageRow(row)"><IconSvg name="download" /></button>
+	                      <button class="icon-btn icon-only" type="button" title="导出司机工资单（登记表）" aria-label="导出司机工资单（登记表）" @click.stop="exportFinanceWageRow(row)"><IconSvg name="download" /></button>
 	                    </template>
 	                  </td>
 	                </tr>
@@ -37140,7 +37816,7 @@ function orderDetailFeeRows(order = {}) {
             <div>
               <h2>{{ activeFinanceWageDetailRow.driver.name }} · 工资订单明细</h2>
               <p class="modal-subtitle">
-                {{ financeDateRangeLabel() }} · {{ activeFinanceWageDetailRow.orderCount }} 单 · 成本中心 {{ moneyPair(activeFinanceWageDetailRow.payable, activeFinanceWageDetailRow.payableRMB) }} · 代垫 {{ moneyPair(activeFinanceWageDetailRow.advanceFee, activeFinanceWageDetailRow.advanceFeeRMB) }} · 应付 {{ moneyPair(activeFinanceWageDetailRow.total, activeFinanceWageDetailRow.totalRMB) }}
+                {{ financeDateRangeLabel() }} · {{ activeFinanceWageDetailRow.orderCount }} 单 · 成本中心 {{ moneyPair(activeFinanceWageDetailRow.payable, activeFinanceWageDetailRow.payableRMB) }} · 代垫 {{ moneyPair(activeFinanceWageDetailRow.advanceFee, activeFinanceWageDetailRow.advanceFeeRMB) }} · 应付 {{ driverWagePayableText(activeFinanceWageDetailRow.total, activeFinanceWageDetailRow.totalRMB) }}
               </p>
             </div>
             <div class="modal-detail-actions">
@@ -37171,7 +37847,7 @@ function orderDetailFeeRows(order = {}) {
               </details>
               <button class="ghost-btn small" type="button" @click="resetFinanceWageDetailColumnOrder"><IconSvg name="list" />恢复列序</button>
               <button class="ghost-btn small" type="button" @click="resetFinanceWageDetailColumnWidths(activeFinanceWageDetailRow)"><IconSvg name="refresh" />恢复列宽</button>
-              <button class="ghost-btn small" type="button" @click="exportFinanceWageRow(activeFinanceWageDetailRow)"><IconSvg name="download" />导出</button>
+              <button class="ghost-btn small" type="button" @click="exportFinanceWageRow(activeFinanceWageDetailRow)"><IconSvg name="download" />导出工资单</button>
               <button type="button" class="icon-btn" @click="closeFinanceWageDetail"><IconSvg name="close" />关闭</button>
             </div>
           </div>
@@ -37354,7 +38030,7 @@ function orderDetailFeeRows(order = {}) {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="(order, orderIndex) in orderListDetailRows" :key="order.no" :class="{ 'charged-row': isChargedOrder(order) }" @dblclick="openOrderModal(null, order)">
+                  <tr v-for="(order, orderIndex) in orderListDetailRows" :key="order.no" :class="{ 'charged-row': isChargedOrder(order), 'linked-customs-row': orderHasLinkedCustomsBusiness(order) }" @dblclick="openOrderModal(null, order)">
                     <td
                       v-for="(column, index) in orderListDetailColumns"
                       :key="column.key"
@@ -39093,13 +39769,13 @@ function orderDetailFeeRows(order = {}) {
                 <label class="order-compact-field">经营单位<input v-model.trim="orderForm.operatingUnit" placeholder="可不填" /></label>
                 <button
                   class="ghost-btn order-customs-link-btn"
-                  :class="{ 'is-disabled': !canOpenOrderCustomsStatement }"
+                  :class="{ 'is-disabled': !canOpenOrderCustomsStatement, 'is-linked': orderCustomsStatementHasSelection }"
                   type="button"
                   :disabled="!canOpenOrderCustomsStatement"
                   :aria-disabled="!canOpenOrderCustomsStatement"
-                  :title="canOpenOrderCustomsStatement ? '查看匹配的报关客户报关单' : '当前客户未匹配到可关联的报关客户'"
+                  :title="orderCustomsStatementHasSelection ? '已关联报关单，点击查看' : (canOpenOrderCustomsStatement ? '查看匹配的报关客户报关单' : '当前客户未匹配到可关联的报关客户')"
                   @click.stop="openOrderCustomsStatementModal"
-                ><IconSvg name="list" />关联报关单</button>
+                ><IconSvg name="list" />{{ orderCustomsStatementHasSelection ? '已关联报关单' : '关联报关单' }}</button>
               </div>
               <label v-if="orderHasTransportFields" class="order-compact-field order-location-field order-location-wide order-loading-field">装货
                 <span class="location-input-row route-tree-wrap" @click.stop>
@@ -39567,7 +40243,7 @@ function orderDetailFeeRows(order = {}) {
                       <th
                         v-for="column in linkedOrderCustomsBusinessColumns"
                         :key="column.key"
-                        :class="{ 'customs-business-amount-col': column.amount }"
+                        :class="{ 'customs-business-amount-col': column.amount, 'customs-business-actions-col': column.key === 'actions' }"
                       >{{ column.label }}</th>
                     </tr>
                   </thead>
@@ -39575,15 +40251,50 @@ function orderDetailFeeRows(order = {}) {
                     <tr v-if="orderCustomsStatementLoading">
                       <td :colspan="linkedOrderCustomsBusinessColumns.length">正在加载报关业务...</td>
                     </tr>
-                    <tr v-for="row in linkedOrderCustomsBusinessRows" :key="row.id">
-                      <td
-                        v-for="column in linkedOrderCustomsBusinessColumns"
-                        :key="`${row.id}-${column.key}`"
-                        :class="{ 'customs-business-amount-col': column.amount, 'customs-business-text-col': ['company', 'remark'].includes(column.key) }"
-                      >
-                        <strong v-if="column.key === 'total'">{{ customsBusinessCellText(row, column) }}</strong>
-                        <template v-else>{{ customsBusinessCellText(row, column) }}</template>
-                      </td>
+                    <tr
+                      v-for="row in linkedOrderCustomsBusinessRows"
+                      :key="row.id"
+                      :class="{ 'is-selected': String(row.id || '').trim() === currentOrderLinkedCustomsBusinessId }"
+                      @dblclick.stop="openEditCustomsBusinessModal(row)"
+                    >
+                      <template v-for="column in linkedOrderCustomsBusinessColumns" :key="`${row.id}-${column.key}`">
+                        <td
+                          v-if="column.key === 'actions'"
+                          class="customs-business-actions-col"
+                        >
+                          <span
+                            v-if="String(row.id || '').trim() === currentOrderLinkedCustomsBusinessId"
+                            class="order-customs-select-group"
+                          >
+                            <button
+                              class="primary-btn small order-customs-select-btn is-linked"
+                              type="button"
+                              @click.stop="selectOrderCustomsStatement(row)"
+                              @dblclick.stop
+                            >已关联报关单</button>
+                            <button
+                              class="ghost-btn small order-customs-cancel-btn"
+                              type="button"
+                              @click.stop="clearOrderCustomsStatementAssociation"
+                              @dblclick.stop
+                            >取消</button>
+                          </span>
+                          <button
+                            v-else
+                            class="ghost-btn small order-customs-select-btn"
+                            type="button"
+                            @click.stop="selectOrderCustomsStatement(row)"
+                            @dblclick.stop
+                          >选择关联</button>
+                        </td>
+                        <td
+                          v-else
+                          :class="{ 'customs-business-amount-col': column.amount, 'customs-business-text-col': ['company', 'remark'].includes(column.key) }"
+                        >
+                          <strong v-if="column.key === 'total'">{{ customsBusinessCellText(row, column) }}</strong>
+                          <template v-else>{{ customsBusinessCellText(row, column) }}</template>
+                        </td>
+                      </template>
                     </tr>
                     <tr v-if="!orderCustomsStatementLoading && linkedOrderCustomsBusinessRows.length === 0">
                       <td :colspan="linkedOrderCustomsBusinessColumns.length">暂无匹配的报关业务</td>
@@ -40449,7 +41160,7 @@ function orderDetailFeeRows(order = {}) {
 	      </section>
 	    </div>
 
-	    <div v-if="customsBusinessModalOpen" class="modal-backdrop">
+	    <div v-if="customsBusinessModalOpen" class="modal-backdrop" :class="{ 'nested-modal-backdrop': orderModalOpen }">
 	      <form class="modal-card compact-modal customs-business-modal" @click="closeCustomsBusinessCompanyPicker" @submit.prevent="saveCustomsBusiness">
 	        <div class="modal-head">
 	          <h2>
