@@ -404,6 +404,14 @@ async function columnDataType(table, column) {
   return row?.data_type || "";
 }
 
+let dispatchPlanUpdatedAtColumnCache = null;
+
+async function dispatchPlanHasUpdatedAtColumn() {
+  if (dispatchPlanUpdatedAtColumnCache !== null) return dispatchPlanUpdatedAtColumnCache;
+  dispatchPlanUpdatedAtColumnCache = await hasColumn("dispatch_plans", "updated_at");
+  return dispatchPlanUpdatedAtColumnCache;
+}
+
 async function addColumn(table, definition) {
   await db.exec(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${definition}`);
 }
@@ -670,11 +678,18 @@ async function backfillDispatchRowCreationTimesAndOrderDates() {
       return nextRow;
     });
     if (changed) {
-      await db.prepare(`
+      const updateSql = (await dispatchPlanHasUpdatedAtColumn())
+        ? `
         UPDATE dispatch_plans
         SET rows_json = @rowsJson, updated_at = CURRENT_TIMESTAMP
         WHERE plan_date = @planDate
-      `).run({ planDate: plan.plan_date, rowsJson: JSON.stringify(nextRows) });
+      `
+        : `
+        UPDATE dispatch_plans
+        SET rows_json = @rowsJson
+        WHERE plan_date = @planDate
+      `;
+      await db.prepare(updateSql).run({ planDate: plan.plan_date, rowsJson: JSON.stringify(nextRows) });
     }
   }
 
@@ -2860,11 +2875,18 @@ async function reconcileLegacyPendingReviewOrders() {
 async function seedDispatchPlan(date) {
   const rows = demoDispatchPlanRows(date);
   if (rows.length === 0) return;
-  await db.prepare(`
+  const insertSql = await dispatchPlanHasUpdatedAtColumn()
+    ? `
     INSERT INTO dispatch_plans (plan_date, rows_json, updated_at)
     VALUES (@date, @rowsJson, CURRENT_TIMESTAMP)
     ON CONFLICT (plan_date) DO NOTHING
-  `).run({ date, rowsJson: JSON.stringify(rows) });
+  `
+    : `
+    INSERT INTO dispatch_plans (plan_date, rows_json)
+    VALUES (@date, @rowsJson)
+    ON CONFLICT (plan_date) DO NOTHING
+  `;
+  await db.prepare(insertSql).run({ date, rowsJson: JSON.stringify(rows) });
 }
 
 async function seedHiddenHistoryAddress(address) {

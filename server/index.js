@@ -680,7 +680,8 @@ async function companyExpenseWriteColumnSupport() {
   if (companyExpenseWriteColumnSupportCache) return companyExpenseWriteColumnSupportCache;
   companyExpenseWriteColumnSupportCache = {
     salaryStatus: await tableColumnExists("company_expenses", "salary_status"),
-    settledAt: await tableColumnExists("company_expenses", "settled_at")
+    settledAt: await tableColumnExists("company_expenses", "settled_at"),
+    updatedAt: await tableColumnExists("company_expenses", "updated_at")
   };
   return companyExpenseWriteColumnSupportCache;
 }
@@ -690,7 +691,8 @@ let driverAdjustmentWriteColumnSupportCache = null;
 async function driverAdjustmentWriteColumnSupport() {
   if (driverAdjustmentWriteColumnSupportCache) return driverAdjustmentWriteColumnSupportCache;
   driverAdjustmentWriteColumnSupportCache = {
-    settledAt: await tableColumnExists("driver_adjustments", "settled_at")
+    settledAt: await tableColumnExists("driver_adjustments", "settled_at"),
+    updatedAt: await tableColumnExists("driver_adjustments", "updated_at")
   };
   return driverAdjustmentWriteColumnSupportCache;
 }
@@ -889,6 +891,16 @@ function normalizeOrderChargedAt(value = "") {
   return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : "";
 }
 
+const ORDER_CUSTOMS_REMARK_PREFIX = "报关信息：";
+
+function stripOrderCustomsRemarkText(remark = "") {
+  return String(remark || "")
+    .split("\n")
+    .filter((line) => !line.startsWith(ORDER_CUSTOMS_REMARK_PREFIX))
+    .join("\n")
+    .trim();
+}
+
 function orderIsCharged(order = {}) {
   return Boolean(normalizeOrderChargedAt(order.chargedAt || order.charged_at));
 }
@@ -901,8 +913,9 @@ function orderChargeDateCn(value = "") {
 }
 
 function orderChargeNoteText(order = {}) {
+  const remark = stripOrderCustomsRemarkText(order.remark || "");
   const dateText = orderChargeDateCn(order.chargedAt || order.charged_at);
-  return dateText ? `于${dateText}已收费` : "";
+  return [remark, dateText ? `于${dateText}已收费` : ""].filter(Boolean).join("；");
 }
 
 function creatorFieldsFromAccount(account = {}) {
@@ -962,7 +975,7 @@ const ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS = [
 ];
 const ORDER_EXPORT_SYSTEM_TOTAL_COLUMN_KEYS = new Set(ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS.map((column) => column.key));
 const ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN = { key: "__sequence", label: "序号", width: 42, fontSize: 8, system: true };
-const ORDER_EXPORT_CHARGE_NOTE_COLUMN = { key: "__chargeNote", label: "收费备注", width: 128, fontSize: 8, system: true };
+const ORDER_EXPORT_CHARGE_NOTE_COLUMN = { key: "__chargeNote", label: "备注", width: 152, fontSize: 8, system: true };
 const ORDER_EXPORT_OPERATING_UNIT_COLUMN = { key: "operatingUnit", label: "经营单位", width: 96, fontSize: 8, system: true };
 const ORDER_EXPORT_NEW_OLD_COLUMN = { key: "newOld", label: "新/旧", width: 52, fontSize: 8, system: true };
 const ORDER_EXPORT_SPECIAL_CAR_COLUMN = { key: "specialCar", label: "专车", width: 52, fontSize: 8, system: true };
@@ -2453,7 +2466,7 @@ function exportColumnsForOrders(templatePayload = null, orders = [], options = {
     ...(columns.find((column) => column.key === systemColumn.key) || {})
   }));
   const dynamicColumns = dynamicExportFeeColumns(orders, bodyColumns);
-  const chargeNoteColumns = options.includeChargeNoteColumn && orders.some(orderIsCharged)
+  const chargeNoteColumns = options.includeChargeNoteColumn
     ? [{ ...ORDER_EXPORT_CHARGE_NOTE_COLUMN }]
     : [];
   const linkedCustomsColumns = options.includeLinkedCustomsColumns
@@ -2681,7 +2694,7 @@ function isExportFeeItemColumn(column = {}) {
 
 function exportColumnMinimumWidth(column = {}) {
   const key = textValue(column.key);
-  if (key === ORDER_EXPORT_CHARGE_NOTE_COLUMN.key) return 88;
+  if (key === ORDER_EXPORT_CHARGE_NOTE_COLUMN.key) return 104;
   const isFeeColumn = isExportFeeItemColumn(column);
   const widthUnits = Math.max(
     stringDisplayWidth(exportColumnBaseLabel(column)),
@@ -2694,7 +2707,7 @@ function exportColumnMinimumWidth(column = {}) {
 function exportColumnMaxWidth(column = {}) {
   const key = textValue(column.key);
   if (key === ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key) return 42;
-  if (key === ORDER_EXPORT_CHARGE_NOTE_COLUMN.key) return 138;
+  if (key === ORDER_EXPORT_CHARGE_NOTE_COLUMN.key) return 180;
   if (key === "date") return 72;
   if (key === "linkedCustomsDate") return 72;
   if (["direction", "currency", "tonnage"].includes(key)) return 50;
@@ -2720,7 +2733,7 @@ function exportColumnMaxWidth(column = {}) {
 function exportColumnFluidMaxWidth(column = {}) {
   const key = textValue(column.key);
   if (key === ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key) return 42;
-  if (key === ORDER_EXPORT_CHARGE_NOTE_COLUMN.key) return 180;
+  if (key === ORDER_EXPORT_CHARGE_NOTE_COLUMN.key) return 240;
   if (key === "linkedCustomsDate") return 76;
   if (["linkedCustomsDeclarationNo", "linkedCustomsSixSheetNo"].includes(key)) return 120;
   if (key === "linkedCustomsCompany" || key === "linkedCustomsRemark") return 240;
@@ -3415,7 +3428,7 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
     row.eachCell((cell, columnNumber) => {
       const column = columns[columnNumber - 1] || {};
       const isChargeNoteColumn = textValue(column.key) === ORDER_EXPORT_CHARGE_NOTE_COLUMN.key;
-      const isChargeNoteCell = isChargeNoteColumn && !isSummaryRow && sourceOrder && orderChargeNoteText(sourceOrder);
+      const isChargeNoteCell = isChargeNoteColumn && !isSummaryRow && sourceOrder && orderIsCharged(sourceOrder);
       if (isSettlementTotalRow && columnNumber - 1 === rowMeta.targetIndex) {
         const formula = exportSettlementTotalExcelFormula(rowMeta.summary, columns, totalRowNumber);
         cell.value = formula
@@ -3462,7 +3475,7 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
       }
       const horizontal = isSettlementTotalRow
         ? (columnNumber - 1 === rowMeta.targetIndex ? "right" : "center")
-        : (isChargeNoteColumn ? "center" : excelAlignment(template?.tableAlign));
+        : excelAlignment(template?.tableAlign);
       cell.alignment = { vertical: "middle", horizontal, wrapText: isChargeNoteColumn };
       if (!isSummaryRow && sourceOrder) {
         const comment = exportOrderColumnComment(sourceOrder, column);
@@ -4031,21 +4044,28 @@ async function renderDriverWageSettlementXlsxBuffer(payload = {}) {
     for (let rowNumber = 75; rowNumber < 75 + extraRows; rowNumber += 1) {
       copyExcelRowStyle(worksheet.getRow(rowNumber), styleSourceRow);
     }
-    DRIVER_WAGE_TEMPLATE_MERGES.forEach((range) => {
-      worksheet.unMergeCells(range);
-    });
-    DRIVER_WAGE_TEMPLATE_MERGES.forEach((range) => {
-      worksheet.mergeCells(shiftA1RangeRows(range, extraRows));
-    });
   }
 
   const summaryRowNumber = 75 + extraRows;
-  const noteRow1 = summaryRowNumber + 1;
-  const noteRow2 = summaryRowNumber + 2;
-  const noteRow3 = summaryRowNumber + 3;
-  const noteRow4 = summaryRowNumber + 4;
-  const noteRow5 = summaryRowNumber + 5;
-  const paymentRow = summaryRowNumber + 9;
+  const footerRow1 = summaryRowNumber + 1;
+  const footerRow2 = summaryRowNumber + 2;
+  const footerRow3 = summaryRowNumber + 3;
+  const footerHiddenStartRow = summaryRowNumber + 4;
+  const footerHiddenEndRow = summaryRowNumber + 9;
+
+  DRIVER_WAGE_TEMPLATE_MERGES.forEach((range) => {
+    const targetRange = shiftA1RangeRows(range, extraRows);
+    try {
+      worksheet.unMergeCells(targetRange);
+    } catch (error) {
+      // Some templates may not expose the exact merged range after load/splice.
+    }
+  });
+  for (let rowNumber = footerRow1; rowNumber <= footerHiddenEndRow; rowNumber += 1) {
+    for (let column = 1; column <= 25; column += 1) {
+      worksheet.getRow(rowNumber).getCell(column).value = null;
+    }
+  }
 
   worksheet.getColumn(19).hidden = true;
   worksheet.getCell(1, 19).value = null;
@@ -4063,10 +4083,10 @@ async function renderDriverWageSettlementXlsxBuffer(payload = {}) {
     const nextFont = cloneExcelStyle(cell.font) || {};
     nextFont.color = { argb: "FF000000" };
     cell.font = nextFont;
-    cell.fill = undefined;
+    cell.fill = { type: "pattern", pattern: "none" };
   };
 
-  for (let rowNumber = 1; rowNumber <= paymentRow; rowNumber += 1) {
+  for (let rowNumber = 1; rowNumber <= footerHiddenEndRow; rowNumber += 1) {
     for (let column = 1; column <= 25; column += 1) {
       clearCellVisualStyle(worksheet.getRow(rowNumber).getCell(column));
     }
@@ -4110,16 +4130,8 @@ async function renderDriverWageSettlementXlsxBuffer(payload = {}) {
   const convertedRMB = exchangeRate ? Number((totalQ * exchangeRate).toFixed(2)) : 0;
   const payableTotal = Number((totalR + totalT + advanceHKD + convertedRMB).toFixed(2));
   const summaryNote = String(payload.summaryNote || `${rows.length}车骑师/口岸过车`).trim();
-  const noteLines = Array.isArray(payload.noteLines) ? payload.noteLines : [];
-  const defaultNotes = [
-    `人民币无预支，司机代垫${formatDriverWageNoteNumber(totalQ)}`,
-    `预支HKD${formatDriverWageNoteNumber(advanceHKD)}，司机代垫${formatDriverWageNoteNumber(advanceHKD)}`,
-    payload.periodLabel ? `${String(payload.periodLabel).trim()}预支杂费${formatDriverWageNoteNumber(totalQ)}` : "",
-    exchangeRate ? `${formatDriverWageNoteNumber(totalQ)}/${formatDriverWageNoteNumber(exchangeRate)}=港币${formatDriverWageNoteNumber(convertedRMB)}` : "",
-    `运费${formatDriverWageNoteNumber(totalR)}+装卸过海加点${formatDriverWageNoteNumber(totalT)}+司机代垫${formatDriverWageNoteNumber(advanceHKD)}+杂费${formatDriverWageNoteNumber(convertedRMB)}=应付${formatDriverWageNoteNumber(payableTotal)}`
-  ];
-  const notes = defaultNotes.map((fallback, index) => String(noteLines[index] || fallback || "").trim());
   const paymentLabel = String(payload.paymentLabel || "").trim();
+  const payableFormulaText = `运费${formatDriverWageNoteNumber(totalR)} + 装卸过海加点${formatDriverWageNoteNumber(totalT)} + 司机代垫${formatDriverWageNoteNumber(advanceHKD)} + 杂费${formatDriverWageNoteNumber(convertedRMB)} = 应付HKD${formatDriverWageNoteNumber(payableTotal)}`;
 
   worksheet.getCell(`P${summaryRowNumber}`).value = totalP;
   worksheet.getCell(`Q${summaryRowNumber}`).value = totalQ;
@@ -4131,17 +4143,44 @@ async function renderDriverWageSettlementXlsxBuffer(payload = {}) {
     setDriverWageNumberFormat(worksheet.getRow(summaryRowNumber).getCell(column));
   });
 
-  worksheet.getCell(`B${noteRow1}`).value = "备注：";
-  worksheet.getCell(`P${noteRow1}`).value = notes[0];
-  worksheet.getCell(`P${noteRow2}`).value = notes[1];
-  worksheet.getCell(`K${noteRow3}`).value = notes[2];
-  worksheet.getCell(`Q${noteRow4}`).value = notes[3];
-  worksheet.getCell(`P${noteRow5}`).value = notes[4];
-  worksheet.getCell(`U${paymentRow}`).value = paymentLabel;
-
   worksheet.getRow(summaryRowNumber).height = worksheet.getRow(summaryRowNumber).height || 22.5;
-  worksheet.getRow(noteRow2).height = worksheet.getRow(noteRow2).height || 20.25;
-  worksheet.getRow(paymentRow).height = worksheet.getRow(paymentRow).height || 22.5;
+  worksheet.getCell(`B${footerRow1}`).value = "备注：";
+  worksheet.getCell(`P${footerRow1}`).value = summaryNote || "-";
+  worksheet.getCell(`U${footerRow1}`).value = paymentLabel || "未付款";
+  worksheet.getCell(`B${footerRow2}`).value = "应付金额：";
+  worksheet.getCell(`P${footerRow2}`).value = `HKD ${formatDriverWageNoteNumber(payableTotal)}`;
+  worksheet.getCell(`B${footerRow3}`).value = "计算：";
+  worksheet.getCell(`K${footerRow3}`).value = payableFormulaText;
+
+  [footerRow1, footerRow2, footerRow3].forEach((rowNumber, index) => {
+    const row = worksheet.getRow(rowNumber);
+    row.hidden = false;
+    row.height = [22.5, 28, 22.5][index];
+    [2, 11, 16, 17, 18, 20, 21].forEach((column) => {
+      const cell = row.getCell(column);
+      if (!cell) return;
+      cell.font = { ...(cloneExcelStyle(cell.font) || {}), bold: column === 2 || column === 11, color: { argb: "FF000000" } };
+      cell.alignment = { vertical: "middle", horizontal: column === 2 ? "right" : "left", wrapText: true };
+    });
+  });
+
+  for (let rowNumber = footerHiddenStartRow; rowNumber <= footerHiddenEndRow; rowNumber += 1) {
+    const row = worksheet.getRow(rowNumber);
+    row.hidden = true;
+    row.height = 0;
+    for (let column = 1; column <= 25; column += 1) {
+      row.getCell(column).value = null;
+    }
+  }
+
+  for (let rowNumber = 1; rowNumber <= footerHiddenEndRow; rowNumber += 1) {
+    for (let column = 1; column <= 25; column += 1) {
+      const cell = worksheet.getRow(rowNumber).getCell(column);
+      if (cell.value !== null && cell.value !== undefined) {
+        cell.fill = { type: "pattern", pattern: "none" };
+      }
+    }
+  }
 
   const columnWidths = {
     1: 5,
@@ -8582,6 +8621,10 @@ function dispatchExportNestedRow(row = {}) {
   return row && typeof row === "object" && !Array.isArray(row) ? row : {};
 }
 
+function dispatchExportOrderRemark(order = {}) {
+  return stripOrderCustomsRemarkText(order.remark || "");
+}
+
 function dispatchExportText(...values) {
   for (const value of values) {
     const text = String(value ?? "").trim();
@@ -8887,7 +8930,7 @@ function dispatchExportRowsForWorkbook(rows = [], fallbackDate = "", customerSho
       dispatchExportTimeValue(dispatchExportText(row.loadTime, order.loadTime, order.loadingTime)),
       dispatchExportShortSupplier(row, supplierShortNames),
       supplierDisplay ? "外派" : "",
-      dispatchExportText(row.note, order.remark)
+      dispatchExportText(row.note, dispatchExportOrderRemark(order))
     ]);
   });
   return bodyRows;
@@ -9434,11 +9477,7 @@ async function syncDispatchPlanRowsStatusForOrder(orderRow = {}, dispatchStatus 
       };
     });
     if (!planChanged) continue;
-    await db.prepare(`
-      UPDATE dispatch_plans
-      SET rows_json = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE plan_date = ?
-    `).run(JSON.stringify(nextRows), plan.plan_date);
+    await updateDispatchPlanRowsJson(plan.plan_date, JSON.stringify(nextRows));
   }
   return changed;
 }
@@ -9520,6 +9559,7 @@ async function createOrderFromDispatchRowForSync(row = {}, planDate = "", orderS
 }
 
 async function loadDeletedOrderLinkedToDispatchRow(row = {}) {
+  const support = await orderWriteColumnSupport();
   const orderNo = String(row.orderNo || row.order_no || "").trim();
   const dispatchNo = String(row.dispatchNo || row.dispatch_no || "").trim();
   const dispatchGroupId = String(row.dispatchGroupId || row.dispatch_group_id || "").trim();
@@ -9529,11 +9569,11 @@ async function loadDeletedOrderLinkedToDispatchRow(row = {}) {
     conditions.push("no = @orderNo");
     params.orderNo = orderNo;
   }
-  if (dispatchNo) {
+  if (dispatchNo && support.dispatchNo) {
     conditions.push("dispatch_no = @dispatchNo");
     params.dispatchNo = dispatchNo;
   }
-  if (dispatchGroupId) {
+  if (dispatchGroupId && support.dispatchGroupId) {
     conditions.push("dispatch_group_id = @dispatchGroupId");
     params.dispatchGroupId = dispatchGroupId;
   }
@@ -9587,12 +9627,13 @@ function dispatchRecycleRowFromOrder(order = {}) {
 }
 
 async function loadOrdersByDispatchRefs({ orderNos = [], dispatchNos = [], dispatchGroupId = "" } = {}, options = {}) {
+  const support = await orderWriteColumnSupport();
   const normalizedOrderNos = compactLookupValues(orderNos);
   const normalizedDispatchNos = compactLookupValues(dispatchNos);
   const groupId = userTextValue(dispatchGroupId);
   const conditions = [];
   const params = [];
-  if (groupId) {
+  if (groupId && support.dispatchGroupId) {
     conditions.push("dispatch_group_id = ?");
     params.push(groupId);
   }
@@ -9600,7 +9641,7 @@ async function loadOrdersByDispatchRefs({ orderNos = [], dispatchNos = [], dispa
     conditions.push(`no IN (${normalizedOrderNos.map(() => "?").join(",")})`);
     params.push(...normalizedOrderNos);
   }
-  if (normalizedDispatchNos.length) {
+  if (normalizedDispatchNos.length && support.dispatchNo) {
     conditions.push(`dispatch_no IN (${normalizedDispatchNos.map(() => "?").join(",")})`);
     params.push(...normalizedDispatchNos);
   }
@@ -9732,6 +9773,7 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = [], rowsForPersiste
         loadingLocationsJson: locationEntriesJson(row.loadingLocations),
         unloading: dispatchRowText(row, "unloading"),
         unloadingLocationsJson: locationEntriesJson(row.unloadingLocations),
+        remark: dispatchRowText(row, "note") || currentOrder.remark || "",
         status: orderStatus,
         date: dispatchRowBusinessDate(row, planDate || currentOrder.date)
       });
@@ -9741,17 +9783,45 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = [], rowsForPersiste
 
   if (persistedRowsChanged) {
     const rowsJson = JSON.stringify(persistenceRows || persistedRows);
-    await db.prepare(`
-      UPDATE dispatch_plans
-      SET rows_json = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE plan_date = ?
-    `).run(rowsJson, planDate);
+    await updateDispatchPlanRowsJson(planDate, rowsJson);
   }
 
   return synced;
 }
 
+async function syncDispatchPlanRowsRemarkFromOrder(order = {}) {
+  const orderNo = String(order.no || "").trim();
+  const dispatchNo = String(order.dispatchNo || "").trim();
+  const dispatchGroupId = String(order.dispatchGroupId || "").trim();
+  if (!orderNo && !dispatchNo && !dispatchGroupId) return 0;
+  const note = stripOrderCustomsRemarkText(order.remark || "");
+  const plans = await db.prepare("SELECT plan_date, rows_json FROM dispatch_plans").all();
+  let changed = 0;
+  for (const plan of plans) {
+    const rows = parseDispatchPlanRowsJson(plan.rows_json);
+    let planChanged = false;
+    rows.forEach((row) => {
+      const matches = (orderNo && (
+        dispatchRowLinkedOrderNos(row).includes(orderNo)
+        || String(row.orderNo || row.order_no || "").trim() === orderNo
+      )) || (dispatchNo && (
+        dispatchRowLinkedDispatchNos(row).includes(dispatchNo)
+        || String(row.dispatchNo || row.dispatch_no || "").trim() === dispatchNo
+      )) || (dispatchGroupId && dispatchRowGroupId(row) === dispatchGroupId);
+      if (!matches) return;
+      if (String(row.note || "") === note) return;
+      row.note = note;
+      planChanged = true;
+    });
+    if (!planChanged) continue;
+    await updateDispatchPlanRowsJson(plan.plan_date, JSON.stringify(rows));
+    changed += 1;
+  }
+  return changed;
+}
+
 async function orderStatusByDispatchReferences(rows = []) {
+  const support = await orderWriteColumnSupport();
   const refs = rows
     .flatMap((row) => [
       ...dispatchRowLinkedOrderNos(row).map((orderNo) => ({ orderNo, dispatchNo: "" })),
@@ -9767,15 +9837,16 @@ async function orderStatusByDispatchReferences(rows = []) {
       params[key] = ref.orderNo;
       conditions.push(`no = @${key}`);
     }
-    if (ref.dispatchNo) {
+    if (ref.dispatchNo && support.dispatchNo) {
       const key = `dispatchNo${index}`;
       params[key] = ref.dispatchNo;
       conditions.push(`dispatch_no = @${key}`);
     }
   });
   if (!conditions.length) return new Map();
+  const dispatchNoSelect = support.dispatchNo ? "dispatch_no" : "NULL AS dispatch_no";
   const orders = await db.prepare(`
-    SELECT no, dispatch_no, status
+    SELECT no, ${dispatchNoSelect}, status
     FROM orders
     WHERE deleted_at IS NULL
       AND (${conditions.join(" OR ")})
@@ -9844,11 +9915,7 @@ async function removeDispatchPlanRowsLinkedToOrder(orderRow = {}) {
     if (nextRows.length === rows.length) continue;
     removed += rows.length - nextRows.length;
     await recycleDispatchPlanRows(plan.plan_date, rowsToRecycle);
-    await db.prepare(`
-      UPDATE dispatch_plans
-      SET rows_json = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE plan_date = ?
-    `).run(JSON.stringify(nextRows), plan.plan_date);
+    await updateDispatchPlanRowsJson(plan.plan_date, JSON.stringify(nextRows));
   }
   return removed;
 }
@@ -10544,6 +10611,17 @@ async function upsertDispatchPlanRow(date = "", rowsJson = "[]", creator = {}) {
   `).run(params);
 }
 
+async function updateDispatchPlanRowsJson(planDate, rowsJson = "[]") {
+  const support = await dispatchPlanWriteColumnSupport();
+  const updateParts = ["rows_json = ?"];
+  if (support.updatedAt) updateParts.push("updated_at = CURRENT_TIMESTAMP");
+  await db.prepare(`
+    UPDATE dispatch_plans
+    SET ${updateParts.join(", ")}
+    WHERE plan_date = ?
+  `).run(String(rowsJson || "[]"), planDate);
+}
+
 async function assignOrderBusinessNumbers(item, requestedNo = "", requestedDispatchNo = "") {
   const no = String(requestedNo || "").trim();
   const dispatchNo = String(requestedDispatchNo || "").trim();
@@ -10779,6 +10857,7 @@ app.post("/api/orders", async (req, res) => {
   }
 
   const transaction = db.transaction(async () => {
+    await lockOrderDispatchSync();
     await lockOrderCreation();
     await assignOrderBusinessNumbers(item, requestedNo, requestedDispatchNo);
     const conflict = await orderBusinessNumberConflict(item.no, item.dispatchNo);
@@ -10787,6 +10866,7 @@ app.post("/api/orders", async (req, res) => {
     }
     await writeOrderRow(item, { includeNo: true });
     await saveOrderFees(item.no, item.fees, item.currency);
+    await syncDispatchPlanRowsRemarkFromOrder(item);
   });
   try {
     await transaction();
@@ -11031,8 +11111,10 @@ app.patch("/api/orders/:no", async (req, res) => {
   }
 
   const transaction = db.transaction(async () => {
+    await lockOrderDispatchSync();
     await updateOrderRow(no, item, { existing: mapOrder(existing) });
     await saveOrderFees(no, item.fees, item.currency);
+    await syncDispatchPlanRowsRemarkFromOrder(item);
   });
 
   await transaction();
@@ -12220,10 +12302,11 @@ app.patch("/api/company-expenses/:id", async (req, res) => {
   }
   const support = await companyExpenseWriteColumnSupport();
   const { updateSql } = buildNamedColumns(companyExpenseWriteEntries(support));
+  const updateParts = [updateSql];
+  if (support.updatedAt) updateParts.push("updated_at = CURRENT_TIMESTAMP");
   await db.prepare(`
     UPDATE company_expenses
-    SET ${updateSql},
-        updated_at = CURRENT_TIMESTAMP
+    SET ${updateParts.join(",\n        ")}
     WHERE id = @id AND deleted_at IS NULL
   `).run({ id, ...item });
   await writeAudit(
@@ -12251,7 +12334,14 @@ app.delete("/api/company-expenses/:id", async (req, res) => {
     res.status(404).json({ message: "记录不存在或已删除" });
     return;
   }
-  await db.prepare("UPDATE company_expenses SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(id);
+  const support = await companyExpenseWriteColumnSupport();
+  const deleteParts = ["deleted_at = CURRENT_TIMESTAMP"];
+  if (support.updatedAt) deleteParts.push("updated_at = CURRENT_TIMESTAMP");
+  await db.prepare(`
+    UPDATE company_expenses
+    SET ${deleteParts.join(", ")}
+    WHERE id = ? AND deleted_at IS NULL
+  `).run(id);
   await writeAudit("delete", "company_expense", String(id), `${row.period_month}/${row.category}`);
   res.json({ ok: true });
 });
@@ -12358,10 +12448,11 @@ app.patch("/api/driver-adjustments/:id", async (req, res) => {
     ["note", "note"]
   ];
   const { updateSql } = buildNamedColumns(entries);
+  const updateParts = [updateSql];
+  if (support.updatedAt) updateParts.push("updated_at = CURRENT_TIMESTAMP");
   await db.prepare(`
     UPDATE driver_adjustments
-    SET ${updateSql},
-        updated_at = CURRENT_TIMESTAMP
+    SET ${updateParts.join(",\n        ")}
     WHERE id = @id AND deleted_at IS NULL
   `).run({ ...item, settledAt });
   await writeAudit(
@@ -13805,12 +13896,6 @@ async function backfillOrderLocationColumns() {
 async function backfillDispatchPlanLocationRows() {
   const plans = await db.prepare("SELECT plan_date, rows_json FROM dispatch_plans").all();
   if (!plans.length) return 0;
-  const update = await db.prepare(`
-    UPDATE dispatch_plans
-    SET rows_json = @rowsJson,
-        updated_at = CURRENT_TIMESTAMP
-    WHERE plan_date = @planDate
-  `);
   let changed = 0;
   const transaction = db.transaction(async (items) => {
     for (const plan of items) {
@@ -13822,10 +13907,7 @@ async function backfillDispatchPlanLocationRows() {
         return result.row;
       });
       if (!planChanged) continue;
-      await update.run({
-        planDate: plan.plan_date,
-        rowsJson: JSON.stringify(nextRows)
-      });
+      await updateDispatchPlanRowsJson(plan.plan_date, JSON.stringify(nextRows));
       changed += 1;
     }
   });
