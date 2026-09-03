@@ -113,12 +113,13 @@ export const MODULES = [
 export const VEHICLE_EXPENSE_CONFIGS = [
   { moduleId: "vehicleFuelExpenses", type: "fuel", title: "加油费管理", addLabel: "增加加油记录", defaultName: "加油记录", timeLabel: "时间" },
   { moduleId: "vehicleRepairExpenses", type: "repair", title: "维修费管理", addLabel: "增加维修费", defaultName: "维修费", timeLabel: "时间" },
-  { moduleId: "vehicleAnnualExpenses", type: "annual", title: "保险年审牌头费", addLabel: "增加年费记录", defaultName: "大陆保险", timeLabel: "时间范围" },
+  { moduleId: "vehicleAnnualExpenses", type: "annual", title: "保险年审牌头费", addLabel: "增加年费记录", defaultName: "大陆保险", timeLabel: "时间范围/月份" },
   { moduleId: "vehicleOtherExpenses", type: "other", title: "高速隧道费管理", addLabel: "增加高速隧道费记录", defaultName: "高速隧道费", timeLabel: "月份" }
 ];
 export const VEHICLE_EXPENSE_CONFIG_BY_MODULE = Object.fromEntries(VEHICLE_EXPENSE_CONFIGS.map((item) => [item.moduleId, item]));
 export const VEHICLE_EXPENSE_CONFIG_BY_TYPE = Object.fromEntries(VEHICLE_EXPENSE_CONFIGS.map((item) => [item.type, item]));
 export const VEHICLE_ANNUAL_EXPENSE_NAMES = ["大陆保险", "香港保险", "大陆年审", "香港年审", "牌头费"];
+export const VEHICLE_ANNUAL_EXPENSE_MONTH_BASED_NAMES = ["牌头费"];
 
 export const AUDIT_ACTION_LABELS = {
   create: "新增",
@@ -226,7 +227,7 @@ export const DISPATCH_STATUS_TO_ORDER_STATUS = {
 };
 export const ORDER_STATUS_OPTIONS = ["待确认", "预排", "正常", "通关中", "已签收", "缺票据", "费用待确认", "已审核"];
 export const DEFAULT_DRIVER_TYPES = ["香港司机", "大陆骑师", "其他"];
-export const DRIVER_ADJUSTMENT_TYPES = ["预支款", "停车费", "过磅费", "加油费", "维修费", "其他报销"];
+export const DRIVER_ADJUSTMENT_TYPES = ["预支款"];
 export const DRIVER_ADJUSTMENT_STATUS_OPTIONS = ["待工资结算", "工资报销", "已结算"];
 
 export const ORDER_DATE_FILTERS = [

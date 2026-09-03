@@ -81,10 +81,11 @@ export function createFinanceWageTableColumns() {
     { key: "tripFee", label: "成本中心合计", width: 150, min: 110 },
     { key: "advanceFee", label: "代垫费", width: 150, min: 110 },
     { key: "adjustments", label: "预支/报销", width: 150, min: 110 },
-    { key: "total", label: "应付合计", width: 160, min: 120 },
+    { key: "note", label: "备注", width: 160, min: 120 },
+    { key: "total", label: "应付合计", width: 152, min: 120 },
     { key: "status", label: "结算状态", width: 96, min: 76 },
     { key: "settledAt", label: "结算时间", width: 118, min: 92 },
-    { key: "actions", label: "操作", width: 86, min: 76, locked: true, exportable: false }
+    { key: "actions", label: "操作", width: 98, min: 84, locked: true, exportable: false }
   ]);
 }
 
@@ -134,6 +135,7 @@ export function createCustomerListDetailColumns() {
     { key: "customsExportPageFee", label: "出口续页费用", width: 116, min: 96 },
     { key: "customsProductionCertificateFee", label: "产证地", width: 104, min: 84 },
     { key: "customsVerificationFee", label: "核注费", width: 96, min: 78 },
+    { key: "customsInspectionFee", label: "商检费", width: 96, min: 78 },
     { key: "createdAt", label: "创建日期", width: 110, min: 86 },
     { key: "actions", label: "操作", width: 138, min: 100, locked: true }
   ]);

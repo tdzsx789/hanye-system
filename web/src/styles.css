@@ -210,6 +210,10 @@ body.is-modal-dragging .modal-head {
   overflow: hidden;
 }
 
+.finance-wage-settlement-modal {
+  width: min(820px, calc(100vw - 24px));
+}
+
 .full-detail-backdrop {
   padding: 12px;
 }
@@ -384,16 +388,91 @@ body.is-modal-dragging .modal-head {
   min-height: 0;
   padding: 12px;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.finance-wage-detail-tabs {
+  flex: 0 0 auto;
+  margin-bottom: 8px;
 }
 
 .finance-wage-detail-scroll {
-  height: 100%;
+  flex: 1;
+  min-height: 0;
   max-height: none;
 }
 
 .finance-wage-detail-table {
   min-width: max-content;
   table-layout: fixed;
+}
+
+.finance-wage-adjustment-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+.finance-wage-adjustment-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  color: #607089;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.finance-wage-adjustment-head strong {
+  color: #213049;
+  font-size: 14px;
+}
+
+.finance-wage-adjustment-toolbar {
+  grid-template-columns: 120px 110px 90px 110px 120px 130px minmax(220px, 1fr) auto auto auto auto;
+}
+
+.finance-wage-adjustment-table-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.finance-wage-adjustment-table {
+  width: 100%;
+  min-width: 100%;
+  table-layout: fixed;
+}
+
+.finance-wage-adjustment-remark-col {
+  width: auto;
+  min-width: 240px;
+}
+
+.finance-wage-adjustment-table td.row-actions {
+  width: 188px;
+  min-width: 188px;
+  justify-content: flex-end;
+  overflow: visible;
+  padding-right: 10px;
+}
+
+.finance-wage-adjustment-table .driver-adjustment-action-btn {
+  min-width: 62px;
+  height: 28px;
+  padding: 0 10px;
+}
+
+.finance-wage-adjustment-table .driver-adjustment-action-btn + .driver-adjustment-action-btn {
+  margin-left: 6px;
+}
+
+.finance-wage-action-btn {
+  min-width: 58px;
 }
 
 .finance-wage-detail-table thead th {
@@ -3261,6 +3340,17 @@ select {
   font-size: 12px;
 }
 
+.vehicle-expense-toolbar-right {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px 10px;
+  margin-left: auto;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
 .vehicle-expense-period-controls {
   justify-content: flex-end;
 }
@@ -3786,7 +3876,7 @@ select {
   grid-template-rows: auto minmax(0, 1fr);
   gap: 10px;
   min-height: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .vehicle-repair-class-grid {
@@ -3794,10 +3884,29 @@ select {
   justify-content: start;
 }
 
+.vehicle-repair-class-card {
+  align-content: start;
+  min-height: 68px;
+  padding: 10px 12px;
+}
+
+.vehicle-repair-class-card span,
+.vehicle-repair-class-card strong,
+.vehicle-repair-class-card small {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.vehicle-repair-class-card span {
+  line-height: 1.25;
+}
+
 .vehicle-repair-class-card small {
   color: #0f766e;
   font-size: 11px;
   font-weight: 850;
+  line-height: 1.25;
 }
 
 .vehicle-repair-board {
@@ -3820,13 +3929,38 @@ select {
   justify-content: flex-end;
 }
 
+.vehicle-repair-total-chip {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 12px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #f8fbff 0%, #eef6ff 100%);
+  color: #1e3a8a;
+  white-space: nowrap;
+}
+
+.vehicle-repair-total-chip span {
+  color: #475569;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.vehicle-repair-total-chip strong {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 900;
+}
+
 .vehicle-repair-workbench {
   display: grid;
   grid-template-columns: minmax(210px, 260px) minmax(0, 1fr);
   gap: 10px;
   min-height: 0;
   padding: 10px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .vehicle-repair-plate-panel,
@@ -3919,8 +4053,8 @@ select {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
-  align-items: center;
-  padding: 10px;
+  align-items: start;
+  padding: 12px;
 }
 
 .vehicle-repair-record-main .row-actions {
@@ -3942,7 +4076,7 @@ select {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto 18px;
   gap: 10px;
-  align-items: center;
+  align-items: start;
   min-width: 0;
   padding: 0;
   border: 0;
@@ -3954,7 +4088,7 @@ select {
 
 .vehicle-repair-record-toggle > span {
   display: grid;
-  gap: 3px;
+  gap: 4px;
   min-width: 0;
 }
 
@@ -3962,15 +4096,15 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  line-height: 1.25;
 }
 
 .vehicle-repair-record-toggle small {
-  overflow: hidden;
   color: var(--muted);
   font-size: 12px;
   font-weight: 750;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 .vehicle-repair-record-meta {
@@ -8302,6 +8436,42 @@ small.vehicle-repair-record-meta {
   white-space: nowrap;
 }
 
+.finance-wage-table td.row-actions {
+  width: auto;
+  min-width: 220px;
+  justify-content: flex-start;
+}
+
+.finance-wage-row-actions {
+  display: flex;
+  width: 100%;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.finance-wage-row-actions .icon-btn:not(.icon-only) {
+  flex: 0 0 auto;
+  min-width: 68px;
+  height: 30px;
+  padding: 0 10px;
+  gap: 6px;
+  line-height: 1;
+}
+
+.finance-wage-row-actions .icon-btn.icon-only {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+}
+
+.finance-wage-row-actions .icon-btn:not(.icon-only) .ui-icon {
+  width: 14px;
+  height: 14px;
+}
+
 .finance-wage-table .finance-wage-settlement-status,
 .finance-wage-table .finance-wage-settlement-date {
   width: 100%;
@@ -8311,6 +8481,108 @@ small.vehicle-repair-record-meta {
   padding: 0 6px;
   box-sizing: border-box;
   font-size: 12px;
+}
+
+.finance-wage-settlement-body {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px 16px;
+}
+
+.finance-wage-settlement-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.finance-wage-settlement-summary-card {
+  min-height: 76px;
+}
+
+.finance-wage-settlement-summary-card strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.finance-wage-settlement-summary-total {
+  border-color: #c7d7ff;
+  background: linear-gradient(180deg, #f8fbff 0%, #edf4ff 100%);
+}
+
+.finance-wage-settlement-summary-total strong {
+  color: #103b9b;
+}
+
+.finance-wage-settlement-editor {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 14px;
+  padding: 14px;
+  border: 1px solid #dbe7f5;
+  border-radius: 10px;
+  background: #fbfdff;
+}
+
+.finance-wage-settlement-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.finance-wage-settlement-field :is(input, select, textarea) {
+  width: 100%;
+  min-width: 0;
+}
+
+.finance-wage-settlement-field input[readonly] {
+  background: #f8fafc;
+  color: var(--text);
+}
+
+.finance-wage-settlement-number {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  appearance: textfield;
+}
+
+.finance-wage-settlement-number::-webkit-outer-spin-button,
+.finance-wage-settlement-number::-webkit-inner-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+
+.finance-wage-settlement-note {
+  grid-column: 1 / -1;
+}
+
+.finance-wage-settlement-note textarea {
+  min-height: 92px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.finance-wage-settlement-actions {
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 760px) {
+  .finance-wage-settlement-modal {
+    width: min(640px, calc(100vw - 20px));
+  }
+
+  .finance-wage-settlement-summary,
+  .finance-wage-settlement-editor {
+    grid-template-columns: 1fr;
+  }
+
+  .finance-wage-settlement-note {
+    grid-column: auto;
+  }
 }
 
 @media (max-width: 1180px) {
@@ -8904,6 +9176,7 @@ body.is-column-resizing {
   width: 100%;
   height: 100%;
   min-height: 280px;
+  overflow: hidden;
 }
 
 .file-preview-stage.is-frame {
@@ -8919,17 +9192,54 @@ body.is-column-resizing {
 }
 
 .file-preview-image {
+  position: absolute;
+  top: 50%;
+  left: 50%;
   display: block;
-  max-width: 100%;
-  max-height: 100%;
   width: auto;
   height: auto;
-  margin: 0 auto;
-  object-fit: contain;
+  max-width: none;
+  max-height: none;
+  object-fit: none;
   object-position: center;
+  transform-origin: center center;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: #fff;
+}
+
+.file-preview-image-viewport {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  place-items: center;
+  padding: 8px;
+  box-sizing: border-box;
+}
+
+.file-preview-image-box {
+  position: relative;
+  display: block;
+  flex: 0 0 auto;
+  overflow: visible;
+  background: transparent;
+}
+
+.file-preview-zoom-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 4px;
+}
+
+.file-preview-zoom-label {
+  min-width: 52px;
+  text-align: center;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .spreadsheet-preview {

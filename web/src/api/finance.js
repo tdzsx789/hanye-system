@@ -93,6 +93,12 @@ export function saveDriverWageSettlement(payload) {
   });
 }
 
+export function deleteDriverWageSettlement(id) {
+  return apiFetch(`/driver-wage-settlements/${encodeURIComponent(id)}`, {
+    method: "DELETE"
+  });
+}
+
 export async function exportDriverWageSettlement(payload = {}) {
   const response = await fetch(`${API_BASE}/driver-wage-settlements/export/xlsx`, {
     method: "POST",

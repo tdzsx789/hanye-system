@@ -190,9 +190,11 @@ ECS_PORT=22
 ECS_KEY=~/.ssh/hanye_ecs_codex
 REMOTE_DIR=/opt/hanye-system
 WEB_PORT=8081
+PUBLIC_WEB_ROOT=/var/www/oa.hanyeltd.com
+STARTUP_DB_MAINTENANCE=1
 ```
 
-脚本只会同步前后端代码，并在服务器上把 `STARTUP_DB_MAINTENANCE=0` 写入 `.env`，然后只重建 `server`、`server-standby` 和 `web` 容器；不会动 PostgreSQL 数据卷。部署完成后访问：
+脚本会同步前后端代码，默认开启启动 DB 维护以补齐兼容列和幂等回填，然后只重建 `server`、`server-standby` 和 `web` 容器；不会动 PostgreSQL 数据卷。如果服务器上还有宿主机 Nginx 域名静态目录，默认会把 Docker 前端产物同步到 `PUBLIC_WEB_ROOT`，避免域名站点停留在旧静态包。部署完成后访问：
 
 ```text
 http://120.24.163.215:8081/

@@ -416,6 +416,25 @@ async function addColumn(table, definition) {
   await db.exec(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${definition}`);
 }
 
+function parseJsonArrayText(value) {
+  if (Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(String(value || "[]"));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function customerLegacyCustomsFieldValue(fields, fieldName) {
+  const match = parseJsonArrayText(fields).find((field) => {
+    const name = String(field?.name ?? field?.label ?? field?.key ?? "").trim();
+    return name === fieldName;
+  });
+  const amount = Number(match?.value ?? match?.amount ?? match?.fee ?? 0);
+  return Number.isFinite(amount) ? amount : null;
+}
+
 async function ensureTextColumn(table, column, defaultValue = "''") {
   if (!(await hasColumn(table, column))) {
     await db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT NOT NULL DEFAULT ${defaultValue}`);
@@ -744,27 +763,173 @@ async function ensureRuntimeSchemaCompatibility() {
     ["orders", "linked_customs_business_id BIGINT"],
     ["orders", "new_old TEXT NOT NULL DEFAULT ''"],
     ["orders", "special_car BOOLEAN NOT NULL DEFAULT false"],
+    ["customers", "customer_category TEXT NOT NULL DEFAULT '运输客户'"],
+    ["customers", "customs_customer_type TEXT NOT NULL DEFAULT ''"],
+    ["customers", "province TEXT NOT NULL DEFAULT ''"],
+    ["customers", "city TEXT NOT NULL DEFAULT ''"],
+    ["customers", "address TEXT NOT NULL DEFAULT ''"],
+    ["customers", "term TEXT NOT NULL DEFAULT '月结30天'"],
+    ["customers", "settlement_currency TEXT NOT NULL DEFAULT ''"],
+    ["customers", "tax_no TEXT NOT NULL DEFAULT ''"],
+    ["customers", "contact TEXT NOT NULL DEFAULT ''"],
+    ["customers", "mobile TEXT NOT NULL DEFAULT ''"],
+    ["customers", "driver_wage_adjust_hkd DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["customers", "default_template_id TEXT NOT NULL DEFAULT ''"],
+    ["customers", "receivable_rmb DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["customers", "receivable_hkd DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["customers", "recent_order TEXT NOT NULL DEFAULT '-'"],
+    ["customers", "invoice_title TEXT NOT NULL DEFAULT ''"],
+    ["customers", "invoice_tax_no TEXT NOT NULL DEFAULT ''"],
+    ["customers", "invoice_bank TEXT NOT NULL DEFAULT ''"],
+    ["customers", "invoice_account TEXT NOT NULL DEFAULT ''"],
+    ["customers", "invoice_address_phone TEXT NOT NULL DEFAULT ''"],
+    ["customers", "customs_home_item_count INTEGER NOT NULL DEFAULT 6"],
+    ["customers", "customs_page_item_count INTEGER NOT NULL DEFAULT 14"],
+    ["customers", "customs_import_home_fee DOUBLE PRECISION NOT NULL DEFAULT 100"],
+    ["customers", "customs_export_home_fee DOUBLE PRECISION NOT NULL DEFAULT 150"],
+    ["customers", "customs_import_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30"],
+    ["customers", "customs_export_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30"],
     ["customers", "operating_unit_enabled BOOLEAN NOT NULL DEFAULT false"],
     ["customers", "new_old_enabled BOOLEAN NOT NULL DEFAULT false"],
     ["customers", "special_car_enabled BOOLEAN NOT NULL DEFAULT false"],
     ["customers", "customs_production_certificate_fee DOUBLE PRECISION NOT NULL DEFAULT 150"],
+    ["customers", "customs_inspection_fee DOUBLE PRECISION NOT NULL DEFAULT 100"],
+    ["customers", "customs_manifest_fee DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["customers", "customs_verification_fee DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["customers", "trip_no_required BOOLEAN NOT NULL DEFAULT false"],
+    ["customers", "six_sheet_no_required BOOLEAN NOT NULL DEFAULT false"],
+    ["customers", "special_customer BOOLEAN NOT NULL DEFAULT false"],
+    ["customers", "customs_custom_fields TEXT NOT NULL DEFAULT '[]'"],
+    ["customers", "created_at TEXT NOT NULL DEFAULT (CURRENT_DATE::text)"],
+    ["customers", "deleted_at TEXT"],
+    ["vehicles", "brand TEXT NOT NULL DEFAULT ''"],
+    ["vehicles", "model TEXT NOT NULL DEFAULT ''"],
+    ["vehicles", "vehicle_type TEXT NOT NULL DEFAULT ''"],
+    ["vehicles", "purchase_date TEXT NOT NULL DEFAULT ''"],
+    ["vehicles", "factory_date TEXT NOT NULL DEFAULT ''"],
+    ["vehicles", "mainland_review_date TEXT NOT NULL DEFAULT ''"],
+    ["vehicles", "hk_review_date TEXT NOT NULL DEFAULT ''"],
+    ["vehicles", "mainland_insurance_date TEXT NOT NULL DEFAULT ''"],
+    ["vehicles", "hk_insurance_date TEXT NOT NULL DEFAULT ''"],
+    ["vehicles", "insurance_reminder TEXT NOT NULL DEFAULT '提前30天'"],
+    ["vehicles", "maintenance_reminder TEXT NOT NULL DEFAULT ''"],
+    ["vehicles", "maintenance_due_date TEXT NOT NULL DEFAULT ''"],
+    ["vehicles", "maintenance_due_km DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["vehicles", "status TEXT NOT NULL DEFAULT '正常'"],
+    ["vehicles", "monthly_cost DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["vehicles", "note TEXT NOT NULL DEFAULT ''"],
+    ["vehicles", "updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)"],
+    ["vehicles", "deleted_at TEXT"],
+    ["vehicle_expenses", "expense_type TEXT NOT NULL DEFAULT 'fuel'"],
+    ["vehicle_expenses", "name TEXT NOT NULL DEFAULT ''"],
+    ["vehicle_expenses", "fuel_station TEXT NOT NULL DEFAULT ''"],
+    ["vehicle_expenses", "fuel_liters DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["vehicle_expenses", "fuel_price_per_liter DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["vehicle_expenses", "odometer_km DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["vehicle_expenses", "is_maintenance BOOLEAN NOT NULL DEFAULT false"],
+    ["vehicle_expenses", "maintenance_next_date TEXT NOT NULL DEFAULT ''"],
     ["order_fees", "cost_hkd DOUBLE PRECISION DEFAULT NULL"],
     ["order_fees", "cost_rmb DOUBLE PRECISION DEFAULT NULL"],
     ["order_fees", "cost_parts_json TEXT NOT NULL DEFAULT '[]'"],
     ["vehicle_expenses", "maintenance_next_km DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["vehicle_expenses", "repair_items_json TEXT NOT NULL DEFAULT '[]'"],
+    ["vehicle_expenses", "plate TEXT NOT NULL DEFAULT ''"],
+    ["vehicle_expenses", "expense_date TEXT NOT NULL DEFAULT (CURRENT_DATE::text)"],
+    ["vehicle_expenses", "start_date TEXT NOT NULL DEFAULT ''"],
+    ["vehicle_expenses", "end_date TEXT NOT NULL DEFAULT ''"],
+    ["vehicle_expenses", "expense_year INTEGER"],
+    ["vehicle_expenses", "payment_date TEXT NOT NULL DEFAULT ''"],
+    ["vehicle_expenses", "currency TEXT NOT NULL DEFAULT '人民币'"],
+    ["vehicle_expenses", "amount DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["vehicle_expenses", "note TEXT NOT NULL DEFAULT ''"],
+    ["vehicle_expenses", "created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)"],
+    ["vehicle_expenses", "updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)"],
+    ["vehicle_expenses", "deleted_at TEXT"],
     ["vehicles", "maintenance_due_km DOUBLE PRECISION NOT NULL DEFAULT 0"],
     ["company_expenses", "salary_status TEXT NOT NULL DEFAULT '工资待结算'"],
     ["company_expenses", "settled_at TEXT NOT NULL DEFAULT ''"],
     ["driver_adjustments", "settled_at TEXT NOT NULL DEFAULT ''"],
+    ["driver_wage_rules", "driver_id BIGINT REFERENCES drivers(id) ON DELETE SET NULL"],
+    ["driver_wage_rules", "direction TEXT NOT NULL DEFAULT '出口'"],
+    ["driver_wage_rules", "city TEXT NOT NULL DEFAULT ''"],
+    ["driver_wage_rules", "transport_mode TEXT NOT NULL DEFAULT '单司机'"],
+    ["driver_wage_rules", "currency TEXT NOT NULL DEFAULT '港币'"],
+    ["driver_wage_rules", "base_rmb DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["driver_wage_rules", "base_hkd DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["driver_wage_rules", "load_per_board DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["driver_wage_rules", "unload_per_board DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["driver_wage_rules", "cross_sea_fee DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["driver_wage_rules", "add_point_fee DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["driver_wage_rules", "waiting_per_hour DOUBLE PRECISION NOT NULL DEFAULT 0"],
+    ["driver_wage_rules", "advance_fee_rates TEXT NOT NULL DEFAULT '{}'"],
+    ["driver_wage_rules", "note TEXT NOT NULL DEFAULT ''"],
+    ["cost_center_rates", "source TEXT NOT NULL DEFAULT ''"],
+    ["cost_center_rates", "entity_id TEXT NOT NULL DEFAULT ''"],
+    ["cost_center_rates", "entity_name TEXT NOT NULL DEFAULT ''"],
+    ["cost_center_rates", "origin TEXT NOT NULL DEFAULT ''"],
+    ["cost_center_rates", "destination TEXT NOT NULL DEFAULT ''"],
+    ["cost_center_rates", "tonnage TEXT NOT NULL DEFAULT ''"],
+    ["cost_center_rates", "currency TEXT NOT NULL DEFAULT '港币'"],
+    ["cost_center_rates", "cost_values TEXT NOT NULL DEFAULT '{}'"],
+    ["cost_center_rates", "note TEXT NOT NULL DEFAULT ''"],
+    ["cost_center_rates", "effective_date TEXT NOT NULL DEFAULT '1970-01-01'"],
+    ["cost_center_rates", "created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)"],
+    ["cost_center_rates", "updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)"],
+    ["cost_center_rates", "deleted_at TEXT"],
     ["statement_downloads", "period_key TEXT NOT NULL DEFAULT ''"],
     ["statement_downloads", "period_mode TEXT NOT NULL DEFAULT ''"],
     ["statement_downloads", "amount_hkd DOUBLE PRECISION NOT NULL DEFAULT 0"],
     ["statement_downloads", "amount_rmb DOUBLE PRECISION NOT NULL DEFAULT 0"],
     ["statement_downloads", "record_count INTEGER NOT NULL DEFAULT 0"],
-    ["statement_downloads", "snapshot_ready BOOLEAN NOT NULL DEFAULT false"]
+    ["statement_downloads", "snapshot_ready BOOLEAN NOT NULL DEFAULT false"],
+    ["statement_downloads", "statement_type TEXT NOT NULL DEFAULT 'customer'"],
+    ["statement_downloads", "entity_name TEXT NOT NULL DEFAULT ''"],
+    ["statement_downloads", "start_date TEXT NOT NULL DEFAULT ''"],
+    ["statement_downloads", "end_date TEXT NOT NULL DEFAULT ''"],
+    ["statement_downloads", "status TEXT NOT NULL DEFAULT '已导出'"],
+    ["statement_downloads", "payment_status TEXT NOT NULL DEFAULT '未收款'"],
+    ["statement_downloads", "payment_date TEXT NOT NULL DEFAULT ''"],
+    ["statement_downloads", "downloaded_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)"],
+    ["statement_downloads", "created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)"],
+    ["statement_downloads", "updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)"],
+    ["statement_downloads", "deleted_at TEXT"],
+    ["driver_wage_settlements", "adjustments_hkd DOUBLE PRECISION"],
+    ["driver_wage_settlements", "adjustments_rmb DOUBLE PRECISION"],
+    ["driver_wage_settlements", "note TEXT NOT NULL DEFAULT ''"],
+    ["driver_wage_settlements", "status TEXT NOT NULL DEFAULT '未结算'"],
+    ["driver_wage_settlements", "settled_at TEXT NOT NULL DEFAULT ''"],
+    ["driver_wage_settlements", "created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)"],
+    ["driver_wage_settlements", "updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)"]
   ];
   for (const [table, definition] of definitions) {
     await addColumn(table, definition);
+  }
+  const legacyCustomers = await db.prepare(`
+    SELECT id, customs_custom_fields, customs_production_certificate_fee, customs_inspection_fee
+    FROM customers
+    WHERE deleted_at IS NULL
+      AND type = '客户'
+      AND customer_category = '报关客户'
+  `).all();
+  for (const row of legacyCustomers) {
+    const legacyProductionCertificateFee = customerLegacyCustomsFieldValue(row.customs_custom_fields, "产证地");
+    const legacyInspectionFee = customerLegacyCustomsFieldValue(row.customs_custom_fields, "商检费");
+    const updateSets = [];
+    const item = { id: row.id };
+    if (legacyProductionCertificateFee !== null && Number(row.customs_production_certificate_fee ?? 150) === 150) {
+      updateSets.push("customs_production_certificate_fee = @productionCertificateFee");
+      item.productionCertificateFee = legacyProductionCertificateFee;
+    }
+    if (legacyInspectionFee !== null && Number(row.customs_inspection_fee ?? 100) === 100) {
+      updateSets.push("customs_inspection_fee = @inspectionFee");
+      item.inspectionFee = legacyInspectionFee;
+    }
+    if (!updateSets.length) continue;
+    await db.prepare(`
+      UPDATE customers
+      SET ${updateSets.join(", ")}
+      WHERE id = @id
+    `).run(item);
   }
   await db.exec(`
     CREATE TABLE IF NOT EXISTS driver_wage_settlements (
@@ -773,6 +938,9 @@ async function ensureRuntimeSchemaCompatibility() {
       driver_id BIGINT REFERENCES drivers(id) ON DELETE CASCADE,
       status TEXT NOT NULL DEFAULT '未结算',
       settled_at TEXT NOT NULL DEFAULT '',
+      adjustments_hkd DOUBLE PRECISION,
+      adjustments_rmb DOUBLE PRECISION,
+      note TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
       updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
       UNIQUE(period_key, driver_id)
@@ -816,6 +984,7 @@ async function initializeSchema() {
       customs_import_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30,
       customs_export_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30,
       customs_production_certificate_fee DOUBLE PRECISION NOT NULL DEFAULT 150,
+      customs_inspection_fee DOUBLE PRECISION NOT NULL DEFAULT 100,
       customs_manifest_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
       customs_verification_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
       trip_no_required BOOLEAN NOT NULL DEFAULT false,
@@ -973,6 +1142,7 @@ async function initializeSchema() {
       start_date TEXT NOT NULL DEFAULT '',
       end_date TEXT NOT NULL DEFAULT '',
       expense_year INTEGER,
+      payment_date TEXT NOT NULL DEFAULT '',
       currency TEXT NOT NULL DEFAULT '人民币',
       amount DOUBLE PRECISION NOT NULL DEFAULT 0,
       note TEXT NOT NULL DEFAULT '',
@@ -1228,6 +1398,9 @@ async function initializeSchema() {
       driver_id BIGINT REFERENCES drivers(id) ON DELETE CASCADE,
       status TEXT NOT NULL DEFAULT '未结算',
       settled_at TEXT NOT NULL DEFAULT '',
+      adjustments_hkd DOUBLE PRECISION,
+      adjustments_rmb DOUBLE PRECISION,
+      note TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
       updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
       UNIQUE(period_key, driver_id)
@@ -1471,6 +1644,7 @@ async function initializeSchema() {
     "customs_import_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30",
     "customs_export_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30",
     "customs_production_certificate_fee DOUBLE PRECISION NOT NULL DEFAULT 150",
+    "customs_inspection_fee DOUBLE PRECISION NOT NULL DEFAULT 100",
     "customs_manifest_fee DOUBLE PRECISION NOT NULL DEFAULT 0",
     "customs_verification_fee DOUBLE PRECISION NOT NULL DEFAULT 0",
     "trip_no_required BOOLEAN NOT NULL DEFAULT false",
@@ -1511,7 +1685,8 @@ async function initializeSchema() {
       "maintenance_next_km DOUBLE PRECISION NOT NULL DEFAULT 0",
       "repair_items_json TEXT NOT NULL DEFAULT '[]'",
       "start_date TEXT NOT NULL DEFAULT ''",
-      "end_date TEXT NOT NULL DEFAULT ''"
+      "end_date TEXT NOT NULL DEFAULT ''",
+      "payment_date TEXT NOT NULL DEFAULT ''"
     ],
     company_expenses: [
       "entry_type TEXT NOT NULL DEFAULT 'expense'",

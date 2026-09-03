@@ -70,6 +70,7 @@ const VEHICLE_EXPENSE_CREATE_LOCK_NAMESPACE = 524461;
 const AUTH_SECRET = process.env.HANYE_AUTH_SECRET || process.env.AUTH_SECRET || "hanye-system-local-dev-secret";
 const VEHICLE_EXPENSE_TYPES = new Set(["fuel", "repair", "annual", "other"]);
 const VEHICLE_ANNUAL_EXPENSE_NAMES = new Set(["大陆保险", "香港保险", "大陆年审", "香港年审", "牌头费"]);
+const VEHICLE_ANNUAL_EXPENSE_MONTH_BASED_NAMES = new Set(["牌头费"]);
 const VEHICLE_ANNUAL_EXPENSE_NAME_ALIASES = new Map([
   ["大陆保险费", "大陆保险"],
   ["香港保险费", "香港保险"],
@@ -463,6 +464,7 @@ function mapCustomer(row) {
     customsImportPageFee: 30,
     customsExportPageFee: 30,
     customsProductionCertificateFee: 150,
+    customsInspectionFee: 100,
     customsManifestFee: 0,
     customsVerificationFee: 0
   };
@@ -496,7 +498,8 @@ function mapCustomer(row) {
     customsExportHomeFee: Number(row.customs_export_home_fee ?? customsDefaults.customsExportHomeFee),
     customsImportPageFee: Number(row.customs_import_page_fee ?? customsDefaults.customsImportPageFee),
     customsExportPageFee: Number(row.customs_export_page_fee ?? customsDefaults.customsExportPageFee),
-    customsProductionCertificateFee: Number(row.customs_production_certificate_fee ?? customsCustomFieldMap.get("产证地") ?? customsDefaults.customsProductionCertificateFee),
+    customsProductionCertificateFee: Number(customsCustomFieldMap.get("产证地") ?? row.customs_production_certificate_fee ?? customsDefaults.customsProductionCertificateFee),
+    customsInspectionFee: Number(customsCustomFieldMap.get("商检费") ?? row.customs_inspection_fee ?? customsDefaults.customsInspectionFee),
     customsManifestFee: Number(row.customs_manifest_fee ?? customsDefaults.customsManifestFee ?? 0),
     customsVerificationFee: Number(row.customs_verification_fee ?? customsDefaults.customsVerificationFee),
     tripNoRequired: booleanFlag(row.trip_no_required, false),
@@ -505,7 +508,7 @@ function mapCustomer(row) {
     operatingUnitEnabled: booleanFlag(row.operating_unit_enabled, false),
     newOldEnabled: booleanFlag(row.new_old_enabled, false),
     specialCarEnabled: booleanFlag(row.special_car_enabled, false),
-    customsCustomFields: customsCustomFields.filter((field) => customsBusinessCustomFieldName(field) !== "产证地"),
+    customsCustomFields: customsCustomFields.filter((field) => !["产证地", "商检费"].includes(customsBusinessCustomFieldName(field))),
     createdAt: row.created_at,
     invoice: {
       title: row.invoice_title || row.name || "",
@@ -697,6 +700,19 @@ async function driverAdjustmentWriteColumnSupport() {
   return driverAdjustmentWriteColumnSupportCache;
 }
 
+let driverWageSettlementWriteColumnSupportCache = null;
+
+async function driverWageSettlementWriteColumnSupport() {
+  if (driverWageSettlementWriteColumnSupportCache) return driverWageSettlementWriteColumnSupportCache;
+  driverWageSettlementWriteColumnSupportCache = {
+    adjustmentsHKD: await tableColumnExists("driver_wage_settlements", "adjustments_hkd"),
+    adjustmentsRMB: await tableColumnExists("driver_wage_settlements", "adjustments_rmb"),
+    note: await tableColumnExists("driver_wage_settlements", "note"),
+    updatedAt: await tableColumnExists("driver_wage_settlements", "updated_at")
+  };
+  return driverWageSettlementWriteColumnSupportCache;
+}
+
 let vehicleMaintenanceReminderWriteColumnSupportCache = null;
 
 async function vehicleMaintenanceReminderWriteColumnSupport() {
@@ -811,6 +827,7 @@ function normalizeCustomerPayload(body, id = "") {
     customsImportPageFee: numericOrDefault(body.customsImportPageFee ?? body.customs_import_page_fee, 30),
     customsExportPageFee: numericOrDefault(body.customsExportPageFee ?? body.customs_export_page_fee, 30),
     customsProductionCertificateFee: numericOrDefault(body.customsProductionCertificateFee ?? body.customs_production_certificate_fee, 150),
+    customsInspectionFee: numericOrDefault(body.customsInspectionFee ?? body.customs_inspection_fee, 100),
     customsManifestFee: numericOrDefault(body.customsManifestFee ?? body.customs_manifest_fee, 0),
     customsVerificationFee: numericOrDefault(body.customsVerificationFee ?? body.customs_verification_fee, 0),
     tripNoRequired: type === "客户" ? booleanFlag(body.tripNoRequired ?? body.trip_no_required, false) : false,
@@ -4703,6 +4720,7 @@ function mapVehicleExpense(row) {
     year,
     startDate,
     endDate,
+    paymentDate: row.payment_date || "",
     currency: userTextValue(row.currency || "人民币"),
     amount: Number(row.amount || 0),
     note: userTextValue(row.note),
@@ -4715,6 +4733,10 @@ function normalizeVehicleAnnualExpenseName(value = "") {
   const text = userTextValue(value);
   if (VEHICLE_ANNUAL_EXPENSE_NAME_ALIASES.has(text)) return VEHICLE_ANNUAL_EXPENSE_NAME_ALIASES.get(text);
   return VEHICLE_ANNUAL_EXPENSE_NAMES.has(text) ? text : "大陆保险";
+}
+
+function vehicleExpenseAnnualIsMonthBasedName(value = "") {
+  return VEHICLE_ANNUAL_EXPENSE_MONTH_BASED_NAMES.has(normalizeVehicleAnnualExpenseName(value));
 }
 
 function vehicleAnnualExpenseReminderField(name = "") {
@@ -4891,12 +4913,21 @@ function normalizeVehicleExpensePayload(body = {}, current = null) {
   const otherMonth = normalizePeriodMonthKey(rawDate || current?.expense_date || todayInputValue());
   const explicitStartDate = String(body.startDate || body.start_date || "").trim();
   const explicitEndDate = String(body.endDate || body.end_date || "").trim();
-  const startDate = type === "annual"
-    ? explicitStartDate || String(current?.start_date || "").trim() || `${year}-01-01`
-    : "";
-  const endDate = type === "annual"
-    ? explicitEndDate || String(current?.end_date || "").trim() || addInputYears(startDate, 1)
-    : "";
+  const annualName = type === "annual" ? normalizeVehicleAnnualExpenseName(rawName || current?.name || "大陆保险") : "";
+  const annualMonthBased = type === "annual" && vehicleExpenseAnnualIsMonthBasedName(annualName);
+  const paymentDate = normalizeVehicleExpensePaymentDate(body.paymentDate ?? body.payment_date ?? current?.payment_date ?? "");
+  let startDate = "";
+  let endDate = "";
+  if (type === "annual") {
+    if (annualMonthBased) {
+      const monthKey = normalizePeriodMonthKey(rawDate || explicitStartDate || current?.start_date || current?.expense_date || todayInputValue());
+      startDate = monthStartInputValue(monthKey || explicitStartDate || current?.start_date || current?.expense_date || `${year}-01`);
+      endDate = monthEndInputValue(startDate);
+    } else {
+      startDate = explicitStartDate || String(current?.start_date || "").trim() || `${year}-01-01`;
+      endDate = explicitEndDate || String(current?.end_date || "").trim() || addInputYears(startDate, 1);
+    }
+  }
   const startYear = Number(String(startDate || "").slice(0, 4));
   const annualYear = type === "annual" && Number.isInteger(startYear) && startYear >= 2000 && startYear <= 2100 ? startYear : year;
   const date = type === "annual"
@@ -4936,7 +4967,7 @@ function normalizeVehicleExpensePayload(body = {}, current = null) {
     : [];
   const normalizedRepairItems = repairItems.length ? repairItems : repairFallbackItems;
   const name = type === "annual"
-    ? normalizeVehicleAnnualExpenseName(rawName || current?.name || "大陆保险")
+    ? annualName
     : (type === "repair" ? vehicleRepairSummaryName(normalizedRepairItems) : (rawName || defaultNames[type]));
   const fuelLitersRaw = Number(body.fuelLiters ?? body.fuel_liters ?? current?.fuel_liters ?? 0);
   const derivedFuelPrice = fuelLitersRaw > 0 && Number(body.amount ?? current?.amount ?? 0) > 0
@@ -4964,6 +4995,7 @@ function normalizeVehicleExpensePayload(body = {}, current = null) {
         year: type === "annual" ? annualYear : null,
         startDate,
         endDate,
+        paymentDate,
         currency: normalizeVehicleExpenseCurrency(body.currency ?? current?.currency ?? "人民币"),
         amount: roundedAmount,
         repairItems: [],
@@ -4992,6 +5024,7 @@ function normalizeVehicleExpensePayload(body = {}, current = null) {
     year: type === "annual" ? annualYear : null,
     startDate,
     endDate,
+    paymentDate,
     currency: type === "repair" ? "人民币" : normalizeVehicleExpenseCurrency(body.currency ?? current?.currency ?? "人民币"),
     amount: type === "fuel"
       ? Number(roundedAmount.toFixed(2))
@@ -5322,6 +5355,23 @@ function normalizePeriodMonthKey(value = "") {
   return `${matched[1]}-${String(monthNumber).padStart(2, "0")}`;
 }
 
+function monthStartInputValue(value = "") {
+  const monthKey = normalizePeriodMonthKey(value);
+  return monthKey ? `${monthKey}-01` : "";
+}
+
+function monthEndInputValue(value = "") {
+  const monthKey = normalizePeriodMonthKey(value);
+  if (!monthKey) return "";
+  const [year, month] = monthKey.split("-").map(Number);
+  return dateInputFromDate(new Date(year, month, 0));
+}
+
+function normalizeVehicleExpensePaymentDate(value = "") {
+  const text = String(value || "").trim().slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : "";
+}
+
 function normalizeVehicleProfitExchangeRate(value = VEHICLE_PROFIT_DEFAULT_EXCHANGE_RATE) {
   const rate = Number(value);
   return Number.isFinite(rate) && rate > 0 ? rate : VEHICLE_PROFIT_DEFAULT_EXCHANGE_RATE;
@@ -5475,6 +5525,15 @@ function normalizeDriverWageSettlementStatus(value = "") {
     : DRIVER_WAGE_SETTLEMENT_PENDING_STATUS;
 }
 
+function normalizeOptionalDriverWageAmount(value = null) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  const amount = Number(text);
+  if (!Number.isFinite(amount)) return null;
+  return Number(amount.toFixed(2));
+}
+
 function mapDriverWageSettlement(row) {
   return {
     id: row.id,
@@ -5482,17 +5541,24 @@ function mapDriverWageSettlement(row) {
     driverId: row.driver_id,
     status: normalizeDriverWageSettlementStatus(row.status),
     settledAt: row.settled_at || "",
+    adjustmentsHKD: row.adjustments_hkd ?? null,
+    adjustmentsRMB: row.adjustments_rmb ?? null,
+    note: row.note || "",
     createdAt: row.created_at || "",
     updatedAt: row.updated_at || row.created_at || ""
   };
 }
 
 function readDriverWageSettlementPayload(body = {}, current = null) {
+  const noteValue = pickBody(body, "note", "remark", current?.note ?? "");
   return {
     periodKey: String(body.periodKey ?? body.period_key ?? current?.period_key ?? "").trim(),
     driverId: Number(body.driverId ?? body.driver_id ?? current?.driver_id ?? 0),
     status: normalizeDriverWageSettlementStatus(body.status ?? body.settlementStatus ?? body.settlement_status ?? current?.status ?? ""),
-    settledAt: String(body.settledAt ?? body.settled_at ?? current?.settled_at ?? "").trim()
+    settledAt: String(body.settledAt ?? body.settled_at ?? current?.settled_at ?? "").trim(),
+    adjustmentsHKD: normalizeOptionalDriverWageAmount(pickBody(body, "adjustmentsHKD", "adjustments_hkd", current?.adjustments_hkd)),
+    adjustmentsRMB: normalizeOptionalDriverWageAmount(pickBody(body, "adjustmentsRMB", "adjustments_rmb", current?.adjustments_rmb)),
+    note: noteValue === null || noteValue === undefined ? "" : String(noteValue).trim()
   };
 }
 
@@ -5590,14 +5656,17 @@ function mapStatementDownload(row) {
 
 function mapCustomsBusiness(row) {
   const customFields = normalizeCustomsBusinessCustomFields(row.custom_fields);
-  const knownTotalWithoutHomeFee = Number(row.customs_fee || 0)
-    + Number(row.page_fee || 0)
-    + Number(row.manifest_fee || 0)
-    + Number(row.inspection_fee || 0)
-    + Number(row.check_fee || 0)
-    + Number(row.verification_fee || 0)
-    + customsBusinessCustomFieldsTotal(customFields);
   const productionCertificateFee = Number(row.home_fee || 0);
+  const computedTotal = userTextValue(row.direction) === "产证地"
+    ? productionCertificateFee
+    : Number(row.customs_fee || 0)
+      + Number(row.page_fee || 0)
+      + Number(row.manifest_fee || 0)
+      + Number(row.inspection_fee || 0)
+      + Number(row.check_fee || 0)
+      + Number(row.verification_fee || 0)
+      + Number(row.other_fee || 0)
+      + customsBusinessCustomFieldsTotal(customFields);
   return {
     id: row.id,
     date: row.business_date || "",
@@ -5617,7 +5686,7 @@ function mapCustomsBusiness(row) {
     verificationFee: Number(row.verification_fee || 0),
     otherFee: Number(row.other_fee || 0),
     customFields,
-    total: Number(row.total || 0),
+    total: computedTotal,
     remark: userTextValue(row.remark),
     createdAt: row.created_at || "",
     updatedAt: row.updated_at || "",
@@ -6322,7 +6391,8 @@ function normalizeCustomsBusinessCustomFields(value = []) {
   const source = Array.isArray(value) ? value : parseJsonArrayText(value);
   const fieldsByName = new Map();
   source.forEach((field) => {
-    const name = userTextValue(field?.name ?? field?.label ?? field?.key ?? "");
+    const rawName = userTextValue(field?.name ?? field?.label ?? field?.key ?? "");
+    const name = rawName === "法检/3C商检" ? "商检费" : rawName;
     if (!name) return;
     const amount = integerField(field?.value ?? field?.amount ?? field?.fee);
     fieldsByName.set(name, {
@@ -6382,6 +6452,7 @@ function normalizeCustomsBusinessPayload(body = {}) {
     ? []
     : normalizeCustomsBusinessCustomFields(body.customFields ?? body.custom_fields);
   const computedTotal = homeFee + customsFee + pageFee + manifestFee + inspectionFee + checkFee + verificationFee
+    + otherFee
     + customsBusinessCustomFieldsTotal(customFields);
   return {
     date: normalizeCustomsBusinessDate(body.date ?? body.businessDate ?? body.business_date),
@@ -7758,6 +7829,7 @@ app.patch("/api/customers/:id", async (req, res) => {
   const hasCustomsVerificationFee = await customerColumnExists("customs_verification_fee");
   const hasCustomsManifestFee = await customerColumnExists("customs_manifest_fee");
   const hasCustomsProductionCertificateFee = await customerColumnExists("customs_production_certificate_fee");
+  const hasCustomsInspectionFee = await customerColumnExists("customs_inspection_fee");
   const hasCustomsCustomFields = await customerColumnExists("customs_custom_fields");
   const updateSets = [
     "type = @type",
@@ -7792,6 +7864,7 @@ app.patch("/api/customers/:id", async (req, res) => {
   if (requirementSupport.tripNoRequired) updateSets.push("trip_no_required = @tripNoRequired");
   if (requirementSupport.sixSheetNoRequired) updateSets.push("six_sheet_no_required = @sixSheetNoRequired");
   if (hasCustomsProductionCertificateFee) updateSets.push("customs_production_certificate_fee = @customsProductionCertificateFee");
+  if (hasCustomsInspectionFee) updateSets.push("customs_inspection_fee = @customsInspectionFee");
   if (hasSpecialCustomerColumn) updateSets.push("special_customer = @specialCustomer");
   if (requirementSupport.operatingUnitEnabled) updateSets.push("operating_unit_enabled = @operatingUnitEnabled");
   if (requirementSupport.newOldEnabled) updateSets.push("new_old_enabled = @newOldEnabled");
@@ -7825,7 +7898,8 @@ app.patch("/api/customers/:id", async (req, res) => {
       { key: "operatingUnitEnabled", label: "经营单位" },
       { key: "newOldEnabled", label: "新/旧" },
       { key: "specialCarEnabled", label: "专车" },
-      { key: "customsProductionCertificateFee", label: "产证地" }
+      { key: "customsProductionCertificateFee", label: "产证地" },
+      { key: "customsInspectionFee", label: "商检费" }
     ], { entityLabel: "客户" })
   );
   res.json(mapCustomer(await db.prepare("SELECT * FROM customers WHERE id = ?").get(id)));
@@ -7848,6 +7922,7 @@ app.post("/api/customers", async (req, res) => {
   const hasCustomsVerificationFee = await customerColumnExists("customs_verification_fee");
   const hasCustomsManifestFee = await customerColumnExists("customs_manifest_fee");
   const hasCustomsProductionCertificateFee = await customerColumnExists("customs_production_certificate_fee");
+  const hasCustomsInspectionFee = await customerColumnExists("customs_inspection_fee");
   const hasCustomsCustomFields = await customerColumnExists("customs_custom_fields");
   const insertColumns = [
     "id",
@@ -7952,6 +8027,10 @@ app.post("/api/customers", async (req, res) => {
   if (hasCustomsProductionCertificateFee) {
     insertColumns.push("customs_production_certificate_fee");
     insertValues.push("@customsProductionCertificateFee");
+  }
+  if (hasCustomsInspectionFee) {
+    insertColumns.push("customs_inspection_fee");
+    insertValues.push("@customsInspectionFee");
   }
   if (hasCustomsCustomFields) {
     insertColumns.push("customs_custom_fields");
@@ -11537,6 +11616,10 @@ app.post("/api/vehicle-expenses", async (req, res) => {
       res.status(400).json({ message: "开始日期不能晚于到期日期" });
       return;
     }
+    if (item.paymentDate && !parseInputDate(item.paymentDate)) {
+      res.status(400).json({ message: "请填写正确的交费时间" });
+      return;
+    }
   }
   const transaction = db.transaction(async () => {
     await lockVehicleExpenseCreation(item);
@@ -11570,8 +11653,8 @@ app.post("/api/vehicle-expenses", async (req, res) => {
       insertColumns.push("maintenance_next_km");
       insertValues.push("@maintenanceNextKm");
     }
-    insertColumns.push("repair_items_json", "plate", "expense_date", "start_date", "end_date", "expense_year", "currency", "amount", "note");
-    insertValues.push("@repairItemsJson", "@plate", "@date", "@startDate", "@endDate", "@year", "@currency", "@amount", "@note");
+    insertColumns.push("repair_items_json", "plate", "expense_date", "start_date", "end_date", "expense_year", "payment_date", "currency", "amount", "note");
+    insertValues.push("@repairItemsJson", "@plate", "@date", "@startDate", "@endDate", "@year", "@paymentDate", "@currency", "@amount", "@note");
     const result = await db.prepare(`
       INSERT INTO vehicle_expenses (${insertColumns.join(", ")})
       VALUES (${insertValues.join(", ")})
@@ -11655,6 +11738,10 @@ app.patch("/api/vehicle-expenses/:id", async (req, res) => {
       res.status(400).json({ message: "开始日期不能晚于到期日期" });
       return;
     }
+    if (item.paymentDate && !parseInputDate(item.paymentDate)) {
+      res.status(400).json({ message: "请填写正确的交费时间" });
+      return;
+    }
   }
   const updateParts = [
     "expense_type = @type",
@@ -11678,6 +11765,7 @@ app.patch("/api/vehicle-expenses/:id", async (req, res) => {
     "start_date = @startDate",
     "end_date = @endDate",
     "expense_year = @year",
+    "payment_date = @paymentDate",
     "currency = @currency",
     "amount = @amount",
     "note = @note",
@@ -11723,6 +11811,7 @@ app.patch("/api/vehicle-expenses/:id", async (req, res) => {
       { key: "plate", label: "车牌" },
       { key: "name", label: "名称" },
       { label: "日期", before: (before) => before.expense_date, after: () => item.date },
+      { label: "交费时间", before: (before) => before.payment_date, after: () => item.paymentDate },
       { key: "amount", label: "金额" },
       { key: "currency", label: "币种" },
       { key: "isMaintenance", label: "保养" },
@@ -12526,14 +12615,25 @@ app.post("/api/driver-wage-settlements", async (req, res) => {
     SELECT * FROM driver_wage_settlements
     WHERE period_key = ? AND driver_id = ?
   `).get(item.periodKey, item.driverId);
+  const support = await driverWageSettlementWriteColumnSupport();
+  const entries = [
+    ["period_key", "periodKey"],
+    ["driver_id", "driverId"],
+    ["status", "status"],
+    ["settled_at", "settledAt"],
+    ...(support.adjustmentsHKD ? [["adjustments_hkd", "adjustmentsHKD"]] : []),
+    ...(support.adjustmentsRMB ? [["adjustments_rmb", "adjustmentsRMB"]] : []),
+    ...(support.note ? [["note", "note"]] : [])
+  ];
+  const { columnSql, valueSql, updateSql } = buildNamedColumns(entries);
+  const updateParts = [updateSql];
+  if (support.updatedAt) updateParts.push("updated_at = CURRENT_TIMESTAMP");
   await db.prepare(`
-    INSERT INTO driver_wage_settlements (period_key, driver_id, status, settled_at)
-    VALUES (@periodKey, @driverId, @status, @settledAt)
+    INSERT INTO driver_wage_settlements (${columnSql})
+    VALUES (${valueSql})
     ON CONFLICT (period_key, driver_id)
     DO UPDATE SET
-      status = excluded.status,
-      settled_at = excluded.settled_at,
-      updated_at = CURRENT_TIMESTAMP
+      ${updateParts.join(",\n      ")}
     RETURNING *
   `).run(item);
   const row = await db.prepare(`
@@ -12544,9 +12644,35 @@ app.post("/api/driver-wage-settlements", async (req, res) => {
     current ? "update" : "create",
     "driver_wage_settlement",
     `${item.periodKey}/${driver.id}`,
-    `${item.periodKey}/${driver.name}/${item.status}${item.settledAt ? `/${item.settledAt}` : ""}`
+    `${item.periodKey}/${driver.name}/${item.status}${item.settledAt ? `/${item.settledAt}` : ""}${item.note ? `/备注:${item.note}` : ""}${item.adjustmentsHKD !== null || item.adjustmentsRMB !== null ? `/预支:${formatDriverWageNoteNumber(item.adjustmentsHKD ?? 0)}/${formatDriverWageNoteNumber(item.adjustmentsRMB ?? 0)}` : ""}`
   );
   res.json(mapDriverWageSettlement(row));
+});
+
+app.delete("/api/driver-wage-settlements/:id", async (req, res) => {
+  if (!(await driverWageSettlementTableAvailable())) {
+    res.status(503).json({ message: "司机工资结算表未就绪" });
+    return;
+  }
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) {
+    res.status(400).json({ message: "结算记录不存在或已删除" });
+    return;
+  }
+  const current = await db.prepare("SELECT * FROM driver_wage_settlements WHERE id = ?").get(id);
+  if (!current) {
+    res.status(404).json({ message: "结算记录不存在或已删除" });
+    return;
+  }
+  const driver = await db.prepare("SELECT id, name FROM drivers WHERE id = ?").get(current.driver_id);
+  await db.prepare("DELETE FROM driver_wage_settlements WHERE id = ?").run(id);
+  await writeAudit(
+    "delete",
+    "driver_wage_settlement",
+    `${current.period_key}/${driver?.id || current.driver_id}`,
+    `${current.period_key}/${driver?.name || current.driver_id}/${current.status}${current.settled_at ? `/${current.settled_at}` : ""}`
+  );
+  res.json({ ok: true });
 });
 
 function readDriverRouteAdjustRulePayload(body, current = null) {
