@@ -5066,6 +5066,7 @@ async function lockVehicleExpenseCreation(item = {}) {
 
 let vehicleExpenseHasMaintenanceNextKmColumnCache;
 let vehicleExpenseHasMaintenanceNextDateColumnCache;
+let vehicleExpenseHasPaymentDateColumnCache;
 
 async function vehicleExpenseHasMaintenanceNextKmColumn() {
   if (vehicleExpenseHasMaintenanceNextKmColumnCache !== undefined) {
@@ -5109,12 +5110,34 @@ async function vehicleExpenseHasMaintenanceNextDateColumn() {
   return vehicleExpenseHasMaintenanceNextDateColumnCache;
 }
 
+async function vehicleExpenseHasPaymentDateColumn() {
+  if (vehicleExpenseHasPaymentDateColumnCache !== undefined) {
+    return vehicleExpenseHasPaymentDateColumnCache;
+  }
+  try {
+    const row = await db.prepare(`
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = ?
+        AND column_name = ?
+      LIMIT 1
+    `).get("vehicle_expenses", "payment_date");
+    vehicleExpenseHasPaymentDateColumnCache = Boolean(row);
+  } catch (error) {
+    console.warn("Failed to inspect vehicle_expenses schema", error);
+    vehicleExpenseHasPaymentDateColumnCache = false;
+  }
+  return vehicleExpenseHasPaymentDateColumnCache;
+}
+
 async function vehicleExpenseMaintenanceColumnSupport() {
-  const [maintenanceNextDate, maintenanceNextKm] = await Promise.all([
+  const [maintenanceNextDate, maintenanceNextKm, paymentDate] = await Promise.all([
     vehicleExpenseHasMaintenanceNextDateColumn(),
-    vehicleExpenseHasMaintenanceNextKmColumn()
+    vehicleExpenseHasMaintenanceNextKmColumn(),
+    vehicleExpenseHasPaymentDateColumn()
   ]);
-  return { maintenanceNextDate, maintenanceNextKm };
+  return { maintenanceNextDate, maintenanceNextKm, paymentDate };
 }
 
 async function findRecentDuplicateVehicleExpense(item = {}, hasMaintenanceNextKm = true) {
@@ -11616,7 +11639,7 @@ app.post("/api/vehicle-expenses", async (req, res) => {
       res.status(400).json({ message: "开始日期不能晚于到期日期" });
       return;
     }
-    if (item.paymentDate && !parseInputDate(item.paymentDate)) {
+    if (maintenanceSupport.paymentDate && item.paymentDate && !parseInputDate(item.paymentDate)) {
       res.status(400).json({ message: "请填写正确的交费时间" });
       return;
     }
@@ -11653,8 +11676,14 @@ app.post("/api/vehicle-expenses", async (req, res) => {
       insertColumns.push("maintenance_next_km");
       insertValues.push("@maintenanceNextKm");
     }
-    insertColumns.push("repair_items_json", "plate", "expense_date", "start_date", "end_date", "expense_year", "payment_date", "currency", "amount", "note");
-    insertValues.push("@repairItemsJson", "@plate", "@date", "@startDate", "@endDate", "@year", "@paymentDate", "@currency", "@amount", "@note");
+    insertColumns.push("repair_items_json", "plate", "expense_date", "start_date", "end_date", "expense_year");
+    insertValues.push("@repairItemsJson", "@plate", "@date", "@startDate", "@endDate", "@year");
+    if (maintenanceSupport.paymentDate) {
+      insertColumns.push("payment_date");
+      insertValues.push("@paymentDate");
+    }
+    insertColumns.push("currency", "amount", "note");
+    insertValues.push("@currency", "@amount", "@note");
     const result = await db.prepare(`
       INSERT INTO vehicle_expenses (${insertColumns.join(", ")})
       VALUES (${insertValues.join(", ")})
@@ -11738,7 +11767,7 @@ app.patch("/api/vehicle-expenses/:id", async (req, res) => {
       res.status(400).json({ message: "开始日期不能晚于到期日期" });
       return;
     }
-    if (item.paymentDate && !parseInputDate(item.paymentDate)) {
+    if (maintenanceSupport.paymentDate && item.paymentDate && !parseInputDate(item.paymentDate)) {
       res.status(400).json({ message: "请填写正确的交费时间" });
       return;
     }
@@ -11765,12 +11794,14 @@ app.patch("/api/vehicle-expenses/:id", async (req, res) => {
     "start_date = @startDate",
     "end_date = @endDate",
     "expense_year = @year",
-    "payment_date = @paymentDate",
     "currency = @currency",
     "amount = @amount",
     "note = @note",
     "updated_at = CURRENT_TIMESTAMP"
   );
+  if (maintenanceSupport.paymentDate) {
+    updateParts.splice(updateParts.indexOf("currency = @currency"), 0, "payment_date = @paymentDate");
+  }
   await db.prepare(`
     UPDATE vehicle_expenses
     SET ${updateParts.join(",\n        ")}
@@ -11811,7 +11842,7 @@ app.patch("/api/vehicle-expenses/:id", async (req, res) => {
       { key: "plate", label: "车牌" },
       { key: "name", label: "名称" },
       { label: "日期", before: (before) => before.expense_date, after: () => item.date },
-      { label: "交费时间", before: (before) => before.payment_date, after: () => item.paymentDate },
+      ...(maintenanceSupport.paymentDate ? [{ label: "交费时间", before: (before) => before.payment_date, after: () => item.paymentDate }] : []),
       { key: "amount", label: "金额" },
       { key: "currency", label: "币种" },
       { key: "isMaintenance", label: "保养" },
