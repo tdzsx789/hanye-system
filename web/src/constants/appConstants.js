@@ -118,7 +118,7 @@ export const VEHICLE_EXPENSE_CONFIGS = [
 ];
 export const VEHICLE_EXPENSE_CONFIG_BY_MODULE = Object.fromEntries(VEHICLE_EXPENSE_CONFIGS.map((item) => [item.moduleId, item]));
 export const VEHICLE_EXPENSE_CONFIG_BY_TYPE = Object.fromEntries(VEHICLE_EXPENSE_CONFIGS.map((item) => [item.type, item]));
-export const VEHICLE_ANNUAL_EXPENSE_NAMES = ["大陆保险", "香港保险", "大陆年审", "香港年审", "牌头费"];
+export const VEHICLE_ANNUAL_EXPENSE_NAMES = ["大陆保险", "香港保险", "中检年审(行驶证)", "香港年审", "牌头费"];
 export const VEHICLE_ANNUAL_EXPENSE_MONTH_BASED_NAMES = ["牌头费"];
 
 export const AUDIT_ACTION_LABELS = {

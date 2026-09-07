@@ -828,7 +828,7 @@ function buildDispatchWarnings(rows, orders, vehicles, drivers, date) {
     const vehicle = vehicleMap[plate];
     if (vehicle) {
       [
-        ["mainlandReviewDate", "大陆年审"],
+        ["mainlandReviewDate", "中检年审(行驶证)"],
         ["hkReviewDate", "香港年审"],
         ["mainlandInsuranceDate", "大陆保险"],
         ["hkInsuranceDate", "香港保险"]

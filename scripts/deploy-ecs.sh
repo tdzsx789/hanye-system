@@ -8,7 +8,10 @@ ECS_KEY="${ECS_KEY:-$HOME/.ssh/hanye_ecs_codex}"
 REMOTE_DIR="${REMOTE_DIR:-/opt/hanye-system}"
 WEB_PORT="${WEB_PORT:-8081}"
 PUBLIC_WEB_ROOT="${PUBLIC_WEB_ROOT:-/var/www/oa.hanyeltd.com}"
-STARTUP_DB_MAINTENANCE="${STARTUP_DB_MAINTENANCE:-1}"
+# Production code deploys must never run schema changes or data backfills.
+# Keep local development maintenance configurable in .env, but force the ECS
+# release path to start in read-only database compatibility mode.
+STARTUP_DB_MAINTENANCE=0
 
 SSH_OPTS=(
   -i "$ECS_KEY"
@@ -21,11 +24,14 @@ RSYNC_EXCLUDES=(
   --exclude=".git"
   --exclude=".db-backups"
   --exclude="backups"
+  --exclude=".tmp-prod-assets"
   --exclude=".env"
   --exclude=".DS_Store"
   --exclude="node_modules"
   --exclude="web/node_modules"
   --exclude="server/node_modules"
+  --exclude="web/pnpm-lock.yaml"
+  --exclude="web/pnpm-workspace.yaml"
   --exclude="web/dist"
   --exclude="server/dist"
   --exclude="server/data"

@@ -3,7 +3,14 @@ import { apiFetch } from "./client.js";
 export function listFiles(entityType, entityId, options = {}) {
   const deletedOnly = options.deletedOnly ? "&deletedOnly=1" : "";
   const includeOrderFiles = options.includeOrderFiles ? "&includeOrderFiles=1" : "";
-  return apiFetch(`/files?entityType=${encodeURIComponent(entityType)}&entityId=${encodeURIComponent(entityId)}${deletedOnly}${includeOrderFiles}`);
+  const entityIds = Array.isArray(options.entityIds)
+    ? options.entityIds.map((value) => String(value || "").trim()).filter(Boolean)
+    : [];
+  const entityIdQuery = entityId ? `&entityId=${encodeURIComponent(entityId)}` : "";
+  const entityIdsQuery = entityIds.length
+    ? `&entityIds=${encodeURIComponent(entityIds.join(","))}`
+    : "";
+  return apiFetch(`/files?entityType=${encodeURIComponent(entityType)}${entityIdQuery}${entityIdsQuery}${deletedOnly}${includeOrderFiles}`);
 }
 
 export function uploadFile(payload) {

@@ -3316,6 +3316,10 @@ select {
   gap: 12px;
 }
 
+.vehicle-expense-page.has-annual-tabs {
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
 .vehicle-expense-card {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
@@ -3353,6 +3357,41 @@ select {
 
 .vehicle-expense-period-controls {
   justify-content: flex-end;
+}
+
+.vehicle-annual-tabs {
+  display: inline-flex;
+  align-items: center;
+  align-self: start;
+  width: fit-content;
+  max-width: 100%;
+  padding: 3px;
+  border: 1px solid #dbe5f2;
+  border-radius: 9px;
+  background: #f5f8fc;
+}
+
+.vehicle-annual-tabs button {
+  min-width: 88px;
+  min-height: 32px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.vehicle-annual-tabs button:hover {
+  color: #1d4ed8;
+}
+
+.vehicle-annual-tabs button.active {
+  background: #fff;
+  color: #155eef;
+  box-shadow: 0 1px 4px rgb(15 35 70 / 12%);
 }
 
 .vehicle-expense-class-grid {
@@ -3472,6 +3511,45 @@ select {
   width: 84px;
 }
 
+.vehicle-expense-table.is-annual-plate-head {
+  min-width: 980px;
+}
+
+.vehicle-expense-table.is-annual-plate-head th:nth-child(1),
+.vehicle-expense-table.is-annual-plate-head td:nth-child(1) {
+  width: 130px;
+}
+
+.vehicle-expense-table.is-annual-plate-head th:nth-child(2),
+.vehicle-expense-table.is-annual-plate-head td:nth-child(2) {
+  width: 140px;
+}
+
+.vehicle-expense-table.is-annual-plate-head th:nth-child(3),
+.vehicle-expense-table.is-annual-plate-head td:nth-child(3) {
+  width: 130px;
+}
+
+.vehicle-expense-table.is-annual-plate-head th:nth-child(4),
+.vehicle-expense-table.is-annual-plate-head td:nth-child(4) {
+  width: 110px;
+}
+
+.vehicle-expense-table.is-annual-plate-head th:nth-child(5),
+.vehicle-expense-table.is-annual-plate-head td:nth-child(5) {
+  width: 80px;
+}
+
+.vehicle-expense-table.is-annual-plate-head th:nth-child(6),
+.vehicle-expense-table.is-annual-plate-head td:nth-child(6) {
+  width: 110px;
+}
+
+.vehicle-expense-table.is-annual-plate-head th:nth-child(7),
+.vehicle-expense-table.is-annual-plate-head td:nth-child(7) {
+  width: auto;
+}
+
 .vehicle-expense-table td {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3579,19 +3657,47 @@ select {
 
 .vehicle-expense-actions-head,
 .vehicle-expense-actions-cell {
-  width: 92px;
-  min-width: 92px;
+  width: 156px !important;
+  min-width: 156px !important;
+  max-width: 156px !important;
+  box-sizing: border-box;
+  overflow: visible !important;
+  white-space: nowrap;
   position: sticky;
-  right: 0;
+  right: auto;
   z-index: 4;
   background: #fff;
-  box-shadow: -10px 0 14px -14px rgb(15 35 70 / 44%);
+  box-shadow: none;
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+.vehicle-expense-table.is-annual .vehicle-expense-actions-head,
+.vehicle-expense-table.is-annual .vehicle-expense-actions-cell {
+  width: 224px !important;
+  min-width: 224px !important;
+  max-width: 224px !important;
+}
+
+.vehicle-expense-table > thead > tr > .vehicle-expense-actions-head,
+.vehicle-expense-table > tbody > tr > .vehicle-expense-actions-cell {
+  width: 156px !important;
+  min-width: 156px !important;
+  max-width: 156px !important;
+}
+
+.vehicle-expense-table.is-annual > thead > tr > .vehicle-expense-actions-head,
+.vehicle-expense-table.is-annual > tbody > tr > .vehicle-expense-actions-cell {
+  width: 224px !important;
+  min-width: 224px !important;
+  max-width: 224px !important;
 }
 
 .vehicle-expense-table thead .vehicle-expense-actions-head {
   z-index: 5;
   background: #f6f9ff;
-  text-align: center;
+  text-align: center !important;
+  vertical-align: middle;
 }
 
 .vehicle-expense-table tbody tr:hover .vehicle-expense-actions-cell {
@@ -3599,12 +3705,26 @@ select {
 }
 
 .vehicle-expense-row-actions {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  justify-content: flex-start;
-  gap: 8px;
+  justify-content: flex-end;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
   min-height: 32px;
+  max-width: 100%;
+  overflow: visible;
+  padding-bottom: 2px;
   white-space: nowrap;
+  box-sizing: border-box;
+}
+
+.vehicle-expense-receipt-list-btn {
+  flex: 0 0 auto;
+  min-width: 56px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0 6px;
 }
 
 .vehicle-expense-action-btn {
@@ -3691,6 +3811,29 @@ select {
   color: #64748b;
 }
 
+.vehicle-annual-payment-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.vehicle-annual-payment-status.is-paid {
+  border-color: #bbf7d0;
+  background: #ecfdf3;
+  color: #15803d;
+}
+
+.vehicle-annual-payment-status.is-unpaid {
+  border-color: #fecaca;
+  background: #fff1f2;
+  color: #b42318;
+}
+
 .vehicle-detail-expense-panel {
   display: grid;
   gap: 8px;
@@ -3698,16 +3841,16 @@ select {
 
 .vehicle-detail-expense-panel .data-table th:last-child,
 .vehicle-maintenance-panel .data-table th:last-child {
-  width: 86px;
-  min-width: 86px;
+  width: 174px;
+  min-width: 174px;
   text-align: center;
 }
 
 .vehicle-detail-expense-panel .data-table td.row-actions,
 .vehicle-maintenance-panel .data-table td.row-actions {
   display: table-cell;
-  width: 86px;
-  min-width: 86px;
+  width: 174px;
+  min-width: 174px;
   padding: 0 8px;
   overflow: visible;
   text-align: center;
@@ -3723,6 +3866,11 @@ select {
   height: 30px;
   min-height: 30px;
   padding: 0;
+  vertical-align: middle;
+}
+
+.vehicle-detail-expense-panel .data-table td.row-actions .vehicle-expense-receipt-list-btn,
+.vehicle-maintenance-panel .data-table td.row-actions .vehicle-expense-receipt-list-btn {
   vertical-align: middle;
 }
 
@@ -4060,6 +4208,8 @@ select {
 .vehicle-repair-record-main .row-actions {
   width: auto;
   flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .vehicle-repair-record-main .row-actions .icon-btn.icon-only {
@@ -4070,6 +4220,70 @@ select {
   padding: 0;
   border-radius: 8px;
   flex: 0 0 34px;
+}
+
+.vehicle-expense-receipt-picker-modal {
+  width: min(720px, calc(100vw - 48px));
+}
+
+.vehicle-expense-receipt-picker-hint {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.vehicle-expense-receipt-picker-list {
+  display: grid;
+  gap: 8px;
+  max-height: min(52vh, 520px);
+  overflow: auto;
+}
+
+.vehicle-expense-receipt-picker-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.vehicle-expense-receipt-picker-file {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+  color: var(--text);
+}
+
+.vehicle-expense-receipt-picker-file .ui-icon {
+  flex: 0 0 auto;
+  width: 17px;
+  height: 17px;
+  color: var(--blue);
+}
+
+.vehicle-expense-receipt-picker-file strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vehicle-expense-receipt-picker-meta {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.vehicle-expense-receipt-picker-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .vehicle-repair-record-toggle {
@@ -8491,7 +8705,7 @@ small.vehicle-repair-record-meta {
 
 .finance-wage-settlement-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -9191,6 +9405,13 @@ body.is-column-resizing {
   justify-content: stretch;
 }
 
+.file-preview-stage.is-pdf {
+  height: 100%;
+  min-height: 100%;
+  align-items: stretch;
+  justify-content: stretch;
+}
+
 .file-preview-image {
   position: absolute;
   top: 50%;
@@ -9200,7 +9421,7 @@ body.is-column-resizing {
   height: auto;
   max-width: none;
   max-height: none;
-  object-fit: none;
+  object-fit: contain;
   object-position: center;
   transform-origin: center center;
   border: 1px solid var(--border);
@@ -9209,14 +9430,22 @@ body.is-column-resizing {
 }
 
 .file-preview-image-viewport {
+  position: relative;
   width: 100%;
   height: 100%;
   min-height: 0;
   overflow: auto;
-  display: grid;
-  place-items: center;
-  padding: 8px;
+  display: block;
   box-sizing: border-box;
+}
+
+.file-preview-image-canvas {
+  position: relative;
+  min-width: 100%;
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .file-preview-image-box {
@@ -9225,6 +9454,30 @@ body.is-column-resizing {
   flex: 0 0 auto;
   overflow: visible;
   background: transparent;
+}
+
+.file-preview-image-state {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  padding: 24px;
+  color: #475569;
+  font-size: 14px;
+  font-weight: 700;
+  text-align: center;
+  background: rgba(248, 250, 252, 0.92);
+}
+
+.file-preview-image-state p {
+  margin: 0;
+}
+
+.file-preview-image-state.is-error {
+  color: #b42318;
 }
 
 .file-preview-zoom-tools {
@@ -9240,6 +9493,88 @@ body.is-column-resizing {
   color: #475569;
   font-size: 12px;
   font-weight: 800;
+}
+
+.pdf-preview {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.pdf-preview-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 30px;
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.pdf-preview-pages {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 12px 24px;
+  border: 1px solid #d7e3f3;
+  border-radius: 8px;
+  background: #e2e8f0;
+}
+
+.pdf-preview-page {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 auto 16px;
+}
+
+.pdf-preview-page:last-child {
+  margin-bottom: 0;
+}
+
+.pdf-preview-page canvas {
+  display: block;
+  max-width: 100%;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  box-shadow: 0 2px 8px rgb(15 23 42 / 12%);
+}
+
+.pdf-preview-page span {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.pdf-preview-state {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  min-height: 220px;
+  padding: 24px;
+  border: 1px solid #d7e3f3;
+  border-radius: 8px;
+  background: #fff;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.pdf-preview-state p {
+  margin: 0;
+}
+
+.pdf-preview-state.is-error {
+  color: #b42318;
 }
 
 .spreadsheet-preview {

@@ -69,20 +69,21 @@ const ORDER_DISPATCH_SYNC_LOCK_ID = 524462;
 const VEHICLE_EXPENSE_CREATE_LOCK_NAMESPACE = 524461;
 const AUTH_SECRET = process.env.HANYE_AUTH_SECRET || process.env.AUTH_SECRET || "hanye-system-local-dev-secret";
 const VEHICLE_EXPENSE_TYPES = new Set(["fuel", "repair", "annual", "other"]);
-const VEHICLE_ANNUAL_EXPENSE_NAMES = new Set(["大陆保险", "香港保险", "大陆年审", "香港年审", "牌头费"]);
+const VEHICLE_ANNUAL_EXPENSE_NAMES = new Set(["大陆保险", "香港保险", "中检年审(行驶证)", "香港年审", "牌头费"]);
 const VEHICLE_ANNUAL_EXPENSE_MONTH_BASED_NAMES = new Set(["牌头费"]);
 const VEHICLE_ANNUAL_EXPENSE_NAME_ALIASES = new Map([
   ["大陆保险费", "大陆保险"],
   ["香港保险费", "香港保险"],
-  ["大陆年审费", "大陆年审"],
+  ["大陆年审", "中检年审(行驶证)"],
+  ["大陆年审费", "中检年审(行驶证)"],
   ["香港年审费", "香港年审"],
   ["保险费", "大陆保险"],
-  ["年审费", "大陆年审"]
+  ["年审费", "中检年审(行驶证)"]
 ]);
 const VEHICLE_ANNUAL_EXPENSE_REMINDER_FIELDS = new Map([
   ["大陆保险", "mainland_insurance_date"],
   ["香港保险", "hk_insurance_date"],
-  ["大陆年审", "mainland_review_date"],
+  ["中检年审(行驶证)", "mainland_review_date"],
   ["香港年审", "hk_review_date"]
 ]);
 const VEHICLE_PROFIT_DEFAULT_EXCHANGE_RATE = 0.88;
@@ -95,6 +96,9 @@ const OSS_REGION = String(process.env.OSS_REGION || "").trim();
 const OSS_ENDPOINT = String(process.env.OSS_ENDPOINT || "").trim();
 const OSS_KEY_PREFIX = String(process.env.OSS_KEY_PREFIX || "hanye-system/uploads").trim();
 const OSS_SIGNED_URL_EXPIRES_SECONDS = Math.max(60, Number(process.env.OSS_SIGNED_URL_EXPIRES_SECONDS || 60 * 60));
+const OSS_REQUEST_TIMEOUT_MS = Math.max(10_000, Number(process.env.OSS_REQUEST_TIMEOUT_MS || 60_000));
+const OSS_READ_RETRY_MAX = Math.max(0, Math.min(5, Number(process.env.OSS_READ_RETRY_MAX || 2)));
+const OSS_READ_RETRY_DELAY_MS = Math.max(100, Math.min(5_000, Number(process.env.OSS_READ_RETRY_DELAY_MS || 500)));
 const OSS_CONFIG_REQUESTED = Boolean(OSS_BUCKET || OSS_REGION || OSS_ENDPOINT || OSS_ACCESS_KEY_ID || OSS_ACCESS_KEY_SECRET);
 const OSS_ENABLED = Boolean(OSS_BUCKET && (OSS_REGION || OSS_ENDPOINT) && OSS_ACCESS_KEY_ID && OSS_ACCESS_KEY_SECRET);
 const ossClient = OSS_ENABLED ? new OSS({
@@ -105,7 +109,8 @@ const ossClient = OSS_ENABLED ? new OSS({
   endpoint: OSS_ENDPOINT || undefined,
   internal: truthyEnv(process.env.OSS_INTERNAL),
   region: OSS_REGION || undefined,
-  secure: !falsyEnv(process.env.OSS_SECURE)
+  secure: !falsyEnv(process.env.OSS_SECURE),
+  timeout: OSS_REQUEST_TIMEOUT_MS
 }) : null;
 const fileStorageProvider = ossClient ? "oss" : "oss-unconfigured";
 const auditActorContext = new AsyncLocalStorage();
@@ -1281,6 +1286,47 @@ function signedOssUrl(row, disposition = "attachment") {
     });
     return "";
   }
+}
+
+function ossReadErrorDetails(error) {
+  return {
+    code: String(error?.code || error?.name || "").trim() || "UnknownError",
+    status: Number(error?.status || error?.statusCode || error?.res?.status || 0) || undefined,
+    requestId: String(error?.requestId || error?.res?.headers?.["x-oss-request-id"] || "").trim() || undefined,
+    message: String(error?.message || error || "").trim().slice(0, 240)
+  };
+}
+
+function waitForOssRetry(delayMs) {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+async function readOssObjectBuffer(objectKey) {
+  if (!ossClient || !objectKey) {
+    throw new Error("OSS 文件存储未配置或文件地址为空");
+  }
+
+  let lastError = null;
+  for (let attempt = 0; attempt <= OSS_READ_RETRY_MAX; attempt += 1) {
+    try {
+      const result = await ossClient.get(objectKey, { timeout: OSS_REQUEST_TIMEOUT_MS });
+      const content = Buffer.isBuffer(result?.content)
+        ? result.content
+        : Buffer.from(result?.content || []);
+      if (!content.length) {
+        const emptyError = new Error("OSS 返回空文件内容");
+        emptyError.code = "EmptyObject";
+        throw emptyError;
+      }
+      return content;
+    } catch (error) {
+      lastError = error;
+      if (attempt >= OSS_READ_RETRY_MAX) break;
+      await waitForOssRetry(OSS_READ_RETRY_DELAY_MS * (attempt + 1));
+    }
+  }
+
+  throw lastError || new Error("OSS 文件读取失败");
 }
 
 async function migrateDatabaseFilesToOss() {
@@ -3087,21 +3133,12 @@ async function loadOrderReceiptImageRows(orders = []) {
 
 async function fetchReceiptImageBuffer(file = {}) {
   if (file.storage_provider !== "oss" || !file.object_key || !ossClient) return null;
-  const url = signedOssUrl(file, "inline");
-  if (!url) return null;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8000);
   try {
-    const response = await fetch(url, { signal: controller.signal });
-    if (!response.ok) return null;
-    const arrayBuffer = await response.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
+    const buffer = await readOssObjectBuffer(file.object_key);
     if (!buffer.length || buffer.length > MAX_UPLOAD_BYTES) return null;
     return trimReceiptImageBuffer(buffer, file.extension);
   } catch {
     return null;
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -4574,6 +4611,8 @@ async function renderOrdersPdf(res, orders, title = "订单导出", templatePayl
 
 function mapOrderFee(row) {
   const quantity = Number(row.quantity || 0) > 0 ? Number(row.quantity) : 1;
+  const costParts = normalizeOrderFeeCostParts(row.cost_parts_json);
+  const costManual = Boolean(row.cost_manual);
   return {
     id: row.id,
     clientKey: userTextValue(row.client_key),
@@ -4589,8 +4628,12 @@ function mapOrderFee(row) {
     costCurrency: userTextValue(row.cost_currency || row.currency || "港币"),
     costHKD: row.cost_hkd == null ? null : Number(row.cost_hkd || 0),
     costRMB: row.cost_rmb == null ? null : Number(row.cost_rmb || 0),
-    costParts: normalizeOrderFeeCostParts(row.cost_parts_json),
-    costManual: Boolean(row.cost_manual),
+    costParts,
+    costManual,
+    costSplitManual: costManual && (
+      costParts.length > 0
+      || (row.cost_hkd != null && row.cost_rmb != null)
+    ),
     fxLinks: parseJsonObjectText(row.fx_links_json, {}),
     advanceAddress: userTextValue(row.advance_address),
     remark: userTextValue(row.remark),
@@ -4974,20 +5017,19 @@ function normalizeVehicleExpensePayload(body = {}, current = null) {
     ? Number((Number(body.amount ?? current?.amount ?? 0) / fuelLitersRaw).toFixed(2))
     : 0;
   const fuelPriceRaw = Number(body.fuelPricePerLiter ?? body.fuel_price_per_liter ?? current?.fuel_price_per_liter ?? derivedFuelPrice ?? 0);
-  const roundedFuelLiters = type === "fuel" ? Number(fuelLitersRaw.toFixed(2)) : 0;
+  const normalizedFuelLiters = type === "fuel" && Number.isFinite(fuelLitersRaw) && fuelLitersRaw > 0 ? fuelLitersRaw : 0;
   const roundedFuelPrice = type === "fuel" ? Number(fuelPriceRaw.toFixed(2)) : 0;
-  let roundedAmount = Number.isFinite(amountRaw) ? amountRaw : 0;
+  let normalizedAmount = Number.isFinite(amountRaw) ? amountRaw : 0;
   if (type === "fuel") {
-    if (roundedFuelPrice > 0 && roundedFuelLiters > 0) {
-      roundedAmount = Number((roundedFuelLiters * roundedFuelPrice).toFixed(2));
-    } else if (roundedFuelPrice > 0 && roundedAmount > 0 && roundedFuelLiters <= 0) {
-      const litersFromAmount = roundedAmount / roundedFuelPrice;
-      roundedAmount = Number(roundedAmount.toFixed(2));
+    if (roundedFuelPrice > 0 && normalizedFuelLiters > 0) {
+      normalizedAmount = normalizedFuelLiters * roundedFuelPrice;
+    } else if (roundedFuelPrice > 0 && normalizedAmount > 0 && normalizedFuelLiters <= 0) {
+      const litersFromAmount = normalizedAmount / roundedFuelPrice;
       return {
         type,
         name,
         fuelStation: userTextValue(body.fuelStation ?? body.fuel_station ?? current?.fuel_station ?? ""),
-        fuelLiters: Number(litersFromAmount.toFixed(2)),
+        fuelLiters: litersFromAmount,
         fuelPricePerLiter: roundedFuelPrice,
         odometerKm: normalizedOdometerKm,
         plate: normalizePlateText(body.plate ?? current?.plate ?? ""),
@@ -4997,7 +5039,7 @@ function normalizeVehicleExpensePayload(body = {}, current = null) {
         endDate,
         paymentDate,
         currency: normalizeVehicleExpenseCurrency(body.currency ?? current?.currency ?? "人民币"),
-        amount: roundedAmount,
+        amount: normalizedAmount,
         repairItems: [],
         repairItemsJson: "[]",
         isMaintenance: false,
@@ -5006,8 +5048,8 @@ function normalizeVehicleExpensePayload(body = {}, current = null) {
         note: userTextValue(body.note ?? current?.note ?? "")
       };
     }
-    if (roundedFuelPrice > 0 && roundedAmount > 0 && roundedFuelLiters > 0) {
-      roundedAmount = Number((roundedFuelLiters * roundedFuelPrice).toFixed(2));
+    if (roundedFuelPrice > 0 && normalizedAmount > 0 && normalizedFuelLiters > 0) {
+      normalizedAmount = normalizedFuelLiters * roundedFuelPrice;
     }
   }
   return {
@@ -5016,7 +5058,7 @@ function normalizeVehicleExpensePayload(body = {}, current = null) {
     fuelStation: type === "fuel"
       ? userTextValue(body.fuelStation ?? body.fuel_station ?? current?.fuel_station ?? "")
       : "",
-    fuelLiters: type === "fuel" ? roundedFuelLiters : 0,
+    fuelLiters: type === "fuel" ? normalizedFuelLiters : 0,
     fuelPricePerLiter: type === "fuel" ? roundedFuelPrice : 0,
     odometerKm: type === "fuel" || (type === "repair" && isMaintenance) ? normalizedOdometerKm : 0,
     plate: normalizePlateText(body.plate ?? current?.plate ?? ""),
@@ -5027,7 +5069,7 @@ function normalizeVehicleExpensePayload(body = {}, current = null) {
     paymentDate,
     currency: type === "repair" ? "人民币" : normalizeVehicleExpenseCurrency(body.currency ?? current?.currency ?? "人民币"),
     amount: type === "fuel"
-      ? Number(roundedAmount.toFixed(2))
+      ? normalizedAmount
       : (type === "repair" ? vehicleRepairItemsTotal(normalizedRepairItems) : Number(body.amount ?? current?.amount ?? 0)),
     repairItems: normalizedRepairItems,
     repairItemsJson: type === "repair" ? JSON.stringify(normalizedRepairItems) : "[]",
@@ -5784,7 +5826,7 @@ function addInputYears(value, years) {
 
 const EXPIRY_REMINDER_WINDOW_DAYS = 30;
 const VEHICLE_EXPIRY_REMINDER_FIELDS = [
-  { field: "mainland_review_date", camelField: "mainlandReviewDate", label: "大陆年审", type: "mainlandReview" },
+  { field: "mainland_review_date", camelField: "mainlandReviewDate", label: "中检年审(行驶证)", type: "mainlandReview" },
   { field: "hk_review_date", camelField: "hkReviewDate", label: "香港年审", type: "hkReview" },
   { field: "mainland_insurance_date", camelField: "mainlandInsuranceDate", label: "大陆保险", type: "mainlandInsurance" },
   { field: "hk_insurance_date", camelField: "hkInsuranceDate", label: "香港保险", type: "hkInsurance" },
@@ -7537,9 +7579,15 @@ app.post("/api/other-businesses/:id/restore", async (req, res) => {
 app.get("/api/files", async (req, res) => {
   const entityType = String(req.query.entityType || "").trim();
   const entityId = String(req.query.entityId || "").trim();
+  const entityIds = [...new Set(
+    String(req.query.entityIds || "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean)
+  )];
   const includeOrderFiles = String(req.query.includeOrderFiles || "") === "1";
   const deletedOnly = String(req.query.deletedOnly || "") === "1";
-  if (!entityType || !entityId) {
+  if (!entityType || (!entityId && entityIds.length === 0)) {
     res.status(400).json({ message: "缺少文件归属信息" });
     return;
   }
@@ -7570,11 +7618,15 @@ app.get("/api/files", async (req, res) => {
     return;
   }
   const deletedClause = deletedOnly ? "deleted_at IS NOT NULL" : "deleted_at IS NULL";
+  const entityIdValues = entityIds.length > 0 ? entityIds : [entityId];
+  const entityIdPlaceholders = entityIdValues.map(() => "?").join(", ");
   const rows = await db.prepare(`
     SELECT * FROM files
-    WHERE ${deletedClause} AND entity_type = ? AND entity_id = ?
+    WHERE ${deletedClause}
+      AND entity_type = ?
+      AND entity_id IN (${entityIdPlaceholders})
     ORDER BY ${deletedOnly ? "deleted_at" : "created_at"} DESC, id DESC
-  `).all(entityType, entityId);
+  `).all(entityType, ...entityIdValues);
   res.json(rows.map(mapFile));
 });
 
@@ -7710,20 +7762,20 @@ async function sendStoredFileContent(req, res) {
     return;
   }
   try {
-    const result = await ossClient.getStream(row.object_key);
+    const content = await readOssObjectBuffer(row.object_key);
     res.setHeader("Content-Type", normalizeMime(row.mime));
     res.setHeader("Content-Disposition", contentDispositionHeader("inline", row.filename));
     res.setHeader("Cache-Control", "private, max-age=300");
+    res.setHeader("Content-Length", String(content.length));
     await writeAudit("preview", "file", String(id), row.filename);
-    result.stream.on("error", (error) => {
-      console.error("OSS stream failed", error);
-      if (!res.headersSent) res.status(502).json({ message: "OSS 文件读取失败" });
-      else res.destroy(error);
-    });
-    result.stream.pipe(res);
+    res.end(content);
   } catch (error) {
-    console.error("OSS content fetch failed", error);
-    res.status(502).json({ message: "OSS 文件读取失败" });
+    console.error("OSS content fetch failed", {
+      fileId: id,
+      objectKey: row.object_key,
+      ...ossReadErrorDetails(error)
+    });
+    res.status(502).json({ message: "OSS 文件读取失败，请点击重试" });
   }
 }
 

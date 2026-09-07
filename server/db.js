@@ -1933,7 +1933,7 @@ async function initializeSchema() {
         CASE
           WHEN TRIM(name) IN ('大陆保险', '大陆保险费', '保险费') THEN 'mainland_insurance_date'
           WHEN TRIM(name) IN ('香港保险', '香港保险费') THEN 'hk_insurance_date'
-          WHEN TRIM(name) IN ('大陆年审', '大陆年审费', '年审费') THEN 'mainland_review_date'
+          WHEN TRIM(name) IN ('大陆年审', '大陆年审费', '中检年审(行驶证)', '年审费') THEN 'mainland_review_date'
           WHEN TRIM(name) IN ('香港年审', '香港年审费') THEN 'hk_review_date'
           ELSE ''
         END AS reminder_field,
