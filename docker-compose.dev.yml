@@ -83,7 +83,7 @@ services:
     build:
       context: ./web
       dockerfile: Dockerfile.dev
-    command: ["npm", "run", "dev", "--", "--port", "80", "--strictPort"]
+    command: ["sh", "-lc", "npm ci && exec npm run dev -- --port 80 --strictPort"]
     environment:
       VITE_API_TARGET: http://server:5174
     volumes:

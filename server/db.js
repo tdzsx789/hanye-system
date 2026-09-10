@@ -435,6 +435,41 @@ function customerLegacyCustomsFieldValue(fields, fieldName) {
   return Number.isFinite(amount) ? amount : null;
 }
 
+function customsBusinessFieldName(field = {}) {
+  const rawName = String(field?.name ?? field?.label ?? field?.key ?? "").trim();
+  return ["法检/3C商检", "商检费"].includes(rawName) ? "报检费" : rawName;
+}
+
+function customsBusinessFieldAmount(field = {}) {
+  const amount = Number(field?.value ?? field?.amount ?? field?.fee ?? 0);
+  return Number.isFinite(amount) && amount > 0 ? Math.round(amount) : 0;
+}
+
+function mergeCustomsBusinessCustomFields(fields = [], legacyInspectionFee = 0) {
+  const fieldsByName = new Map();
+  parseJsonArrayText(fields).forEach((field) => {
+    const name = customsBusinessFieldName(field);
+    if (!name) return;
+    const amount = customsBusinessFieldAmount(field);
+    fieldsByName.set(name, {
+      name,
+      value: Number(fieldsByName.get(name)?.value || 0) + amount
+    });
+  });
+  const legacyAmount = customsBusinessFieldAmount({ value: legacyInspectionFee });
+  if (legacyAmount > 0) {
+    fieldsByName.set("报检费", {
+      name: "报检费",
+      value: Number(fieldsByName.get("报检费")?.value || 0) + legacyAmount
+    });
+  }
+  return Array.from(fieldsByName.values()).filter((field) => Number(field.value || 0) > 0);
+}
+
+function customsBusinessCustomFieldsTotal(fields = []) {
+  return mergeCustomsBusinessCustomFields(fields).reduce((sum, field) => sum + Number(field.value || 0), 0);
+}
+
 async function ensureTextColumn(table, column, defaultValue = "''") {
   if (!(await hasColumn(table, column))) {
     await db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT NOT NULL DEFAULT ${defaultValue}`);
@@ -793,7 +828,7 @@ async function ensureRuntimeSchemaCompatibility() {
     ["customers", "new_old_enabled BOOLEAN NOT NULL DEFAULT false"],
     ["customers", "special_car_enabled BOOLEAN NOT NULL DEFAULT false"],
     ["customers", "customs_production_certificate_fee DOUBLE PRECISION NOT NULL DEFAULT 150"],
-    ["customers", "customs_inspection_fee DOUBLE PRECISION NOT NULL DEFAULT 100"],
+    ["customers", "customs_inspection_fee DOUBLE PRECISION NOT NULL DEFAULT 0"],
     ["customers", "customs_manifest_fee DOUBLE PRECISION NOT NULL DEFAULT 0"],
     ["customers", "customs_verification_fee DOUBLE PRECISION NOT NULL DEFAULT 0"],
     ["customers", "trip_no_required BOOLEAN NOT NULL DEFAULT false"],
@@ -913,14 +948,15 @@ async function ensureRuntimeSchemaCompatibility() {
   `).all();
   for (const row of legacyCustomers) {
     const legacyProductionCertificateFee = customerLegacyCustomsFieldValue(row.customs_custom_fields, "产证地");
-    const legacyInspectionFee = customerLegacyCustomsFieldValue(row.customs_custom_fields, "商检费");
+    const legacyInspectionFee = customerLegacyCustomsFieldValue(row.customs_custom_fields, "报检费")
+      ?? customerLegacyCustomsFieldValue(row.customs_custom_fields, "商检费");
     const updateSets = [];
     const item = { id: row.id };
     if (legacyProductionCertificateFee !== null && Number(row.customs_production_certificate_fee ?? 150) === 150) {
       updateSets.push("customs_production_certificate_fee = @productionCertificateFee");
       item.productionCertificateFee = legacyProductionCertificateFee;
     }
-    if (legacyInspectionFee !== null && Number(row.customs_inspection_fee ?? 100) === 100) {
+    if (legacyInspectionFee !== null && Number(row.customs_inspection_fee ?? 0) === 0) {
       updateSets.push("customs_inspection_fee = @inspectionFee");
       item.inspectionFee = legacyInspectionFee;
     }
@@ -930,6 +966,93 @@ async function ensureRuntimeSchemaCompatibility() {
       SET ${updateSets.join(", ")}
       WHERE id = @id
     `).run(item);
+  }
+  const inspectionFeeDefaultMigrationKey = "customs_inspection_fee_default_zero_v1";
+  if (!(await getAppSetting(inspectionFeeDefaultMigrationKey))) {
+    await db.prepare(`
+      UPDATE customers
+      SET customs_inspection_fee = 0
+      WHERE deleted_at IS NULL
+        AND type = '客户'
+        AND customer_category = '报关客户'
+        AND COALESCE(customs_inspection_fee, 0) = 100
+        AND POSITION('"报检费"' IN COALESCE(customs_custom_fields, '[]')) = 0
+        AND POSITION('"商检费"' IN COALESCE(customs_custom_fields, '[]')) = 0
+    `).run();
+    await setAppSetting(inspectionFeeDefaultMigrationKey, new Date().toISOString());
+  }
+  const customsBusinessInspectionMergeKey = "customs_business_inspection_fee_merged_to_commercial_inspection_v1";
+  if (!(await getAppSetting(customsBusinessInspectionMergeKey))) {
+    const legacyRows = await db.prepare(`
+      SELECT id, direction, customs_fee, page_fee, manifest_fee, inspection_fee, check_fee, verification_fee, other_fee, home_fee, custom_fields
+      FROM customs_businesses
+      WHERE COALESCE(inspection_fee, 0) <> 0
+         OR POSITION('"报检费"' IN COALESCE(custom_fields, '[]')) > 0
+         OR POSITION('"商检费"' IN COALESCE(custom_fields, '[]')) > 0
+         OR POSITION('"法检/3C商检"' IN COALESCE(custom_fields, '[]')) > 0
+    `).all();
+    const updateLegacyCustomsBusiness = await db.prepare(`
+      UPDATE customs_businesses
+      SET inspection_fee = 0,
+          custom_fields = @customFieldsJson,
+          total = @total,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = @id
+    `);
+    for (const row of legacyRows) {
+      const customFields = mergeCustomsBusinessCustomFields(row.custom_fields, row.inspection_fee);
+      const total = String(row.direction || "").trim() === "产证地"
+        ? Number(row.home_fee || 0)
+        : Number(row.customs_fee || 0)
+          + Number(row.page_fee || 0)
+          + Number(row.manifest_fee || 0)
+          + Number(row.check_fee || 0)
+          + Number(row.verification_fee || 0)
+          + Number(row.other_fee || 0)
+          + customsBusinessCustomFieldsTotal(customFields);
+      await updateLegacyCustomsBusiness.run({
+        id: row.id,
+        customFieldsJson: JSON.stringify(customFields),
+        total
+      });
+    }
+    await setAppSetting(customsBusinessInspectionMergeKey, new Date().toISOString());
+  }
+  const customsBusinessInspectionCanonicalNameKey = "customs_business_inspection_fee_canonical_name_v2";
+  if (!(await getAppSetting(customsBusinessInspectionCanonicalNameKey))) {
+    const legacyRows = await db.prepare(`
+      SELECT id, direction, customs_fee, page_fee, manifest_fee, inspection_fee, check_fee, verification_fee, other_fee, home_fee, custom_fields
+      FROM customs_businesses
+      WHERE COALESCE(inspection_fee, 0) <> 0
+         OR POSITION('"商检费"' IN COALESCE(custom_fields, '[]')) > 0
+         OR POSITION('"法检/3C商检"' IN COALESCE(custom_fields, '[]')) > 0
+    `).all();
+    const updateLegacyCustomsBusiness = await db.prepare(`
+      UPDATE customs_businesses
+      SET inspection_fee = 0,
+          custom_fields = @customFieldsJson,
+          total = @total,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = @id
+    `);
+    for (const row of legacyRows) {
+      const customFields = mergeCustomsBusinessCustomFields(row.custom_fields, row.inspection_fee);
+      const total = String(row.direction || "").trim() === "产证地"
+        ? Number(row.home_fee || 0)
+        : Number(row.customs_fee || 0)
+          + Number(row.page_fee || 0)
+          + Number(row.manifest_fee || 0)
+          + Number(row.check_fee || 0)
+          + Number(row.verification_fee || 0)
+          + Number(row.other_fee || 0)
+          + customsBusinessCustomFieldsTotal(customFields);
+      await updateLegacyCustomsBusiness.run({
+        id: row.id,
+        customFieldsJson: JSON.stringify(customFields),
+        total
+      });
+    }
+    await setAppSetting(customsBusinessInspectionCanonicalNameKey, new Date().toISOString());
   }
   await db.exec(`
     CREATE TABLE IF NOT EXISTS driver_wage_settlements (
@@ -984,7 +1107,7 @@ async function initializeSchema() {
       customs_import_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30,
       customs_export_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30,
       customs_production_certificate_fee DOUBLE PRECISION NOT NULL DEFAULT 150,
-      customs_inspection_fee DOUBLE PRECISION NOT NULL DEFAULT 100,
+      customs_inspection_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
       customs_manifest_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
       customs_verification_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
       trip_no_required BOOLEAN NOT NULL DEFAULT false,
@@ -1644,7 +1767,7 @@ async function initializeSchema() {
     "customs_import_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30",
     "customs_export_page_fee DOUBLE PRECISION NOT NULL DEFAULT 30",
     "customs_production_certificate_fee DOUBLE PRECISION NOT NULL DEFAULT 150",
-    "customs_inspection_fee DOUBLE PRECISION NOT NULL DEFAULT 100",
+    "customs_inspection_fee DOUBLE PRECISION NOT NULL DEFAULT 0",
     "customs_manifest_fee DOUBLE PRECISION NOT NULL DEFAULT 0",
     "customs_verification_fee DOUBLE PRECISION NOT NULL DEFAULT 0",
     "trip_no_required BOOLEAN NOT NULL DEFAULT false",

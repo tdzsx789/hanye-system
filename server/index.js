@@ -469,7 +469,7 @@ function mapCustomer(row) {
     customsImportPageFee: 30,
     customsExportPageFee: 30,
     customsProductionCertificateFee: 150,
-    customsInspectionFee: 100,
+    customsInspectionFee: 0,
     customsManifestFee: 0,
     customsVerificationFee: 0
   };
@@ -504,7 +504,7 @@ function mapCustomer(row) {
     customsImportPageFee: Number(row.customs_import_page_fee ?? customsDefaults.customsImportPageFee),
     customsExportPageFee: Number(row.customs_export_page_fee ?? customsDefaults.customsExportPageFee),
     customsProductionCertificateFee: Number(customsCustomFieldMap.get("产证地") ?? row.customs_production_certificate_fee ?? customsDefaults.customsProductionCertificateFee),
-    customsInspectionFee: Number(customsCustomFieldMap.get("商检费") ?? row.customs_inspection_fee ?? customsDefaults.customsInspectionFee),
+    customsInspectionFee: Number(customsCustomFieldMap.get("报检费") ?? customsCustomFieldMap.get("商检费") ?? row.customs_inspection_fee ?? customsDefaults.customsInspectionFee),
     customsManifestFee: Number(row.customs_manifest_fee ?? customsDefaults.customsManifestFee ?? 0),
     customsVerificationFee: Number(row.customs_verification_fee ?? customsDefaults.customsVerificationFee),
     tripNoRequired: booleanFlag(row.trip_no_required, false),
@@ -513,7 +513,7 @@ function mapCustomer(row) {
     operatingUnitEnabled: booleanFlag(row.operating_unit_enabled, false),
     newOldEnabled: booleanFlag(row.new_old_enabled, false),
     specialCarEnabled: booleanFlag(row.special_car_enabled, false),
-    customsCustomFields: customsCustomFields.filter((field) => !["产证地", "商检费"].includes(customsBusinessCustomFieldName(field))),
+    customsCustomFields: customsCustomFields.filter((field) => !["产证地", "报检费", "商检费"].includes(customsBusinessCustomFieldName(field))),
     createdAt: row.created_at,
     invoice: {
       title: row.invoice_title || row.name || "",
@@ -832,7 +832,7 @@ function normalizeCustomerPayload(body, id = "") {
     customsImportPageFee: numericOrDefault(body.customsImportPageFee ?? body.customs_import_page_fee, 30),
     customsExportPageFee: numericOrDefault(body.customsExportPageFee ?? body.customs_export_page_fee, 30),
     customsProductionCertificateFee: numericOrDefault(body.customsProductionCertificateFee ?? body.customs_production_certificate_fee, 150),
-    customsInspectionFee: numericOrDefault(body.customsInspectionFee ?? body.customs_inspection_fee, 100),
+    customsInspectionFee: numericOrDefault(body.customsInspectionFee ?? body.customs_inspection_fee, 0),
     customsManifestFee: numericOrDefault(body.customsManifestFee ?? body.customs_manifest_fee, 0),
     customsVerificationFee: numericOrDefault(body.customsVerificationFee ?? body.customs_verification_fee, 0),
     tripNoRequired: type === "客户" ? booleanFlag(body.tripNoRequired ?? body.trip_no_required, false) : false,
@@ -2097,7 +2097,6 @@ function exportOrderColumnAmount(order, column) {
   if (key === "linkedCustomsProductionCertificateFee") return Number(order?.linkedCustomsBusiness?.productionCertificateFee || 0);
   if (key === "linkedCustomsCustomsFee") return Number(order?.linkedCustomsBusiness?.customsFee || 0);
   if (key === "linkedCustomsManifestFee") return Number(order?.linkedCustomsBusiness?.manifestFee || 0);
-  if (key === "linkedCustomsInspectionFee") return Number(order?.linkedCustomsBusiness?.inspectionFee || 0);
   if (key === "linkedCustomsCheckFee") return Number(order?.linkedCustomsBusiness?.checkFee || 0);
   if (key === "linkedCustomsVerificationFee") return Number(order?.linkedCustomsBusiness?.verificationFee || 0);
   if (key === "linkedCustomsOtherFee") return Number(order?.linkedCustomsBusiness?.otherFee || 0);
@@ -2631,7 +2630,6 @@ const ORDER_EXPORT_LINKED_CUSTOMS_FIXED_COLUMNS = [
   { key: "linkedCustomsProductionCertificateFee", label: "产证地", width: 11, pdfWidth: 44, amount: true },
   { key: "linkedCustomsCustomsFee", label: "报关费", width: 11, pdfWidth: 44, amount: true },
   { key: "linkedCustomsManifestFee", label: "舱单费", width: 11, pdfWidth: 44, amount: true },
-  { key: "linkedCustomsInspectionFee", label: "报检费", width: 11, pdfWidth: 44, amount: true },
   { key: "linkedCustomsCheckFee", label: "查验费", width: 11, pdfWidth: 44, amount: true },
   { key: "linkedCustomsVerificationFee", label: "核注费", width: 11, pdfWidth: 44, amount: true },
   { key: "linkedCustomsOtherFee", label: "其他费用", width: 12, pdfWidth: 44, amount: true },
@@ -2654,7 +2652,6 @@ function linkedCustomsBusinessFixedColumnValue(order = {}, column = {}) {
   if (key === "linkedCustomsProductionCertificateFee") return Number(customs.productionCertificateFee || 0) || "";
   if (key === "linkedCustomsCustomsFee") return Number(customs.customsFee || 0) || "";
   if (key === "linkedCustomsManifestFee") return Number(customs.manifestFee || 0) || "";
-  if (key === "linkedCustomsInspectionFee") return Number(customs.inspectionFee || 0) || "";
   if (key === "linkedCustomsCheckFee") return Number(customs.checkFee || 0) || "";
   if (key === "linkedCustomsVerificationFee") return Number(customs.verificationFee || 0) || "";
   if (key === "linkedCustomsOtherFee") return Number(customs.otherFee || 0) || "";
@@ -5720,14 +5717,17 @@ function mapStatementDownload(row) {
 }
 
 function mapCustomsBusiness(row) {
-  const customFields = normalizeCustomsBusinessCustomFields(row.custom_fields);
+  const legacyInspectionFee = Number(row.inspection_fee || 0);
+  const customFields = normalizeCustomsBusinessCustomFields([
+    ...normalizeCustomsBusinessCustomFields(row.custom_fields),
+    ...(legacyInspectionFee > 0 ? [{ name: "报检费", value: legacyInspectionFee }] : [])
+  ]);
   const productionCertificateFee = Number(row.home_fee || 0);
   const computedTotal = userTextValue(row.direction) === "产证地"
     ? productionCertificateFee
     : Number(row.customs_fee || 0)
       + Number(row.page_fee || 0)
       + Number(row.manifest_fee || 0)
-      + Number(row.inspection_fee || 0)
       + Number(row.check_fee || 0)
       + Number(row.verification_fee || 0)
       + Number(row.other_fee || 0)
@@ -5746,7 +5746,7 @@ function mapCustomsBusiness(row) {
     customsFee: Number(row.customs_fee || 0),
     pageFee: Number(row.page_fee || 0),
     manifestFee: Number(row.manifest_fee || 0),
-    inspectionFee: Number(row.inspection_fee || 0),
+    inspectionFee: 0,
     checkFee: Number(row.check_fee || 0),
     verificationFee: Number(row.verification_fee || 0),
     otherFee: Number(row.other_fee || 0),
@@ -6093,7 +6093,6 @@ const CUSTOMS_STATEMENT_EXPORT_COLUMNS = [
   { key: "productionCertificateFee", label: "产证地", width: 11, pdfWidth: 44, amount: true },
   { key: "customsFee", label: "报关费", width: 11, pdfWidth: 44, amount: true },
   { key: "manifestFee", label: "舱单费", width: 11, pdfWidth: 44, amount: true },
-  { key: "inspectionFee", label: "报检费", width: 11, pdfWidth: 44, amount: true },
   { key: "checkFee", label: "查验费", width: 11, pdfWidth: 44, amount: true },
   { key: "verificationFee", label: "核注费", width: 11, pdfWidth: 44, amount: true },
   { key: "otherFee", label: "其他费用", width: 12, pdfWidth: 44, amount: true },
@@ -6457,7 +6456,7 @@ function normalizeCustomsBusinessCustomFields(value = []) {
   const fieldsByName = new Map();
   source.forEach((field) => {
     const rawName = userTextValue(field?.name ?? field?.label ?? field?.key ?? "");
-    const name = rawName === "法检/3C商检" ? "商检费" : rawName;
+    const name = ["法检/3C商检", "商检费"].includes(rawName) ? "报检费" : rawName;
     if (!name) return;
     const amount = integerField(field?.value ?? field?.amount ?? field?.fee);
     fieldsByName.set(name, {
@@ -6487,6 +6486,10 @@ function customsBusinessCustomFieldsTotal(fields = []) {
   return normalizeCustomsBusinessCustomFields(fields).reduce((sum, field) => sum + integerField(field.value), 0);
 }
 
+function customsBusinessAllowsInspectionFee(direction = "") {
+  return ["进口", "金二进口"].includes(userTextValue(direction));
+}
+
 function otherBusinessCustomFieldsBreakdown(fields = []) {
   return normalizeOtherBusinessCustomFields(fields).reduce((sum, field) => ({
     income: sum.income + moneyNumberField(field.income),
@@ -6503,7 +6506,7 @@ function normalizeCustomsBusinessPayload(body = {}) {
   const customsFee = isProductionCertificateDirection ? 0 : integerField(body.customsFee ?? body.customs_fee);
   const pageFee = isProductionCertificateDirection ? 0 : integerField(body.pageFee ?? body.page_fee);
   const manifestFee = isProductionCertificateDirection ? 0 : integerField(body.manifestFee ?? body.manifest_fee);
-  const inspectionFee = isProductionCertificateDirection ? 0 : integerField(body.inspectionFee ?? body.inspection_fee);
+  const inspectionFee = 0;
   const checkFee = isProductionCertificateDirection ? 0 : integerField(body.checkFee ?? body.check_fee);
   const verificationFee = isProductionCertificateDirection
     ? 0
@@ -6515,7 +6518,10 @@ function normalizeCustomsBusinessPayload(body = {}) {
   const pageCount = isProductionCertificateDirection ? 0 : integerField(body.pageCount ?? body.page_count);
   const customFields = isProductionCertificateDirection
     ? []
-    : normalizeCustomsBusinessCustomFields(body.customFields ?? body.custom_fields);
+    : normalizeCustomsBusinessCustomFields(body.customFields ?? body.custom_fields)
+      .map((field) => field.name === "报检费" && !customsBusinessAllowsInspectionFee(direction)
+        ? { ...field, value: 0 }
+        : field);
   const computedTotal = homeFee + customsFee + pageFee + manifestFee + inspectionFee + checkFee + verificationFee
     + otherFee
     + customsBusinessCustomFieldsTotal(customFields);
@@ -7974,7 +7980,7 @@ app.patch("/api/customers/:id", async (req, res) => {
       { key: "newOldEnabled", label: "新/旧" },
       { key: "specialCarEnabled", label: "专车" },
       { key: "customsProductionCertificateFee", label: "产证地" },
-      { key: "customsInspectionFee", label: "商检费" }
+      { key: "customsInspectionFee", label: "报检费" }
     ], { entityLabel: "客户" })
   );
   res.json(mapCustomer(await db.prepare("SELECT * FROM customers WHERE id = ?").get(id)));

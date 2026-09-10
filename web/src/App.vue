@@ -373,7 +373,7 @@ const CUSTOMER_CUSTOMS_FEE_FIELD_NAMES = {
   customsImportDeclarationFee: "进口报关费",
   customsExportDeclarationFee: "出口报关费",
   customsProductionCertificateFee: "产证地",
-  customsInspectionFee: "商检费"
+  customsInspectionFee: "报检费"
 };
 const CUSTOMER_CUSTOMS_FEE_FIELD_NAME_SET = new Set(["舱单费", ...Object.values(CUSTOMER_CUSTOMS_FEE_FIELD_NAMES)]);
 const DEFAULT_CUSTOMS_CUSTOMER_CONFIG = {
@@ -386,7 +386,7 @@ const DEFAULT_CUSTOMS_CUSTOMER_CONFIG = {
   customsImportPageFee: 30,
   customsExportPageFee: 30,
   customsProductionCertificateFee: 150,
-  customsInspectionFee: 100,
+  customsInspectionFee: 0,
   customsManifestFee: 0,
   customsVerificationFee: 0
 };
@@ -411,8 +411,8 @@ const dataTableDensityOptions = DATA_TABLE_DENSITY_OPTIONS;
 const CUSTOMS_BUSINESS_TABLE_ID = "customs_business";
 const CUSTOMS_BUSINESS_COLUMN_ORDER_KEY = dataTableStorageKey(CUSTOMS_BUSINESS_TABLE_ID, "order");
 const CUSTOMS_BUSINESS_COLUMN_WIDTH_MIGRATION_KEY = dataTableStorageKey(CUSTOMS_BUSINESS_TABLE_ID, "compact_widths_v1");
-const CUSTOMS_BUSINESS_FIXED_FEE_NAME = "商检费";
-const CUSTOMS_BUSINESS_FIXED_FEE_LEGACY_NAMES = new Set(["法检/3C商检"]);
+const CUSTOMS_BUSINESS_FIXED_FEE_NAME = "报检费";
+const CUSTOMS_BUSINESS_FIXED_FEE_LEGACY_NAMES = new Set(["法检/3C商检", "商检费"]);
 const CUSTOMS_BUSINESS_COMPACT_WIDTHS = {
   date: 88,
   declarationNo: 116,
@@ -425,7 +425,6 @@ const CUSTOMS_BUSINESS_COMPACT_WIDTHS = {
   productionCertificateFee: 78,
   customsFee: 78,
   manifestFee: 78,
-  inspectionFee: 78,
   checkFee: 78,
   verificationFee: 78,
   otherFee: 84,
@@ -444,7 +443,6 @@ const CUSTOMS_BUSINESS_PREFIX_COLUMNS = [
   { key: "productionCertificateFee", label: "产证地", width: 78, min: 60, amount: true },
   { key: "customsFee", label: "报关费", width: 78, min: 60, amount: true },
   { key: "manifestFee", label: "舱单费", width: 78, min: 60, amount: true },
-  { key: "inspectionFee", label: "报检费", width: 78, min: 60, amount: true },
   { key: "checkFee", label: "查验费", width: 78, min: 60, amount: true },
   { key: "verificationFee", label: "核注费", width: 78, min: 60, amount: true },
   { key: "otherFee", label: "其他费用", width: 84, min: 64, amount: true }
@@ -2254,7 +2252,6 @@ function blankCustomsBusinessForm() {
     productionCertificateFee: 0,
     customsFee: 0,
     pageFee: 0,
-    inspectionFee: 0,
     checkFee: 0,
     verificationFee: 0,
     otherFee: 0,
@@ -2270,9 +2267,9 @@ const customsBusinessAutoCharges = reactive({
   customsFee: 0,
   pageCount: 0,
   pageFee: 0,
-  inspectionFee: 0,
   manifestFee: 0,
-  verificationFee: 0
+  verificationFee: 0,
+  fajian3cFee: 0
 });
 
 function createBlankOtherBusinessCustomField() {
@@ -7404,6 +7401,11 @@ function dispatchDirectionText(value = "") {
   return text || "-";
 }
 
+function dispatchMessageCustomerPrefix(row = {}) {
+  const customer = String(dispatchRowCustomerDisplayText(row) || "").trim();
+  return customer && customer !== "-" ? `${customer} ` : "";
+}
+
 function dispatchMessageText(rows = dispatchPlanDisplayRows.value) {
   if (!rows.length) return "";
   return rows.map((row) => {
@@ -7418,8 +7420,9 @@ function dispatchMessageText(rows = dispatchPlanDisplayRows.value) {
     const date = dispatchPlanDate(row) || "-";
     const time = row.loadTime || order.loadingTime || "-";
     const direction = order.direction || row.direction || "";
+    const customerPrefix = dispatchMessageCustomerPrefix(row);
     return [
-      `装货时间：${date}   ${time}  ${dispatchWeighingText(row.needsWeighing)} ${dispatchDirectionText(direction)} 口岸：${displayPortText(order.port, row.port) || "-"}`,
+      `${customerPrefix}装货时间：${date}   ${time}  ${dispatchWeighingText(row.needsWeighing)} ${dispatchDirectionText(direction)} 口岸：${displayPortText(order.port, row.port) || "-"}`,
       `车牌：${row.plate || order.plate || "-"} 吨位：${order.tonnage || row.tonnage || "-"}    板数：${order.quantity || row.quantity || "-"}`,
       "",
       dispatchLocationBlock("装货地", record, "loading"),
@@ -8776,7 +8779,6 @@ function normalizeCustomsBusinessFormIntegers() {
     "customsFee",
     "pageFee",
     "manifestFee",
-    "inspectionFee",
     "checkFee",
     "verificationFee",
     "fajian3cFee",
@@ -8869,10 +8871,9 @@ const customsBusinessFormTotal = computed(() =>
     : Number(customsBusinessForm.pageFee || 0)
       + Number(customsBusinessForm.customsFee || 0)
       + Number(customsBusinessForm.manifestFee || 0)
-      + Number(customsBusinessForm.inspectionFee || 0)
       + Number(customsBusinessForm.checkFee || 0)
       + (customsBusinessShowsVerificationFee.value ? Number(customsBusinessForm.verificationFee || 0) : 0)
-      + Number(customsBusinessForm.fajian3cFee || 0)
+      + (customsBusinessUsesInspectionFee() ? Number(customsBusinessForm.fajian3cFee || 0) : 0)
       + Number(customsBusinessForm.otherFee || 0)
       + normalizeCustomsBusinessCustomFields(customsBusinessForm.customFields)
         .reduce((sum, field) => sum + customsBusinessCustomFieldAmount(field), 0)
@@ -8948,6 +8949,7 @@ function selectCustomsBusinessCompany(customer) {
 function applyCustomsBusinessCustomerDefaultFields(customer = customsBusinessSelectedCustomer.value) {
   if (!customer || editingCustomsBusinessId.value || copyingCustomsBusinessId.value) return;
   const defaults = normalizeCustomsCustomerDefaultFields(customer.customsCustomFields);
+  customsBusinessForm.fajian3cFee = customsBusinessConfiguredInspectionFee(customer);
   customsBusinessForm.customFields = defaults.map((field) => ({
     name: field.name,
     value: customsBusinessIntegerValue(field.value)
@@ -8976,6 +8978,10 @@ function customsBusinessNeedsVerificationFee(direction = customsBusinessForm.dir
 const customsBusinessShowsVerificationFee = computed(() =>
   customsBusinessNeedsVerificationFee()
 );
+
+function customsBusinessUsesInspectionFee(direction = customsBusinessForm.direction) {
+  return ["进口", "金二进口"].includes(String(direction || "").trim());
+}
 
 function customsBusinessDirectionFeeType(direction = customsBusinessForm.direction) {
   const text = String(direction || "").trim();
@@ -9018,15 +9024,15 @@ function customsBusinessConfiguredProductionCertificateFee() {
   return customsBusinessIntegerValue(customer?.customsProductionCertificateFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsProductionCertificateFee);
 }
 
-function customsBusinessConfiguredInspectionFee() {
-  const customer = customsBusinessSelectedCustomer.value;
-  return customsBusinessIntegerValue(customer?.customsInspectionFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsInspectionFee);
-}
-
 function customsBusinessConfiguredVerificationFee() {
   if (!customsBusinessShowsVerificationFee.value) return 0;
   const customer = customsBusinessSelectedCustomer.value;
   return customsBusinessIntegerValue(customer?.customsVerificationFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee);
+}
+
+function customsBusinessConfiguredInspectionFee(customer = customsBusinessSelectedCustomer.value, direction = customsBusinessForm.direction) {
+  if (!customsBusinessUsesInspectionFee(direction)) return 0;
+  return customsBusinessIntegerValue(customer?.customsInspectionFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsInspectionFee);
 }
 
 function customsBusinessConfiguredManifestFee() {
@@ -9058,7 +9064,8 @@ function calculatedCustomsBusinessChargeValues() {
       pageCount: 0,
       pageFee: 0,
       manifestFee: 0,
-      verificationFee: 0
+      verificationFee: 0,
+      fajian3cFee: 0
     };
   }
   return {
@@ -9067,7 +9074,8 @@ function calculatedCustomsBusinessChargeValues() {
     pageCount: feeType ? calculatedCustomsBusinessPageCount.value : 0,
     pageFee: feeType ? calculatedCustomsBusinessPageFee.value : 0,
     manifestFee: customsBusinessConfiguredManifestFee(),
-    verificationFee: customsBusinessConfiguredVerificationFee()
+    verificationFee: customsBusinessConfiguredVerificationFee(),
+    fajian3cFee: customsBusinessConfiguredInspectionFee()
   };
 }
 
@@ -9076,9 +9084,9 @@ function setCustomsBusinessAutoChargeBaseline(values = {}) {
   customsBusinessAutoCharges.customsFee = customsBusinessIntegerValue(values.customsFee);
   customsBusinessAutoCharges.pageCount = customsBusinessIntegerValue(values.pageCount);
   customsBusinessAutoCharges.pageFee = customsBusinessIntegerValue(values.pageFee);
-  customsBusinessAutoCharges.inspectionFee = customsBusinessIntegerValue(values.inspectionFee);
   customsBusinessAutoCharges.manifestFee = customsBusinessIntegerValue(values.manifestFee);
   customsBusinessAutoCharges.verificationFee = customsBusinessIntegerValue(values.verificationFee);
+  customsBusinessAutoCharges.fajian3cFee = customsBusinessIntegerValue(values.fajian3cFee);
 }
 
 function maybeApplyCustomsBusinessAutoCharge(key, value, options = {}) {
@@ -9099,24 +9107,25 @@ function syncCalculatedCustomsBusinessCharges(options = {}) {
   maybeApplyCustomsBusinessAutoCharge("productionCertificateFee", calculated.productionCertificateFee, options);
   maybeApplyCustomsBusinessAutoCharge("customsFee", calculated.customsFee, options);
   maybeApplyCustomsBusinessAutoCharge("manifestFee", calculated.manifestFee, options);
-  maybeApplyCustomsBusinessAutoCharge("inspectionFee", customsBusinessConfiguredInspectionFee(), options);
   maybeApplyCustomsBusinessAutoCharge("verificationFee", calculated.verificationFee, options);
+  maybeApplyCustomsBusinessAutoCharge("fajian3cFee", calculated.fajian3cFee, {
+    ...options,
+    force: options.force || !customsBusinessUsesInspectionFee()
+  });
   const feeType = customsBusinessDirectionFeeType();
   if (feeType === "production") {
     customsBusinessAutoCharges.customsFee = 0;
     customsBusinessAutoCharges.pageCount = 0;
     customsBusinessAutoCharges.pageFee = 0;
-    customsBusinessAutoCharges.inspectionFee = 0;
     customsBusinessAutoCharges.manifestFee = 0;
     customsBusinessAutoCharges.verificationFee = 0;
+    customsBusinessAutoCharges.fajian3cFee = 0;
     customsBusinessForm.customsFee = 0;
     customsBusinessForm.pageCount = 0;
     customsBusinessForm.pageFee = 0;
-    customsBusinessForm.inspectionFee = 0;
     customsBusinessForm.manifestFee = 0;
     customsBusinessForm.verificationFee = 0;
     customsBusinessForm.itemCount = 0;
-    customsBusinessForm.inspectionFee = 0;
     customsBusinessForm.checkFee = 0;
     customsBusinessForm.fajian3cFee = 0;
     customsBusinessForm.otherFee = 0;
@@ -9128,7 +9137,6 @@ function syncCalculatedCustomsBusinessCharges(options = {}) {
       maybeApplyCustomsBusinessAutoCharge("productionCertificateFee", 0, options);
       maybeApplyCustomsBusinessAutoCharge("pageCount", 0, options);
       maybeApplyCustomsBusinessAutoCharge("pageFee", 0, options);
-      maybeApplyCustomsBusinessAutoCharge("inspectionFee", 0, options);
     }
     return;
   }
@@ -9144,13 +9152,13 @@ watch(
     () => customsBusinessSelectedCustomer.value?.customsHomeItemCount,
     () => customsBusinessSelectedCustomer.value?.customsPageItemCount,
     () => customsBusinessSelectedCustomer.value?.customsProductionCertificateFee,
-    () => customsBusinessSelectedCustomer.value?.customsInspectionFee,
     () => customsBusinessSelectedCustomer.value?.customsImportDeclarationFee,
     () => customsBusinessSelectedCustomer.value?.customsExportDeclarationFee,
     () => customsBusinessSelectedCustomer.value?.customsImportPageFee,
     () => customsBusinessSelectedCustomer.value?.customsExportPageFee,
     () => customsBusinessSelectedCustomer.value?.customsManifestFee,
-    () => customsBusinessSelectedCustomer.value?.customsVerificationFee
+    () => customsBusinessSelectedCustomer.value?.customsVerificationFee,
+    () => customsBusinessSelectedCustomer.value?.customsInspectionFee
   ],
   syncCalculatedCustomsBusinessCharges,
   { immediate: true }
@@ -9204,8 +9212,8 @@ const filteredCustomsBusinessRows = computed(() =>
 );
 
 const customsBusinessCustomColumns = computed(() => {
-  const names = [];
-  const seen = new Set();
+  const names = [CUSTOMS_BUSINESS_FIXED_FEE_NAME];
+  const seen = new Set(names);
   customsBusinessRows.value.forEach((row) => {
     normalizeCustomsBusinessCustomFields(row.customFields).forEach((field) => {
       if (seen.has(field.name)) return;
@@ -9313,7 +9321,6 @@ function customsBusinessCellText(row = {}, column = {}) {
     customsFee: money(row.customsFee),
     pageFee: money(row.pageFee),
     manifestFee: money(row.manifestFee),
-    inspectionFee: money(row.inspectionFee),
     checkFee: money(row.checkFee),
     verificationFee: money(row.verificationFee),
     otherFee: money(row.otherFee),
@@ -9419,8 +9426,7 @@ const customsBusinessSummary = computed(() => {
   return {
     count: rows.length,
     declarationCount: rows.filter((row) => row.declarationNo || row.sixSheetNo).length,
-    revenue: rows.reduce((sum, row) => sum + Number(row.total || 0), 0),
-    inspectionFee: rows.reduce((sum, row) => sum + Number(row.inspectionFee || 0), 0)
+    revenue: rows.reduce((sum, row) => sum + Number(row.total || 0), 0)
   };
 });
 
@@ -13334,7 +13340,7 @@ const bossDashboardCustomsRevenueRows = computed(() =>
       productionCertificateFee: moneyRmbDisplay(row.productionCertificateFee || row.homeFee || 0),
       manifestFee: moneyRmbDisplay(row.manifestFee || 0),
       verificationFee: moneyRmbDisplay(row.verificationFee || 0),
-      otherFee: moneyRmbDisplay(Number(row.inspectionFee || 0) + Number(row.checkFee || 0) + Number(row.otherFee || 0)),
+      otherFee: moneyRmbDisplay(Number(row.checkFee || 0) + Number(row.otherFee || 0)),
       total: moneyRmbDisplay(row.total || 0),
       totalValue: Number(row.total || 0)
     }))
@@ -13946,7 +13952,6 @@ function buildCustomsStatementRows(sourceRows = []) {
       pageFee: 0,
       productionCertificateFee: 0,
       manifestFee: 0,
-      inspectionFee: 0,
       checkFee: 0,
       verificationFee: 0,
       otherFee: 0,
@@ -13958,7 +13963,6 @@ function buildCustomsStatementRows(sourceRows = []) {
     row.pageFee += Number(item.pageFee || 0);
     row.productionCertificateFee += Number(item.productionCertificateFee || item.homeFee || 0);
     row.manifestFee += Number(item.manifestFee || 0);
-    row.inspectionFee += Number(item.inspectionFee || 0);
     row.checkFee += Number(item.checkFee || 0);
     row.verificationFee += Number(item.verificationFee || 0);
     row.otherFee += Number(item.otherFee || 0);
@@ -24404,6 +24408,8 @@ function resetCustomsBusinessForm() {
 function assignCustomsBusinessForm(row = {}) {
   const normalizedCustomFields = normalizeCustomsBusinessCustomFields(row.customFields);
   const fixedFeeField = normalizedCustomFields.find((field) => customsBusinessCustomFieldName(field) === CUSTOMS_BUSINESS_FIXED_FEE_NAME);
+  const mergedFixedFee = customsBusinessIntegerValue(fixedFeeField?.value) + customsBusinessIntegerValue(row.inspectionFee);
+  const inspectionFee = customsBusinessUsesInspectionFee(row.direction) ? mergedFixedFee : 0;
   Object.assign(customsBusinessForm, {
     date: row.date || todayInputValue(),
     declarationNo: row.declarationNo || "",
@@ -24416,17 +24422,19 @@ function assignCustomsBusinessForm(row = {}) {
     customsFee: customsBusinessIntegerValue(row.customsFee),
     pageFee: customsBusinessIntegerValue(row.pageFee),
     manifestFee: customsBusinessIntegerValue(row.manifestFee),
-    inspectionFee: customsBusinessIntegerValue(row.inspectionFee),
     checkFee: customsBusinessIntegerValue(row.checkFee),
     verificationFee: customsBusinessIntegerValue(row.verificationFee),
     otherFee: customsBusinessIntegerValue(row.otherFee),
-    fajian3cFee: customsBusinessIntegerValue(fixedFeeField?.value),
+    fajian3cFee: inspectionFee,
     customFields: normalizedCustomFields
       .filter((field) => customsBusinessCustomFieldName(field) !== CUSTOMS_BUSINESS_FIXED_FEE_NAME)
       .map((field) => ({ name: field.name, value: customsBusinessIntegerValue(field.value) })),
     remark: row.remark || ""
   });
-  setCustomsBusinessAutoChargeBaseline(calculatedCustomsBusinessChargeValues());
+  setCustomsBusinessAutoChargeBaseline({
+    ...calculatedCustomsBusinessChargeValues(),
+    fajian3cFee: inspectionFee
+  });
   customsBusinessCompanySearch.value = customsCustomerLabelByReference(row.company || "", row.customerId || "") || String(row.company || "");
   customsBusinessCompanyPickerOpen.value = false;
 }
@@ -24509,9 +24517,10 @@ async function saveCustomsBusiness() {
   }
   normalizeCustomsBusinessFormIntegers();
   const isProductionCertificateBusiness = customsBusinessDirectionFeeType() === "production";
+  const inspectionFee = customsBusinessUsesInspectionFee() ? customsBusinessForm.fajian3cFee : 0;
   const customFields = isProductionCertificateBusiness
     ? []
-    : customsBusinessCustomFieldsForSave(customsBusinessForm.customFields, customsBusinessForm.fajian3cFee);
+    : customsBusinessCustomFieldsForSave(customsBusinessForm.customFields, inspectionFee);
   try {
     customsBusinessSaving.value = true;
     const isCopying = Boolean(copyingCustomsBusinessId.value);
@@ -29265,7 +29274,6 @@ const CUSTOMS_STATEMENT_EXPORT_HEADERS = [
   "续页费",
   "报关费",
   "舱单费",
-  "报检费",
   "查验费",
   "核注费",
   "其他费用",
@@ -29286,7 +29294,6 @@ function customsStatementExportRow(item = {}, index = 0) {
     money(item.pageFee),
     money(item.customsFee),
     money(item.manifestFee),
-    money(item.inspectionFee),
     money(item.checkFee),
     money(item.verificationFee),
     money(item.otherFee),
@@ -29297,7 +29304,7 @@ function customsStatementExportRow(item = {}, index = 0) {
 
 function customsStatementTotalRow(rows = []) {
   const total = rows.reduce((sum, row) => sum + Number(row.total || 0), 0);
-  return ["合计", ...Array.from({ length: 13 }, () => ""), money(total), ""];
+  return ["合计", ...Array.from({ length: CUSTOMS_STATEMENT_EXPORT_HEADERS.length - 3 }, () => ""), money(total), ""];
 }
 
 function customsStatementExportFilename(company = "客户", start = "", end = "", extension = "xlsx") {
@@ -39724,7 +39731,7 @@ function orderDetailFeeRows(order = {}) {
                 <label>核注费
                   <input v-model.number="customerForm.customsVerificationFee" type="number" min="0" step="0.01" />
                 </label>
-                <label>商检费
+                <label>报检费
                   <input v-model.number="customerForm.customsInspectionFee" type="number" min="0" step="0.01" />
                 </label>
                 <label>舱单费
@@ -42058,10 +42065,9 @@ function orderDetailFeeRows(order = {}) {
             <label>续页费<input v-model.number="customsBusinessForm.pageFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'pageFee', $event)" /></label>
             <label>报关费<input v-model.number="customsBusinessForm.customsFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'customsFee', $event)" /></label>
             <label>舱单费<input v-model.number="customsBusinessForm.manifestFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'manifestFee', $event)" /></label>
-            <label>报检费<input v-model.number="customsBusinessForm.inspectionFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'inspectionFee', $event)" /></label>
             <label>查验费<input v-model.number="customsBusinessForm.checkFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'checkFee', $event)" /></label>
             <label v-if="customsBusinessShowsVerificationFee">核注费<input v-model.number="customsBusinessForm.verificationFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'verificationFee', $event)" /></label>
-            <label>商检费<input v-model.number="customsBusinessForm.fajian3cFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'fajian3cFee', $event)" /></label>
+            <label>报检费<input v-model.number="customsBusinessForm.fajian3cFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'fajian3cFee', $event)" /></label>
             <label>其他费用<input v-model.number="customsBusinessForm.otherFee" type="number" min="0" step="1" inputmode="numeric" @keydown="preventCustomsBusinessDecimalInput" @input="normalizeCustomsBusinessIntegerInput(customsBusinessForm, 'otherFee', $event)" /></label>
           </template>
           <div v-if="customsBusinessDirectionFeeType() !== 'production'" class="span-4 customs-business-custom-fields">
