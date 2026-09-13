@@ -8911,9 +8911,23 @@ small.vehicle-repair-record-meta {
   display: inline-flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 8px;
+  gap: 10px;
   height: 34px;
   vertical-align: middle;
+}
+
+.order-row-actions .icon-btn.danger {
+  margin-left: 6px;
+}
+
+.customer-order-table td.row-actions {
+  padding-left: 6px;
+  padding-right: 6px;
+}
+
+.customer-order-table .row-actions .icon-btn.icon-only {
+  width: 30px;
+  height: 30px;
 }
 
 .order-table .row-actions .icon-btn:not(.icon-only) {
@@ -13964,6 +13978,21 @@ tr.selected {
   white-space: nowrap;
 }
 
+.dispatch-action-buttons {
+  display: grid;
+  grid-template-columns: repeat(3, 28px);
+  align-items: center;
+  justify-content: start;
+  gap: 10px;
+  min-height: 34px;
+}
+
+.dispatch-action-placeholder {
+  display: block;
+  width: 28px;
+  height: 28px;
+}
+
 .dispatch-row-actions .icon-btn {
   width: 28px;
   min-width: 28px;
@@ -13971,7 +14000,7 @@ tr.selected {
   min-height: 28px;
   padding: 0;
   flex: 0 0 28px;
-  margin-right: 4px;
+  margin-right: 0;
 }
 
 .dispatch-row-actions .dispatch-status-return-btn {

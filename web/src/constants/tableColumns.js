@@ -37,7 +37,7 @@ export function createCustomerOrderColumns() {
     { key: "receivableHKD", label: "应收港币", width: 82, min: 68 },
     { key: "receivableRMB", label: "应收人民币", width: 82, min: 68 },
     { key: "status", label: "状态", width: 64, min: 54 },
-    { key: "actions", label: "操作", width: 82, min: 72, locked: true }
+    { key: "actions", label: "操作", width: 140, min: 132, locked: true }
   ]);
 }
 
@@ -108,7 +108,7 @@ export function createDispatchTableColumns() {
     { key: "weight", label: "重量", width: 76, min: 58 },
     { key: "route", label: "装 / 卸", width: 250, min: 140 },
     { key: "note", label: "备注", width: 120, min: 86 },
-    { key: "actions", label: "操作", width: 184, min: 144, locked: true }
+    { key: "actions", label: "操作", width: 132, min: 124, locked: true }
   ]);
 }
 

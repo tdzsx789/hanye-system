@@ -643,6 +643,9 @@ function normalizeDispatchDriverColumnWidths(saved = {}) {
   if (!Number.isFinite(driverWidth) || driverWidth < 118 || driverWidth > 170) {
     next.driver = 148;
   }
+  if (Number(next.actions) === 184) {
+    next.actions = 132;
+  }
   return next;
 }
 
@@ -680,6 +683,16 @@ function loadDataTableColumnWidths(tableId, columns) {
       localStorage.setItem(dataTableStorageKey(tableId, "widths"), JSON.stringify(next));
       saved = next;
       localStorage.setItem(balancedKey, "done");
+    }
+    const actionsCompactKey = dataTableStorageKey(tableId, "actions_width_compact_v1");
+    if (localStorage.getItem(actionsCompactKey) !== "done") {
+      const next = normalizeDispatchDriverColumnWidths(saved);
+      if (Number(next.actions) === 184 || !Number.isFinite(Number(next.actions))) {
+        next.actions = 132;
+        localStorage.setItem(dataTableStorageKey(tableId, "widths"), JSON.stringify(next));
+        saved = next;
+      }
+      localStorage.setItem(actionsCompactKey, "done");
     }
   }
   if (tableId === "finance_wages") {
@@ -736,6 +749,16 @@ function loadCustomerOrderColumnWidths() {
     saved = JSON.parse(localStorage.getItem(CUSTOMER_ORDER_COLUMN_STORAGE_KEY) || "{}") || {};
   } catch {
     saved = {};
+  }
+  const migrationKey = "hanye_customer_order_actions_width_migrated_v1";
+  if (localStorage.getItem(migrationKey) !== "done") {
+    const next = { ...saved };
+    if (!Number.isFinite(Number(next.actions)) || Number(next.actions) < 132) {
+      next.actions = 140;
+      localStorage.setItem(CUSTOMER_ORDER_COLUMN_STORAGE_KEY, JSON.stringify(next));
+      saved = next;
+    }
+    localStorage.setItem(migrationKey, "done");
   }
   return customerOrderColumns.reduce((widths, column) => {
     const savedWidth = Number(saved[column.key]);
@@ -7097,6 +7120,12 @@ function applyDispatchRowToOrderForm(row) {
 async function removeDispatchPlanRow(index) {
   const row = dispatchPlanRows.value[index];
   if (!row) return;
+  if (!canDeleteDispatchPlanRow(row)) {
+    notify(currentAccountCanDeleteAdminOnlyOrder.value
+      ? "当前排车单不可删除"
+      : "只有预排或已派车排车单可以删除，其他状态请使用管理员账号");
+    return;
+  }
   const linkedOrder = linkedOrderForDispatchRow(row);
   const planDate = dispatchPlanDate(row);
   if (linkedOrder) {
@@ -21876,7 +21905,8 @@ function sortRowsByTable(rows = [], tableId, fallbackIndexKey = "__sortIndex") {
     .map((item) => item.row);
 }
 
-const ADMIN_ONLY_DELETE_ORDER_STATUSES = ["待确认", "通关中"];
+const NON_ADMIN_DELETABLE_ORDER_STATUSES = ["预排", "已派车"];
+const NON_ADMIN_DELETABLE_DISPATCH_STATUSES = ["预排", "已派车"];
 
 const currentAccountCanDeleteAdminOnlyOrder = computed(() =>
   normalizeAccountRole(currentAccount.value.role) === "管理员"
@@ -21899,9 +21929,15 @@ watch(() => accountCreateForm.role, (role) => {
 });
 
 function canDeleteOrder(order = {}) {
-  if (order.status === "已审核") return false;
-  if (ADMIN_ONLY_DELETE_ORDER_STATUSES.includes(order.status)) return currentAccountCanDeleteAdminOnlyOrder.value;
-  return true;
+  if (currentAccountCanDeleteAdminOnlyOrder.value) return true;
+  return NON_ADMIN_DELETABLE_ORDER_STATUSES.includes(String(order.status || "").trim());
+}
+
+function canDeleteDispatchPlanRow(row = {}) {
+  if (currentAccountCanDeleteAdminOnlyOrder.value) return true;
+  if (!NON_ADMIN_DELETABLE_DISPATCH_STATUSES.includes(dispatchStatusValueForRow(row))) return false;
+  const linkedOrder = linkedOrderForDispatchRow(row);
+  return !linkedOrder || canDeleteOrder(linkedOrder);
 }
 
 function findAddressBookContactForLocation(location = "") {
@@ -27447,7 +27483,9 @@ async function deleteSelectedOrders() {
   }
   const locked = targets.filter((item) => !canDeleteOrder(item));
   if (locked.length) {
-    notify(currentAccountCanDeleteAdminOnlyOrder.value ? "已审核订单不可删除，请取消勾选后再操作" : "已审核、待确认或通关中订单不可删除，请取消勾选后再操作");
+    notify(currentAccountCanDeleteAdminOnlyOrder.value
+      ? "当前选择的订单不可删除，请取消勾选后再操作"
+      : "只有预排或已派车订单可以删除，其他状态请使用管理员账号");
     return;
   }
   if (!window.confirm(`确定删除 ${targets.length} 条订单？删除后会进入回收站。`)) return;
@@ -27474,11 +27512,9 @@ async function deleteSelectedOrders() {
 
 async function deleteOrder(order) {
   if (!canDeleteOrder(order)) {
-    if (ADMIN_ONLY_DELETE_ORDER_STATUSES.includes(order.status)) {
-      notify(`${order.status}订单不可删除，请使用管理员账号操作`);
-      return;
-    }
-    notify("已审核订单不可删除");
+    notify(currentAccountCanDeleteAdminOnlyOrder.value
+      ? "当前订单不可删除"
+      : "只有预排或已派车订单可以删除，其他状态请使用管理员账号");
     return;
   }
   const orderLabel = [order.no, order.customer].filter(Boolean).join(" / ");
@@ -27574,7 +27610,9 @@ async function deleteSelectedCustomerOrders() {
   if (targets.length === 0) return;
   const locked = targets.filter((item) => !canDeleteOrder(item));
   if (locked.length) {
-    notify(currentAccountCanDeleteAdminOnlyOrder.value ? "已审核订单不可删除，请先取消审核或取消勾选" : "已审核、待确认或通关中订单不可删除，请先取消勾选");
+    notify(currentAccountCanDeleteAdminOnlyOrder.value
+      ? "当前选择的订单不可删除，请先取消勾选"
+      : "只有预排或已派车订单可以删除，其他状态请使用管理员账号");
     return;
   }
   if (!window.confirm(`确定删除 ${targets.length} 条订单？删除后会进入回收站。`)) return;
@@ -34850,16 +34888,19 @@ function orderDetailFeeRows(order = {}) {
                         <input v-model.trim="dispatchPlanRows[row.index].note" placeholder="备注" @click.stop @input="saveDispatchPlan({ silent: true })" />
                       </template>
                       <template v-else-if="column.key === 'actions'">
-                        <button class="icon-btn icon-only" type="button" title="编辑排车单" @click.stop="openEditDispatchPlanRow(row)"><IconSvg name="edit" /></button>
-                        <button class="icon-btn danger icon-only" type="button" title="移除" @click.stop="removeDispatchPlanRow(row.index)"><IconSvg name="trash" /></button>
-                        <button
-                          class="icon-btn icon-only dispatch-status-return-btn"
-                          type="button"
-                          :title="dispatchStatusReturnButtonTitle(row)"
-                          aria-label="返回上一步状态"
-                          :disabled="!canReturnDispatchStatus(row) || loading"
-                          @click.stop="returnDispatchRowStatus(row)"
-                        ><IconSvg name="undo" /></button>
+                        <span class="dispatch-action-buttons">
+                          <button class="icon-btn icon-only" type="button" title="编辑排车单" @click.stop="openEditDispatchPlanRow(row)"><IconSvg name="edit" /></button>
+                          <button
+                            class="icon-btn icon-only dispatch-status-return-btn"
+                            type="button"
+                            :title="dispatchStatusReturnButtonTitle(row)"
+                            aria-label="返回上一步状态"
+                            :disabled="!canReturnDispatchStatus(row) || loading"
+                            @click.stop="returnDispatchRowStatus(row)"
+                          ><IconSvg name="undo" /></button>
+                          <button v-if="canDeleteDispatchPlanRow(row)" class="icon-btn danger icon-only" type="button" title="移除排车单" @click.stop="removeDispatchPlanRow(row.index)"><IconSvg name="trash" /></button>
+                          <span v-else class="dispatch-action-placeholder" aria-hidden="true"></span>
+                        </span>
                       </template>
                     </td>
                   </tr>

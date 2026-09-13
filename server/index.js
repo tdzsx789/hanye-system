@@ -224,7 +224,8 @@ function booleanFlag(value, fallback = false) {
   return fallback;
 }
 
-const ADMIN_ONLY_DELETE_ORDER_STATUSES = new Set(["待确认", "通关中"]);
+const NON_ADMIN_DELETABLE_ORDER_STATUSES = new Set(["预排", "已派车"]);
+const NON_ADMIN_DELETABLE_DISPATCH_STATUSES = new Set(["预排", "已派车"]);
 const DISPATCH_PLAN_DEFAULT_STATUS = "预排";
 const DISPATCH_STATUS_OPTIONS = ["预排", "已派车", "通关中", "已签收", "异常滞留"];
 const DISPATCH_STATUS_TO_ORDER_STATUS = {
@@ -9838,14 +9839,33 @@ async function assertOrderRowsCanBeDeleted(orderRows = [], req, specialLookup = 
   if (visibleRows.length !== orderRows.length) {
     throw createHttpError(403, "无权查看该订单");
   }
-  const audited = orderRows.find((row) => row.status === "已审核");
-  if (audited) {
-    throw createHttpError(409, `已审核订单不可删除：${audited.no}`);
+  if (requestHasAdminOrderDeletePermission(req)) return;
+  const blocked = orderRows.find((row) => !NON_ADMIN_DELETABLE_ORDER_STATUSES.has(normalizeOrderStatus(row.status, "")));
+  if (blocked) {
+    throw createHttpError(403, `${blocked.status || "当前状态"}订单不可删除，只有预排或已派车订单可以删除`);
   }
-  const adminOnly = orderRows.find((row) => ADMIN_ONLY_DELETE_ORDER_STATUSES.has(row.status));
-  if (adminOnly && !requestHasAdminOrderDeletePermission(req)) {
-    throw createHttpError(403, `${adminOnly.status}订单不可删除，请使用管理员账号操作`);
+}
+
+function assertDispatchRowsCanBeDeleted(rows = [], req) {
+  if (!rows.length || requestHasAdminOrderDeletePermission(req)) return;
+  const blocked = rows.find((row) => !NON_ADMIN_DELETABLE_DISPATCH_STATUSES.has(normalizeDispatchPlanStatus(row.status)));
+  if (blocked) {
+    throw createHttpError(403, `${normalizeDispatchPlanStatus(blocked.status)}排车单不可删除，只有预排或已派车排车单可以删除`);
   }
+}
+
+async function loadDispatchPlanRowsLinkedToOrder(orderRow = {}) {
+  const orderNo = String(orderRow.no || orderRow.order_no || "").trim();
+  const dispatchNo = String(orderRow.dispatch_no || orderRow.dispatchNo || "").trim();
+  const dispatchGroupId = String(orderRow.dispatch_group_id || orderRow.dispatchGroupId || "").trim();
+  if (!orderNo && !dispatchNo && !dispatchGroupId) return [];
+
+  const plans = await db.prepare("SELECT plan_date, rows_json FROM dispatch_plans").all();
+  return plans.flatMap((plan) =>
+    parseDispatchPlanRowsJson(plan.rows_json)
+      .filter((row) => dispatchRowMatchesRefs(row, orderNo, dispatchNo, dispatchGroupId))
+      .map((row) => ({ ...row, planDate: plan.plan_date }))
+  );
 }
 
 function deletedOrderRefsPayload(orderRows = []) {
@@ -10133,6 +10153,14 @@ app.post("/api/dispatch-plans/recycle", async (req, res) => {
     res.status(403).json({ message: "无权操作该排车单" });
     return;
   }
+  try {
+    assertDispatchRowsCanBeDeleted([row], req);
+    const linkedOrders = await loadOrdersLinkedToDispatchRow(row);
+    await assertOrderRowsCanBeDeleted(linkedOrders, req, specialLookup);
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ message: error.message });
+    return;
+  }
 
   const result = await db.transaction(async () => {
     await lockDispatchPlanDate(planDate);
@@ -10209,6 +10237,7 @@ app.delete("/api/dispatch-plans/:date/rows", async (req, res) => {
       if (!rowsToRecycle.length) {
         return { removed: 0, saved: plan ? mapDispatchPlanRecord(plan) : { date, rows: [], updatedAt: "" }, deletedOrders: [] };
       }
+      assertDispatchRowsCanBeDeleted(rowsToRecycle, req);
       const linkedOrderMap = new Map();
       for (const row of rowsToRecycle) {
         const linkedOrders = await loadOrdersLinkedToDispatchRow(row);
@@ -11432,6 +11461,8 @@ app.delete("/api/orders/:no", async (req, res) => {
   const ordersToDelete = linkedOrders.length ? linkedOrders : [row];
   try {
     await assertOrderRowsCanBeDeleted(ordersToDelete, req, specialLookup);
+    const linkedDispatchRows = await loadDispatchPlanRowsLinkedToOrder(row);
+    assertDispatchRowsCanBeDeleted(linkedDispatchRows, req);
   } catch (error) {
     res.status(error.statusCode || 500).json({ message: error.message });
     return;
