@@ -11027,8 +11027,14 @@ async function validateOrderReadyForSignedStatus(item = {}, customer = item?._re
 }
 
 app.post("/api/orders", async (req, res) => {
-  const requestedNo = String(req.body?.no || "").trim();
-  const requestedDispatchNo = String(req.body?.dispatchNo || req.body?.dispatch_no || "").trim();
+  const isCopyRequest = Boolean(
+    String(req.body?.copyFromOrderNo || "").trim()
+    || String(req.body?.copyFromDispatchNo || "").trim()
+  );
+  const requestedNo = isCopyRequest ? "" : String(req.body?.no || "").trim();
+  const requestedDispatchNo = isCopyRequest
+    ? ""
+    : String(req.body?.dispatchNo || req.body?.dispatch_no || "").trim();
   const item = await readOrderPayload({ ...req.body, no: requestedNo || undefined, dispatchNo: requestedDispatchNo });
   Object.assign(item, creatorFieldsFromAccount(req.account));
   item.fees = item.fees || [];

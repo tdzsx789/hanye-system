@@ -6635,12 +6635,20 @@ async function saveManualDispatchPlanRow() {
   const planDate = dispatchForm.date || dispatchDate.value;
   const row = createManualDispatchPlanRow();
   const isCopyingDispatch = Boolean(copyingDispatchRowId.value);
+  const copySourceRow = isCopyingDispatch
+    ? dispatchPlanRows.value.find((item) => item.id === copyingDispatchRowId.value)
+    : null;
+  const createdOrderNos = [];
   try {
     loading.value = true;
     const createdAt = row.createdAt || currentTimestampInputValue();
     row.createdAt = createdAt;
     row.date = planDate;
     const item = await ordersApi.createOrder({
+      ...(isCopyingDispatch ? {
+        copyFromOrderNo: copySourceRow?.orderNo || "",
+        copyFromDispatchNo: copySourceRow?.dispatchNo || ""
+      } : {}),
       customerId: matchedCustomer.id,
       customer: matchedCustomer.name,
       dispatchCustomerIds: row.customerIds,
@@ -6670,6 +6678,7 @@ async function saveManualDispatchPlanRow() {
       fees: [],
       skipSignValidation: true
     });
+    createdOrderNos.push(String(item.no || "").trim());
     row.orderNo = item.no;
     row.customer = dispatchCustomerSelectionText(selectedCustomers) || item.customer || row.customer;
     row.dispatchNo = item.dispatchNo || row.dispatchNo;
@@ -6688,7 +6697,10 @@ async function saveManualDispatchPlanRow() {
     closeDispatchModal({ force: true });
     notify(isCopyingDispatch ? `排车单已复制，并生成预排订单：${item.no}` : `排车单已创建，并生成预排订单：${item.no}`);
   } catch (error) {
-    notify(error.message || "创建排车单失败");
+    const rollbackResult = await rollbackCreatedDispatchOrders(createdOrderNos);
+    notify(rollbackResult.failed.length
+      ? `${error.message || "创建排车单失败"}；自动回滚失败，请检查订单：${rollbackResult.failed.join("、")}`
+      : (error.message || "创建排车单失败"));
   } finally {
     loading.value = false;
   }
@@ -6932,6 +6944,27 @@ async function duplicateSelectedDispatchRows() {
   await openCopyDispatchPlanRow(rows[0]);
 }
 
+async function rollbackCreatedDispatchOrders(orderNos = []) {
+  const uniqueOrderNos = Array.from(new Set(orderNos.map((value) => String(value || "").trim()).filter(Boolean)));
+  const failed = [];
+  for (const orderNo of uniqueOrderNos) {
+    try {
+      await ordersApi.deleteOrder(orderNo);
+    } catch {
+      failed.push(orderNo);
+    }
+  }
+  if (uniqueOrderNos.length) {
+    const orderNoSet = new Set(uniqueOrderNos);
+    orderRows.value = orderRows.value.filter((order) => !orderNoSet.has(String(order.no || "").trim()));
+    dispatchPlanRows.value = dispatchPlanRows.value.filter((row) =>
+      !orderNoSet.has(String(row.orderNo || "").trim())
+      && !normalizeDispatchCustomerSelectionValues(row.linkedOrderNos || row.linked_order_nos).some((orderNo) => orderNoSet.has(orderNo))
+    );
+  }
+  return { failed };
+}
+
 function closeDispatchDuplicateModal() {
   if (loading.value) return;
   dispatchDuplicateModalOpen.value = false;
@@ -6956,6 +6989,7 @@ async function saveDuplicateDispatchRows() {
     return;
   }
 
+  const createdOrderNos = [];
   try {
     loading.value = true;
     const duplicatedRows = [];
@@ -6968,15 +7002,15 @@ async function saveDuplicateDispatchRows() {
         || transportCustomerById(draft.customerId || sourceOrder.customerId)
         || transportCustomerByReference(customerName, draft.customerId || sourceOrder.customerId);
       if (!matchedCustomer) {
-        notify(`找不到客户：${customerName || "未填写"}`);
-        return;
+        throw new Error(`找不到客户：${customerName || "未填写"}`);
       }
 
       const note = String(draft.note || "").trim() || String(sourceRow.note || "").trim();
       const createdAt = currentTimestampInputValue();
-      const dispatchNo = generateDispatchNo(dispatchDate.value, duplicatedRows);
+      const copyDate = String(sourceRow.date || sourceOrder.date || dispatchDate.value || "").trim().slice(0, 10);
       const item = await ordersApi.createOrder({
-        dispatchNo,
+        copyFromOrderNo: sourceOrder.no || sourceRow.orderNo || "",
+        copyFromDispatchNo: sourceRow.dispatchNo || "",
         customerId: matchedCustomer.id,
         customer: matchedCustomer.name,
         dispatchCustomerIds: customerSelection.map((customer) => String(customer?.id || "").trim()).filter(Boolean),
@@ -7001,7 +7035,7 @@ async function saveDuplicateDispatchRows() {
 	        unloading: draft.unloading || sourceOrder.unloading || sourceRow.unloading || "",
 	        unloadingLocations: cloneDispatchLocationEntries(recordDispatchLocationEntries(draft, "unloading", sourceOrder)),
         loadTime: draft.loadTime || sourceRow.loadTime || sourceOrder.loadTime || "",
-        date: dispatchDate.value,
+        date: copyDate,
         status: "预排",
         remark: note,
         tripNoEnabled: sourceOrder.tripNoEnabled || 0,
@@ -7011,14 +7045,23 @@ async function saveDuplicateDispatchRows() {
         fees: [],
         skipSignValidation: true
       });
+      createdOrderNos.push(String(item.no || "").trim());
+      const dispatchNo = String(item.dispatchNo || "").trim();
+      if (!dispatchNo) {
+        throw new Error("复制排车单失败：服务端没有返回新的排车单号");
+      }
 
       const duplicatedRow = {
         ...sourceRow,
         id: `dispatch-copy-${Date.now()}-${duplicatedRows.length}`,
         createdAt,
-        date: dispatchDate.value,
+        date: copyDate,
         dispatchNo,
         orderNo: item.no,
+        dispatchGroupId: "",
+        linkedOrderNos: [item.no],
+        linkedDispatchNos: [dispatchNo],
+        rowSplitFrom: "",
         customerId: matchedCustomer.id,
         customer: customerName || item.customer || matchedCustomer.name,
         customerIds: customerSelection.map((customer) => String(customer?.id || "").trim()).filter(Boolean),
@@ -7050,12 +7093,15 @@ async function saveDuplicateDispatchRows() {
 
     dispatchPlanRows.value.push(...duplicatedRows);
     selectedDispatchPlanIds.value = duplicatedRows.map((row) => row.id);
-    saveDispatchPlan({ silent: true });
+    await saveDispatchPlan({ silent: true, throwOnError: true });
     dispatchDuplicateModalOpen.value = false;
     dispatchDuplicateDraftRows.value = [];
     notify(`已复制 ${duplicatedRows.length} 张排车单`);
   } catch (error) {
-    notify(error.message || "复制排车单失败");
+    const rollbackResult = await rollbackCreatedDispatchOrders(createdOrderNos || []);
+    notify(rollbackResult.failed.length
+      ? `${error.message || "复制排车单失败"}；自动回滚失败，请检查订单：${rollbackResult.failed.join("、")}`
+      : (error.message || "复制排车单失败"));
   } finally {
     loading.value = false;
   }
@@ -7127,6 +7173,11 @@ async function removeDispatchPlanRow(index) {
     return;
   }
   const linkedOrder = linkedOrderForDispatchRow(row);
+  const dispatchLabel = String(row.dispatchNo || row.orderNo || "当前排车单").trim();
+  const confirmMessage = linkedOrder
+    ? `确定删除排车单 ${dispatchLabel} 及其关联订单？删除后会进入回收站，关联订单也会一并删除。`
+    : `确定删除排车单 ${dispatchLabel}？删除后会进入回收站。`;
+  if (!window.confirm(confirmMessage)) return;
   const planDate = dispatchPlanDate(row);
   if (linkedOrder) {
     try {
@@ -15293,6 +15344,17 @@ function statementDateRange() {
   };
 }
 
+function compareStatementOrderDates(left = {}, right = {}) {
+  const leftDate = inputDateUtcValue(left.date) ?? Number.MAX_SAFE_INTEGER;
+  const rightDate = inputDateUtcValue(right.date) ?? Number.MAX_SAFE_INTEGER;
+  if (leftDate !== rightDate) return leftDate - rightDate;
+  return String(left.no || "").localeCompare(
+    String(right.no || ""),
+    "zh-Hans-CN",
+    { numeric: true, sensitivity: "base" }
+  );
+}
+
 function selectedStatementOrders() {
   const entity = ensureStatementEntity();
   const { start, end } = statementDateRange();
@@ -15313,9 +15375,11 @@ function selectedStatementOrders() {
     }
     return order.customer === entity || Boolean(statementCustomer && statementCustomer.id === order.customerId);
   });
-  return statementExportType.value === "customer"
-    ? orders.map(customerStatementOrderSnapshot)
-    : orders;
+  if (statementExportType.value !== "customer") return orders;
+  return orders
+    .map((order, index) => ({ order, index }))
+    .sort((left, right) => compareStatementOrderDates(left.order, right.order) || left.index - right.index)
+    .map(({ order }) => customerStatementOrderSnapshot(order));
 }
 
 function statementConvertedTotal(orders, currency, rateValue) {
@@ -20445,6 +20509,8 @@ function addDispatchCustomerSelection(customer = {}) {
 }
 
 function removeDispatchCustomerSelection(customer = {}) {
+  const customerLabel = dispatchCustomerSelectionLabel(customer) || "该客户";
+  if (!window.confirm(`确定移除客户“${customerLabel}”？移除后，本次排车单将不再关联该客户。`)) return;
   const targetKey = dispatchCustomerSelectionIdentityKey(customer);
   const next = dispatchSelectedCustomerRows.value.filter((item) => {
     const itemKey = dispatchCustomerSelectionIdentityKey(item);
@@ -23925,6 +23991,8 @@ function removeDispatchLocationEntry(target, index) {
   if (entries.length <= 1 || index <= 0) {
     return;
   }
+  const targetLabel = target === "loading" ? "装货地" : "卸货地";
+  if (!window.confirm(`确定删除第 ${index + 1} 个${targetLabel}地址？删除后该地址内容将丢失。`)) return;
   entries.splice(index, 1);
   setDispatchLocationEntries(target, entries);
   dispatchLocationDistrictPicker.key = "";
@@ -27259,6 +27327,9 @@ function ensureTrailingBlankFeeRow() {
 
 function removeFeeRow(index) {
   if (orderFees.value.length === 1) return;
+  const fee = orderFees.value[index] || {};
+  const feeLabel = String(fee.name || "").trim() || `第 ${index + 1} 行收费项目`;
+  if (!window.confirm(`确定删除“${feeLabel}”？删除后该收费项目未保存的内容将丢失。`)) return;
   orderFees.value.splice(index, 1);
 }
 
@@ -27667,12 +27738,26 @@ async function restoreOrder(order) {
     ];
     recycleRows.value = recycleRows.value.filter((item) => !restoredNos.has(item.no));
     const restoredDispatchRows = Array.isArray(result?.dispatchRows) ? result.dispatchRows : [];
-    if (restoredDispatchRows.length) {
-      const restoredDispatchIds = new Set(restoredDispatchRows.map((item) => item.id));
-      dispatchRecycleRows.value = dispatchRecycleRows.value.filter((item) => !restoredDispatchIds.has(item.id));
-      if (canAccessModule("dispatchBoard")) {
-        await loadDispatchPlansForCurrentFilter();
-      }
+    const restoredDispatchIds = new Set(restoredDispatchRows.map((item) => item.id).filter(Boolean));
+    const restoredDispatchNos = new Set([
+      ...restoredOrders.map((item) => String(item.dispatchNo || "").trim()),
+      ...restoredDispatchRows.map((item) => String(item.dispatchNo || item.dispatch_no || "").trim())
+    ].filter(Boolean));
+    dispatchRecycleRows.value = dispatchRecycleRows.value.filter((item) =>
+      !restoredDispatchIds.has(item.id)
+      && !restoredDispatchNos.has(String(item.dispatchNo || "").trim())
+    );
+
+    // The restore API also restores linked dispatch rows on the server. Refresh
+    // both caches so order visibility does not depend on manually refreshing
+    // the dispatch board first.
+    await loadDatabaseData({
+      preserveSelection: true,
+      silent: true,
+      refreshBuckets: new Set(["orders"])
+    });
+    if (canAccessModule("dispatchBoard")) {
+      await loadDispatchPlansForCurrentFilter();
     }
     notify(restoredDispatchRows.length ? `已恢复订单组 ${restoredOrders.length} 条及关联排车单` : `已恢复订单：${[...restoredNos].join("、")}`);
   } catch (error) {
