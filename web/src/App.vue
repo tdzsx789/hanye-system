@@ -3468,7 +3468,9 @@ const homeRecentDispatchRows = computed(() => dispatchPlanDisplayRows.value.slic
 
 const dispatchModalNo = computed(() => {
   const editingRow = dispatchPlanRows.value.find((row) => row.id === editingDispatchRowId.value);
-  return editingRow?.dispatchNo || generateDispatchNo(currentTimestampInputValue().slice(0, 10));
+  if (editingRow?.dispatchNo) return editingRow.dispatchNo;
+  const selectedDate = dispatchForm.date || dispatchDate.value || todayInputValue();
+  return generateDispatchNo(selectedDate);
 });
 
 const customerModalTitleId = computed(() => editingCustomerId.value || "KH00021053");
@@ -4244,6 +4246,9 @@ function addVehicleRepairItem() {
 
 function removeVehicleRepairItem(index) {
   if (!Array.isArray(vehicleExpenseForm.repairItems) || vehicleExpenseForm.repairItems.length <= 1) return;
+  const item = vehicleExpenseForm.repairItems[index] || {};
+  const label = String(item.content || item.name || "").trim() || `第 ${index + 1} 行维修项目`;
+  if (!window.confirm(`确定删除“${label}”？删除后该维修项目未保存的内容将丢失。`)) return;
   vehicleExpenseForm.repairItems.splice(index, 1);
 }
 
@@ -8956,6 +8961,9 @@ function addCustomsBusinessCustomField() {
 
 function removeCustomsBusinessCustomField(index) {
   if (!Array.isArray(customsBusinessForm.customFields)) return;
+  const field = customsBusinessForm.customFields[index] || {};
+  const label = customsBusinessCustomFieldName(field) || `第 ${index + 1} 个类目`;
+  if (!window.confirm(`确定删除“${label}”？删除后该类目未保存的内容将丢失。`)) return;
   customsBusinessForm.customFields.splice(index, 1);
 }
 
@@ -8968,6 +8976,9 @@ function addCustomerCustomsCustomField() {
 
 function removeCustomerCustomsCustomField(index) {
   if (!Array.isArray(customerForm.customsCustomFields)) return;
+  const field = customerForm.customsCustomFields[index] || {};
+  const label = customsBusinessCustomFieldName(field) || `第 ${index + 1} 个默认配置项`;
+  if (!window.confirm(`确定删除“${label}”？删除后该默认配置项未保存的内容将丢失。`)) return;
   customerForm.customsCustomFields.splice(index, 1);
 }
 
@@ -9622,6 +9633,9 @@ function addOtherBusinessCustomField() {
 
 function removeOtherBusinessCustomField(index) {
   if (!Array.isArray(otherBusinessForm.customFields)) return;
+  const field = otherBusinessForm.customFields[index] || {};
+  const label = otherBusinessCustomFieldName(field) || `第 ${index + 1} 个类目`;
+  if (!window.confirm(`确定删除“${label}”？删除后该类目未保存的内容将丢失。`)) return;
   otherBusinessForm.customFields.splice(index, 1);
 }
 
