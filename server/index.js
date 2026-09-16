@@ -6862,6 +6862,14 @@ function nextBusinessNoFromRows(prefix, rows = []) {
   return `${prefix}${String(max + 1).padStart(3, "0")}`;
 }
 
+async function dispatchPlanBusinessNumberRows() {
+  const plans = await db.prepare("SELECT rows_json FROM dispatch_plans").all();
+  return plans.flatMap((plan) => parseDispatchPlanRowsJson(plan.rows_json).flatMap((row) => [
+    { no: row.orderNo || row.order_no || "" },
+    { dispatch_no: row.dispatchNo || row.dispatch_no || "" }
+  ]));
+}
+
 async function nextOrderNo(date = todayInputValue()) {
   const prefix = businessNoPrefix("HY", date);
   const rows = await db.prepare(`
@@ -6871,7 +6879,9 @@ async function nextOrderNo(date = todayInputValue()) {
     SELECT order_no AS no FROM dispatch_plan_recycle
     WHERE order_no LIKE ?
   `).all(`${prefix}%`, `${prefix}%`);
-  return nextBusinessNoFromRows(prefix, rows);
+  const planRows = (await dispatchPlanBusinessNumberRows())
+    .filter((row) => String(row.no || "").startsWith(prefix));
+  return nextBusinessNoFromRows(prefix, [...rows, ...planRows]);
 }
 
 async function nextDispatchNo(date = todayInputValue()) {
@@ -6884,9 +6894,7 @@ async function nextDispatchNo(date = todayInputValue()) {
     SELECT dispatch_no FROM dispatch_plan_recycle
     WHERE dispatch_no LIKE ?
   `).all(`${prefix}%`);
-  const plan = await db.prepare("SELECT rows_json FROM dispatch_plans WHERE plan_date = ?").get(normalizeBusinessNoDate(date));
-  const planRows = parseDispatchPlanRowsJson(plan?.rows_json)
-    .map((row) => ({ dispatch_no: row.dispatchNo }))
+  const planRows = (await dispatchPlanBusinessNumberRows())
     .filter((row) => String(row.dispatch_no || "").startsWith(prefix));
   return nextBusinessNoFromRows(prefix, [...orderRows, ...recycleRows, ...planRows]);
 }

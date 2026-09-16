@@ -6443,13 +6443,19 @@ function generateBusinessNo(prefix, date = todayInputValue(), rows = []) {
 }
 
 function generateOrderNo(date = todayInputValue(), extraRows = []) {
-  return generateBusinessNo("HY", date, [...orderRows.value, ...extraRows]);
+  return generateBusinessNo("HY", date, [
+    ...orderRows.value,
+    ...dispatchPlanRows.value,
+    ...recycleRows.value,
+    ...extraRows
+  ]);
 }
 
 function generateDispatchNo(date = dispatchDate.value, extraRows = []) {
   const rows = [
     ...dispatchPlanRows.value,
     ...orderRows.value.map((order) => ({ dispatchNo: order.dispatchNo })),
+    ...dispatchRecycleRows.value,
     ...extraRows
   ];
   return generateBusinessNo("PC", date, rows);
@@ -7051,8 +7057,24 @@ async function saveDuplicateDispatchRows() {
         throw new Error("复制排车单失败：服务端没有返回新的排车单号");
       }
 
+      const {
+        id: _sourceId,
+        order: _sourceNestedOrder,
+        vehicle: _sourceVehicle,
+        hkDriverRow: _sourceHkDriverRow,
+        mainlandDriverRow: _sourceMainlandDriverRow,
+        index: _sourceIndex,
+        displayIndex: _sourceDisplayIndex,
+        orderNo: _sourceOrderNo,
+        dispatchNo: _sourceDispatchNo,
+        dispatchGroupId: _sourceDispatchGroupId,
+        linkedOrderNos: _sourceLinkedOrderNos,
+        linkedDispatchNos: _sourceLinkedDispatchNos,
+        rowSplitFrom: _sourceRowSplitFrom,
+        ...sourceBusinessFields
+      } = sourceRow;
       const duplicatedRow = {
-        ...sourceRow,
+        ...sourceBusinessFields,
         id: `dispatch-copy-${Date.now()}-${duplicatedRows.length}`,
         createdAt,
         date: copyDate,
@@ -7494,8 +7516,12 @@ function dispatchMessageText(rows = dispatchPlanDisplayRows.value) {
 	      ...order,
 	      loading: order.loading || row.loading,
 	      loadingLocations: order.loadingLocations || row.loadingLocations || [],
+	      loadingContact: order.loadingContact || row.loadingContact || "",
+	      loadingPhone: order.loadingPhone || row.loadingPhone || "",
 	      unloading: order.unloading || row.unloading,
-	      unloadingLocations: order.unloadingLocations || row.unloadingLocations || []
+	      unloadingLocations: order.unloadingLocations || row.unloadingLocations || [],
+	      unloadingContact: order.unloadingContact || row.unloadingContact || "",
+	      unloadingPhone: order.unloadingPhone || row.unloadingPhone || ""
 	    };
     const date = dispatchPlanDate(row) || "-";
     const time = row.loadTime || order.loadingTime || "-";
@@ -22006,46 +22032,12 @@ function canDeleteDispatchPlanRow(row = {}) {
   return !linkedOrder || canDeleteOrder(linkedOrder);
 }
 
-function findAddressBookContactForLocation(location = "") {
-  const normalizedLocation = normalizeLocationText(location);
-  if (!normalizedLocation) return null;
-  const contactMatch = customerContactAddressOptions.value.find((item) => {
-    const candidates = [
-      item.address,
-      item.area,
-      [item.area, item.address].filter(Boolean).join(" / ")
-    ].map((value) => normalizeLocationText(value));
-    return candidates.some((candidate) =>
-      candidate && (candidate.includes(normalizedLocation) || normalizedLocation.includes(candidate))
-    );
-  });
-  if (contactMatch) {
-    return {
-      contact: contactMatch.contact,
-      phone: contactMatch.phone
-    };
-  }
-  return addressBookRows.value.find((item) => {
-    const candidates = [
-      item.address,
-      item.area,
-      [item.area, item.address].filter(Boolean).join(" / ")
-    ].map((value) => normalizeLocationText(value));
-    return candidates.some((candidate) =>
-      candidate && (candidate.includes(normalizedLocation) || normalizedLocation.includes(candidate))
-    );
-  }) || null;
-}
-
-function dispatchLocationContactLines(record = {}, target, location = "", index = 0) {
+function dispatchLocationContactLines(record = {}, target, index = 0) {
   const contact = index === 0 ? String(record[`${target}Contact`] || "").trim() : "";
   const phone = index === 0 ? String(record[`${target}Phone`] || "").trim() : "";
-  const matched = findAddressBookContactForLocation(location);
   return [
     contact ? `联系人：${contact}` : "",
-    phone ? `电话：${phone}` : "",
-    !contact && matched?.contact ? `联系人：${matched.contact}` : "",
-    !phone && matched?.phone ? `电话：${matched.phone}` : ""
+    phone ? `电话：${phone}` : ""
   ].filter(Boolean);
 }
 
@@ -22066,7 +22058,7 @@ function dispatchLocationBlock(label, record = {}, target) {
     const displayLocation = dispatchMessageLocationDetail(location) || "-";
     return [
       `${label}：${displayLocation}`,
-      ...dispatchLocationContactLines(record, target, locationText)
+      ...dispatchLocationContactLines(record, target, 0)
     ].join("\n");
   }
   return entries
@@ -22074,7 +22066,7 @@ function dispatchLocationBlock(label, record = {}, target) {
       const locationText = composeDispatchLocationParts(location.city, location.district, location.detail);
       return [
       `${label}${index + 1}：${dispatchMessageLocationDetail(location) || "-"}`,
-      ...dispatchLocationContactLines(record, target, locationText, index)
+      ...dispatchLocationContactLines(record, target, index)
     ];
     })
     .join("\n");
@@ -23119,14 +23111,26 @@ async function selectDispatchDriver(row = {}, driver = "") {
 
 function dispatchDriverText(row = {}) {
   const order = row.order || {};
-  const names = [
-    row.driver,
-    order.driver,
-    row.hkDriver,
-    order.hkDriver,
-    row.mainlandDriver,
-    order.mainlandDriver
+  const mode = normalizeTransportMode(order.transportMode || row.transportMode || "");
+  const roleNames = [
+    order.hkDriver || row.hkDriver,
+    order.mainlandDriver || row.mainlandDriver
   ]
+    .flatMap((value) => String(value || "").split(/[\/／|｜、]+/))
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const sourceNames = mode === "双司机" && roleNames.length
+    ? roleNames
+    : [
+      order.driver || row.driver,
+      order.hkDriver || row.hkDriver,
+      order.mainlandDriver || row.mainlandDriver,
+      row.driver,
+      row.hkDriver,
+      row.mainlandDriver
+    ]
+  ;
+  const names = sourceNames
     .flatMap((value) => String(value || "").split(/[\/／|｜、]+/))
     .map((value) => value.trim())
     .filter(Boolean);
@@ -33312,12 +33316,15 @@ function closeDispatchDetail() {
 function orderDetailDriverText(order = {}) {
   const source = orderDisplaySource(order);
   const mode = normalizeTransportMode(source.transportMode || "");
-  const dispatchDriver = String(source.dispatchDriver || "").trim();
-  const rawNames = mode === "双司机"
-    ? [dispatchDriver, source.hkDriver, source.mainlandDriver, source.driver]
+  const roleNames = [source.hkDriver, source.mainlandDriver]
+    .flatMap((value) => String(value || "").split(/[\/／|｜、]+/))
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const rawNames = mode === "双司机" && roleNames.length
+    ? roleNames
     : isDomesticTransferMode(mode)
-      ? [dispatchDriver, source.hkDriver, source.driver, source.mainlandDriver]
-      : [dispatchDriver, source.driver, source.hkDriver, source.mainlandDriver];
+      ? [source.hkDriver, source.driver, source.mainlandDriver]
+      : [source.driver, source.hkDriver, source.mainlandDriver, source.dispatchDriver];
   const names = rawNames
     .flatMap((value) => String(value || "").split(/[\/／|｜、]+/))
     .map((value) => String(value || "").trim())
