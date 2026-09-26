@@ -1950,6 +1950,8 @@ const orderRowsByDispatchNo = computed(() => {
 });
 const vehicleRows = ref([]);
 const vehicleExpenseRows = ref([]);
+const vehicleExpenseDataLoaded = ref(false);
+let vehicleExpenseLoadRetryTimer = null;
 const driverRows = ref([]);
 const vehicleRowsByPlate = computed(() => {
   const map = new Map();
@@ -2033,9 +2035,13 @@ const attachmentRecycleRows = ref([]);
 const vehicleFileRows = ref([]);
 const vehicleExpenseReceiptRows = ref([]);
 const vehicleExpenseReceiptFilesById = ref(new Map());
+const vehicleExpenseReceiptFilesLoadedIds = ref(new Set());
+const vehicleExpenseReceiptFilesLoadingIds = ref(new Set());
 const vehicleExpenseReceiptPickerOpen = ref(false);
 const vehicleExpenseReceiptPickerItem = ref(null);
 const vehicleExpenseReceiptPickerFiles = ref([]);
+const vehicleExpenseReceiptPickerLoading = ref(false);
+const vehicleExpenseReceiptPickerError = ref("");
 const vehicleExpenseReceiptUploading = ref(false);
 const vehicleExpenseReceiptUploadStatus = ref("");
 const vehicleExpenseReceiptUploadTone = ref("busy");
@@ -2057,6 +2063,8 @@ const expiryReminderModalOpen = ref(false);
 const expiryReminderCenterFilter = ref("all");
 const expiryReminderCenterEl = ref(null);
 const expiryReminderPopupMutedSignature = ref("");
+const expiredVehicleExpenseModalOpen = ref(false);
+const expiredVehicleExpenseModalKind = ref("insurance");
 const EXPIRY_REMINDER_FILTERS = [
   { value: "all", label: "全部" },
   { value: "unacknowledged", label: "新提醒" },
@@ -4020,6 +4028,13 @@ const VEHICLE_ANNUAL_EXPENSE_TABS = [
 ];
 
 vehicleAnnualExpenseTab.value = normalizeVehicleAnnualExpenseTab(vehicleAnnualExpenseTab.value);
+// Annual expense tabs should always open with a valid, unfiltered plate view after refresh.
+vehicleExpenseAnnualPlateFilter.value = "全部";
+localStorage.setItem("hanye_vehicle_expense_annual_plate_filter", "全部");
+if (vehicleAnnualExpenseIsPlateHead(vehicleAnnualExpenseTab.value)) {
+  vehicleAnnualPlatePeriodFilter.value = "all";
+  localStorage.setItem("hanye_vehicle_annual_plate_period_filter", "all");
+}
 
 function normalizeVehicleAnnualExpenseTab(value = "") {
   const normalized = String(value || "").trim();
@@ -4064,6 +4079,7 @@ function setVehicleAnnualExpenseTab(value = "insurance") {
   const nextTab = normalizeVehicleAnnualExpenseTab(value);
   vehicleAnnualExpenseTab.value = nextTab;
   localStorage.setItem("hanye_vehicle_annual_expense_tab", nextTab);
+  setVehicleExpenseAnnualPlateFilter("全部");
   if (!vehicleAnnualExpenseIsPlateHead(nextTab)) {
     vehicleAnnualPlatePeriodFilter.value = "all";
     localStorage.setItem("hanye_vehicle_annual_plate_period_filter", "all");
@@ -4495,7 +4511,10 @@ const visibleVehicleExpenses = computed(() => {
   const keyword = vehicleDriverSearch.value.trim().toLowerCase();
   const rows = vehicleExpenseRows.value.filter((item) =>
     item.type === config.type
-      && (config.type !== "annual" || vehicleAnnualExpenseTabMatches(item))
+    && (config.type !== "annual" || vehicleAnnualExpenseTabMatches(item))
+    && (config.type !== "annual"
+      || vehicleExpenseExpiryState(item).days === null
+      || vehicleExpenseExpiryState(item).days >= 0)
   );
   const periodRows = config.type === "annual"
     ? (vehicleAnnualExpenseIsPlateHead()
@@ -4506,6 +4525,7 @@ const visibleVehicleExpenses = computed(() => {
       : dateMatchesPeriodFilter(item.date, periodFilterValue("vehicleExpenses")));
   const filteredRows = config.type === "annual"
     ? (vehicleExpenseAnnualPlateFilter.value !== "全部"
+      && periodRows.some((item) => vehicleExpenseAnnualPlateMatches(item.plate))
       ? periodRows.filter((item) => vehicleExpenseAnnualPlateMatches(item.plate))
       : periodRows)
     : (config.type === "fuel"
@@ -4542,6 +4562,7 @@ const visibleVehicleExpenses = computed(() => {
     ]
       .some((value) => String(value || "").toLowerCase().includes(keyword))
   );
+  if (vehicleAnnualExpenseUsesFixedOrder()) return sortVehicleAnnualExpenseRows(searchedRows);
   return sortRowsByTable(searchedRows, "vehicleExpenses");
 });
 
@@ -4636,6 +4657,50 @@ function normalizeVehicleAnnualExpenseName(value = "") {
   const text = String(value || "").trim();
   if (!text) return "大陆保险";
   return VEHICLE_ANNUAL_EXPENSE_NAME_ALIASES.get(text) || (VEHICLE_ANNUAL_EXPENSE_NAMES.includes(text) ? text : "大陆保险");
+}
+
+const VEHICLE_ANNUAL_EXPENSE_SORT_ORDER = new Map([
+  ["大陆保险", 0],
+  ["香港保险", 1],
+  ["中检年审(行驶证)", 0],
+  ["香港年审", 1],
+  ["牌头费", 0]
+]);
+
+function compareVehicleAnnualExpenseRows(left = {}, right = {}) {
+  const leftPlate = normalizePlateText(left.plate || "");
+  const rightPlate = normalizePlateText(right.plate || "");
+  if (!leftPlate && rightPlate) return 1;
+  if (!rightPlate && leftPlate) return -1;
+  const plateCompare = leftPlate.localeCompare(rightPlate, "zh-Hans-CN", {
+    numeric: true,
+    sensitivity: "base"
+  });
+  if (plateCompare !== 0) return plateCompare;
+
+  const leftName = normalizeVehicleAnnualExpenseName(left.name || "");
+  const rightName = normalizeVehicleAnnualExpenseName(right.name || "");
+  return (VEHICLE_ANNUAL_EXPENSE_SORT_ORDER.get(leftName) ?? 99)
+    - (VEHICLE_ANNUAL_EXPENSE_SORT_ORDER.get(rightName) ?? 99);
+}
+
+function sortVehicleAnnualExpenseRows(rows = []) {
+  return rows
+    .map((row, index) => ({ row, index }))
+    .sort((left, right) =>
+      compareVehicleAnnualExpenseRows(left.row, right.row)
+      || left.index - right.index
+    )
+    .map((item) => item.row);
+}
+
+function vehicleAnnualExpenseUsesFixedOrder() {
+  return activeVehicleExpenseConfig.value.type === "annual"
+    && !vehicleAnnualExpenseIsPlateHead();
+}
+
+function vehicleExpenseColumnSortable(column = {}) {
+  return column.key !== "actions" && !vehicleAnnualExpenseUsesFixedOrder();
 }
 
 function vehicleExpenseAnnualIsMonthBased(item = {}) {
@@ -4747,6 +4812,60 @@ function vehicleExpenseExpiryClass(item = {}) {
   return `is-${vehicleExpenseExpiryState(item).tone}`;
 }
 
+const expiredVehicleInsuranceRows = computed(() =>
+  vehicleExpenseRows.value
+    .filter((item) =>
+      vehicleAnnualExpenseTabMatches(item, "insurance")
+      && vehicleExpenseExpiryState(item).days !== null
+      && vehicleExpenseExpiryState(item).days < 0
+    )
+    .sort((left, right) =>
+      String(vehicleExpenseAnnualEndDate(left) || "").localeCompare(String(vehicleExpenseAnnualEndDate(right) || ""))
+      || String(left.plate || "").localeCompare(String(right.plate || ""), "zh-Hans-CN", { numeric: true })
+      || Number(left.id || 0) - Number(right.id || 0)
+    )
+);
+
+const expiredVehicleReviewRows = computed(() =>
+  vehicleExpenseRows.value
+    .filter((item) =>
+      vehicleAnnualExpenseTabMatches(item, "review")
+      && vehicleExpenseExpiryState(item).days !== null
+      && vehicleExpenseExpiryState(item).days < 0
+    )
+    .sort((left, right) =>
+      String(vehicleExpenseAnnualEndDate(left) || "").localeCompare(String(vehicleExpenseAnnualEndDate(right) || ""))
+      || String(left.plate || "").localeCompare(String(right.plate || ""), "zh-Hans-CN", { numeric: true })
+      || Number(left.id || 0) - Number(right.id || 0)
+    )
+);
+
+const expiredVehicleExpenseTotal = computed(() =>
+  expiredVehicleInsuranceRows.value.length + expiredVehicleReviewRows.value.length
+);
+
+const activeExpiredVehicleExpenseRows = computed(() =>
+  expiredVehicleExpenseModalKind.value === "review"
+    ? expiredVehicleReviewRows.value
+    : expiredVehicleInsuranceRows.value
+);
+
+const activeExpiredVehicleExpenseLabel = computed(() =>
+  expiredVehicleExpenseModalKind.value === "review" ? "过期年审" : "过期保险"
+);
+
+function openExpiredVehicleExpenseModal() {
+  expiredVehicleExpenseModalOpen.value = true;
+}
+
+function setExpiredVehicleExpenseModalKind(kind = "insurance") {
+  expiredVehicleExpenseModalKind.value = kind === "review" ? "review" : "insurance";
+}
+
+function closeExpiredVehicleExpenseModal() {
+  expiredVehicleExpenseModalOpen.value = false;
+}
+
 function vehicleExpenseAllocationText(item = {}) {
   if (item.type !== "annual") return "计入费用日期所在月份";
   if (vehicleExpenseAnnualIsMonthBased(item)) return "按月份交费";
@@ -4836,6 +4955,30 @@ function vehicleExpenseHasReceipts(item = {}) {
   return vehicleExpenseReceiptCount(item) > 0;
 }
 
+function vehicleExpenseReceiptId(item = {}) {
+  return String(item?.id || "").trim();
+}
+
+function vehicleExpenseReceiptsLoaded(item = {}) {
+  const id = vehicleExpenseReceiptId(item);
+  return Boolean(id && vehicleExpenseReceiptFilesLoadedIds.value.has(id));
+}
+
+function vehicleExpenseReceiptButtonDisabled(item = {}) {
+  // Keep the action clickable so a stale/failed batch load can be retried.
+  // The button is styled as empty when the server has confirmed no files.
+  return false;
+}
+
+function vehicleExpenseReceiptButtonTitle(item = {}) {
+  const id = vehicleExpenseReceiptId(item);
+  if (id && vehicleExpenseReceiptFilesLoadingIds.value.has(id)) return "正在加载票据";
+  if (!vehicleExpenseReceiptsLoaded(item)) return "加载票据";
+  return vehicleExpenseHasReceipts(item)
+    ? `查看${vehicleExpenseReceiptCount(item)}张票据`
+    : "暂无票据，点击重试";
+}
+
 function vehicleExpenseReceiptButtonLabel(item = {}) {
   return "票据";
 }
@@ -4846,6 +4989,10 @@ function setVehicleExpenseReceiptFiles(expenseId, files = []) {
   const next = new Map(vehicleExpenseReceiptFilesById.value);
   next.set(id, Array.isArray(files) ? files : []);
   vehicleExpenseReceiptFilesById.value = next;
+  vehicleExpenseReceiptFilesLoadedIds.value = new Set([
+    ...vehicleExpenseReceiptFilesLoadedIds.value,
+    id
+  ]);
 }
 
 function addVehicleExpenseReceiptFile(expenseId, file) {
@@ -4866,6 +5013,8 @@ function closeVehicleExpenseReceiptPicker() {
   vehicleExpenseReceiptPickerOpen.value = false;
   vehicleExpenseReceiptPickerItem.value = null;
   vehicleExpenseReceiptPickerFiles.value = [];
+  vehicleExpenseReceiptPickerLoading.value = false;
+  vehicleExpenseReceiptPickerError.value = "";
 }
 
 function openVehicleExpenseReceiptFile(file) {
@@ -4873,16 +5022,67 @@ function openVehicleExpenseReceiptFile(file) {
   openStoredFile(file, "preview");
 }
 
-function openVehicleExpenseReceiptPreview(item = {}) {
-  const files = vehicleExpenseReceiptFiles(item);
-  if (!files.length) return;
-  if (files.length === 1) {
-    openStoredFile(files[0], "preview");
+function openVehicleExpenseReceiptPicker(item = {}) {
+  const id = vehicleExpenseReceiptId(item);
+  if (!id) {
+    notify("这条费用记录缺少ID，无法加载票据");
     return;
   }
+  const loadingIds = new Set(vehicleExpenseReceiptFilesLoadingIds.value);
+
+  const cachedFiles = vehicleExpenseReceiptFiles(item);
+  if (cachedFiles.length === 1) {
+    openStoredFile(cachedFiles[0], "preview");
+    return;
+  }
+
   vehicleExpenseReceiptPickerItem.value = item;
-  vehicleExpenseReceiptPickerFiles.value = files;
+  vehicleExpenseReceiptPickerFiles.value = cachedFiles;
+  vehicleExpenseReceiptPickerLoading.value = true;
+  vehicleExpenseReceiptPickerError.value = "";
   vehicleExpenseReceiptPickerOpen.value = true;
+
+  // Open the picker even when the initial batch request is still running.
+  // The direct request below guarantees this row can finish independently.
+  loadingIds.add(id);
+  vehicleExpenseReceiptFilesLoadingIds.value = loadingIds;
+  refreshVehicleExpenseReceiptPicker(item);
+}
+
+async function refreshVehicleExpenseReceiptPicker(item = {}) {
+  const id = vehicleExpenseReceiptId(item);
+  if (!id) return;
+  const cachedFiles = vehicleExpenseReceiptFiles(item);
+  try {
+    // Refresh on demand to repair a stale cache after an interrupted batch
+    // request, without delaying the initial preview above.
+    const refreshedFiles = await loadVehicleExpenseReceiptFiles(id);
+    if (!refreshedFiles.length) {
+      vehicleExpenseReceiptPickerLoading.value = false;
+      vehicleExpenseReceiptPickerError.value = cachedFiles.length
+        ? ""
+        : "这条记录暂无票据";
+      return;
+    }
+    if (vehicleExpenseReceiptPickerOpen.value && vehicleExpenseReceiptPickerItem.value?.id === item.id) {
+      if (refreshedFiles.length === 1) {
+        closeVehicleExpenseReceiptPicker();
+        openStoredFile(refreshedFiles[0], "preview");
+        return;
+      }
+      vehicleExpenseReceiptPickerFiles.value = refreshedFiles;
+      vehicleExpenseReceiptPickerLoading.value = false;
+    }
+  } catch (error) {
+    if (vehicleExpenseReceiptPickerOpen.value && vehicleExpenseReceiptPickerItem.value?.id === item.id) {
+      vehicleExpenseReceiptPickerLoading.value = false;
+      vehicleExpenseReceiptPickerError.value = error?.message || "票据加载失败，请点击重试";
+    }
+  } finally {
+    const nextLoadingIds = new Set(vehicleExpenseReceiptFilesLoadingIds.value);
+    nextLoadingIds.delete(id);
+    vehicleExpenseReceiptFilesLoadingIds.value = nextLoadingIds;
+  }
 }
 
 function resetVehicleExpenseReceiptState() {
@@ -4906,15 +5106,26 @@ async function loadVehicleExpenseReceiptFilesForRows(rows = []) {
       .filter(Boolean)
   )];
   vehicleExpenseReceiptFilesById.value = new Map();
+  vehicleExpenseReceiptFilesLoadedIds.value = new Set();
   if (!ids.length) return;
+  vehicleExpenseReceiptFilesLoadingIds.value = new Set(ids);
   try {
     const chunks = [];
     for (let index = 0; index < ids.length; index += 200) {
       chunks.push(ids.slice(index, index + 200));
     }
-    const files = (await Promise.all(
-      chunks.map((chunk) => filesApi.listFiles("vehicle_expense", "", { entityIds: chunk }))
-    )).flat();
+    let files = [];
+    try {
+      files = (await Promise.all(
+        chunks.map((chunk) => filesApi.listFiles("vehicle_expense", "", { entityIds: chunk }))
+      )).flat();
+    } catch (error) {
+      // Older server builds do not support entityIds; retry per expense so
+      // existing receipts are still recognized instead of being disabled.
+      files = (await Promise.all(
+        ids.map((id) => filesApi.listFiles("vehicle_expense", id))
+      )).flat();
+    }
     const grouped = new Map(ids.map((id) => [id, []]));
     files.forEach((file) => {
       const id = String(file?.entityId || "").trim();
@@ -4923,8 +5134,11 @@ async function loadVehicleExpenseReceiptFilesForRows(rows = []) {
     const next = new Map(vehicleExpenseReceiptFilesById.value);
     grouped.forEach((items, id) => next.set(id, items));
     vehicleExpenseReceiptFilesById.value = next;
+    vehicleExpenseReceiptFilesLoadedIds.value = new Set(ids);
   } catch (error) {
     console.warn("车辆支出票据列表加载失败", error);
+  } finally {
+    vehicleExpenseReceiptFilesLoadingIds.value = new Set();
   }
 }
 
@@ -8182,11 +8396,32 @@ function buildVehicleExpensePlateCards(rows = []) {
 }
 
 const vehicleExpenseAnnualPlateCards = computed(() => {
-  const tabRows = vehicleExpenseRows.value.filter((item) => vehicleAnnualExpenseTabMatches(item));
+  const tabRows = vehicleExpenseRows.value.filter((item) =>
+    vehicleAnnualExpenseTabMatches(item)
+    && (vehicleAnnualExpenseIsPlateHead()
+      || vehicleExpenseExpiryState(item).days === null
+      || vehicleExpenseExpiryState(item).days >= 0)
+  );
   const rows = vehicleAnnualExpenseIsPlateHead()
     ? tabRows.filter((item) => vehicleExpenseAnnualMonthMatchesPeriod(item))
     : tabRows;
   return buildVehicleExpensePlateCards(rows);
+});
+
+const availableVehicleExpenseAnnualPlateKeys = computed(() => {
+  const keys = new Set();
+  vehicleExpenseRows.value.forEach((item) => {
+    if (!vehicleAnnualExpenseTabMatches(item)) return;
+    if (!vehicleAnnualExpenseIsPlateHead()) {
+      const days = vehicleExpenseExpiryState(item).days;
+      if (days !== null && days < 0) return;
+    } else if (!vehicleExpenseAnnualMonthMatchesPeriod(item)) {
+      return;
+    }
+    const plate = normalizePlateText(item.plate || "");
+    if (plate) keys.add(plate);
+  });
+  return keys;
 });
 
 const vehicleExpenseFuelPlateCards = computed(() => {
@@ -10620,6 +10855,10 @@ function resetPeriodFiltersForModuleNavigation() {
   customsStatementPeriodFilter.value = currentMonth;
   vehicleExpensePeriodFilter.value = currentMonth;
   vehicleAnnualPlatePeriodFilter.value = "all";
+  if (activeModule.value === "vehicleAnnualExpenses") {
+    vehicleExpenseAnnualPlateFilter.value = "全部";
+    localStorage.setItem("hanye_vehicle_expense_annual_plate_filter", "全部");
+  }
   dispatchRangePeriodFilter.value = currentMonth;
   localStorage.setItem("hanye_order_period_filter", currentMonth);
   localStorage.setItem("hanye_finance_period_filter", currentMonth);
@@ -17276,12 +17515,35 @@ async function extractDispatchPdfText(file) {
   const pdfjs = pdfModule.default || pdfModule;
   const workerSrc = workerModule.default || workerModule;
   pdfjs.GlobalWorkerOptions.workerSrc = `${workerSrc}${String(workerSrc).includes("?") ? "&" : "?"}v=pdf-worker-js`;
-  const loadingTask = pdfjs.getDocument({
+  let loadingTask = pdfjs.getDocument({
     data: new Uint8Array(buffer),
     useWorkerFetch: false,
     isEvalSupported: false
   });
-  const pdf = await loadingTask.promise;
+  let pdf;
+  try {
+    pdf = await loadingTask.promise;
+  } catch (error) {
+    const message = String(error?.message || error || "").toLowerCase();
+    if (!message.includes("fake worker")
+      && !message.includes("dynamically imported module")
+      && !message.includes("setting up worker")
+      && !message.includes("worker")) {
+      throw error;
+    }
+    try {
+      await loadingTask.destroy();
+    } catch {
+      // The failed loading task may already be destroyed.
+    }
+    loadingTask = pdfjs.getDocument({
+      data: new Uint8Array(buffer),
+      useWorkerFetch: false,
+      isEvalSupported: false,
+      disableWorker: true
+    });
+    pdf = await loadingTask.promise;
+  }
   const pages = [];
   try {
     for (let pageNo = 1; pageNo <= pdf.numPages; pageNo += 1) {
@@ -21876,6 +22138,13 @@ function tableSortDirection(tableId, key) {
 
 function toggleTableSort(tableId, column = {}) {
   if (!column?.key || ["select", "actions", "sequence"].includes(column.key)) return;
+  if (tableId === "vehicleExpenses" && vehicleAnnualExpenseUsesFixedOrder()) {
+    const state = loadTableSortState(tableId);
+    state.key = "";
+    state.direction = "";
+    localStorage.removeItem(tableSortKey(tableId));
+    return;
+  }
   const state = loadTableSortState(tableId);
   if (state.key !== column.key) {
     state.key = column.key;
@@ -22264,7 +22533,20 @@ watch(vehicleExpenseOtherPlateFilter, (value) => {
 
 watch(vehicleExpenseAnnualPlateCards, (cards) => {
   const keys = new Set((cards || []).map((item) => item.key));
-  if (!keys.size) return;
+  if (vehicleExpenseAnnualPlateFilter.value !== "全部" && !keys.has(vehicleExpenseAnnualPlateFilter.value)) {
+    setVehicleExpenseAnnualPlateFilter("全部");
+  }
+}, { immediate: true });
+
+watch(vehicleAnnualExpenseTab, (tab) => {
+  setVehicleExpenseAnnualPlateFilter("全部");
+  if (normalizeVehicleAnnualExpenseTab(tab) === "plateHead") {
+    vehicleAnnualPlatePeriodFilter.value = "all";
+    localStorage.setItem("hanye_vehicle_annual_plate_period_filter", "all");
+  }
+});
+
+watch(availableVehicleExpenseAnnualPlateKeys, (keys) => {
   if (vehicleExpenseAnnualPlateFilter.value !== "全部" && !keys.has(vehicleExpenseAnnualPlateFilter.value)) {
     setVehicleExpenseAnnualPlateFilter("全部");
   }
@@ -24453,6 +24735,20 @@ async function apiFetchListFrom(request, label, options = {}) {
   }
 }
 
+function scheduleVehicleExpenseLoadRetry() {
+  if (!loggedIn.value || !isVehicleExpenseModule(activeModule.value)) return;
+  window.clearTimeout(vehicleExpenseLoadRetryTimer);
+  vehicleExpenseLoadRetryTimer = window.setTimeout(async () => {
+    vehicleExpenseLoadRetryTimer = null;
+    if (!loggedIn.value || !isVehicleExpenseModule(activeModule.value)) return;
+    const rows = await apiFetchListFrom(vehiclesApi.listVehicleExpenses, "车辆支出", { silent: true });
+    if (!rows.length) return;
+    vehicleExpenseRows.value = rows;
+    vehicleExpenseDataLoaded.value = true;
+    await loadVehicleExpenseReceiptFilesForRows(rows);
+  }, 300);
+}
+
 function clampAuditPageSize(value = auditPageSize.value) {
   const next = Math.floor(Number(value || 20));
   return auditPageSizeOptions.includes(next) ? next : 20;
@@ -25465,12 +25761,21 @@ async function loadDatabaseDataRefreshBuckets(refreshBuckets = new Set(), option
         apiFetchListFrom(vehiclesApi.listDriverAdjustments, "司机预支/报销", { silent: true })
       ]);
       vehicleRows.value = vehicleData;
-      vehicleExpenseRows.value = vehicleExpenseData;
+      if (vehicleExpenseData.length || !vehicleExpenseDataLoaded.value) {
+        vehicleExpenseRows.value = vehicleExpenseData;
+      }
+      vehicleExpenseDataLoaded.value = true;
+      if (!vehicleExpenseData.length) scheduleVehicleExpenseLoadRetry();
       await loadVehicleExpenseReceiptFilesForRows(vehicleExpenseData);
       driverRows.value = driverData.map(normalizeDriverRecord);
       driverAdjustmentRows.value = driverAdjustmentData;
     } else if (buckets.has("vehicleExpenses")) {
-      vehicleExpenseRows.value = await apiFetchListFrom(vehiclesApi.listVehicleExpenses, "车辆支出", { silent: true });
+      const vehicleExpenseData = await apiFetchListFrom(vehiclesApi.listVehicleExpenses, "车辆支出", { silent: true });
+      if (vehicleExpenseData.length || !vehicleExpenseDataLoaded.value) {
+        vehicleExpenseRows.value = vehicleExpenseData;
+      }
+      vehicleExpenseDataLoaded.value = true;
+      if (!vehicleExpenseData.length) scheduleVehicleExpenseLoadRetry();
       await loadVehicleExpenseReceiptFilesForRows(vehicleExpenseRows.value);
     }
 
@@ -25694,9 +25999,13 @@ async function loadDatabaseData(options = {}) {
     customerContactRows.value = customerContactData;
     orderRows.value = orderData;
     vehicleRows.value = vehicleData;
-    vehicleExpenseRows.value = vehicleExpenseData;
+    if (vehicleExpenseData.length || !vehicleExpenseDataLoaded.value) {
+      vehicleExpenseRows.value = vehicleExpenseData;
+    }
+    vehicleExpenseDataLoaded.value = true;
     if (canLoadVehicleExpenses) {
       await loadVehicleExpenseReceiptFilesForRows(vehicleExpenseData);
+      if (!vehicleExpenseData.length) scheduleVehicleExpenseLoadRetry();
     }
     driverRows.value = normalizedDriverData;
     driverWageRuleRows.value = driverWageRuleData;
@@ -35197,10 +35506,15 @@ function orderDetailFeeRows(order = {}) {
                       <td class="row-actions">
                         <button
                           class="icon-btn vehicle-expense-receipt-list-btn"
+                          :class="{
+                            'is-empty': vehicleExpenseReceiptsLoaded(item) && !vehicleExpenseHasReceipts(item),
+                            'is-loading': vehicleExpenseReceiptFilesLoadingIds.has(String(item.id))
+                          }"
                           type="button"
-                          :disabled="!vehicleExpenseHasReceipts(item)"
-                          :title="vehicleExpenseHasReceipts(item) ? `查看${vehicleExpenseReceiptCount(item)}张票据` : '暂无票据'"
-                          @click="openVehicleExpenseReceiptPreview(item)"
+                          :disabled="vehicleExpenseReceiptButtonDisabled(item)"
+                          :aria-busy="vehicleExpenseReceiptFilesLoadingIds.has(String(item.id))"
+                          :title="vehicleExpenseReceiptButtonTitle(item)"
+                          @click.stop="openVehicleExpenseReceiptPicker(item)"
                         ><IconSvg name="eye" />{{ vehicleExpenseReceiptButtonLabel(item) }}</button>
                         <button class="icon-btn icon-only" type="button" title="编辑费用" aria-label="编辑费用" @click="openVehicleExpenseModal(item)"><IconSvg name="edit" /></button>
                         <button class="icon-btn icon-only danger" type="button" title="删除费用" aria-label="删除费用" @click="deleteVehicleExpense(item)"><IconSvg name="trash" /></button>
@@ -35235,10 +35549,15 @@ function orderDetailFeeRows(order = {}) {
                     <td class="row-actions">
                         <button
                           class="icon-btn vehicle-expense-receipt-list-btn"
+                          :class="{
+                            'is-empty': vehicleExpenseReceiptsLoaded(item) && !vehicleExpenseHasReceipts(item),
+                            'is-loading': vehicleExpenseReceiptFilesLoadingIds.has(String(item.id))
+                          }"
                           type="button"
-                          :disabled="!vehicleExpenseHasReceipts(item)"
-                          :title="vehicleExpenseHasReceipts(item) ? `查看${vehicleExpenseReceiptCount(item)}张票据` : '暂无票据'"
-                          @click="openVehicleExpenseReceiptPreview(item)"
+                          :disabled="vehicleExpenseReceiptButtonDisabled(item)"
+                          :aria-busy="vehicleExpenseReceiptFilesLoadingIds.has(String(item.id))"
+                          :title="vehicleExpenseReceiptButtonTitle(item)"
+                          @click.stop="openVehicleExpenseReceiptPicker(item)"
                         ><IconSvg name="eye" />{{ vehicleExpenseReceiptButtonLabel(item) }}</button>
                         <button class="icon-btn icon-only" type="button" title="编辑维修保养" aria-label="编辑维修保养" @click="openVehicleExpenseModal(item)"><IconSvg name="edit" /></button>
                         <button class="icon-btn icon-only danger" type="button" title="删除维修保养" aria-label="删除维修保养" @click="deleteVehicleExpense(item)"><IconSvg name="trash" /></button>
@@ -35307,6 +35626,17 @@ function orderDetailFeeRows(order = {}) {
             :placeholder="activeVehicleExpenseConfig.type === 'repair' ? '车牌 / 维修项目 / 公里数 / 备注' : (activeVehicleExpenseConfig.type === 'annual' ? (vehicleAnnualExpenseIsPlateHead() ? '车牌 / 月份 / 交费时间 / 缴费状态 / 备注' : '车牌 / 时间范围 / 交费时间 / 到期提醒 / 备注') : (activeVehicleExpenseConfig.type === 'other' ? '车牌 / 月份 / 名称 / 备注' : '车牌 / 时间 / 名称 / 备注'))"
           />
           <div class="vehicle-driver-actions">
+            <template v-if="activeVehicleExpenseConfig.type === 'annual'">
+              <button
+                class="ghost-btn expired-expense-btn"
+                :class="{ 'has-expired': expiredVehicleExpenseTotal > 0 }"
+                type="button"
+                :title="`查看过期费用（${expiredVehicleExpenseTotal}条）`"
+                @click="openExpiredVehicleExpenseModal()"
+              >
+                <IconSvg name="bell" />过期费用
+              </button>
+            </template>
             <button class="ghost-btn" type="button" @click="exportVehicleExpenses"><IconSvg name="download" />导出</button>
             <button class="primary-btn" type="button" @click="openVehicleExpenseModal()">
               <IconSvg name="plus" />{{ activeVehicleExpenseConfig.addLabel }}
@@ -35414,10 +35744,15 @@ function orderDetailFeeRows(order = {}) {
                     <div class="row-actions">
                       <button
                         class="icon-btn vehicle-expense-receipt-list-btn"
+                        :class="{
+                          'is-empty': vehicleExpenseReceiptsLoaded(row.item) && !vehicleExpenseHasReceipts(row.item),
+                          'is-loading': vehicleExpenseReceiptFilesLoadingIds.has(String(row.item.id))
+                        }"
                         type="button"
-                        :disabled="!vehicleExpenseHasReceipts(row.item)"
-                        :title="vehicleExpenseHasReceipts(row.item) ? `查看${vehicleExpenseReceiptCount(row.item)}张票据` : '暂无票据'"
-                        @click.stop="openVehicleExpenseReceiptPreview(row.item)"
+                        :disabled="vehicleExpenseReceiptButtonDisabled(row.item)"
+                        :aria-busy="vehicleExpenseReceiptFilesLoadingIds.has(String(row.item.id))"
+                        :title="vehicleExpenseReceiptButtonTitle(row.item)"
+                        @click.stop="openVehicleExpenseReceiptPicker(row.item)"
                       ><IconSvg name="eye" />{{ vehicleExpenseReceiptButtonLabel(row.item) }}</button>
                       <button class="icon-btn icon-only" type="button" title="编辑维修单" aria-label="编辑维修单" @click="openVehicleExpenseModal(row.item)"><IconSvg name="edit" /></button>
                       <button class="icon-btn icon-only danger" type="button" title="删除维修单" aria-label="删除维修单" @click="deleteVehicleExpense(row.item)"><IconSvg name="trash" /></button>
@@ -35541,10 +35876,10 @@ function orderDetailFeeRows(order = {}) {
                   <th
                     v-for="column in vehicleExpenseTableColumns()"
                     :key="column.key"
-                    :class="[{ sortable: column.key !== 'actions', sorted: tableSortDirection('vehicleExpenses', column.key), 'vehicle-expense-actions-head': column.key === 'actions' }]"
-                    @click="toggleTableSort('vehicleExpenses', column)"
+                    :class="[{ sortable: vehicleExpenseColumnSortable(column), sorted: vehicleExpenseColumnSortable(column) && tableSortDirection('vehicleExpenses', column.key), 'vehicle-expense-actions-head': column.key === 'actions' }]"
+                    @click="vehicleExpenseColumnSortable(column) && toggleTableSort('vehicleExpenses', column)"
                   >
-                    <button v-if="column.key !== 'actions'" class="table-sort-trigger" type="button">
+                    <button v-if="vehicleExpenseColumnSortable(column)" class="table-sort-trigger" type="button">
                       <span>{{ column.label }}</span>
                       <span class="sort-mark">{{ tableSortDirection('vehicleExpenses', column.key) === 'asc' ? '↑' : tableSortDirection('vehicleExpenses', column.key) === 'desc' ? '↓' : '' }}</span>
                     </button>
@@ -35589,10 +35924,15 @@ function orderDetailFeeRows(order = {}) {
                     <span class="vehicle-expense-row-actions" @click.stop @dblclick.stop>
                       <button
                         class="icon-btn vehicle-expense-receipt-list-btn"
+                        :class="{
+                          'is-empty': vehicleExpenseReceiptsLoaded(item) && !vehicleExpenseHasReceipts(item),
+                          'is-loading': vehicleExpenseReceiptFilesLoadingIds.has(String(item.id))
+                        }"
                         type="button"
-                        :disabled="!vehicleExpenseHasReceipts(item)"
-                        :title="vehicleExpenseHasReceipts(item) ? `查看${vehicleExpenseReceiptCount(item)}张票据` : '暂无票据'"
-                        @click.stop="openVehicleExpenseReceiptPreview(item)"
+                        :disabled="vehicleExpenseReceiptButtonDisabled(item)"
+                        :aria-busy="vehicleExpenseReceiptFilesLoadingIds.has(String(item.id))"
+                        :title="vehicleExpenseReceiptButtonTitle(item)"
+                        @click.stop="openVehicleExpenseReceiptPicker(item)"
                       ><IconSvg name="eye" />{{ vehicleExpenseReceiptButtonLabel(item) }}</button>
                       <button class="icon-btn icon-only vehicle-expense-action-btn" type="button" title="编辑费用" aria-label="编辑费用" @click.stop="openVehicleExpenseModal(item)"><IconSvg name="edit" /></button>
                       <button class="icon-btn icon-only danger vehicle-expense-action-btn" type="button" title="删除费用" aria-label="删除费用" @click.stop="deleteVehicleExpense(item)"><IconSvg name="trash" /></button>
@@ -41662,6 +42002,82 @@ function orderDetailFeeRows(order = {}) {
         </section>
       </div>
 
+      <Teleport to="body">
+        <div v-if="expiredVehicleExpenseModalOpen" class="modal-backdrop expired-expense-backdrop" @click.self="closeExpiredVehicleExpenseModal">
+          <section class="modal-card expired-expense-modal">
+            <div class="modal-head">
+              <div>
+                <p class="eyebrow">车辆司机 · 保险年审牌头费</p>
+                <h2>过期费用 <span class="order-title-meta">{{ expiredVehicleExpenseTotal }} 条</span></h2>
+              </div>
+              <button type="button" class="icon-btn" @click="closeExpiredVehicleExpenseModal"><IconSvg name="close" />关闭</button>
+            </div>
+            <div class="modal-body expired-expense-modal-body">
+              <div class="expired-expense-tabs" role="tablist" aria-label="过期费用分类">
+                <button
+                  type="button"
+                  role="tab"
+                  :aria-selected="expiredVehicleExpenseModalKind === 'insurance'"
+                  :class="{ active: expiredVehicleExpenseModalKind === 'insurance' }"
+                  @click="setExpiredVehicleExpenseModalKind('insurance')"
+                >
+                  <IconSvg name="shield" />保险
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  :aria-selected="expiredVehicleExpenseModalKind === 'review'"
+                  :class="{ active: expiredVehicleExpenseModalKind === 'review' }"
+                  @click="setExpiredVehicleExpenseModalKind('review')"
+                >
+                  <IconSvg name="checklist" />年审
+                </button>
+              </div>
+              <p class="expired-expense-modal-copy">
+                以下{{ activeExpiredVehicleExpenseLabel.replace('过期', '') }}记录的有效期早于今天（{{ inputDateLabel(todayInputValue()) }}），请及时续办。
+              </p>
+              <div v-if="activeExpiredVehicleExpenseRows.length" class="expired-expense-table-wrap">
+                <table class="data-table compact expired-expense-table">
+                  <thead>
+                    <tr>
+                      <th>类型</th>
+                      <th>车牌</th>
+                      <th>有效期</th>
+                      <th>过期天数</th>
+                      <th>交费时间</th>
+                      <th>金额</th>
+                      <th>备注</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="item in activeExpiredVehicleExpenseRows" :key="item.id">
+                      <td>{{ item.name || vehicleExpenseTypeLabel(item.type, item) }}</td>
+                      <td><strong>{{ item.plate || '-' }}</strong></td>
+                      <td>{{ vehicleExpenseDateText(item) }}</td>
+                      <td><span class="expired-expense-days">{{ Math.abs(vehicleExpenseExpiryState(item).days || 0) }} 天</span></td>
+                      <td>{{ vehicleExpensePaymentDateText(item) }}</td>
+                      <td>{{ currencyCodeDisplay(item.currency) }} {{ money(item.amount) }}</td>
+                      <td class="expired-expense-note" :title="item.note || ''">{{ item.note || '-' }}</td>
+                      <td>
+                        <button class="icon-btn icon-only" type="button" title="编辑费用" aria-label="编辑费用" @click="closeExpiredVehicleExpenseModal(); openVehicleExpenseModal(item)">
+                          <IconSvg name="edit" />
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div v-else class="expired-expense-empty">
+                <IconSvg name="check" />
+                <strong>暂无过期{{ activeExpiredVehicleExpenseLabel.replace('过期', '') }}</strong>
+                <span>当前没有超过有效期的记录。</span>
+              </div>
+            </div>
+          </section>
+        </div>
+      </Teleport>
+
       <div v-if="vehicleModalOpen" class="modal-backdrop">
         <form class="modal-card" @submit.prevent="saveVehicle">
           <div class="modal-head">
@@ -41949,37 +42365,53 @@ function orderDetailFeeRows(order = {}) {
         </form>
       </div>
 
-      <div v-if="vehicleExpenseReceiptPickerOpen" class="nested-modal-backdrop" @click.self="closeVehicleExpenseReceiptPicker">
-        <section class="modal-card vehicle-expense-receipt-picker-modal">
-          <div class="modal-head">
-            <div>
-              <p class="eyebrow">已上传票据</p>
-              <h2>选择要查看的票据</h2>
-            </div>
-            <button type="button" class="icon-btn" @click="closeVehicleExpenseReceiptPicker"><IconSvg name="close" />关闭</button>
-          </div>
-          <div class="modal-body">
-            <p class="vehicle-expense-receipt-picker-hint">
-              {{ vehicleExpenseReceiptPickerItem?.plate || "" }}
-              <span v-if="vehicleExpenseReceiptPickerItem">·</span>
-              {{ vehicleExpenseReceiptPickerItem ? vehicleExpenseTypeLabel(vehicleExpenseReceiptPickerItem.type, vehicleExpenseReceiptPickerItem) : "" }}
-            </p>
-            <div class="vehicle-expense-receipt-picker-list">
-              <div v-for="file in vehicleExpenseReceiptPickerFiles" :key="file.id" class="vehicle-expense-receipt-picker-row">
-                <span class="vehicle-expense-receipt-picker-file">
-                  <IconSvg name="file" />
-                  <strong :title="file.filename">{{ file.filename }}</strong>
-                </span>
-                <span class="vehicle-expense-receipt-picker-meta">{{ fileSizeText(file.size) }}</span>
-                <span class="vehicle-expense-receipt-picker-actions">
-                  <button type="button" class="icon-btn" @click="openVehicleExpenseReceiptFile(file)"><IconSvg name="eye" />预览</button>
-                  <button type="button" class="icon-btn" @click="openStoredFile(file, 'download')"><IconSvg name="download" />下载</button>
-                </span>
+      <Teleport to="body">
+        <div v-if="vehicleExpenseReceiptPickerOpen" class="nested-modal-backdrop vehicle-expense-receipt-picker-backdrop" @click.self="closeVehicleExpenseReceiptPicker">
+          <section class="modal-card vehicle-expense-receipt-picker-modal">
+            <div class="modal-head">
+              <div>
+                <p class="eyebrow">已上传票据</p>
+                <h2>选择要查看的票据（{{ vehicleExpenseReceiptPickerFiles.length }}张）</h2>
               </div>
+              <button type="button" class="icon-btn" @click="closeVehicleExpenseReceiptPicker"><IconSvg name="close" />关闭</button>
             </div>
-          </div>
-        </section>
-      </div>
+            <div class="modal-body">
+              <p class="vehicle-expense-receipt-picker-hint">
+                {{ vehicleExpenseReceiptPickerItem?.plate || "" }}
+                <span v-if="vehicleExpenseReceiptPickerItem">·</span>
+                {{ vehicleExpenseReceiptPickerItem ? vehicleExpenseTypeLabel(vehicleExpenseReceiptPickerItem.type, vehicleExpenseReceiptPickerItem) : "" }}
+              </p>
+              <div v-if="vehicleExpenseReceiptPickerLoading" class="vehicle-expense-receipt-picker-state" aria-live="polite">
+                正在加载票据…
+              </div>
+              <div v-else-if="vehicleExpenseReceiptPickerError" class="vehicle-expense-receipt-picker-state is-error" aria-live="polite">
+                {{ vehicleExpenseReceiptPickerError }}
+              </div>
+              <div class="vehicle-expense-receipt-picker-list">
+                <div v-for="file in vehicleExpenseReceiptPickerFiles" :key="file.id" class="vehicle-expense-receipt-picker-row">
+                  <button
+                    type="button"
+                    class="vehicle-expense-receipt-picker-file"
+                    :title="`预览 ${file.filename}`"
+                    @click="openVehicleExpenseReceiptFile(file)"
+                  >
+                    <IconSvg name="file" />
+                    <strong :title="file.filename">{{ file.filename }}</strong>
+                  </button>
+                  <span class="vehicle-expense-receipt-picker-meta">{{ fileSizeText(file.size) }}</span>
+                  <span class="vehicle-expense-receipt-picker-actions">
+                    <button type="button" class="icon-btn" @click="openVehicleExpenseReceiptFile(file)"><IconSvg name="eye" />预览</button>
+                    <button type="button" class="icon-btn" @click="openStoredFile(file, 'download')"><IconSvg name="download" />下载</button>
+                  </span>
+                </div>
+              </div>
+              <p v-if="!vehicleExpenseReceiptPickerLoading && !vehicleExpenseReceiptPickerError && vehicleExpenseReceiptPickerFiles.length === 0" class="vehicle-expense-receipt-picker-empty">
+                暂无可预览票据
+              </p>
+            </div>
+          </section>
+        </div>
+      </Teleport>
 
       <div v-if="recycleModalOpen" class="modal-backdrop">
 	    <section class="modal-card compact-modal recycle-modal">

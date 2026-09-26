@@ -132,6 +132,18 @@ button:disabled {
   background: rgb(15 23 42 / 42%);
 }
 
+.vehicle-expense-receipt-picker-backdrop {
+  position: fixed !important;
+  inset: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 100vw;
+  height: 100vh;
+  padding: 24px;
+  z-index: 1000;
+}
+
 .modal-card {
   width: min(980px, calc(100vw - 48px));
   max-height: calc(100vh - 48px);
@@ -3355,6 +3367,176 @@ select {
   flex-wrap: wrap;
 }
 
+.expired-expense-btn {
+  gap: 5px;
+}
+
+.expired-expense-btn.has-expired {
+  color: #b42318;
+  border-color: #f3b4ae;
+  background: #fff7f6;
+}
+
+.expired-expense-btn.has-expired:hover {
+  color: #9f1d14;
+  border-color: #e98b82;
+  background: #fff0ee;
+}
+
+.expired-expense-count {
+  display: inline-flex;
+  min-width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+  border-radius: 999px;
+  color: #475569;
+  background: #eef2f7;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.expired-expense-btn.has-expired .expired-expense-count {
+  color: #b42318;
+  background: #ffe0dc;
+}
+
+.expired-expense-backdrop {
+  z-index: 1000;
+}
+
+.expired-expense-modal {
+  width: min(1180px, calc(100vw - 48px));
+  max-height: min(720px, calc(100vh - 48px));
+  overflow: hidden;
+}
+
+.expired-expense-modal-body {
+  min-height: 0;
+  padding: 16px 18px 20px;
+}
+
+.expired-expense-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 14px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #f6f9ff;
+}
+
+.expired-expense-tabs button {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--muted);
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.expired-expense-tabs button:hover {
+  color: var(--text);
+  background: #eaf0f8;
+}
+
+.expired-expense-tabs button.active {
+  color: var(--primary);
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(24, 48, 82, 0.12);
+}
+
+.expired-expense-tabs button span {
+  display: inline-flex;
+  min-width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 5px;
+  border-radius: 999px;
+  color: currentColor;
+  background: rgba(100, 116, 139, 0.12);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.expired-expense-modal-copy {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.expired-expense-table-wrap {
+  max-height: min(520px, calc(100vh - 220px));
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.expired-expense-table {
+  min-width: 900px;
+}
+
+.expired-expense-table th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #f6f9ff;
+}
+
+.expired-expense-table td,
+.expired-expense-table th {
+  white-space: nowrap;
+}
+
+.expired-expense-table td.expired-expense-note {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.expired-expense-days {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  color: #b42318;
+  background: #fff0ee;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.expired-expense-empty {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  padding: 48px 20px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.expired-expense-empty .ui-icon {
+  width: 28px;
+  height: 28px;
+  color: #16845b;
+}
+
+.expired-expense-empty strong {
+  color: var(--text);
+  font-size: 16px;
+}
+
 .vehicle-expense-period-controls {
   justify-content: flex-end;
 }
@@ -3481,7 +3663,21 @@ select {
 
 .vehicle-expense-table.is-annual th:nth-child(3),
 .vehicle-expense-table.is-annual td:nth-child(3) {
-  width: 17%;
+  width: 260px;
+  min-width: 260px;
+}
+
+.vehicle-expense-table.is-annual:not(.is-annual-plate-head) td:nth-child(3) {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  line-height: 1.35;
+}
+
+.vehicle-expense-table.is-annual:not(.is-annual-plate-head) th:nth-child(3) {
+  white-space: nowrap;
 }
 
 .vehicle-expense-table.is-annual th:nth-child(4),
@@ -3725,6 +3921,23 @@ select {
   height: 28px;
   min-height: 28px;
   padding: 0 6px;
+}
+
+.vehicle-expense-receipt-list-btn.is-empty {
+  color: var(--muted);
+  border-color: var(--border);
+  background: #f3f4f6;
+}
+
+.vehicle-expense-receipt-list-btn.is-empty:hover {
+  color: var(--text);
+  border-color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.vehicle-expense-receipt-list-btn.is-loading {
+  cursor: wait;
+  box-shadow: inset 0 0 0 1px rgb(37 99 235 / 18%);
 }
 
 .vehicle-expense-action-btn {
@@ -4223,14 +4436,60 @@ select {
 }
 
 .vehicle-expense-receipt-picker-modal {
-  width: min(720px, calc(100vw - 48px));
+  width: min(620px, calc(100vw - 48px));
+  max-height: min(560px, calc(100vh - 48px));
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid #cbdcf4;
+  border-radius: 12px;
+  box-shadow: 0 24px 70px rgb(15 35 70 / 28%);
+}
+
+.vehicle-expense-receipt-picker-modal .modal-head {
+  padding: 18px 20px;
+  background: #f8fbff;
+}
+
+.vehicle-expense-receipt-picker-modal .modal-head h2 {
+  color: #18345c;
+  font-size: 17px;
+}
+
+.vehicle-expense-receipt-picker-modal .modal-body {
+  padding: 16px 20px 20px;
+  background: #fff;
 }
 
 .vehicle-expense-receipt-picker-hint {
-  margin: 0 0 12px;
+  margin: 0 0 14px;
   color: var(--muted);
   font-size: 13px;
   font-weight: 700;
+}
+
+.vehicle-expense-receipt-picker-state,
+.vehicle-expense-receipt-picker-empty {
+  margin: 0 0 12px;
+  padding: 14px;
+  border: 1px dashed #bfdbfe;
+  border-radius: 8px;
+  color: #1d4ed8;
+  background: #eff6ff;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.vehicle-expense-receipt-picker-state.is-error {
+  border-color: #fecaca;
+  color: #b91c1c;
+  background: #fef2f2;
+}
+
+.vehicle-expense-receipt-picker-empty {
+  border-color: var(--border);
+  color: var(--muted);
+  background: #f8fafc;
 }
 
 .vehicle-expense-receipt-picker-list {
@@ -4245,19 +4504,43 @@ select {
   grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 10px;
-  min-height: 44px;
-  padding: 8px 10px;
+  min-height: 54px;
+  padding: 8px 12px;
   border: 1px solid var(--border);
-  border-radius: 8px;
-  background: #fff;
+  border-radius: 10px;
+  background: #fbfdff;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.vehicle-expense-receipt-picker-row:hover {
+  border-color: #9cc5ff;
+  background: #f5f9ff;
+  box-shadow: 0 4px 14px rgb(37 99 235 / 8%);
 }
 
 .vehicle-expense-receipt-picker-file {
+  appearance: none;
   display: inline-flex;
   align-items: center;
   min-width: 0;
   gap: 8px;
+  width: 100%;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
   color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.vehicle-expense-receipt-picker-file:hover {
+  background: var(--blue-soft);
+}
+
+.vehicle-expense-receipt-picker-file:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 1px;
 }
 
 .vehicle-expense-receipt-picker-file .ui-icon {
@@ -4284,6 +4567,7 @@ select {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
 }
 
 .vehicle-repair-record-toggle {

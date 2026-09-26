@@ -6202,6 +6202,12 @@ function customsStatementExportContext(body = {}) {
 const CUSTOMS_STATEMENT_OUTER_BORDER = { style: "medium", color: { argb: "FF000000" } };
 const CUSTOMS_STATEMENT_INNER_BORDER = { style: "thin", color: { argb: "FF9CA3AF" } };
 const CUSTOMS_STATEMENT_HEADER_BORDER = { style: "thin", color: { argb: "FF6B7280" } };
+const CUSTOMS_STATEMENT_PAYMENT_FOOTER_LINES = [
+  "费用请转入以下账号：",
+  "户名：深圳市汉业国际货运代理有限公司",
+  "账号：760164710106",
+  "开户行：中国银行股份有限公司深圳河套皇岗分行"
+];
 
 function customsStatementTableBorder(rowNumber, columnNumber, tableStartRow, tableEndRow, lastColumn, options = {}) {
   const isHeader = rowNumber === tableStartRow;
@@ -6299,6 +6305,19 @@ async function renderCustomsStatementXlsxBuffer(rows = [], context = {}) {
       }
       cell.border = customsStatementTableBorder(rowNumber, columnNumber, tableStartRow, tableEndRow, mergeEndColumn, { isTotal: isTotalRow });
     }
+  });
+
+  const footerStartRow = tableEndRow + 3;
+  const footerStartColumn = Math.min(4, mergeEndColumn);
+  const footerEndColumn = Math.min(8, mergeEndColumn);
+  CUSTOMS_STATEMENT_PAYMENT_FOOTER_LINES.forEach((line, index) => {
+    const rowNumber = footerStartRow + index;
+    worksheet.mergeCells(rowNumber, footerStartColumn, rowNumber, footerEndColumn);
+    const cell = worksheet.getCell(rowNumber, footerStartColumn);
+    cell.value = line;
+    cell.font = { name: "Microsoft YaHei", size: 12, color: { argb: "FF000000" } };
+    cell.alignment = { vertical: "middle", horizontal: "left", wrapText: false };
+    worksheet.getRow(rowNumber).height = 20;
   });
   worksheet.views = [{ state: "frozen", ySplit: tableStartRow }];
   return workbook.xlsx.writeBuffer();

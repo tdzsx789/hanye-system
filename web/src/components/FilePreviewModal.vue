@@ -332,6 +332,41 @@ function retryPdfPreview() {
   loadPdfPreview();
 }
 
+function isPdfWorkerLoadError(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  return message.includes("fake worker")
+    || message.includes("dynamically imported module")
+    || message.includes("setting up worker")
+    || message.includes("worker");
+}
+
+async function loadPdfDocument(pdfjs, buffer) {
+  const options = {
+    data: new Uint8Array(buffer),
+    useWorkerFetch: false,
+    isEvalSupported: false
+  };
+  try {
+    pdfLoadingTask = pdfjs.getDocument(options);
+    return await pdfLoadingTask.promise;
+  } catch (error) {
+    if (!isPdfWorkerLoadError(error)) throw error;
+    // A stale cache, strict MIME policy, or a proxy can prevent the worker
+    // module from loading. Rendering on the main thread still keeps preview
+    // available while the static asset issue is being corrected.
+    try {
+      await pdfLoadingTask?.destroy?.();
+    } catch {
+      // The failed loading task may already be destroyed.
+    }
+    pdfLoadingTask = pdfjs.getDocument({
+      ...options,
+      disableWorker: true
+    });
+    return await pdfLoadingTask.promise;
+  }
+}
+
 async function loadPdfPreview() {
   const requestId = ++pdfPreviewRequestId;
   abortPdfPreviewRequest();
@@ -375,12 +410,7 @@ async function loadPdfPreview() {
     const pdfjs = pdfModule.default || pdfModule;
     const workerSrc = workerModule.default || workerModule;
     pdfjs.GlobalWorkerOptions.workerSrc = `${workerSrc}${String(workerSrc).includes("?") ? "&" : "?"}v=pdf-worker-js`;
-    pdfLoadingTask = pdfjs.getDocument({
-      data: new Uint8Array(buffer),
-      useWorkerFetch: false,
-      isEvalSupported: false
-    });
-    pdfDocument = await pdfLoadingTask.promise;
+    pdfDocument = await loadPdfDocument(pdfjs, buffer);
     if (requestId !== pdfPreviewRequestId) return;
     const pages = Array.from({ length: pdfDocument.numPages }, (_, index) => ({ number: index + 1 }));
     pdfState.value = {
