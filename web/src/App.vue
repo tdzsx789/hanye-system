@@ -1352,6 +1352,12 @@ function addInputYears(value, years = 1) {
   return dateInputFromDate(date);
 }
 
+function addInputDays(value, days = 1) {
+  const date = parseInputDate(value) || parseInputDate(todayInputValue()) || new Date();
+  date.setDate(date.getDate() + Number(days || 0));
+  return dateInputFromDate(date);
+}
+
 function parseInputDate(value) {
   if (!value) return null;
   const [year, month, day] = String(value).slice(0, 10).split("-").map(Number);
@@ -1864,6 +1870,8 @@ const initialDispatchDate = dispatchQuickDateValue(dispatchPeriodFilter.value) |
 const dispatchDate = ref(initialDispatchDate);
 const activeDispatchStatusPool = ref(DISPATCH_STATUS_ALL);
 const dispatchPlanRows = ref([]);
+const dispatchPage = ref(1);
+const dispatchPageSize = ref(100);
 const dispatchLoadedDates = ref([dispatchDate.value]);
 const dispatchPlanBaseRowsByDate = reactive({});
 const dispatchPlanUpdatedAtByDate = reactive({});
@@ -1932,6 +1940,9 @@ const partnerRowsByTypedLabel = computed(() => {
 });
 const customerContactRows = ref([]);
 const orderRows = ref([]);
+let orderListRequestSerial = 0;
+const orderPage = ref(1);
+const orderPageSize = ref(100);
 const orderRowsByNo = computed(() => {
   const map = new Map();
   orderRows.value.forEach((order) => {
@@ -2134,7 +2145,18 @@ const uploadPanel = reactive({
 const loading = ref(false);
 const apiStatus = ref("");
 const notice = ref("");
+const statementExportProgress = reactive({
+  open: false,
+  stage: "",
+  detail: "",
+  percent: 0,
+  indeterminate: false,
+  elapsedSeconds: 0,
+  orderCount: 0
+});
 let noticeTimer;
+let statementExportProgressTimer;
+let statementExportProgressCloseTimer;
 let orderAttachmentUploadStatusTimer;
 let orderFeeCostSyncTimer;
 let vehicleExpenseReceiptUploadStatusTimer;
@@ -3106,7 +3128,7 @@ const templateDesigner = reactive({
   previewZoom: "fit",
   columns: [
     { key: "no", label: "订单号", visible: true, fontSize: 11 },
-    { key: "customer", label: "客户", visible: true, fontSize: 11 },
+    { key: "customer", label: "客户简称", visible: true, fontSize: 11 },
     { key: "date", label: "日期", visible: true, fontSize: 11 },
     { key: "businessType", label: "业务类型", visible: true, fontSize: 11 },
     { key: "loading", label: "装货地", visible: true, fontSize: 11 },
@@ -5671,6 +5693,7 @@ function applyDispatchPlanRows(rows = [], date = dispatchDate.value, loadedDates
   closeDispatchDriverPicker();
   dispatchStatusBeforeChangeByRowKey.clear();
   dispatchPlanRows.value = normalizedRows;
+  dispatchPage.value = 1;
   dispatchLoadedDates.value = loadedDates.length ? loadedDates : [date];
   selectedDispatchPlanIds.value = selectedDispatchPlanIds.value.filter((id) =>
     normalizedRows.some((row) => row.id === id)
@@ -6301,7 +6324,11 @@ async function syncDispatchNosToOrders(rows = dispatchPlanRows.value) {
 
 async function refreshOrderRows() {
   if (!canAccessModule("orders")) return;
-  orderRows.value = await apiFetchListFrom(ordersApi.listOrders, "订单");
+  const requestSerial = ++orderListRequestSerial;
+  const query = orderListQueryForCurrentView();
+  const rows = await apiFetchListFrom(() => ordersApi.listOrders(query), "订单");
+  if (requestSerial !== orderListRequestSerial) return;
+  orderRows.value = rows;
 }
 
 async function syncDispatchDriverToOrder(row, driverName) {
@@ -10625,12 +10652,20 @@ function setPeriodFilterRangeStart(scope, value) {
   const start = normalizePeriodRangeDate(value, periodFilterRangeStart(scope));
   const end = periodFilterRangeEnd(scope) || start;
   setPeriodFilterValue(scope, `range:${start}:${end}`);
+  if (scope === "orders" && activeModule.value === "orders") {
+    orderPage.value = 1;
+    loadOrdersForCurrentFilter();
+  }
 }
 
 function setPeriodFilterRangeEnd(scope, value) {
   const end = normalizePeriodRangeDate(value, periodFilterRangeEnd(scope));
   const start = periodFilterRangeStart(scope) || end;
   setPeriodFilterValue(scope, `range:${start}:${end}`);
+  if (scope === "orders" && activeModule.value === "orders") {
+    orderPage.value = 1;
+    loadOrdersForCurrentFilter();
+  }
 }
 
 function setPeriodFilterYear(scope, year) {
@@ -10716,21 +10751,37 @@ function setOrderQuickDateFilter(filterKey) {
   orderDateFilter.value = normalizeOrderDateFilterKey(filterKey);
   setOrderDateFilterMode(DATE_FILTER_MODE_QUICK);
   localStorage.setItem("hanye_order_date_filter", orderDateFilter.value);
+  if (activeModule.value === "orders") {
+    orderPage.value = 1;
+    loadOrdersForCurrentFilter();
+  }
 }
 
 function setOrderPeriodMode(mode) {
   setOrderDateFilterMode(DATE_FILTER_MODE_PERIOD);
   setPeriodFilterMode("orders", mode);
+  if (activeModule.value === "orders") {
+    orderPage.value = 1;
+    loadOrdersForCurrentFilter();
+  }
 }
 
 function setOrderPeriodYear(year) {
   setOrderDateFilterMode(DATE_FILTER_MODE_PERIOD);
   setPeriodFilterYear("orders", year);
+  if (activeModule.value === "orders") {
+    orderPage.value = 1;
+    loadOrdersForCurrentFilter();
+  }
 }
 
 function setOrderPeriodMonth(month) {
   setOrderDateFilterMode(DATE_FILTER_MODE_PERIOD);
   setPeriodFilterMonth("orders", month);
+  if (activeModule.value === "orders") {
+    orderPage.value = 1;
+    loadOrdersForCurrentFilter();
+  }
 }
 
 function reloadCustomsBusinessRowsIfVisible() {
@@ -15841,9 +15892,10 @@ const customerListDetailRows = computed(() =>
 );
 
 const customerPageColumns = computed(() => {
+  const isCustomer = activePartnerType.value === "客户";
   const baseColumns = [
     { key: "id", label: `${activeCustomerListLabel.value}编号` },
-    { key: "name", label: `${activeCustomerListLabel.value}名称` },
+    { key: "name", label: isCustomer ? "客户全称" : `${activeCustomerListLabel.value}名称` },
     { key: "city", label: "城市" },
     { key: "term", label: "账期" },
     { key: "settlementCurrency", label: "结算币种" }
@@ -15851,7 +15903,7 @@ const customerPageColumns = computed(() => {
   if (activePartnerType.value === "客户" && normalizeCustomerCategory(activeCustomerCategory.value) === "报关客户") {
     return [
       ...baseColumns.slice(0, 2),
-      { key: "shortName", label: "简称" },
+      { key: "shortName", label: "客户简称" },
       { key: "customsCustomerType", label: "客户类型" },
       ...baseColumns.slice(2),
       { key: "customsHomeItemCount", label: "主页品名项" },
@@ -17663,6 +17715,35 @@ const filteredOrders = computed(() => {
     orderMatchesSelectFilters(item) && matchesOrderSearchKeyword(item)
   ), "orders");
 });
+
+const orderPageCount = computed(() =>
+  Math.max(1, Math.ceil(filteredOrders.value.length / Math.max(1, orderPageSize.value)))
+);
+
+const pagedFilteredOrders = computed(() => {
+  const page = Math.min(Math.max(1, orderPage.value), orderPageCount.value);
+  const start = (page - 1) * orderPageSize.value;
+  return filteredOrders.value.slice(start, start + orderPageSize.value);
+});
+
+function orderDisplayIndex(order = {}) {
+  return filteredOrders.value.findIndex((item) => item.no === order.no);
+}
+
+function changeOrderPage(page) {
+  orderPage.value = Math.min(Math.max(1, Number(page) || 1), orderPageCount.value);
+}
+
+watch([filteredOrders, orderPageSize], () => {
+  if (orderPage.value > orderPageCount.value) orderPage.value = orderPageCount.value;
+});
+
+watch(
+  [orderSearchKeyword, orderCustomerFilter, orderPlateFilter, orderDriverFilter, orderLoadingLocationFilter, orderUnloadingLocationFilter],
+  () => {
+    orderPage.value = 1;
+  }
+);
 
 const orderDateRangeLabel = computed(() => {
   const option = ORDER_DATE_FILTERS.find((item) => item.key === orderDateFilter.value);
@@ -21213,7 +21294,7 @@ const orderFreightTemplateOptions = computed(() =>
       }
       return { item, content };
     })
-    .filter(({ content }) => content?.type === "order-freight-template" && orderTemplateMatchesCurrentCustomer(content))
+    .filter(({ content }) => content?.type === "order-freight-template")
     .map(({ item, content }) => ({
       ...item,
       feeCount: Array.isArray(content.fees) ? content.fees.length : 0
@@ -25284,7 +25365,10 @@ async function migrateLegacyClientStorageToPostgres(options = {}) {
 }
 
 async function reloadTemplateRows(options = {}) {
-  templateRows.value = await apiFetchListFrom(() => templatesApi.listTemplates("?includeContent=0&scope=export"), "模板中心", options);
+  // Order freight templates are shared database records too. They must be
+  // loaded with content so the order editor can filter them by customer after
+  // another user refreshes or logs in.
+  templateRows.value = await apiFetchListFrom(() => templatesApi.listTemplates("?includeContent=1"), "模板中心", options);
   templateRowsLoaded.value = true;
 }
 
@@ -25718,6 +25802,36 @@ function currentAuditDataSnapshot() {
   };
 }
 
+function orderListQueryForCurrentView() {
+  if (normalizeRoute(activeModule.value) !== "orders") return "";
+  const bounds = orderDateFilterMode.value === DATE_FILTER_MODE_PERIOD
+    ? periodFilterBounds(periodFilterValue("orders"))
+    : orderDateFilterBounds(orderDateFilter.value);
+  if (!bounds.start || !bounds.end) return "";
+  const first = bounds.start <= bounds.end ? bounds.start : bounds.end;
+  const last = bounds.start <= bounds.end ? bounds.end : bounds.start;
+  const params = new URLSearchParams({
+    start: first,
+    end: last
+  });
+  return `?${params.toString()}`;
+}
+
+async function loadOrdersForCurrentFilter(options = {}) {
+  if (!loggedIn.value || !canAccessModule("orders")) return;
+  const { silent = true } = options;
+  const requestSerial = ++orderListRequestSerial;
+  const query = orderListQueryForCurrentView();
+  const rows = await apiFetchListFrom(
+    () => ordersApi.listOrders(query),
+    "订单",
+    { silent }
+  );
+  if (requestSerial !== orderListRequestSerial) return;
+  orderRows.value = rows;
+  orderPage.value = 1;
+}
+
 async function loadDatabaseDataRefreshBuckets(refreshBuckets = new Set(), options = {}) {
   const buckets = refreshBuckets instanceof Set
     ? refreshBuckets
@@ -25746,7 +25860,17 @@ async function loadDatabaseDataRefreshBuckets(refreshBuckets = new Set(), option
     }
 
     if (buckets.has("orders")) {
-      orderRows.value = await apiFetchListFrom(ordersApi.listOrders, "订单", { silent: true });
+      const requestSerial = ++orderListRequestSerial;
+      const query = orderListQueryForCurrentView();
+      const rows = await apiFetchListFrom(
+        () => ordersApi.listOrders(query),
+        "订单",
+        { silent: true }
+      );
+      if (requestSerial === orderListRequestSerial) {
+        orderRows.value = rows;
+        orderPage.value = 1;
+      }
     }
 
     if (buckets.has("dispatch")) {
@@ -25915,6 +26039,8 @@ async function loadDatabaseData(options = {}) {
   const canLoadFeeItems = shouldLoadFreightConfig;
   const canLoadFreightRates = shouldLoadFreightConfig;
   const canLoadAddressBook = shouldLoadAddressBook;
+  const orderRequestSerial = canLoadOrders ? ++orderListRequestSerial : null;
+  const orderQuery = canLoadOrders ? orderListQueryForCurrentView() : "";
   const skippedRows = (canRead, rows) => (canRead && scopedLoad ? rows : []);
   const skippedAudit = canReadAuditLogs && scopedLoad ? currentAuditDataSnapshot() : {
     items: [],
@@ -25967,7 +26093,9 @@ async function loadDatabaseData(options = {}) {
     ] = await Promise.all([
       canLoadCustomers ? apiFetchListFrom(customersApi.listCustomers, "客户/供应商") : Promise.resolve(skippedRows(canReadCustomers, customerRows.value)),
       canLoadCustomers ? apiFetchListFrom(customersApi.listCustomerContacts, "联系人") : Promise.resolve(skippedRows(canReadCustomers, customerContactRows.value)),
-      canLoadOrders ? apiFetchListFrom(ordersApi.listOrders, "订单") : Promise.resolve(skippedRows(canReadOrders, orderRows.value)),
+      canLoadOrders
+        ? apiFetchListFrom(() => ordersApi.listOrders(orderQuery), "订单")
+        : Promise.resolve(skippedRows(canReadOrders, orderRows.value)),
       canLoadVehicleDriver ? apiFetchListFrom(vehiclesApi.listVehicles, "车辆") : Promise.resolve(skippedRows(canReadVehicleDriver, vehicleRows.value)),
       canLoadVehicleExpenses ? apiFetchListFrom(vehiclesApi.listVehicleExpenses, "车辆支出") : Promise.resolve(skippedRows(canReadVehicleExpenses, vehicleExpenseRows.value)),
       canLoadVehicleDriver ? apiFetchListFrom(vehiclesApi.listDrivers, "司机") : Promise.resolve(skippedRows(canReadVehicleDriver, driverRows.value)),
@@ -25985,7 +26113,7 @@ async function loadDatabaseData(options = {}) {
       canLoadAddressBook ? apiFetchListFrom(customersApi.listHiddenAddressHistory, "隐藏历史地址") : Promise.resolve(scopedLoad ? hiddenAddressHistoryRows.value : []),
       canLoadDriverRouteAdjustRules ? apiFetchListFrom(financeApi.listDriverRouteAdjustRules, "司机路线扣减规则") : Promise.resolve(skippedRows(canReadDriverRouteAdjustRules, driverRouteAdjustRules.value)),
       canLoadStatementDownloads ? apiFetchListFrom(financeApi.listStatementDownloads, "对账下载记录") : Promise.resolve(skippedRows(canReadStatementDownloads, statementDownloadRows.value)),
-      canLoadCustomsBusiness ? apiFetchListFrom(() => customsBusinessApi.listCustomsBusinesses(periodFilterValue(customsBusinessLoadScope)), "报关业务") : Promise.resolve(skippedRows(canReadCustomsBusiness, customsBusinessRows.value)),
+      canLoadCustomsBusiness ? apiFetchListFrom(() => customsBusinessApi.listCustomsBusinesses(customsBusinessListFilterValue(customsBusinessLoadScope)), "报关业务") : Promise.resolve(skippedRows(canReadCustomsBusiness, customsBusinessRows.value)),
       canLoadCustomsBusiness && (dataLoadScopeIsBoss(scope) || scope === "financeCustomsStatements" || !scopedLoad) ? apiFetchListFrom(customsBusinessApi.listAllCustomsBusinesses, "报关业务") : Promise.resolve(skippedRows(canReadCustomsBusiness, customsBusinessAllRows.value)),
       canLoadOtherBusiness && canAccessModule("otherBusiness") ? apiFetchListFrom(() => otherBusinessApi.listOtherBusinesses(periodFilterValue("otherBusiness")), "其他业务") : Promise.resolve(skippedRows(canReadOtherBusiness, otherBusinessRows.value)),
       canLoadOtherBusiness && (dataLoadScopeIsBoss(scope) || !scopedLoad) ? apiFetchListFrom(otherBusinessApi.listAllOtherBusinesses, "其他业务") : Promise.resolve(skippedRows(canReadOtherBusiness, otherBusinessAllRows.value)),
@@ -25997,7 +26125,10 @@ async function loadDatabaseData(options = {}) {
     const activeDriverData = normalizedDriverData.filter((item) => driverEmploymentStatus(item) === "在职");
     customerRows.value = normalizedCustomerData;
     customerContactRows.value = customerContactData;
-    orderRows.value = orderData;
+    if (orderRequestSerial === null || orderRequestSerial === orderListRequestSerial) {
+      orderRows.value = orderData;
+      orderPage.value = 1;
+    }
     vehicleRows.value = vehicleData;
     if (vehicleExpenseData.length || !vehicleExpenseDataLoaded.value) {
       vehicleExpenseRows.value = vehicleExpenseData;
@@ -26345,6 +26476,9 @@ watch(() => customerForm.customerCategory, (category) => {
   if (customerForm.type !== "客户") return;
   const normalizedCategory = normalizeCustomerCategory(category);
   if (normalizedCategory !== "运输客户") {
+    customerForm.tripNoRequired = false;
+    customerForm.sixSheetNoRequired = false;
+    customerForm.specialCustomer = false;
     customerForm.operatingUnitEnabled = false;
     customerForm.newOldEnabled = false;
     customerForm.specialCarEnabled = false;
@@ -26395,6 +26529,8 @@ function customerConfigNumber(value, fallback) {
 
 function buildCustomerPayload() {
   const customsConfig = normalizeCustomerCustomsConfig(customerForm);
+  const isTransportCustomer = customerForm.type === "客户"
+    && normalizeCustomerCategory(customerForm.customerCategory) === "运输客户";
   return {
     ...customerForm,
     shortName: String(customerForm.shortName || "").trim(),
@@ -26416,16 +26552,16 @@ function buildCustomerPayload() {
     customsInspectionFee: customerConfigNumber(customerForm.customsInspectionFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsInspectionFee),
     customsManifestFee: customerConfigNumber(customerForm.customsManifestFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsManifestFee),
     customsVerificationFee: customerConfigNumber(customerForm.customsVerificationFee, DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee),
-    tripNoRequired: booleanFlag(customerForm.tripNoRequired, false),
-    sixSheetNoRequired: booleanFlag(customerForm.sixSheetNoRequired, false),
-    specialCustomer: booleanFlag(customerForm.specialCustomer, false),
-    operatingUnitEnabled: customerForm.type === "客户" && normalizeCustomerCategory(customerForm.customerCategory) === "运输客户"
+    tripNoRequired: isTransportCustomer ? booleanFlag(customerForm.tripNoRequired, false) : false,
+    sixSheetNoRequired: isTransportCustomer ? booleanFlag(customerForm.sixSheetNoRequired, false) : false,
+    specialCustomer: isTransportCustomer ? booleanFlag(customerForm.specialCustomer, false) : false,
+    operatingUnitEnabled: isTransportCustomer
       ? booleanFlag(customerForm.operatingUnitEnabled, false)
       : false,
-    newOldEnabled: customerForm.type === "客户" && normalizeCustomerCategory(customerForm.customerCategory) === "运输客户"
+    newOldEnabled: isTransportCustomer
       ? booleanFlag(customerForm.newOldEnabled, false)
       : false,
-    specialCarEnabled: customerForm.type === "客户" && normalizeCustomerCategory(customerForm.customerCategory) === "运输客户"
+    specialCarEnabled: isTransportCustomer
       ? booleanFlag(customerForm.specialCarEnabled, false)
       : false,
     customsCustomFields: [
@@ -26533,6 +26669,7 @@ function openCustomerModal(customer = null, createType = activePartnerType.value
   const customerCategory = type === "客户"
     ? (normalizedCustomer ? customerCategoryValue(normalizedCustomer) : normalizeCustomerCategory(activeCustomerCategory.value))
     : "";
+  const isTransportCustomer = type === "客户" && customerCategory === "运输客户";
   const customsConfig = normalizeCustomerCustomsConfig({
     ...(normalizedCustomer || {}),
     type,
@@ -26570,12 +26707,12 @@ function openCustomerModal(customer = null, createType = activePartnerType.value
     customsInspectionFee: Number(normalizedCustomer?.customsInspectionFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsInspectionFee),
     customsManifestFee: Number(normalizedCustomer?.customsManifestFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsManifestFee),
     customsVerificationFee: Number(normalizedCustomer?.customsVerificationFee ?? DEFAULT_CUSTOMS_CUSTOMER_CONFIG.customsVerificationFee),
-    tripNoRequired: booleanFlag(normalizedCustomer?.tripNoRequired ?? normalizedCustomer?.trip_no_required, false),
-    sixSheetNoRequired: booleanFlag(normalizedCustomer?.sixSheetNoRequired ?? normalizedCustomer?.six_sheet_no_required, false),
-    specialCustomer: booleanFlag(normalizedCustomer?.specialCustomer ?? normalizedCustomer?.special_customer, false),
-    operatingUnitEnabled: booleanFlag(normalizedCustomer?.operatingUnitEnabled ?? normalizedCustomer?.operating_unit_enabled, false),
-    newOldEnabled: booleanFlag(normalizedCustomer?.newOldEnabled ?? normalizedCustomer?.new_old_enabled, false),
-    specialCarEnabled: booleanFlag(normalizedCustomer?.specialCarEnabled ?? normalizedCustomer?.special_car_enabled, false),
+    tripNoRequired: isTransportCustomer ? booleanFlag(normalizedCustomer?.tripNoRequired ?? normalizedCustomer?.trip_no_required, false) : false,
+    sixSheetNoRequired: isTransportCustomer ? booleanFlag(normalizedCustomer?.sixSheetNoRequired ?? normalizedCustomer?.six_sheet_no_required, false) : false,
+    specialCustomer: isTransportCustomer ? booleanFlag(normalizedCustomer?.specialCustomer ?? normalizedCustomer?.special_customer, false) : false,
+    operatingUnitEnabled: isTransportCustomer ? booleanFlag(normalizedCustomer?.operatingUnitEnabled ?? normalizedCustomer?.operating_unit_enabled, false) : false,
+    newOldEnabled: isTransportCustomer ? booleanFlag(normalizedCustomer?.newOldEnabled ?? normalizedCustomer?.new_old_enabled, false) : false,
+    specialCarEnabled: isTransportCustomer ? booleanFlag(normalizedCustomer?.specialCarEnabled ?? normalizedCustomer?.special_car_enabled, false) : false,
     customsCustomFields: customsConfig.customsCustomFields
       .map((field) => ({ name: field.name, value: customsBusinessIntegerValue(field.value) })),
     invoicePasteText: ""
@@ -26677,9 +26814,11 @@ function openOrderCustomerPicker() {
 }
 
 function handleOrderCustomerInput() {
-  const customer = transportCustomerByReference(orderCustomerKeyword.value, orderForm.customerId);
+  // The input is only a search box. A typed value must resolve to a customer
+  // record instead of silently becoming a new customer name.
+  const customer = transportCustomerByReference(orderCustomerKeyword.value, "");
   orderForm.customerId = customer?.id || "";
-  orderForm.customer = customer?.name || orderCustomerKeyword.value;
+  orderForm.customer = customer?.name || "";
   orderCustomerPickerOpen.value = true;
   applyOrderRequiredFieldDefaults();
   syncOrderCustomerFeatureFields();
@@ -27133,6 +27272,11 @@ async function saveOrder(options = {}) {
       notify("代垫类型收费项目请先填写金额");
       return null;
     }
+    const selectedCustomer = currentOrderCustomerRecord();
+    if (!selectedCustomer?.id) {
+      notify("请从运输客户资料中选择有效的客户简称");
+      return null;
+    }
     if (!(await confirmSaveOrderWithMissingAdvanceReceipts())) return null;
     loading.value = true;
     if (orderIsCustomsOnly.value) {
@@ -27174,6 +27318,8 @@ async function saveOrder(options = {}) {
         })
         .filter((fee) => String(fee.name || "").trim())
     };
+    payload.customerId = String(selectedCustomer.id);
+    payload.customer = String(selectedCustomer.name || "");
     const item = editingOrderNo.value
       ? await ordersApi.updateOrder(editingOrderNo.value, payload)
       : await ordersApi.createOrder(payload);
@@ -28202,6 +28348,50 @@ function downloadBlob(blob, filename) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+function clearStatementExportProgressTimers() {
+  if (statementExportProgressTimer) {
+    window.clearInterval(statementExportProgressTimer);
+    statementExportProgressTimer = undefined;
+  }
+  if (statementExportProgressCloseTimer) {
+    window.clearTimeout(statementExportProgressCloseTimer);
+    statementExportProgressCloseTimer = undefined;
+  }
+}
+
+function startStatementExportProgress(orderCount = 0) {
+  clearStatementExportProgressTimers();
+  statementExportProgress.open = true;
+  statementExportProgress.stage = "准备导出";
+  statementExportProgress.detail = `正在整理 ${orderCount} 条订单`;
+  statementExportProgress.percent = 10;
+  statementExportProgress.indeterminate = false;
+  statementExportProgress.elapsedSeconds = 0;
+  statementExportProgress.orderCount = orderCount;
+  statementExportProgressTimer = window.setInterval(() => {
+    statementExportProgress.elapsedSeconds += 1;
+  }, 1000);
+}
+
+function updateStatementExportProgress(stage, detail, percent, options = {}) {
+  statementExportProgress.stage = stage;
+  statementExportProgress.detail = detail;
+  statementExportProgress.percent = Math.max(0, Math.min(100, Number(percent || 0)));
+  statementExportProgress.indeterminate = Boolean(options.indeterminate);
+}
+
+function finishStatementExportProgress(success = true) {
+  updateStatementExportProgress(
+    success ? "导出完成" : "导出失败",
+    success ? "文件已生成，正在保存到本地" : "请稍后重试",
+    success ? 100 : 100
+  );
+  statementExportProgressCloseTimer = window.setTimeout(() => {
+    statementExportProgress.open = false;
+    clearStatementExportProgressTimers();
+  }, success ? 900 : 1800);
+}
+
 async function exportOrderRowsAsPdf(orders, title = "订单导出", templateRow = selectedTemplate.value, exchangeOverride = null) {
   if (orders.length === 0) {
     notify("没有可导出的订单");
@@ -28243,10 +28433,26 @@ async function exportOrderSnapshotsAsExcel(orders, title = "订单导出", templ
     return false;
   }
   const templateName = templateRow?.name || "默认模板";
+  const showStatementProgress = Boolean(options.statementProgress);
   try {
     loading.value = true;
+    if (showStatementProgress) {
+      startStatementExportProgress(orders.length);
+      await nextTick();
+    }
     const fullTemplateRow = await ensureTemplateContent(templateRow);
     const template = parseVisualExportTemplate(fullTemplateRow);
+    if (showStatementProgress) {
+      updateStatementExportProgress("准备服务器任务", "订单数据已整理，正在提交导出请求", 22);
+      await nextTick();
+      updateStatementExportProgress(
+        "正在生成 Excel",
+        "服务器正在读取票据并生成文件，票据较多时请耐心等待",
+        35,
+        { indeterminate: true }
+      );
+      await nextTick();
+    }
     const response = await fetch(`${API_BASE}/orders/export/excel`, {
       method: "POST",
       headers: apiRequestHeaders({ "Content-Type": "application/json" }),
@@ -28263,12 +28469,21 @@ async function exportOrderSnapshotsAsExcel(orders, title = "订单导出", templ
     if (!response.ok) {
       throw new Error(await apiDownloadErrorMessage(response, "Excel 导出失败"));
     }
+    if (showStatementProgress) {
+      updateStatementExportProgress("正在下载文件", "服务器已完成生成，正在传输 Excel 文件", 88);
+      await nextTick();
+    }
     const blob = await response.blob();
+    if (showStatementProgress) {
+      updateStatementExportProgress("导出完成", "文件已生成，正在保存到本地", 100);
+    }
     downloadBlob(blob, filename || orderExportFilename(orders, "xlsx"));
     notify(`已按模板导出 Excel：${templateName}`);
+    if (showStatementProgress) finishStatementExportProgress(true);
     return true;
   } catch (error) {
     notify(error.message || "Excel 导出失败");
+    if (showStatementProgress) finishStatementExportProgress(false);
     return false;
   } finally {
     loading.value = false;
@@ -30329,7 +30544,14 @@ async function exportStatementByFormat(format, templateRow = selectedTemplate.va
     };
     const ok = format === "pdf"
       ? await exportOrderSnapshotsAsPdf(orders, title, templateRow, exchange, statementExportFilename(entityName, start, end, "pdf"))
-      : await exportOrderSnapshotsAsExcel(orders, title, templateRow, exchange, statementExportFilename(entityName, start, end, "xlsx"), { includeReceiptSheet: true });
+      : await exportOrderSnapshotsAsExcel(
+        orders,
+        title,
+        templateRow,
+        exchange,
+        statementExportFilename(entityName, start, end, "xlsx"),
+        { includeReceiptSheet: true, statementProgress: true }
+      );
     if (ok) await markStatementDownloaded(statementExportType.value, entityName, start, end, snapshot);
     return;
   }
@@ -33347,6 +33569,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   closeRealtimeConnection();
   stopModalDrag();
+  clearStatementExportProgressTimers();
   window.clearTimeout(deferredAppFontsTimer);
   window.clearTimeout(dispatchRecognitionStatusTimer);
   window.clearTimeout(orderFeeFxSyncTimer);
@@ -33502,7 +33725,32 @@ function clearDispatchFilters() {
 
 const searchedDispatchPlanRows = computed(() =>
   sortRowsByTable(dispatchStatusPoolRows.value, "dispatchBoard")
-)
+);
+
+const dispatchPageCount = computed(() =>
+  Math.max(1, Math.ceil(searchedDispatchPlanRows.value.length / Math.max(1, dispatchPageSize.value)))
+);
+
+const pagedSearchedDispatchPlanRows = computed(() => {
+  const page = Math.min(Math.max(1, dispatchPage.value), dispatchPageCount.value);
+  const start = (page - 1) * dispatchPageSize.value;
+  return searchedDispatchPlanRows.value.slice(start, start + dispatchPageSize.value);
+});
+
+function changeDispatchPage(page) {
+  dispatchPage.value = Math.min(Math.max(1, Number(page) || 1), dispatchPageCount.value);
+}
+
+watch([searchedDispatchPlanRows, dispatchPageSize], () => {
+  if (dispatchPage.value > dispatchPageCount.value) dispatchPage.value = dispatchPageCount.value;
+});
+
+watch(
+  [dispatchSearchKeyword, dispatchCustomerFilter, dispatchPlateFilter, dispatchDriverFilter, dispatchBusinessTypeFilter, activeDispatchStatusPool],
+  () => {
+    dispatchPage.value = 1;
+  }
+);
 
 const searchedDispatchPlanTotalRows = computed(() =>
   dispatchFilteredPlanRows.value
@@ -33665,6 +33913,29 @@ function orderDetailFeeRows(order = {}) {
 
 <template>
   <div v-if="notice" class="toast">{{ notice }}</div>
+
+  <div v-if="statementExportProgress.open" class="export-progress-backdrop" role="status" aria-live="polite">
+    <section class="export-progress-card">
+      <div class="export-progress-head">
+        <div>
+          <p class="export-progress-eyebrow">客户对账单</p>
+          <h2>{{ statementExportProgress.stage }}</h2>
+        </div>
+        <strong>{{ statementExportProgress.percent }}%</strong>
+      </div>
+      <div class="export-progress-track" aria-hidden="true">
+        <span
+          :class="{ 'is-indeterminate': statementExportProgress.indeterminate }"
+          :style="{ width: `${statementExportProgress.percent}%` }"
+        />
+      </div>
+      <p class="export-progress-detail">{{ statementExportProgress.detail }}</p>
+      <div class="export-progress-meta">
+        <span>{{ statementExportProgress.orderCount }} 条订单</span>
+        <span>已用时 {{ statementExportProgress.elapsedSeconds }} 秒</span>
+      </div>
+    </section>
+  </div>
 
   <section v-if="!loggedIn" class="login-page">
     <form class="login-card" @submit.prevent="login">
@@ -33921,7 +34192,7 @@ function orderDetailFeeRows(order = {}) {
           <input
             v-model.trim="partnerSearch"
             class="search-input customer-page-search"
-            :placeholder="`${activeCustomerListLabel}名称 / 税号 / 订单号 / 联系人 / 手机号`"
+            :placeholder="`${activePartnerType === '客户' ? '客户全称' : `${activeCustomerListLabel}名称`} / 税号 / 订单号 / 联系人 / 手机号`"
           />
           <div class="customer-toolbar-actions">
             <button class="ghost-btn" @click="toggleCustomerBatchSelection">
@@ -34670,7 +34941,7 @@ function orderDetailFeeRows(order = {}) {
 	              <input
 	                v-model.trim="orderSearchKeyword"
 	                type="search"
-	                placeholder="搜索订单号 / 排车号 / 客户 / 车牌 / 司机 / 路线"
+	                placeholder="搜索订单号 / 排车号 / 客户简称 / 车牌 / 司机 / 路线"
 	              />
 	              <button
 	                v-if="orderSearchKeyword"
@@ -34894,7 +35165,7 @@ function orderDetailFeeRows(order = {}) {
               </thead>
               <tbody>
                   <tr
-                  v-for="(order, orderIndex) in filteredOrders"
+                  v-for="order in pagedFilteredOrders"
                   :key="order.no"
                   :class="{ selected: selectedOrderRowNo === order.no, 'charged-row': isChargedOrder(order), 'linked-customs-row': orderHasLinkedCustomsBusiness(order) }"
                   @click="selectedOrderRowNo = selectedOrderRowNo === order.no ? '' : order.no"
@@ -34927,8 +35198,8 @@ function orderDetailFeeRows(order = {}) {
                         <button v-if="canDeleteOrder(order)" class="icon-btn icon-only danger" type="button" title="删除订单" aria-label="删除订单" @click.stop="deleteOrder(order)" @dblclick.stop><IconSvg name="trash" /></button>
                       </span>
                     </template>
-                    <button v-else-if="column.key === 'no'" class="table-link-btn" type="button" @click.stop="openOrderDetail(order)">{{ orderCellText(order, column.key, orderIndex) }}</button>
-                    <template v-else>{{ orderCellText(order, column.key, orderIndex) }}</template>
+                    <button v-else-if="column.key === 'no'" class="table-link-btn" type="button" @click.stop="openOrderDetail(order)">{{ orderCellText(order, column.key, orderDisplayIndex(order)) }}</button>
+                    <template v-else>{{ orderCellText(order, column.key, orderDisplayIndex(order)) }}</template>
                   </td>
                 </tr>
               </tbody>
@@ -34938,6 +35209,18 @@ function orderDetailFeeRows(order = {}) {
             <span>合计 {{ filteredOrders.length }} 条</span>
             <strong>港币 {{ filteredOrders.reduce((sum, item) => sum + Number(item.receivableHKD || 0), 0).toLocaleString() }}</strong>
             <strong>人民币 {{ filteredOrders.reduce((sum, item) => sum + Number(item.receivableRMB || 0), 0).toLocaleString() }}</strong>
+          </div>
+          <div v-if="orderPageCount > 1" class="list-pagination order-pagination">
+            <span>第 {{ orderPage }} / {{ orderPageCount }} 页</span>
+            <label>每页
+              <select v-model.number="orderPageSize" @change="orderPage = 1">
+                <option :value="50">50</option>
+                <option :value="100">100</option>
+                <option :value="200">200</option>
+              </select>
+            </label>
+            <button class="icon-btn icon-only" type="button" title="上一页" :disabled="orderPage <= 1" @click="changeOrderPage(orderPage - 1)"><IconSvg name="chevronLeft" /></button>
+            <button class="icon-btn icon-only" type="button" title="下一页" :disabled="orderPage >= orderPageCount" @click="changeOrderPage(orderPage + 1)"><IconSvg name="chevronRight" /></button>
           </div>
         </div>
         </BusinessPage>
@@ -35013,7 +35296,7 @@ function orderDetailFeeRows(order = {}) {
 	              <input
 	                v-model.trim="dispatchSearchKeyword"
 	                type="search"
-	                placeholder="搜索排车号 / 订单号 / 客户 / 车牌 / 司机 / 路线"
+	                placeholder="搜索排车号 / 订单号 / 客户简称 / 车牌 / 司机 / 路线"
 	              />
 	              <button
 	                v-if="dispatchSearchKeyword"
@@ -35026,7 +35309,7 @@ function orderDetailFeeRows(order = {}) {
 	              </button>
 	            </label>
 	            <label class="dispatch-filter-field">
-	              <span>客户</span>
+	              <span>客户简称</span>
 	              <select v-model="dispatchCustomerFilter">
 	                <option value="">全部客户</option>
 	                <option v-for="customer in dispatchCustomerFilterOptions" :key="customer" :value="customer">{{ partnerDisplayLabelByReference(customer, '客户', '', '运输客户') || customer }}</option>
@@ -35185,7 +35468,7 @@ function orderDetailFeeRows(order = {}) {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="row in searchedDispatchPlanRows" :key="row.id" @dblclick="openEditDispatchPlanRow(row)">
+                  <tr v-for="row in pagedSearchedDispatchPlanRows" :key="row.id" @dblclick="openEditDispatchPlanRow(row)">
                     <td
                       v-for="(column, index) in visibleDispatchTableColumns"
                       :key="column.key"
@@ -35326,6 +35609,18 @@ function orderDetailFeeRows(order = {}) {
 	                  </tr>
 	                </tbody>
               </table>
+            </div>
+            <div v-if="dispatchPageCount > 1" class="list-pagination dispatch-pagination">
+              <span>第 {{ dispatchPage }} / {{ dispatchPageCount }} 页</span>
+              <label>每页
+                <select v-model.number="dispatchPageSize" @change="dispatchPage = 1">
+                  <option :value="50">50</option>
+                  <option :value="100">100</option>
+                  <option :value="200">200</option>
+                </select>
+              </label>
+              <button class="icon-btn icon-only" type="button" title="上一页" :disabled="dispatchPage <= 1" @click="changeDispatchPage(dispatchPage - 1)"><IconSvg name="chevronLeft" /></button>
+              <button class="icon-btn icon-only" type="button" title="下一页" :disabled="dispatchPage >= dispatchPageCount" @click="changeDispatchPage(dispatchPage + 1)"><IconSvg name="chevronRight" /></button>
             </div>
           </section>
         </div>
@@ -40148,12 +40443,17 @@ function orderDetailFeeRows(order = {}) {
               </div>
             </div>
             <div class="form-grid customer-form-grid">
-              <label class="span-2">名称<input v-model.trim="customerForm.name" placeholder="请输入名称" /></label>
-              <label>简称<input v-model.trim="customerForm.shortName" placeholder="用于列表展示" /></label>
-              <div v-if="customerForm.type === '客户'" class="span-6 customer-flag-row">
-                <label class="order-switch-field"><input v-model="customerForm.tripNoRequired" type="checkbox" />车次号必须</label>
-                <label class="order-switch-field"><input v-model="customerForm.sixSheetNoRequired" type="checkbox" />六联单号必须</label>
-                <label v-if="currentAccountCanViewSpecialCustomerOrders" class="order-switch-field"><input v-model="customerForm.specialCustomer" type="checkbox" />特殊客户</label>
+              <label class="span-2">{{ customerForm.type === '客户' ? '客户全称' : '名称' }}<input v-model.trim="customerForm.name" :placeholder="customerForm.type === '客户' ? '请输入客户全称' : '请输入名称'" /></label>
+              <label>{{ customerForm.type === '客户' ? '客户简称' : '简称' }}<input v-model.trim="customerForm.shortName" placeholder="用于列表展示" /></label>
+              <div
+                v-if="customerForm.type === '客户' && normalizeCustomerCategory(customerForm.customerCategory) === '运输客户'"
+                class="span-6 customer-flag-row"
+              >
+                <template v-if="normalizeCustomerCategory(customerForm.customerCategory) === '运输客户'">
+                  <label class="order-switch-field"><input v-model="customerForm.tripNoRequired" type="checkbox" />车次号必须</label>
+                  <label class="order-switch-field"><input v-model="customerForm.sixSheetNoRequired" type="checkbox" />六联单号必须</label>
+                  <label v-if="currentAccountCanViewSpecialCustomerOrders" class="order-switch-field"><input v-model="customerForm.specialCustomer" type="checkbox" />特殊客户</label>
+                </template>
                 <label v-if="normalizeCustomerCategory(customerForm.customerCategory) === '运输客户'" class="order-switch-field"><input v-model="customerForm.operatingUnitEnabled" type="checkbox" />经营单位</label>
                 <label v-if="normalizeCustomerCategory(customerForm.customerCategory) === '运输客户'" class="order-switch-field"><input v-model="customerForm.newOldEnabled" type="checkbox" />新/旧</label>
                 <label v-if="normalizeCustomerCategory(customerForm.customerCategory) === '运输客户'" class="order-switch-field"><input v-model="customerForm.specialCarEnabled" type="checkbox" />专车</label>
@@ -40338,7 +40638,7 @@ function orderDetailFeeRows(order = {}) {
               <label>排车日期<input v-model="dispatchForm.date" type="date" /></label>
             </div>
             <div class="form-grid dispatch-form-grid">
-              <label class="dispatch-customer-field">客户
+            <label class="dispatch-customer-field">客户简称
                 <span class="searchable-select dispatch-searchable-select dispatch-customer-multi-select" @click.stop @mousedown.stop>
                   <span class="dispatch-customer-combobox" :class="{ 'is-open': dispatchCustomerPickerOpen, 'is-empty': !dispatchSelectedCustomerRows.length }">
                     <span
@@ -40942,7 +41242,7 @@ function orderDetailFeeRows(order = {}) {
 	          <div class="modal-body order-modal-review-body" :class="{ 'is-readonly': orderReadOnlyMode }">
 	            <fieldset class="order-modal-readonly-fieldset" :disabled="orderReadOnlyMode">
             <div class="form-grid order-compact-grid order-layout-grid">
-              <label class="order-compact-field hidden-order-customer">客户
+              <label class="order-compact-field hidden-order-customer">客户简称
                 <span class="searchable-select" @click.stop>
                   <input
                     v-model.trim="orderCustomerKeyword"

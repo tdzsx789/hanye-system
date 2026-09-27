@@ -53,7 +53,7 @@ const emit = defineEmits(["close", "submit", "panelClick"]);
       <div class="modal-head">
         <h2>
           {{ title || (editing ? '编辑订单' : '新建订单') }}
-          <span class="order-title-meta">客户：{{ customer || "-" }}</span>
+          <span class="order-title-meta">客户简称：{{ customer || "-" }}</span>
           <span class="order-title-meta">订单号：{{ orderNo }}</span>
         </h2>
         <div class="modal-detail-actions">

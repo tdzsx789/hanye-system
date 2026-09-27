@@ -117,6 +117,108 @@ button:disabled {
   font-weight: 700;
 }
 
+.export-progress-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(15 23 42 / 24%);
+}
+
+.export-progress-card {
+  width: min(440px, calc(100vw - 48px));
+  padding: 24px;
+  border: 1px solid #cbd9eb;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgb(15 35 70 / 24%);
+}
+
+.export-progress-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.export-progress-eyebrow {
+  margin: 0 0 4px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.export-progress-head h2 {
+  margin: 0;
+  color: #17233c;
+  font-size: 18px;
+}
+
+.export-progress-head > strong {
+  color: #0f6bff;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.export-progress-track {
+  position: relative;
+  height: 8px;
+  margin: 22px 0 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e8eef7;
+}
+
+.export-progress-track > span {
+  display: block;
+  height: 100%;
+  min-width: 3%;
+  border-radius: inherit;
+  background: #0f6bff;
+  transition: width 240ms ease;
+}
+
+.export-progress-track > span.is-indeterminate {
+  position: relative;
+  min-width: 34%;
+  animation: export-progress-indeterminate 1.4s ease-in-out infinite;
+  transform-origin: left center;
+}
+
+.export-progress-detail {
+  min-height: 40px;
+  margin: 0;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.export-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+@keyframes export-progress-indeterminate {
+  0% {
+    opacity: 0.58;
+    transform: translateX(-42%) scaleX(0.82);
+  }
+  50% {
+    opacity: 1;
+    transform: translateX(92%) scaleX(1);
+  }
+  100% {
+    opacity: 0.58;
+    transform: translateX(220%) scaleX(0.82);
+  }
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -13259,6 +13361,35 @@ tr.selected {
 
 .audit-pagination {
   margin-left: auto;
+}
+
+.list-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.list-pagination label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.list-pagination select {
+  min-width: 64px;
+  height: 30px;
+  padding: 0 24px 0 8px;
+}
+
+.order-pagination,
+.dispatch-pagination {
+  margin-top: 0;
 }
 
 .audit-log-table {

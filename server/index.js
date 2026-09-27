@@ -99,6 +99,14 @@ const OSS_SIGNED_URL_EXPIRES_SECONDS = Math.max(60, Number(process.env.OSS_SIGNE
 const OSS_REQUEST_TIMEOUT_MS = Math.max(10_000, Number(process.env.OSS_REQUEST_TIMEOUT_MS || 60_000));
 const OSS_READ_RETRY_MAX = Math.max(0, Math.min(5, Number(process.env.OSS_READ_RETRY_MAX || 2)));
 const OSS_READ_RETRY_DELAY_MS = Math.max(100, Math.min(5_000, Number(process.env.OSS_READ_RETRY_DELAY_MS || 500)));
+const ORDER_LIST_LOOKUP_CACHE_TTL_MS = Math.max(
+  1_000,
+  Math.min(30_000, Number(process.env.ORDER_LIST_LOOKUP_CACHE_TTL_MS || 8_000))
+);
+const STATEMENT_RECEIPT_READ_CONCURRENCY = Math.max(
+  1,
+  Math.min(8, Number(process.env.STATEMENT_RECEIPT_READ_CONCURRENCY || 6))
+);
 const OSS_CONFIG_REQUESTED = Boolean(OSS_BUCKET || OSS_REGION || OSS_ENDPOINT || OSS_ACCESS_KEY_ID || OSS_ACCESS_KEY_SECRET);
 const OSS_ENABLED = Boolean(OSS_BUCKET && (OSS_REGION || OSS_ENDPOINT) && OSS_ACCESS_KEY_ID && OSS_ACCESS_KEY_SECRET);
 const ossClient = OSS_ENABLED ? new OSS({
@@ -115,6 +123,39 @@ const ossClient = OSS_ENABLED ? new OSS({
 const fileStorageProvider = ossClient ? "oss" : "oss-unconfigured";
 const auditActorContext = new AsyncLocalStorage();
 let realtimeHub = null;
+const orderListLookupCache = new Map();
+let orderListLookupCacheVersion = 0;
+
+function clearOrderListLookupCache() {
+  orderListLookupCacheVersion += 1;
+  orderListLookupCache.clear();
+}
+
+async function cachedOrderListLookup(key, loader) {
+  const now = Date.now();
+  const version = orderListLookupCacheVersion;
+  const cached = orderListLookupCache.get(key);
+  if (cached?.value && now - cached.createdAt < ORDER_LIST_LOOKUP_CACHE_TTL_MS) {
+    return cached.value;
+  }
+  if (cached?.promise) return cached.promise;
+  const promise = Promise.resolve()
+    .then(loader)
+    .then((value) => {
+      if (version === orderListLookupCacheVersion) {
+        orderListLookupCache.set(key, { value, createdAt: Date.now() });
+      }
+      return value;
+    })
+    .catch((error) => {
+      if (version === orderListLookupCacheVersion && orderListLookupCache.get(key)?.promise === promise) {
+        orderListLookupCache.delete(key);
+      }
+      throw error;
+    });
+  orderListLookupCache.set(key, { promise, createdAt: now });
+  return promise;
+}
 
 function auditActorFromAccount(account = {}) {
   return String(account.name || account.displayName || account.username || "").trim() || "admin";
@@ -529,68 +570,72 @@ function mapCustomer(row) {
 
 async function loadCustomerSpecialCustomerMap(options = {}) {
   const category = String(options.category || "").trim();
-  if (!(await customerColumnExists("special_customer"))) {
-    return new Map();
-  }
-  const rows = category
-    ? await db.prepare(`
-      SELECT id, name, short_name
-      FROM customers
-      WHERE deleted_at IS NULL
-        AND type = '客户'
-        AND (
-          customer_category = ?
-          OR (? = '运输客户' AND COALESCE(customer_category, '运输客户') <> '报关客户')
-        )
-        AND COALESCE(special_customer, false) = true
-      ORDER BY created_at DESC, id DESC
-    `).all(category, category)
-    : await db.prepare(`
-      SELECT id, name, short_name
-      FROM customers
-      WHERE deleted_at IS NULL AND type = '客户' AND COALESCE(special_customer, false) = true
-      ORDER BY created_at DESC, id DESC
-    `).all();
-  const map = new Map();
-  rows.forEach((row) => {
-    const id = String(row.id || "").trim();
-    const name = String(row.name || "").trim();
-    const shortName = String(row.short_name || "").trim();
-    if (id) map.set(id, true);
-    if (name) map.set(name, true);
-    if (shortName) map.set(shortName, true);
+  return cachedOrderListLookup(`customer-special:${category || "all"}`, async () => {
+    if (!(await customerColumnExists("special_customer"))) {
+      return new Map();
+    }
+    const rows = category
+      ? await db.prepare(`
+        SELECT id, name, short_name
+        FROM customers
+        WHERE deleted_at IS NULL
+          AND type = '客户'
+          AND (
+            customer_category = ?
+            OR (? = '运输客户' AND COALESCE(customer_category, '运输客户') <> '报关客户')
+          )
+          AND COALESCE(special_customer, false) = true
+        ORDER BY created_at DESC, id DESC
+      `).all(category, category)
+      : await db.prepare(`
+        SELECT id, name, short_name
+        FROM customers
+        WHERE deleted_at IS NULL AND type = '客户' AND COALESCE(special_customer, false) = true
+        ORDER BY created_at DESC, id DESC
+      `).all();
+    const map = new Map();
+    rows.forEach((row) => {
+      const id = String(row.id || "").trim();
+      const name = String(row.name || "").trim();
+      const shortName = String(row.short_name || "").trim();
+      if (id) map.set(id, true);
+      if (name) map.set(name, true);
+      if (shortName) map.set(shortName, true);
+    });
+    return map;
   });
-  return map;
 }
 
 async function loadTransportCustomerFeatureMap() {
-  const support = await customerRequirementColumnSupport();
-  const rows = await db.prepare(`
-    SELECT
-      id,
-      name,
-      short_name,
-      ${support.operatingUnitEnabled ? "operating_unit_enabled" : "false AS operating_unit_enabled"},
-      ${support.newOldEnabled ? "new_old_enabled" : "false AS new_old_enabled"},
-      ${support.specialCarEnabled ? "special_car_enabled" : "false AS special_car_enabled"}
-    FROM customers
-    WHERE deleted_at IS NULL
-      AND type = '客户'
-      AND COALESCE(customer_category, '运输客户') <> '报关客户'
-  `).all();
-  const map = new Map();
-  rows.forEach((row) => {
-    const flags = {
-      operatingUnitEnabled: booleanFlag(row.operating_unit_enabled, false),
-      newOldEnabled: booleanFlag(row.new_old_enabled, false),
-      specialCarEnabled: booleanFlag(row.special_car_enabled, false)
-    };
-    [row.id, row.name, row.short_name]
-      .map((value) => String(value || "").trim())
-      .filter(Boolean)
-      .forEach((key) => map.set(key, flags));
+  return cachedOrderListLookup("customer-features", async () => {
+    const support = await customerRequirementColumnSupport();
+    const rows = await db.prepare(`
+      SELECT
+        id,
+        name,
+        short_name,
+        ${support.operatingUnitEnabled ? "operating_unit_enabled" : "false AS operating_unit_enabled"},
+        ${support.newOldEnabled ? "new_old_enabled" : "false AS new_old_enabled"},
+        ${support.specialCarEnabled ? "special_car_enabled" : "false AS special_car_enabled"}
+      FROM customers
+      WHERE deleted_at IS NULL
+        AND type = '客户'
+        AND COALESCE(customer_category, '运输客户') <> '报关客户'
+    `).all();
+    const map = new Map();
+    rows.forEach((row) => {
+      const flags = {
+        operatingUnitEnabled: booleanFlag(row.operating_unit_enabled, false),
+        newOldEnabled: booleanFlag(row.new_old_enabled, false),
+        specialCarEnabled: booleanFlag(row.special_car_enabled, false)
+      };
+      [row.id, row.name, row.short_name]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+        .forEach((key) => map.set(key, flags));
+    });
+    return map;
   });
-  return map;
 }
 
 const customerColumnAvailability = new Map();
@@ -3140,6 +3185,23 @@ async function fetchReceiptImageBuffer(file = {}) {
   }
 }
 
+async function loadReceiptImageBuffers(files = []) {
+  const imageBuffers = new Array(files.length).fill(null);
+  let nextIndex = 0;
+  const workerCount = Math.min(STATEMENT_RECEIPT_READ_CONCURRENCY, files.length);
+
+  async function readNextReceipt() {
+    while (nextIndex < files.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      imageBuffers[index] = await fetchReceiptImageBuffer(files[index]);
+    }
+  }
+
+  await Promise.all(Array.from({ length: workerCount }, () => readNextReceipt()));
+  return imageBuffers;
+}
+
 async function addStatementReceiptSheet(workbook, orders = []) {
   const receiptRows = await loadOrderReceiptImageRows(orders);
   const worksheet = workbook.addWorksheet("票据");
@@ -3181,6 +3243,10 @@ async function addStatementReceiptSheet(workbook, orders = []) {
     if (!grouped.has(date)) grouped.set(date, []);
     grouped.get(date).push(file);
   });
+  const receiptImageBuffers = await loadReceiptImageBuffers(receiptRows);
+  const receiptImageBufferByFile = new Map(
+    receiptRows.map((file, index) => [file, receiptImageBuffers[index]])
+  );
   const sortedGroups = Array.from(grouped.entries()).sort(([left], [right]) => left.localeCompare(right));
   for (const [date, files] of sortedGroups) {
     if (files.length > worksheet.columnCount) {
@@ -3221,7 +3287,7 @@ async function addStatementReceiptSheet(workbook, orders = []) {
       imageCell.alignment = { vertical: "middle", horizontal: "center" };
       imageCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: excelArgb("#ffffff") } };
       imageCell.border = { top: border, left: border, bottom: border, right: border };
-      const imageBuffer = await fetchReceiptImageBuffer(file);
+      const imageBuffer = receiptImageBufferByFile.get(file);
       if (!imageBuffer) {
         imageCell.value = "图片读取失败";
         imageCell.font = { name: "Microsoft YaHei", size: 10, color: { argb: excelArgb("#dc2626") } };
@@ -3233,10 +3299,27 @@ async function addStatementReceiptSheet(workbook, orders = []) {
       }
       const dims = statementImageDimensions(imageBuffer, file.extension) || { width: 4, height: 3 };
       const box = fitImageBox(dims.width, dims.height, receiptColumnImageWidth, receiptImageMaxHeight, { allowUpscale: true, maxScale: 8 });
-      const imageId = workbook.addImage({
-        buffer: imageBuffer,
-        extension: file.extension
-      });
+      let imageId = null;
+      try {
+        imageId = workbook.addImage({
+          buffer: imageBuffer,
+          extension: file.extension
+        });
+      } catch (error) {
+        console.warn("Statement receipt image skipped", {
+          fileId: file.id,
+          filename: file.filename,
+          extension: file.extension,
+          message: error?.message || String(error)
+        });
+        imageCell.value = "图片格式不支持";
+        imageCell.font = { name: "Microsoft YaHei", size: 10, color: { argb: excelArgb("#dc2626") } };
+        imageCell.alignment = { vertical: "middle", horizontal: "center" };
+        imageCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: excelArgb("#fff1f2") } };
+        imageCell.border = { top: border, left: border, bottom: border, right: border };
+        rowHeights.push(72);
+        continue;
+      }
       rowHeights.push(imagePixelHeightToExcelRowHeight(box.height, 2));
       file._receiptImage = { imageId, box, startColumn };
     }
@@ -6047,6 +6130,15 @@ function dispatchPlanPeriodBounds(query = {}) {
   return singleDay(0);
 }
 
+function orderListDateBounds(query = {}) {
+  const start = String(query.start || query.from || query.begin || "").trim().slice(0, 10);
+  const end = String(query.end || query.to || "").trim().slice(0, 10);
+  if (!parseInputDate(start) || !parseInputDate(end)) return { start: "", end: "" };
+  const first = start <= end ? start : end;
+  const last = start <= end ? end : start;
+  return { start: first, end: addInputDays(last, 1) };
+}
+
 function customsBusinessPeriodBounds(query = {}) {
   const period = String(query.period || "").trim();
   const mode = String(query.mode || "").trim();
@@ -6745,32 +6837,34 @@ function auditChangeSummary(before = {}, after = {}, fields = [], options = {}) 
 
 async function loadCustomerShortNameMap(options = {}) {
   const category = String(options.category || "").trim();
-  const rows = category
-    ? await db.prepare(`
-      SELECT id, name, short_name
-      FROM customers
-      WHERE deleted_at IS NULL AND type = '客户'
-        AND (
-          customer_category = ?
-          OR (? = '运输客户' AND COALESCE(customer_category, '运输客户') <> '报关客户')
-        )
-      ORDER BY created_at DESC, id DESC
-    `).all(category, category)
-    : await db.prepare(`
-      SELECT id, name, short_name
-      FROM customers
-      WHERE deleted_at IS NULL AND type = '客户'
-      ORDER BY created_at DESC, id DESC
-    `).all();
-  const map = new Map();
-  rows.forEach((row) => {
-    const shortName = String(row.short_name || "").trim();
-    const name = String(row.name || "").trim();
-    if (!shortName || !name) return;
-    map.set(String(row.id || "").trim(), shortName);
-    if (!map.has(name)) map.set(name, shortName);
+  return cachedOrderListLookup(`customer-short-names:${category || "all"}`, async () => {
+    const rows = category
+      ? await db.prepare(`
+        SELECT id, name, short_name
+        FROM customers
+        WHERE deleted_at IS NULL AND type = '客户'
+          AND (
+            customer_category = ?
+            OR (? = '运输客户' AND COALESCE(customer_category, '运输客户') <> '报关客户')
+          )
+        ORDER BY created_at DESC, id DESC
+      `).all(category, category)
+      : await db.prepare(`
+        SELECT id, name, short_name
+        FROM customers
+        WHERE deleted_at IS NULL AND type = '客户'
+        ORDER BY created_at DESC, id DESC
+      `).all();
+    const map = new Map();
+    rows.forEach((row) => {
+      const shortName = String(row.short_name || "").trim();
+      const name = String(row.name || "").trim();
+      if (!shortName || !name) return;
+      map.set(String(row.id || "").trim(), shortName);
+      if (!map.has(name)) map.set(name, shortName);
+    });
+    return map;
   });
-  return map;
 }
 
 function shortNameFromMap(value = "", shortNameMap = new Map()) {
@@ -7923,6 +8017,11 @@ app.patch("/api/customers/:id", async (req, res) => {
     return;
   }
   const item = normalizeCustomerPayload(req.body, id);
+  if (item.type === "客户" && item.customerCategory !== "运输客户") {
+    item.tripNoRequired = false;
+    item.sixSheetNoRequired = false;
+    item.specialCustomer = false;
+  }
   if (!requestCanViewSpecialCustomerOrders(req)) {
     item.specialCustomer = booleanFlag(existing.special_customer, false);
   }
@@ -7990,13 +8089,14 @@ app.patch("/api/customers/:id", async (req, res) => {
     res.status(404).json({ message: "客户不存在或已删除" });
     return;
   }
+  clearOrderListLookupCache();
   await writeAudit(
     "update",
     "customer",
     id,
     auditChangeSummary(existing, item, [
-      { key: "name", label: "公司名称" },
-      { key: "shortName", label: "简称" },
+      { key: "name", label: item.type === "客户" ? "客户全称" : "公司名称" },
+      { key: "shortName", label: item.type === "客户" ? "客户简称" : "简称" },
       { key: "customerCategory", label: "客户类别" },
       { key: "settlementCurrency", label: "结算币种" },
       { key: "contact", label: "联系人" },
@@ -8016,6 +8116,11 @@ app.patch("/api/customers/:id", async (req, res) => {
 
 app.post("/api/customers", async (req, res) => {
   const item = normalizeCustomerPayload(req.body, req.body.id || (await nextCustomerId(req.body.type)));
+  if (item.type === "客户" && item.customerCategory !== "运输客户") {
+    item.tripNoRequired = false;
+    item.sixSheetNoRequired = false;
+    item.specialCustomer = false;
+  }
   if (!requestCanViewSpecialCustomerOrders(req)) {
     item.specialCustomer = false;
   }
@@ -8151,6 +8256,7 @@ app.post("/api/customers", async (req, res) => {
     VALUES
       (${insertValues.join(", ")})
   `).run(item);
+  clearOrderListLookupCache();
   await writeAudit("create", "customer", item.id, item.name);
   res.status(201).json(mapCustomer(await db.prepare("SELECT * FROM customers WHERE id = ?").get(item.id)));
 });
@@ -8173,6 +8279,7 @@ app.delete("/api/customers/:id", async (req, res) => {
     return;
   }
   await db.prepare("UPDATE customers SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?").run(id);
+  clearOrderListLookupCache();
   await writeAudit("delete", "customer", id, customer.name);
   res.json({ ok: true });
 });
@@ -8267,14 +8374,39 @@ app.delete("/api/customer-contacts/:id", async (req, res) => {
   res.json({ ok: true });
 });
 
-app.get("/api/orders", async (_req, res) => {
+app.get("/api/orders", async (req, res) => {
+  const { start, end } = orderListDateBounds(req.query);
+  const dateWhere = start && end
+    ? `AND (
+      (o.order_date >= ? AND o.order_date < ?)
+      OR EXISTS (
+        SELECT 1
+        FROM dispatch_plans AS dp
+        CROSS JOIN LATERAL jsonb_array_elements(dp.rows_json::jsonb) AS dispatch_row
+        WHERE dp.plan_date >= ? AND dp.plan_date < ?
+          AND (
+            NULLIF(dispatch_row->>'orderNo', '') = o.no
+            OR (
+              NULLIF(dispatch_row->>'dispatchNo', '') <> ''
+              AND NULLIF(dispatch_row->>'dispatchNo', '') = o.dispatch_no
+            )
+            OR (
+              NULLIF(dispatch_row->>'dispatchGroupId', '') <> ''
+              AND NULLIF(dispatch_row->>'dispatchGroupId', '') = o.dispatch_group_id
+            )
+          )
+      )
+    )`
+    : "";
+  const params = start && end ? [start, end, start, end] : [];
   const specialLookup = await loadSpecialCustomerOrderLookup();
   const rows = await db.prepare(`
-    SELECT * FROM orders
-    WHERE deleted_at IS NULL
+    SELECT o.* FROM orders AS o
+    WHERE o.deleted_at IS NULL
+      ${dateWhere}
     ${ORDER_DEFAULT_SORT_SQL}
-  `).all();
-  const visibleRows = await filterVisibleOrdersForAccount(rows.map(mapOrder), _req.account, specialLookup);
+  `).all(...params);
+  const visibleRows = await filterVisibleOrdersForAccount(rows.map(mapOrder), req.account, specialLookup);
   res.json(await hydrateOrderRowsForApi(visibleRows));
 });
 
@@ -8586,24 +8718,27 @@ function recordOrderDispatchLoadInfoCandidate(lookup = new Map(), row = {}, plan
 }
 
 async function orderDispatchLoadInfoLookup() {
-  const lookup = new Map();
-  const plans = await db.prepare("SELECT plan_date, rows_json FROM dispatch_plans").all();
-  for (const plan of plans) {
-    parseDispatchPlanRowsJson(plan.rows_json).forEach((row) =>
-      recordOrderDispatchLoadInfoCandidate(lookup, row, plan.plan_date, 2)
-    );
-  }
-
-  const recycleRows = await db.prepare(`
-    SELECT plan_date, row_json
-    FROM dispatch_plan_recycle
-    ORDER BY restored_at NULLS FIRST, deleted_at DESC, id DESC
-  `).all();
-  for (const recycle of recycleRows) {
-    const row = parseDispatchPlanRowJson(recycle.row_json);
-    if (dispatchRowHasReference(row)) recordOrderDispatchLoadInfoCandidate(lookup, row, recycle.plan_date, 1);
-  }
-  return lookup;
+  return cachedOrderListLookup("order-dispatch-load-info", async () => {
+    const lookup = new Map();
+    const [plans, recycleRows] = await Promise.all([
+      db.prepare("SELECT plan_date, rows_json FROM dispatch_plans").all(),
+      db.prepare(`
+        SELECT plan_date, row_json
+        FROM dispatch_plan_recycle
+        ORDER BY restored_at NULLS FIRST, deleted_at DESC, id DESC
+      `).all()
+    ]);
+    for (const plan of plans) {
+      parseDispatchPlanRowsJson(plan.rows_json).forEach((row) =>
+        recordOrderDispatchLoadInfoCandidate(lookup, row, plan.plan_date, 2)
+      );
+    }
+    for (const recycle of recycleRows) {
+      const row = parseDispatchPlanRowJson(recycle.row_json);
+      if (dispatchRowHasReference(row)) recordOrderDispatchLoadInfoCandidate(lookup, row, recycle.plan_date, 1);
+    }
+    return lookup;
+  });
 }
 
 async function hydrateOrderDispatchLoadInfo(orders = []) {
@@ -8638,10 +8773,19 @@ async function hydrateOrderDispatchLoadInfo(orders = []) {
 }
 
 async function hydrateOrderRowsForApi(orders = []) {
-  const rows = await hydrateOrderDispatchLoadInfo(await hydrateOrderFees(orders));
-  const customerShortNames = await loadCustomerShortNameMap({ category: "运输客户" });
-  const specialCustomerMap = await loadCustomerSpecialCustomerMap();
-  const customerFeatureMap = await loadTransportCustomerFeatureMap();
+  if (!orders.length) return orders;
+  const [dispatchRows, feeRows, customerShortNames, specialCustomerMap, customerFeatureMap] = await Promise.all([
+    hydrateOrderDispatchLoadInfo(orders),
+    hydrateOrderFees(orders),
+    loadCustomerShortNameMap({ category: "运输客户" }),
+    loadCustomerSpecialCustomerMap(),
+    loadTransportCustomerFeatureMap()
+  ]);
+  const feesByOrderNo = new Map(feeRows.map((row) => [String(row.no || "").trim(), row.fees || []]));
+  const rows = dispatchRows.map((row) => ({
+    ...row,
+    fees: feesByOrderNo.get(String(row.no || "").trim()) || []
+  }));
   return rows.map((row) => {
     const customerShortName = shortNameFromMap(row.customerId, customerShortNames)
       || shortNameFromMap(row.customer, customerShortNames)
@@ -9569,6 +9713,7 @@ async function recycleDispatchPlanRows(planDate, rows = []) {
       rowJson: JSON.stringify(row)
     });
   }
+  clearOrderListLookupCache();
   return validRows.length;
 }
 
@@ -10506,50 +10651,56 @@ app.get("/api/orders/export/csv", async (req, res) => {
 });
 
 app.get("/api/orders/export/excel", async (req, res) => {
-  const orderNos = String(req.query.orderNos || "")
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-  const title = String(req.query.title || "订单导出").trim() || "订单导出";
-  const template = await exportTemplateById(req.query.templateId);
-  const exchange = normalizeExportExchange(req.query);
-  const orders = await loadExportOrders(orderNos, req.account);
-  if (orders.length === 0) {
-    res.status(400).type("text/plain").send("没有可导出的订单");
-    return;
-  }
   try {
+    const orderNos = String(req.query.orderNos || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const title = String(req.query.title || "订单导出").trim() || "订单导出";
+    const template = await exportTemplateById(req.query.templateId);
+    const exchange = normalizeExportExchange(req.query);
+    const orders = await loadExportOrders(orderNos, req.account);
+    if (orders.length === 0) {
+      res.status(400).type("text/plain").send("没有可导出的订单");
+      return;
+    }
     const body = await renderOrdersXlsxBuffer(orders, title, template, exchange);
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(orderExportFilename(orders, "xlsx"))}`);
     await writeAudit("export", "order", orderNos.join(",") || "all", `Excel ${orders.length} 条`);
     res.send(body);
   } catch (error) {
-    console.error("Excel export failed", error);
-    res.status(500).type("text/plain").send("Excel 导出失败");
+    console.error("Excel export failed", {
+      method: req.method,
+      path: req.originalUrl,
+      accountId: req.account?.id,
+      message: error?.message || String(error),
+      stack: error?.stack
+    });
+    if (!res.headersSent) res.status(500).type("text/plain").send("Excel 导出失败，请稍后重试");
   }
 });
 
 app.post("/api/orders/export/excel", async (req, res) => {
-  const orderNos = Array.isArray(req.body.orderNos) ? req.body.orderNos.map(String).filter(Boolean) : [];
-  const title = String(req.body.title || "订单导出").trim() || "订单导出";
-  const templateMeta = await exportTemplateMetaById(req.body.templateId);
-  let template = req.body.template && typeof req.body.template === "object" ? req.body.template : null;
-  if (!template && templateMeta?.content) {
-    try {
-      template = JSON.parse(templateMeta.content);
-    } catch {
-      template = null;
-    }
-  }
-  const visualTemplate = template?.type === "visual-export-template" ? template : null;
-  const exchange = normalizeExportExchange(req.body.exchange);
-  const orders = await loadExportOrdersFromRequest(req.body, orderNos, req.account);
-  if (orders.length === 0) {
-    res.status(400).type("text/plain").send("没有可导出的订单");
-    return;
-  }
   try {
+    const orderNos = Array.isArray(req.body.orderNos) ? req.body.orderNos.map(String).filter(Boolean) : [];
+    const title = String(req.body.title || "订单导出").trim() || "订单导出";
+    const templateMeta = await exportTemplateMetaById(req.body.templateId);
+    let template = req.body.template && typeof req.body.template === "object" ? req.body.template : null;
+    if (!template && templateMeta?.content) {
+      try {
+        template = JSON.parse(templateMeta.content);
+      } catch {
+        template = null;
+      }
+    }
+    const visualTemplate = template?.type === "visual-export-template" ? template : null;
+    const exchange = normalizeExportExchange(req.body.exchange);
+    const orders = await loadExportOrdersFromRequest(req.body, orderNos, req.account);
+    if (orders.length === 0) {
+      res.status(400).type("text/plain").send("没有可导出的订单");
+      return;
+    }
     const useKenfaTemplate = req.body.templateKind === "kenfa"
       || templateMeta?.name === "肯发专用"
       || isKenfaExportTemplatePayload(template);
@@ -10563,8 +10714,16 @@ app.post("/api/orders/export/excel", async (req, res) => {
     await writeAudit("export", "order", orderNos.join(",") || "snapshot", `Excel ${orders.length} 条`);
     res.send(body);
   } catch (error) {
-    console.error("Excel export failed", error);
-    res.status(500).type("text/plain").send("Excel 导出失败");
+    console.error("Excel export failed", {
+      method: req.method,
+      path: req.originalUrl,
+      accountId: req.account?.id,
+      orderCount: Array.isArray(req.body?.orders) ? req.body.orders.length : 0,
+      title: req.body?.title,
+      message: error?.message || String(error),
+      stack: error?.stack
+    });
+    if (!res.headersSent) res.status(500).type("text/plain").send("Excel 导出失败，请稍后重试");
   }
 });
 
@@ -10623,6 +10782,7 @@ app.post("/api/orders/audit", async (req, res) => {
   });
 
   await transaction(orderNos);
+  clearOrderListLookupCache();
   res.json(await hydrateOrderRowsForApi(updated));
 });
 
@@ -10777,6 +10937,7 @@ async function writeOrderRow(item = {}, { includeNo = false } = {}) {
     INSERT INTO orders (${columns.join(", ")})
     VALUES (${placeholders.join(", ")})
   `).run(params);
+  clearOrderListLookupCache();
 }
 
 async function updateOrderRow(no, item = {}, { existing = null, includeChargedAt = false } = {}) {
@@ -10788,11 +10949,13 @@ async function updateOrderRow(no, item = {}, { existing = null, includeChargedAt
   params.no = userTextValue(no);
   if (!columns.length) return { changes: 0 };
   const assignments = columns.map((column) => `${column} = @${column}`);
-  return db.prepare(`
+  const result = await db.prepare(`
     UPDATE orders
     SET ${assignments.join(", ")}
     WHERE no = @no AND deleted_at IS NULL
   `).run(params);
+  clearOrderListLookupCache();
+  return result;
 }
 
 async function upsertDispatchPlanRow(date = "", rowsJson = "[]", creator = {}) {
@@ -10825,6 +10988,7 @@ async function upsertDispatchPlanRow(date = "", rowsJson = "[]", creator = {}) {
     VALUES (${values.join(", ")})
     ON CONFLICT(plan_date) DO UPDATE SET ${updateSets.join(", ")}
   `).run(params);
+  clearOrderListLookupCache();
 }
 
 async function updateDispatchPlanRowsJson(planDate, rowsJson = "[]") {
@@ -10836,6 +11000,7 @@ async function updateDispatchPlanRowsJson(planDate, rowsJson = "[]") {
     SET ${updateParts.join(", ")}
     WHERE plan_date = ?
   `).run(String(rowsJson || "[]"), planDate);
+  clearOrderListLookupCache();
 }
 
 async function assignOrderBusinessNumbers(item, requestedNo = "", requestedDispatchNo = "") {
@@ -10925,37 +11090,41 @@ async function resolveOrderCustomer(item) {
 }
 
 async function loadSpecialCustomerOrderLookup() {
-  if (!(await customerColumnExists("special_customer"))) {
+  return cachedOrderListLookup("special-customer-orders", async () => {
+    if (!(await customerColumnExists("special_customer"))) {
+      return {
+        ids: new Set(),
+        names: new Set(),
+        shortNames: new Set(),
+        orderNos: new Set(),
+        dispatchNos: new Set()
+      };
+    }
+    const [rows, orderRows] = await Promise.all([
+      db.prepare(`
+        SELECT id, name, short_name
+        FROM customers
+        WHERE deleted_at IS NULL
+          AND type = '客户'
+          AND COALESCE(special_customer, false) = true
+      `).all(),
+      db.prepare(`
+        SELECT orders.no, orders.dispatch_no
+        FROM orders
+        INNER JOIN customers ON customers.id = orders.customer_id
+        WHERE customers.deleted_at IS NULL
+          AND customers.type = '客户'
+          AND COALESCE(customers.special_customer, false) = true
+      `).all()
+    ]);
     return {
-      ids: new Set(),
-      names: new Set(),
-      shortNames: new Set(),
-      orderNos: new Set(),
-      dispatchNos: new Set()
+      ids: new Set(rows.map((row) => String(row.id || "").trim()).filter(Boolean)),
+      names: new Set(rows.map((row) => String(row.name || "").trim()).filter(Boolean)),
+      shortNames: new Set(rows.map((row) => String(row.short_name || "").trim()).filter(Boolean)),
+      orderNos: new Set(orderRows.map((row) => String(row.no || "").trim()).filter(Boolean)),
+      dispatchNos: new Set(orderRows.map((row) => String(row.dispatch_no || "").trim()).filter(Boolean))
     };
-  }
-  const rows = await db.prepare(`
-    SELECT id, name, short_name
-    FROM customers
-    WHERE deleted_at IS NULL
-      AND type = '客户'
-      AND COALESCE(special_customer, false) = true
-  `).all();
-  const orderRows = await db.prepare(`
-    SELECT orders.no, orders.dispatch_no
-    FROM orders
-    INNER JOIN customers ON customers.id = orders.customer_id
-    WHERE customers.deleted_at IS NULL
-      AND customers.type = '客户'
-      AND COALESCE(customers.special_customer, false) = true
-  `).all();
-  return {
-    ids: new Set(rows.map((row) => String(row.id || "").trim()).filter(Boolean)),
-    names: new Set(rows.map((row) => String(row.name || "").trim()).filter(Boolean)),
-    shortNames: new Set(rows.map((row) => String(row.short_name || "").trim()).filter(Boolean)),
-    orderNos: new Set(orderRows.map((row) => String(row.no || "").trim()).filter(Boolean)),
-    dispatchNos: new Set(orderRows.map((row) => String(row.dispatch_no || "").trim()).filter(Boolean))
-  };
+  });
 }
 
 function compactLookupValues(values = []) {
@@ -11450,6 +11619,7 @@ app.patch("/api/orders/:no/status", async (req, res) => {
     return;
   }
 
+  clearOrderListLookupCache();
   await writeAudit(status === "已审核" ? "audit" : "update_status", "order", no, `状态改为${status}`);
   res.json((await hydrateOrderRowsForApi([mapOrder(row)]))[0]);
 });
@@ -11509,6 +11679,7 @@ app.delete("/api/orders/:no", async (req, res) => {
     await removeDispatchPlanRowsLinkedToOrder(row);
   });
   await transaction();
+  clearOrderListLookupCache();
   await writeAudit("delete", "order", no, ordersToDelete.length > 1 ? `移入回收站，同组 ${ordersToDelete.length} 条订单` : "移入回收站");
   res.json({ ok: true, ...deletedOrderRefsPayload(ordersToDelete) });
 });
@@ -11536,6 +11707,7 @@ app.post("/api/orders/:no/restore", async (req, res) => {
     restoredDispatchRows.push(...await restoreDispatchPlanRowsLinkedToOrder(deletedOrder));
   });
   await transaction();
+  clearOrderListLookupCache();
   await writeAudit("restore", "order", no, ordersToRestore.length > 1 ? `从回收站恢复，同组 ${ordersToRestore.length} 条订单` : "从回收站恢复");
   const restoredRows = [];
   for (const order of ordersToRestore) {
@@ -14224,4 +14396,13 @@ listenRealtimeEvents((event) => realtimeHub?.broadcast(event));
 server.listen(port, () => {
   console.log(`Hanye API listening on http://127.0.0.1:${port}`);
   console.log(`PostgreSQL database: ${databaseInfo}`);
+  Promise.all([
+    loadSpecialCustomerOrderLookup(),
+    loadCustomerShortNameMap({ category: "运输客户" }),
+    loadCustomerSpecialCustomerMap(),
+    loadTransportCustomerFeatureMap(),
+    orderDispatchLoadInfoLookup()
+  ]).catch((error) => {
+    console.warn("Order list lookup warm-up failed:", error.message);
+  });
 });
