@@ -8376,31 +8376,44 @@ app.delete("/api/customer-contacts/:id", async (req, res) => {
 
 app.get("/api/orders", async (req, res) => {
   const { start, end } = orderListDateBounds(req.query);
+  const dateCte = start && end
+    ? `WITH dispatch_refs AS MATERIALIZED (
+      SELECT DISTINCT
+        COALESCE(NULLIF(dispatch_row->>'orderNo', ''), NULLIF(dispatch_row->>'order_no', '')) AS order_no,
+        COALESCE(NULLIF(dispatch_row->>'dispatchNo', ''), NULLIF(dispatch_row->>'dispatch_no', '')) AS dispatch_no,
+        COALESCE(NULLIF(dispatch_row->>'dispatchGroupId', ''), NULLIF(dispatch_row->>'dispatch_group_id', '')) AS dispatch_group_id
+      FROM dispatch_plans AS dp
+      CROSS JOIN LATERAL jsonb_array_elements(dp.rows_json::jsonb) AS dispatch_row
+      WHERE COALESCE(
+        NULLIF(dispatch_row->>'date', ''),
+        NULLIF(dispatch_row->>'dispatchLoadDate', ''),
+        NULLIF(dispatch_row->>'dispatch_load_date', ''),
+        dp.plan_date
+      ) >= ?
+        AND COALESCE(
+          NULLIF(dispatch_row->>'date', ''),
+          NULLIF(dispatch_row->>'dispatchLoadDate', ''),
+          NULLIF(dispatch_row->>'dispatch_load_date', ''),
+          dp.plan_date
+        ) < ?
+    )`
+    : "";
   const dateWhere = start && end
     ? `AND (
       (o.order_date >= ? AND o.order_date < ?)
       OR EXISTS (
         SELECT 1
-        FROM dispatch_plans AS dp
-        CROSS JOIN LATERAL jsonb_array_elements(dp.rows_json::jsonb) AS dispatch_row
-        WHERE dp.plan_date >= ? AND dp.plan_date < ?
-          AND (
-            NULLIF(dispatch_row->>'orderNo', '') = o.no
-            OR (
-              NULLIF(dispatch_row->>'dispatchNo', '') <> ''
-              AND NULLIF(dispatch_row->>'dispatchNo', '') = o.dispatch_no
-            )
-            OR (
-              NULLIF(dispatch_row->>'dispatchGroupId', '') <> ''
-              AND NULLIF(dispatch_row->>'dispatchGroupId', '') = o.dispatch_group_id
-            )
-          )
+        FROM dispatch_refs AS ref
+        WHERE ref.order_no = o.no
+          OR (ref.dispatch_no IS NOT NULL AND ref.dispatch_no = o.dispatch_no)
+          OR (ref.dispatch_group_id IS NOT NULL AND ref.dispatch_group_id = o.dispatch_group_id)
       )
     )`
     : "";
   const params = start && end ? [start, end, start, end] : [];
   const specialLookup = await loadSpecialCustomerOrderLookup();
   const rows = await db.prepare(`
+    ${dateCte}
     SELECT o.* FROM orders AS o
     WHERE o.deleted_at IS NULL
       ${dateWhere}
