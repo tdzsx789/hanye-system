@@ -8420,7 +8420,7 @@ app.get("/api/orders", async (req, res) => {
     ${ORDER_DEFAULT_SORT_SQL}
   `).all(...params);
   const visibleRows = await filterVisibleOrdersForAccount(rows.map(mapOrder), req.account, specialLookup);
-  res.json(await hydrateOrderRowsForApi(visibleRows));
+  res.json(await hydrateOrderRowsForApi(visibleRows, { start, end }));
 });
 
 function parseDispatchPlanRowsJson(rowsJson = "[]") {
@@ -8726,7 +8726,15 @@ function recordOrderDispatchLoadInfoCandidate(lookup = new Map(), row = {}, plan
   };
   keys.forEach((key) => {
     const existing = lookup.get(key);
-    if (isPreferredDispatchDateCandidate(candidate, existing)) lookup.set(key, candidate);
+    const candidates = Array.isArray(existing) ? existing : (existing ? [existing] : []);
+    const duplicate = candidates.some((item) =>
+      item.date === candidate.date
+      && item.loadTime === candidate.loadTime
+      && item.createdAt === candidate.createdAt
+      && item.priority === candidate.priority
+      && item.dispatchNo === candidate.dispatchNo
+    );
+    if (!duplicate) lookup.set(key, [...candidates, candidate]);
   });
 }
 
@@ -8754,17 +8762,33 @@ async function orderDispatchLoadInfoLookup() {
   });
 }
 
-async function hydrateOrderDispatchLoadInfo(orders = []) {
+async function hydrateOrderDispatchLoadInfo(orders = [], options = {}) {
   if (!orders.length) return orders;
   const lookup = await orderDispatchLoadInfoLookup();
+  const rangeStart = String(options.start || "").trim().slice(0, 10);
+  const rangeEnd = String(options.end || "").trim().slice(0, 10);
+  const hasDateRange = Boolean(rangeStart && rangeEnd);
+  const dateInRange = (value) => {
+    const date = String(value || "").trim().slice(0, 10);
+    return hasDateRange && date >= rangeStart && date < rangeEnd;
+  };
+  const candidatesForKey = (key) => {
+    const value = lookup.get(key);
+    return Array.isArray(value) ? value : (value ? [value] : []);
+  };
   return orders.map((order) => {
     const candidates = [
-      order?.no && lookup.get(`order:${order.no}`),
-      order?.dispatchNo && lookup.get(`dispatch:${order.dispatchNo}`)
-    ].filter(Boolean);
-    const matched = candidates.reduce((best, candidate) =>
+      ...(order?.no ? candidatesForKey(`order:${order.no}`) : []),
+      ...(order?.dispatchNo ? candidatesForKey(`dispatch:${order.dispatchNo}`) : [])
+    ];
+    const rangeCandidates = hasDateRange ? candidates.filter((candidate) => dateInRange(candidate.date)) : [];
+    const matched = (rangeCandidates.length ? rangeCandidates : candidates).reduce((best, candidate) =>
       isPreferredDispatchDateCandidate(candidate, best) ? candidate : best
     , null);
+    const orderDate = String(order?.date || "").trim().slice(0, 10);
+    const dispatchLoadDate = hasDateRange && !rangeCandidates.length && dateInRange(orderDate)
+      ? orderDate
+      : (matched?.date || orderDate);
     return {
       ...order,
       dispatchNo: String(order?.dispatchNo || matched?.dispatchNo || "").trim(),
@@ -8778,17 +8802,17 @@ async function hydrateOrderDispatchLoadInfo(orders = []) {
       plate: normalizePlateText(order?.plate || matched?.plate || ""),
       loading: String(order?.loading || "").trim() || String(matched?.loading || "").trim(),
       unloading: String(order?.unloading || "").trim() || String(matched?.unloading || "").trim(),
-      dispatchLoadDate: matched?.date || String(order?.date || "").trim().slice(0, 10),
+      dispatchLoadDate,
       dispatchLoadTime: matched?.loadTime || "",
       dispatchDriver: matched?.driverText || ""
     };
   });
 }
 
-async function hydrateOrderRowsForApi(orders = []) {
+async function hydrateOrderRowsForApi(orders = [], options = {}) {
   if (!orders.length) return orders;
   const [dispatchRows, feeRows, customerShortNames, specialCustomerMap, customerFeatureMap] = await Promise.all([
-    hydrateOrderDispatchLoadInfo(orders),
+    hydrateOrderDispatchLoadInfo(orders, options),
     hydrateOrderFees(orders),
     loadCustomerShortNameMap({ category: "运输客户" }),
     loadCustomerSpecialCustomerMap(),
