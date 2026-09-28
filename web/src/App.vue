@@ -7435,7 +7435,7 @@ async function removeDispatchPlanRow(index) {
   const row = dispatchPlanRows.value[index];
   if (!row) return;
   if (!canDeleteDispatchPlanRow(row)) {
-    notify(currentAccountCanDeleteAdminOnlyOrder.value
+    notify(currentAccountCanDeleteAnyStatusOrder.value
       ? "当前排车单不可删除"
       : "只有预排或已派车排车单可以删除，其他状态请使用管理员账号");
     return;
@@ -22364,8 +22364,9 @@ function sortRowsByTable(rows = [], tableId, fallbackIndexKey = "__sortIndex") {
 const NON_ADMIN_DELETABLE_ORDER_STATUSES = ["预排", "已派车"];
 const NON_ADMIN_DELETABLE_DISPATCH_STATUSES = ["预排", "已派车"];
 
-const currentAccountCanDeleteAdminOnlyOrder = computed(() =>
+const currentAccountCanDeleteAnyStatusOrder = computed(() =>
   normalizeAccountRole(currentAccount.value.role) === "管理员"
+  || String(currentAccount.value.username || "").trim().toLowerCase() === "liaomufeng"
 );
 
 const currentAccountCanManageOrderAudit = computed(() =>
@@ -22385,12 +22386,12 @@ watch(() => accountCreateForm.role, (role) => {
 });
 
 function canDeleteOrder(order = {}) {
-  if (currentAccountCanDeleteAdminOnlyOrder.value) return true;
+  if (currentAccountCanDeleteAnyStatusOrder.value) return true;
   return NON_ADMIN_DELETABLE_ORDER_STATUSES.includes(String(order.status || "").trim());
 }
 
 function canDeleteDispatchPlanRow(row = {}) {
-  if (currentAccountCanDeleteAdminOnlyOrder.value) return true;
+  if (currentAccountCanDeleteAnyStatusOrder.value) return true;
   if (!NON_ADMIN_DELETABLE_DISPATCH_STATUSES.includes(dispatchStatusValueForRow(row))) return false;
   const linkedOrder = linkedOrderForDispatchRow(row);
   return !linkedOrder || canDeleteOrder(linkedOrder);
@@ -28027,7 +28028,7 @@ async function deleteSelectedOrders() {
   }
   const locked = targets.filter((item) => !canDeleteOrder(item));
   if (locked.length) {
-    notify(currentAccountCanDeleteAdminOnlyOrder.value
+    notify(currentAccountCanDeleteAnyStatusOrder.value
       ? "当前选择的订单不可删除，请取消勾选后再操作"
       : "只有预排或已派车订单可以删除，其他状态请使用管理员账号");
     return;
@@ -28056,7 +28057,7 @@ async function deleteSelectedOrders() {
 
 async function deleteOrder(order) {
   if (!canDeleteOrder(order)) {
-    notify(currentAccountCanDeleteAdminOnlyOrder.value
+    notify(currentAccountCanDeleteAnyStatusOrder.value
       ? "当前订单不可删除"
       : "只有预排或已派车订单可以删除，其他状态请使用管理员账号");
     return;
@@ -28154,7 +28155,7 @@ async function deleteSelectedCustomerOrders() {
   if (targets.length === 0) return;
   const locked = targets.filter((item) => !canDeleteOrder(item));
   if (locked.length) {
-    notify(currentAccountCanDeleteAdminOnlyOrder.value
+    notify(currentAccountCanDeleteAnyStatusOrder.value
       ? "当前选择的订单不可删除，请先取消勾选"
       : "只有预排或已派车订单可以删除，其他状态请使用管理员账号");
     return;
