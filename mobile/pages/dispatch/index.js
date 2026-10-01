@@ -147,6 +147,7 @@ function displayNameOrEmptyFromDirectory(customers, id, name, type) {
 function orderStatusActionDisabled(order, targetStatus) {
   const status = valueText(order && order.status);
   if (status === "已签收") return true;
+  if (status === "已审核" && targetStatus === "异常滞留") return true;
   if (targetStatus === "异常滞留" && (status === "异常滞留" || status === "费用待确认")) return true;
   return false;
 }
@@ -202,6 +203,18 @@ function isDisplayOrder(order, date) {
   return valueText(order.date).slice(0, 10) === date;
 }
 
+function orderBelongsToDate(order, date, rows) {
+  if (!isDisplayOrder(order, date)) {
+    const orderNo = valueText(order && order.no);
+    const dispatchNo = valueText(order && order.dispatchNo);
+    return (rows || []).some((row) =>
+      (orderNo && valueText(row.orderNo) === orderNo)
+      || (dispatchNo && valueText(row.dispatchNo) === dispatchNo)
+    );
+  }
+  return true;
+}
+
 function accountCanDeleteAnyStatus(account) {
   const role = valueText(account && account.role);
   const username = valueText(account && account.username).toLowerCase();
@@ -221,6 +234,7 @@ function canDeleteDispatchRow(account, row, linkedOrder) {
 
 Page({
   data: {
+    account: null,
     accountLabel: "",
     activeStatus: "all",
     activeModule: "dispatch",
@@ -318,6 +332,7 @@ Page({
       return;
     }
     this.setData({
+      account,
       accountLabel: account.displayName || account.username || account.role || ""
     });
     this.attachRealtime();
@@ -407,7 +422,10 @@ Page({
     try {
       const [plan, orders, vehicles, drivers, expiryReminders, customers] = await Promise.all([
         api.getDispatchPlan(date),
-        api.listOrders(),
+        api.listOrders({
+          start: date,
+          end: addDaysToInputDate(date, 1)
+        }),
         api.listVehicles(),
         api.listDrivers(),
         api.listExpiryReminders().catch(() => null),
@@ -475,7 +493,9 @@ Page({
       ? Array.from(new Set(serverWarnings))
       : buildDispatchWarnings(rawRows, this.data.orders, this.data.vehicles, this.data.drivers, date);
     const emptyText = emptyTextForStatus(activeStatus);
-    const currentDateOrders = (this.data.orders || []).filter((order) => isDisplayOrder(order, date));
+    const currentDateOrders = (this.data.orders || []).filter((order) =>
+      orderBelongsToDate(order, date, rawRows)
+    );
     const orderDisplayRows = currentDateOrders
       .map((order) => {
         const dispatchRow = rawRows.find((row) =>
@@ -490,7 +510,7 @@ Page({
           customerText: displayNameFromDirectory(this.data.customers, order.customerId, order.customer, "客户"),
           supplierText,
           driverText,
-          highlightTimeText: valueText(order.loadTime || order.loadingTime) || "未定",
+          highlightTimeText: valueText(order.loadTime || order.loadingTime || (dispatchRow && dispatchRow.loadTime)) || "未定",
           highlightPlateText: valueText(order.plate) || "-",
           supplierHighlightText: source === "外派车辆" ? supplierText : "",
           routeText: routeTextForRecord(order),
