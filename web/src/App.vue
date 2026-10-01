@@ -10681,6 +10681,13 @@ function setPeriodFilterMonth(scope, month) {
 
 function setPeriodFilterDay(scope, day) {
   setPeriodFilterValue(scope, `day:${normalizePeriodRangeDate(day)}`);
+  if (scope === "orders" && activeModule.value === "orders") {
+    orderPage.value = 1;
+    loadOrdersForCurrentFilter();
+  }
+  if (scope === "dispatchRange" && activeModule.value === "dispatchBoard") {
+    loadDispatchPlansForCurrentFilter();
+  }
 }
 
 function customsBusinessFilterValue() {
@@ -33892,11 +33899,20 @@ function orderDetailDriverText(order = {}) {
     .flatMap((value) => String(value || "").split(/[\/／|｜、]+/))
     .map((value) => value.trim())
     .filter(Boolean);
+  const singleDriverName = [
+    source.driver,
+    source.hkDriver,
+    source.mainlandDriver,
+    source.dispatchDriver
+  ]
+    .flatMap((value) => String(value || "").split(/[\/／|｜、]+/))
+    .map((value) => value.trim())
+    .find(Boolean);
   const rawNames = mode === "双司机" && roleNames.length
     ? roleNames
     : isDomesticTransferMode(mode)
       ? [source.hkDriver, source.driver, source.mainlandDriver]
-      : [source.driver, source.hkDriver, source.mainlandDriver, source.dispatchDriver];
+      : [singleDriverName];
   const names = rawNames
     .flatMap((value) => String(value || "").split(/[\/／|｜、]+/))
     .map((value) => String(value || "").trim())

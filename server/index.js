@@ -2921,18 +2921,68 @@ function excelColumnLetter(columnNumber = 1) {
   return text;
 }
 
-function exportSettlementTotalExcelFormula(summary, columns = [], totalRowNumber = 1) {
+function exportSettlementTotalExcelFormula(summary, columns = [], detailStartRow = 0, detailEndRow = 0, options = {}) {
   if (!summary?.rate) return "";
   const hkdIndex = exportPreferredColumnIndex(columns, ["__hkdTotal", "receivableHKD"]);
   const rmbIndex = exportPreferredColumnIndex(columns, ["__rmbTotal", "receivableRMB"]);
-  if (hkdIndex < 0 || rmbIndex < 0) return "";
-  const hkdCell = `${excelColumnLetter(hkdIndex + 1)}${totalRowNumber}`;
-  const rmbCell = `${excelColumnLetter(rmbIndex + 1)}${totalRowNumber}`;
+  if (hkdIndex < 0 || rmbIndex < 0 || !detailStartRow || !detailEndRow) return "";
+  const hkdSum = exportExcelAmountRangeFormula(columns, hkdIndex, detailStartRow, detailEndRow, options);
+  const rmbSum = exportExcelAmountRangeFormula(columns, rmbIndex, detailStartRow, detailEndRow, options);
+  if (!hkdSum || !rmbSum) return "";
   const rate = Number(summary.rate || 0);
   if (!Number.isFinite(rate) || rate <= 0) return "";
   return summary.currency === "港币"
-    ? `${hkdCell}+${rmbCell}/${rate}`
-    : `${rmbCell}+${hkdCell}*${rate}`;
+    ? `(${hkdSum})+(${rmbSum})/${rate}`
+    : `(${rmbSum})+(${hkdSum})*${rate}`;
+}
+
+function exportExcelAmountRangeFormula(columns = [], columnIndex = -1, detailStartRow = 0, detailEndRow = 0, options = {}) {
+  if (columnIndex < 0 || !detailStartRow || !detailEndRow) return "";
+  const amountColumn = columns[columnIndex];
+  if (!amountColumn || !isExportAmountColumn(amountColumn) || exportLocationFeeType(amountColumn)) return "";
+  if (isExportFeeItemColumn(amountColumn) && Array.isArray(options.orders)
+    && !options.orders.every((order) => exportExcelFeeCellCanBeNumeric(order, amountColumn, options.valueOptions || {}))) {
+    return "";
+  }
+  const amountRange = `${excelColumnLetter(columnIndex + 1)}${detailStartRow}:${excelColumnLetter(columnIndex + 1)}${detailEndRow}`;
+  if (!options.excludeChargedFromTotals) return `SUM(${amountRange})`;
+  const chargeNoteIndex = columns.findIndex((column) => textValue(column?.key) === ORDER_EXPORT_CHARGE_NOTE_COLUMN.key);
+  if (chargeNoteIndex < 0) return `SUM(${amountRange})`;
+  const chargeNoteRange = `${excelColumnLetter(chargeNoteIndex + 1)}${detailStartRow}:${excelColumnLetter(chargeNoteIndex + 1)}${detailEndRow}`;
+  return `SUMIF(${chargeNoteRange},"<>*已收费*",${amountRange})`;
+}
+
+function exportExcelFeeCellCanBeNumeric(order, column, options = {}) {
+  if (!isExportFeeItemColumn(column) || exportLocationFeeType(column)) return false;
+  const amount = Number(exportOrderColumnAmount(order, column) || 0);
+  const display = textValue(exportOrderColumnValue(order, column, 0, options)).replaceAll(",", "").trim();
+  if (!display) return amount === 0;
+  const displayNumber = Number(display);
+  return Number.isFinite(displayNumber) && displayNumber === amount;
+}
+
+function exportExcelOrderCurrencyTotalFormula(order, columns = [], rowNumber = 0, currency = "", options = {}) {
+  const normalizedCurrency = normalizeFeeCurrency(currency);
+  const feeColumns = columns.filter((column) =>
+    isExportFeeItemColumn(column)
+    && !exportLocationFeeType(column)
+    && normalizeFeeCurrency(exportFeeItemCurrencyForColumn(column)) === normalizedCurrency
+  );
+  if (!feeColumns.length) return "";
+  const orderFees = (Array.isArray(order?.fees) ? order.fees : [])
+    .filter(feeHasRecordedValue)
+    .filter((fee) => normalizeFeeCurrency(fee.currency) === normalizedCurrency);
+  if (!orderFees.length) return "";
+  const matchedColumns = feeColumns.filter((column) =>
+    feeRowsForColumn(order, column).some((fee) => orderFees.includes(fee))
+  );
+  if (matchedColumns.length === 0 || matchedColumns.length < orderFees.length) return "";
+  if (!matchedColumns.every((column) => exportExcelFeeCellCanBeNumeric(order, column, options))) return "";
+  const references = matchedColumns.map((column) => {
+    const columnIndex = columns.indexOf(column);
+    return `${excelColumnLetter(columnIndex + 1)}${rowNumber}`;
+  });
+  return `SUM(${references.join(",")})`;
 }
 
 function applyExcelTemplateLogo(workbook, worksheet, template, headerBlockRows, columnWidths = []) {
@@ -3420,6 +3470,7 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "汉业管理系统";
   workbook.created = new Date();
+  workbook.calcProperties.fullCalcOnLoad = true;
   const worksheet = workbook.addWorksheet("订单导出");
   worksheet.pageSetup = {
     paperSize: 9,
@@ -3549,8 +3600,11 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
 
   const sortedOrders = tableData.sortedOrders;
   const totalOrders = tableData.totalOrders || sortedOrders;
-  const totalRowOffset = tableData.rows.findIndex((row) => row.kind === "total");
-  const totalRowNumber = totalRowOffset >= 0 ? tableStartRow + 1 + totalRowOffset : 0;
+  const valueOptions = {
+    includeAdvanceAddress: isCustomerStatement
+  };
+  const detailStartRow = tableStartRow + 1;
+  const detailEndRow = tableStartRow + sortedOrders.length;
   rows.forEach((rowValues, rowIndex) => {
     const rowMeta = tableData.rows[rowIndex] || {};
     const isTotalRow = rowMeta.kind === "total";
@@ -3566,21 +3620,53 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
       const isChargeNoteColumn = textValue(column.key) === ORDER_EXPORT_CHARGE_NOTE_COLUMN.key;
       const isChargeNoteCell = isChargeNoteColumn && !isSummaryRow && sourceOrder && orderIsCharged(sourceOrder);
       if (isSettlementTotalRow && columnNumber - 1 === rowMeta.targetIndex) {
-        const formula = exportSettlementTotalExcelFormula(rowMeta.summary, columns, totalRowNumber);
+        const formula = exportSettlementTotalExcelFormula(
+          rowMeta.summary,
+          columns,
+          detailStartRow,
+          detailEndRow,
+          {
+            excludeChargedFromTotals: isCustomerStatement,
+            orders: totalOrders,
+            valueOptions
+          }
+        );
         cell.value = formula
           ? { formula, result: Number(rowMeta.summary?.amount || 0) }
           : Number(rowMeta.summary?.amount || 0);
         cell.numFmt = "#,##0.00";
-      } else if (!isSettlementTotalRow && isExportAmountColumn(column) && (isTotalRow || (!exportLocationFeeType(column) && !isExportFeeItemColumn(column)))) {
+      } else if (isTotalRow && isExportAmountColumn(column)) {
         const amount = isTotalRow
           ? exportTotalAmountForColumn(totalOrders, column, exchange, { rawCurrencyTotals: includeSettlementTotal })
           : exportOrderColumnAmount(sourceOrder, column);
-        if (isTotalRow || Number(amount || 0) !== 0) {
-          cell.value = Number(amount || 0);
+        const formula = exportExcelAmountRangeFormula(
+          columns,
+          columnNumber - 1,
+          detailStartRow,
+          detailEndRow,
+          {
+            excludeChargedFromTotals: isCustomerStatement,
+            orders: totalOrders,
+            valueOptions
+          }
+        );
+        cell.value = formula
+          ? { formula, result: Number(amount || 0) }
+          : Number(amount || 0);
+        cell.numFmt = "#,##0";
+      } else if (sourceOrder && !isSummaryRow && (textValue(column.key) === "__hkdTotal" || textValue(column.key) === "__rmbTotal")) {
+        const currency = textValue(column.key) === "__hkdTotal" ? "HKD" : "RMB";
+        const formula = exportExcelOrderCurrencyTotalFormula(sourceOrder, columns, row.number, currency, valueOptions);
+        if (formula) {
+          const amount = exportOrderColumnAmount(sourceOrder, column);
+          cell.value = { formula, result: Number(amount || 0) };
           cell.numFmt = "#,##0";
-        } else {
-          cell.value = "";
         }
+      } else if (sourceOrder && !isSummaryRow && isExportAmountColumn(column) && !exportLocationFeeType(column)
+        && (!isExportFeeItemColumn(column) || exportExcelFeeCellCanBeNumeric(sourceOrder, column, valueOptions))) {
+        const amount = exportOrderColumnAmount(sourceOrder, column);
+        cell.value = Number(amount || 0) !== 0 ? Number(amount || 0) : "";
+        cell.numFmt = "#,##0";
       }
       cell.font = {
         name: "Microsoft YaHei",
@@ -3883,6 +3969,7 @@ function addKenfaDailySheet(workbook, date, dayOrders, index, exchange = null) {
 
   const firstDetailRow = 12;
   const feeRows = kenfaDailyFeeRows(dayOrders, exchange).slice(0, 12);
+  const dailyTotal = feeRows.reduce((sum, fee) => sum + Number(fee.amount || 0), 0);
   feeRows.forEach((fee, rowIndex) => {
     const rowNumber = firstDetailRow + rowIndex;
     kenfaBlankMergedCell(worksheet, `A${rowNumber}:B${rowNumber}`, { value: fee.name, size: 11, align: "center" });
@@ -3893,7 +3980,10 @@ function addKenfaDailySheet(workbook, date, dayOrders, index, exchange = null) {
 
   const totalRow = firstDetailRow + Math.max(feeRows.length, 1);
   kenfaBlankMergedCell(worksheet, `A${totalRow}:J${totalRow}`, { value: "", size: 11 });
-  kenfaSetCell(worksheet.getCell(`K${totalRow}`), { formula: `SUM(K${firstDetailRow}:K${totalRow - 1})` }, { size: 11, numFmt: "#,##0.00" });
+  kenfaSetCell(worksheet.getCell(`K${totalRow}`), {
+    formula: `SUM(K${firstDetailRow}:K${totalRow - 1})`,
+    result: dailyTotal
+  }, { size: 11, numFmt: "#,##0.00" });
   kenfaBlankMergedCell(worksheet, `I${totalRow + 1}:K${totalRow + 1}`, { value: "制表：  廖木凤", bold: true, align: "center", size: 11, border: false });
   kenfaBlankMergedCell(worksheet, `A${totalRow + 2}:C${totalRow + 2}`, { value: "備註: ", bold: true, size: 11, border: false });
   kenfaBlankMergedCell(worksheet, `A${totalRow + 3}:K${totalRow + 3}`, { value: "INVOICE如有問題,煩請於三日內與本公司經辦人聯系更改.", bold: true, size: 11, border: false });
@@ -3904,7 +3994,8 @@ function addKenfaDailySheet(workbook, date, dayOrders, index, exchange = null) {
     date,
     departure: kenfaPortOfDeparture(first),
     destination: kenfaDestination(first),
-    totalCell: `'${worksheet.name}'!K${totalRow}`
+    totalCell: `'${worksheet.name}'!K${totalRow}`,
+    total: dailyTotal
   };
 }
 
@@ -3913,6 +4004,7 @@ async function renderKenfaStatementXlsxBuffer(orders, title = "客户对账单",
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "汉业管理系统";
   workbook.created = new Date();
+  workbook.calcProperties.fullCalcOnLoad = true;
   const groups = groupedKenfaOrders(orders);
   const dailySummaries = groups.map(([date, dayOrders], index) => addKenfaDailySheet(workbook, date, dayOrders, index, exchange));
   const summary = workbook.addWorksheet("总表");
@@ -3972,17 +4064,27 @@ async function renderKenfaStatementXlsxBuffer(orders, title = "客户对账单",
     kenfaSetCell(summary.getCell(rowNumber, 4), item.destination, { bold: true, align: "center", size: 11 });
     kenfaMerge(summary, `G${rowNumber}:H${rowNumber}`);
     kenfaSetCell(summary.getCell(rowNumber, 7), item.invoiceNo, { bold: true, align: "center", size: 11 });
-    kenfaSetCell(summary.getCell(rowNumber, 9), { formula: item.totalCell }, { align: "right", numFmt: "#,##0.00", size: 11, color: index === 10 ? "#ff0000" : "#000000" });
+    kenfaSetCell(summary.getCell(rowNumber, 9), {
+      formula: item.totalCell,
+      result: Number(item.total || 0)
+    }, { align: "right", numFmt: "#,##0.00", size: 11, color: index === 10 ? "#ff0000" : "#000000" });
   });
   const totalRow = Math.max(headerRow + 1 + dailySummaries.length, 24);
   kenfaMerge(summary, `A${totalRow}:H${totalRow}`);
   kenfaSetCell(summary.getCell(totalRow, 1), "", { bold: true, align: "right" });
-  kenfaSetCell(summary.getCell(totalRow, 9), { formula: `SUM(I${headerRow + 1}:I${totalRow - 1})` }, { bold: true, align: "right", numFmt: "#,##0.00", size: 12 });
+  const summaryTotal = dailySummaries.reduce((sum, item) => sum + Number(item.total || 0), 0);
+  kenfaSetCell(summary.getCell(totalRow, 9), {
+    formula: `SUM(I${headerRow + 1}:I${totalRow - 1})`,
+    result: summaryTotal
+  }, { bold: true, align: "right", numFmt: "#,##0.00", size: 12 });
   const vatRow = totalRow + 1;
   kenfaMerge(summary, `A${vatRow}:H${vatRow}`);
   kenfaMerge(summary, `G${vatRow}:H${vatRow}`);
   kenfaSetCell(summary.getCell(vatRow, 7), "含6%增值税价格", { align: "center", size: 11, border: false });
-  kenfaSetCell(summary.getCell(vatRow, 9), { formula: `I${totalRow}*1.06` }, { bold: true, align: "right", numFmt: "#,##0.00", size: 12, border: false });
+  kenfaSetCell(summary.getCell(vatRow, 9), {
+    formula: `I${totalRow}*1.06`,
+    result: summaryTotal * 1.06
+  }, { bold: true, align: "right", numFmt: "#,##0.00", size: 12, border: false });
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 

@@ -114,7 +114,7 @@
     <view wx:elif="{{activeModule === 'orders'}}" class="list-area">
       <view wx:if="{{!orderDisplayRows.length}}" class="empty-box">{{orderEmptyText}}</view>
       <view wx:for="{{orderDisplayRows}}" wx:key="no" class="order-card {{item.opening ? 'opening' : ''}}">
-        <view class="card-head" data-no="{{item.no}}" bindtap="toggleOrderExpand">
+        <view class="card-head">
           <view class="card-head-main">
             <view class="card-title-wrap">
               <text class="dispatch-no">{{item.no || '未编号'}}</text>
@@ -125,9 +125,9 @@
         </view>
         <view class="customer-line">{{item.customerText}}</view>
         <view class="highlight-line">
-          <text class="highlight-pill time">时间 {{item.highlightTimeText || '-'}}</text>
-          <text class="highlight-pill plate">车牌 {{item.highlightPlateText || item.plate || '-'}}</text>
-          <text wx:if="{{item.supplierHighlightText}}" class="highlight-pill supplier">外派 {{item.supplierHighlightText}}</text>
+          <text class="highlight-pill time">{{item.highlightTimeText || '-'}}</text>
+          <text class="highlight-pill plate">{{item.highlightPlateText || item.plate || '-'}}</text>
+          <text wx:if="{{item.supplierHighlightText}}" class="highlight-pill supplier">外派 {{item.supplierHighlightText}}{{item.driverText && item.driverText !== '-' ? ' ' + item.driverText : ''}}</text>
         </view>
         <view class="meta-line">
           <text>{{item.date || dispatchDate}}</text>
@@ -138,16 +138,8 @@
         </view>
         <view class="route-line">{{item.routeText}}</view>
         <view class="tag-row">
-          <text class="source-tag {{item.vehicleSource === '外派车辆' ? 'source-outsourced' : item.vehicleSource === '汉业物流' ? 'source-own' : 'source-empty'}}">{{item.vehicleSource || '-'}}</text>
-          <text class="driver-tag">司机 {{item.driverText}}</text>
+          <text wx:if="{{!item.supplierHighlightText && item.driverText !== '-'}}" class="driver-tag">{{item.driverText}}</text>
           <text class="order-status-tag">应收 {{item.amountText}}</text>
-        </view>
-        <view wx:if="{{item.expanded}}" class="expanded-area">
-          <view class="detail-line"><text>业务类型</text><text>{{item.businessType || '-'}}</text></view>
-          <view class="detail-line"><text>运输模式</text><text>{{item.transportMode || '-'}}</text></view>
-          <view class="detail-line"><text>装货地</text><text class="detail-value multiline">{{item.loading || '-'}}</text></view>
-          <view class="detail-line"><text>卸货地</text><text class="detail-value multiline">{{item.unloading || '-'}}</text></view>
-          <view class="detail-line"><text>备注</text><text>{{item.remark || '-'}}</text></view>
         </view>
         <view class="card-actions order-actions">
           <view class="card-action-btn exception {{saving || formOpening || item.exceptionDisabled ? 'disabled' : ''}}" data-no="{{item.no}}" data-status="异常滞留" catchtap="updateOrderStatusFromCard">异常滞留</view>

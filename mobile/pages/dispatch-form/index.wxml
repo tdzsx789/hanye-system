@@ -181,7 +181,7 @@
           <view class="picker-box">{{form.transportMode || '请选择运输模式'}}</view>
         </picker>
       </view>
-      <view wx:elif="{{form.transportMode === '双司机'}}" class="two-col">
+      <view wx:if="{{form.transportMode === '双司机'}}" class="two-col">
         <view class="field-row">
           <text class="field-label">香港司机</text>
           <picker wx:if="{{hkDriverOptions.length}}" range="{{hkDriverOptions}}" data-field="hkDriver" data-options-key="hkDriverOptions" bindchange="onPickerChange">

@@ -219,7 +219,6 @@ Page({
     currentOrderLabel: "当前订单 0",
     orderDisplayRows: [],
     orderEmptyText: "当前日期暂无订单",
-    orderExpandedNos: [],
     orders: [],
     planBaseRows: [],
     planUpdatedAt: "",
@@ -431,7 +430,6 @@ Page({
     const date = this.data.dispatchDate;
     const rawRows = this.data.rawRows || [];
     const selectedIds = new Set(this.data.selectedDispatchIds || []);
-    const orderExpandedNos = this.data.orderExpandedNos || [];
     const summaryCards = dispatchSummaryCards(rawRows).map((card) => Object.assign({}, card, {
       active: this.data.activeStatus === card.key
     }));
@@ -490,7 +488,6 @@ Page({
           statusClass: orderStatusClass(status),
           signedDisabled: orderStatusActionDisabled(order, "已签收"),
           exceptionDisabled: orderStatusActionDisabled(order, "异常滞留"),
-          expanded: orderExpandedNos.indexOf(order.no) >= 0,
           dispatchRowId: dispatchRow && dispatchRow.id ? dispatchRow.id : "",
           opening: formOpeningKind === "order" && formOpeningId === String(order.no || "")
         });
@@ -550,7 +547,6 @@ Page({
       activeStatus: "all",
       dispatchDate: date,
       expandedIds: [],
-      orderExpandedNos: [],
       selectedDispatchIds: [],
       showWarningsPanel: false
     });
@@ -625,20 +621,6 @@ Page({
       expandedIds.push(id);
     }
     this.setData({ expandedIds });
-    this.refreshDerivedData();
-  },
-
-  toggleOrderExpand(event) {
-    const no = event.currentTarget.dataset.no;
-    if (!no) return;
-    const orderExpandedNos = this.data.orderExpandedNos.slice();
-    const index = orderExpandedNos.indexOf(no);
-    if (index >= 0) {
-      orderExpandedNos.splice(index, 1);
-    } else {
-      orderExpandedNos.push(no);
-    }
-    this.setData({ orderExpandedNos });
     this.refreshDerivedData();
   },
 
