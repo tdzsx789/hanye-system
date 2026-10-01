@@ -11,6 +11,7 @@ const {
   dispatchStatusOptionsForRow,
   dispatchStatusValueForRow,
   dispatchSummaryCards,
+  driverTextForOrder,
   hasDispatchAccess,
   presentDispatchRows,
   normalizePortText,
@@ -199,6 +200,23 @@ function isDisplayOrder(order, date) {
   if (!order || order.deletedAt) return false;
   if (order.businessType === "报关") return false;
   return valueText(order.date).slice(0, 10) === date;
+}
+
+function accountCanDeleteAnyStatus(account) {
+  const role = valueText(account && account.role);
+  const username = valueText(account && account.username).toLowerCase();
+  return role === "管理员" || username === "liaomufeng";
+}
+
+function canDeleteOrder(account, order) {
+  if (accountCanDeleteAnyStatus(account)) return true;
+  return ["预排", "已派车"].indexOf(valueText(order && order.status)) >= 0;
+}
+
+function canDeleteDispatchRow(account, row, linkedOrder) {
+  if (accountCanDeleteAnyStatus(account)) return true;
+  if (["预排", "已派车"].indexOf(dispatchStatusValueForRow(row)) < 0) return false;
+  return !linkedOrder || canDeleteOrder(account, linkedOrder);
 }
 
 Page({
@@ -464,14 +482,7 @@ Page({
           (order.no && valueText(row.orderNo) === valueText(order.no))
           || (order.dispatchNo && valueText(row.dispatchNo) === valueText(order.dispatchNo))
         );
-        const driverText = uniqueTextList([
-          order.driver,
-          order.hkDriver,
-          order.mainlandDriver,
-          dispatchRow && dispatchRow.driver,
-          dispatchRow && dispatchRow.hkDriver,
-          dispatchRow && dispatchRow.mainlandDriver
-        ]).join(" / ") || "-";
+        const driverText = driverTextForOrder(order, dispatchRow);
         const status = valueText(order.status) || "-";
         const source = valueText(order.vehicleSource);
         const supplierText = displayNameOrEmptyFromDirectory(this.data.customers, "", order.supplier, "供应商");
@@ -751,7 +762,8 @@ Page({
     const no = event.currentTarget.dataset.no;
     const targetStatus = event.currentTarget.dataset.status;
     const order = this.orderByNo(no);
-    if (!order || orderStatusActionDisabled(order, targetStatus)) return;
+      if (!order || orderStatusActionDisabled(order, targetStatus)) return;
+      if (valueText(order.status) === "已审核" && targetStatus === "异常滞留") return;
     const orderStatus = targetStatus === "异常滞留" ? "费用待确认" : targetStatus;
     if (["已签收", "费用待确认"].indexOf(orderStatus) < 0) return;
     this.setData({ saving: true });
@@ -995,6 +1007,10 @@ Page({
     const row = this.rowById(id);
     if (!row) return;
     const linkedOrder = this.linkedOrderForRow(row);
+    if (!canDeleteDispatchRow(this.data.account, row, linkedOrder)) {
+      wx.showToast({ title: "只有预排或已派车排车单可以删除", icon: "none" });
+      return;
+    }
     wx.showModal({
       title: "删除排车单",
       content: linkedOrder
@@ -1037,8 +1053,15 @@ Page({
             wx.showToast({ title: "排车单及关联订单已删除", icon: "none" });
             return;
           }
+          await api.deleteDispatchPlanRows(this.data.dispatchDate, [{
+            id: row.id,
+            dispatchNo: row.dispatchNo,
+            orderNo: row.orderNo
+          }]);
           const rows = this.data.rawRows.filter((item) => item.id !== id);
-          await this.saveRows(rows, { sort: false, toast: "排车单已移除" });
+          this.setData({ rawRows: rows, planBaseRows: rows.map((item) => sanitizeDispatchRow(item)) });
+          this.refreshDerivedData();
+          wx.showToast({ title: "排车单已移除", icon: "none" });
         } catch (error) {
           wx.showToast({ title: error.message || "删除失败", icon: "none" });
         }
@@ -1057,7 +1080,11 @@ Page({
     ];
     if (index > 0) actions.push({ key: "up", label: "上移" });
     if (index >= 0 && index < rows.length - 1) actions.push({ key: "down", label: "下移" });
-    actions.push({ key: "delete", label: "删除" });
+    const row = this.rowById(id);
+    const linkedOrder = this.linkedOrderForRow(row);
+    if (row && canDeleteDispatchRow(this.data.account, row, linkedOrder)) {
+      actions.push({ key: "delete", label: "删除" });
+    }
     wx.showActionSheet({
       itemList: actions.map((action) => action.label),
       success: (result) => {

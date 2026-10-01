@@ -36,8 +36,12 @@ function deleteCustomerContact(contactId) {
   });
 }
 
-function listOrders() {
-  return requestList("/orders");
+function listOrders(options) {
+  const source = options || {};
+  const params = [];
+  if (source.start) params.push(`start=${encodeURIComponent(source.start)}`);
+  if (source.end) params.push(`end=${encodeURIComponent(source.end)}`);
+  return requestList(`/orders${params.length ? `?${params.join("&")}` : ""}`);
 }
 
 function createOrder(payload) {
@@ -96,6 +100,14 @@ function saveDispatchPlan(date, rows, options) {
   });
 }
 
+function deleteDispatchPlanRows(date, refs) {
+  const rows = Array.isArray(refs) ? refs : [refs];
+  return request(`/dispatch-plans/${encodeURIComponent(date)}/rows`, {
+    method: "DELETE",
+    data: { refs: rows }
+  });
+}
+
 function listDispatchPlans(options) {
   const source = options || {};
   const params = [];
@@ -121,6 +133,7 @@ module.exports = {
   listVehicles,
   login,
   deleteCustomerContact,
+  deleteDispatchPlanRows,
   saveDispatchPlan,
   updateOrder,
   updateCustomerContact,

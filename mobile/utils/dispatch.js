@@ -639,15 +639,27 @@ function dispatchDirectionText(value) {
 
 function driverDisplayText(row) {
   const order = row && row.order ? row.order : {};
-  const names = uniqueTextList([
-    row && row.driver,
-    row && row.hkDriver,
-    row && row.mainlandDriver,
-    order.driver,
-    order.hkDriver,
-    order.mainlandDriver
-  ]);
+  const mode = normalizeTransportMode(order.transportMode || row.transportMode || "");
+  const splitNames = (value) => String(value || "")
+    .split(/[\/／|｜、]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const roleNames = [
+    order.hkDriver || row.hkDriver,
+    order.mainlandDriver || row.mainlandDriver
+  ].flatMap(splitNames);
+  const names = mode === "双司机" && roleNames.length
+    ? uniqueTextList(roleNames)
+    : uniqueTextList([
+      splitNames(order.driver || row.driver)[0],
+      splitNames(order.hkDriver || row.hkDriver)[0],
+      splitNames(order.mainlandDriver || row.mainlandDriver)[0]
+    ]);
   return names.join(" / ") || "-";
+}
+
+function driverTextForOrder(order, dispatchRow) {
+  return driverDisplayText(Object.assign({}, dispatchRow || {}, { order: order || {} }));
 }
 
 function textMatchesRow(row, keyword) {
@@ -1085,6 +1097,7 @@ module.exports = {
   dispatchStatusValueForRow,
   dispatchSummaryCards,
   dispatchVehicleSourceText,
+  driverTextForOrder,
   formFromDispatchRow,
   generateDispatchNo,
   hasDispatchAccess,
