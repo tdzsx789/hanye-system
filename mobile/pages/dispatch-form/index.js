@@ -1545,11 +1545,26 @@ Page({
         baseRows: targetPlan.rows.map(sanitizeDispatchRow),
         updatedAt: targetPlan.updatedAt
       });
-      const originPlan = await this.loadPlanRows(originDate);
-      await api.saveDispatchPlan(originDate, originPlan.rows.filter((item) => item.id !== cleanRow.id).map(sanitizeDispatchRow), {
-        baseRows: originPlan.rows.map(sanitizeDispatchRow),
-        updatedAt: originPlan.updatedAt
-      });
+      try {
+        const originPlan = await this.loadPlanRows(originDate);
+        await api.saveDispatchPlan(originDate, originPlan.rows.filter((item) => item.id !== cleanRow.id).map(sanitizeDispatchRow), {
+          baseRows: originPlan.rows.map(sanitizeDispatchRow),
+          updatedAt: originPlan.updatedAt
+        });
+      } catch (error) {
+        const latestTargetPlan = await this.loadPlanRows(targetDate).catch(() => null);
+        if (latestTargetPlan) {
+          await api.saveDispatchPlan(
+            targetDate,
+            latestTargetPlan.rows.filter((item) => item.id !== cleanRow.id).map(sanitizeDispatchRow),
+            {
+              baseRows: latestTargetPlan.rows.map(sanitizeDispatchRow),
+              updatedAt: latestTargetPlan.updatedAt
+            }
+          ).catch(() => {});
+        }
+        throw error;
+      }
       return;
     }
     const plan = await this.loadPlanRows(targetDate);
@@ -1596,6 +1611,7 @@ Page({
       }
     }
     this.setData({ saving: true });
+    let createdOrderNo = "";
     try {
       const targetRows = await this.loadPlanRows(form.date);
       form.customerId = customer.id;
@@ -1615,6 +1631,7 @@ Page({
       const order = shouldCreateOrder
         ? await api.createOrder(payload)
         : await api.updateOrder(form.orderNo, payload);
+      if (shouldCreateOrder) createdOrderNo = String(order.no || "").trim();
       const dispatchNo = order.dispatchNo || form.dispatchNo || generateDispatchNo(form.date, targetRows);
       const nextForm = Object.assign({}, form, {
         dispatchNo,
@@ -1640,6 +1657,9 @@ Page({
         wx.navigateBack({ delta: 1 });
       }, 500);
     } catch (error) {
+      if (createdOrderNo) {
+        await api.deleteOrder(createdOrderNo).catch(() => {});
+      }
       wx.showToast({ title: error.message || (isOrderEditMode(this.data.mode) ? "保存订单失败" : "保存排车单失败"), icon: "none" });
     } finally {
       this.setData({ saving: false });

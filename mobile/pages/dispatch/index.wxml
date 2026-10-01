@@ -74,9 +74,9 @@
         </view>
         <view class="customer-line">{{item.customerText}}</view>
         <view class="highlight-line">
-          <text class="highlight-pill time">时间 {{item.highlightTimeText || item.timeText}}</text>
-          <text class="highlight-pill plate">车牌 {{item.highlightPlateText || item.plate || '-'}}</text>
-          <text wx:if="{{item.supplierHighlightText}}" class="highlight-pill supplier">外派 {{item.supplierHighlightText}}</text>
+          <text class="highlight-pill time">{{item.highlightTimeText || item.timeText}}</text>
+          <text class="highlight-pill plate">{{item.highlightPlateText || item.plate || '-'}}</text>
+          <text wx:if="{{item.supplierHighlightText}}" class="highlight-pill supplier">外派 {{item.supplierHighlightText}}{{item.driverText && item.driverText !== '-' ? ' ' + item.driverText : ''}}</text>
         </view>
         <view class="meta-line">
           <text>{{item.dateText || dispatchDate}}</text>
@@ -87,9 +87,7 @@
         </view>
         <view class="route-line">{{item.routeText}}</view>
         <view class="tag-row">
-          <text wx:if="{{item.businessTypeText}}" class="business-tag">{{item.businessTypeText}}</text>
-          <text class="source-tag {{item.sourceClass}}">{{item.sourceText}}</text>
-          <text class="driver-tag">司机 {{item.driverText}}</text>
+          <text wx:if="{{!item.supplierHighlightText && item.driverText !== '-'}}" class="driver-tag">{{item.driverText}}</text>
           <text wx:if="{{item.creatorText}}" class="creator-tag">创建者 {{item.creatorText}}</text>
           <text wx:if="{{item.orderStatusText}}" class="order-status-tag">订单 {{item.orderStatusText}}</text>
         </view>
