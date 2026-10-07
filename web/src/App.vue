@@ -6237,7 +6237,7 @@ function dispatchReturnStatusForRow(row = {}) {
 }
 
 function canReturnDispatchStatus(row = {}) {
-  if ([DISPATCH_LOCKED_STATUS, "已签收", "异常滞留"].includes(dispatchStatusValueForRow(row))) return false;
+  if ([DISPATCH_LOCKED_STATUS, "异常滞留"].includes(dispatchStatusValueForRow(row))) return false;
   return Boolean(dispatchReturnStatusForRow(row));
 }
 
@@ -6289,7 +6289,7 @@ function dispatchStatusChangeSnapshot(row = {}) {
   };
 }
 
-async function syncDispatchRowOrderStatus(row, status) {
+async function syncDispatchRowOrderStatus(row, status, options = {}) {
   const orderStatus = DISPATCH_STATUS_TO_ORDER_STATUS[status];
   if (!orderStatus) return;
   const currentOrder = dispatchRowLiveOrder(row);
@@ -6297,7 +6297,7 @@ async function syncDispatchRowOrderStatus(row, status) {
     if (dispatchRowHasMissingOrder(row)) return;
     return;
   }
-  if (currentOrder?.status === orderStatus) return;
+  if (!options.force && currentOrder?.status === orderStatus) return;
   const item = await ordersApi.updateOrderStatus(currentOrder.no, orderStatus, { skipSignValidation: true });
   orderRows.value = orderRows.value.map((order) => order.no === item.no ? item : order);
 }
@@ -6405,12 +6405,6 @@ async function handleDispatchStatusChange(row, event = null) {
     saveDispatchPlan({ silent: true });
     return;
   }
-  if (previousStatus === "已签收" && ["已派车", "通关中"].includes(nextStatus)) {
-    target.status = "已签收";
-    notify("已签收的订单不能退回已派车或通关中");
-    saveDispatchPlan({ silent: true });
-    return;
-  }
   if (!currentStatusOptions.includes(nextStatus)) {
     target.status = previousStatus;
     notify("当前排车状态不能直接切换到该状态");
@@ -6486,8 +6480,12 @@ async function returnDispatchRowStatus(row) {
   try {
     target.status = previousStatus;
     target.previousStatus = "";
+    // Drain a save that started before the rollback, then make the order status
+    // change authoritative before persisting the dispatch row.
+    await dispatchPlanAutoSavePromise.catch(() => {});
+    await dispatchPlanSavePromise.catch(() => {});
+    await syncDispatchRowOrderStatus(target, previousStatus, { force: true });
     await saveDispatchPlan({ silent: true, throwOnError: true });
-    await syncDispatchRowOrderStatus(target, previousStatus);
     await refreshOrderRows();
     activeDispatchStatusPool.value = previousStatus;
     notify(`排车状态已返回到${previousStatus}`);
@@ -13815,10 +13813,40 @@ function statementCustomerOrderMatchesEntity(order = {}, entityName = "", custom
   const target = String(entityName || "").trim();
   if (!target) return false;
   const orderCustomer = String(order.customer || "").trim();
+  const orderCustomerId = String(order.customerId || order.customer_id || "").trim();
+  const targetCustomer = customer || transportCustomerByReference(target, "");
+  const targetCustomerId = String(targetCustomer?.id || "").trim();
+
+  // IDs are authoritative. Do not fall back to a display name when both
+  // records carry IDs, because different customers may share a short name.
+  if (targetCustomerId && orderCustomerId) return targetCustomerId === orderCustomerId;
+
+  // Older orders may not have customerId. Resolve their stored name against
+  // the customer table before using a short-name fallback.
+  const resolvedOrderCustomer = transportCustomerByReference(orderCustomer, orderCustomerId);
+  if (targetCustomerId && resolvedOrderCustomer?.id) {
+    return targetCustomerId === String(resolvedOrderCustomer.id).trim();
+  }
+
   if (orderCustomer === target) return true;
-  if (customer?.id && String(order.customerId || "").trim() === String(customer.id || "").trim()) return true;
-  if (transportCustomerLabelByReference(orderCustomer, order.customerId || "") === target) return true;
-  return customerShortDisplay(customer) === target;
+  const targetNames = new Set([
+    target,
+    targetCustomer?.name,
+    targetCustomer?.shortName,
+    targetCustomer?.short_name
+  ].map((value) => String(value || "").trim()).filter(Boolean));
+  if (targetNames.has(orderCustomer)) return true;
+
+  // This branch only applies to legacy rows without IDs. It is deliberately
+  // scoped to the resolved customer, so one customer's short name cannot
+  // make every order match every customer.
+  if (!targetCustomerId && resolvedOrderCustomer?.id) {
+    return [resolvedOrderCustomer.name, resolvedOrderCustomer.shortName, resolvedOrderCustomer.short_name]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+      .includes(target);
+  }
+  return false;
 }
 
 function statementSupplierOrderMatchesEntity(order = {}, entityName = "") {
@@ -13839,12 +13867,15 @@ function sortBossUnreceivedRows(rows = []) {
 }
 
 function bossUnreceivedSnapshotForRecord(record = {}) {
-  if (statementRecordType(record) === "customer") {
-    const snapshot = statementDownloadSnapshotForRecord(record);
-    return statementDownloadSnapshotHasValue(snapshot) ? snapshot : null;
+  const storedSnapshot = statementDownloadSnapshotRecord(record);
+  if (storedSnapshot.snapshotReady || statementDownloadSnapshotHasValue(storedSnapshot)) {
+    return storedSnapshot;
   }
-  const snapshot = statementDownloadSnapshotRecord(record);
-  return statementDownloadSnapshotHasValue(snapshot) ? snapshot : null;
+
+  // Legacy statement rows may predate the persisted snapshot columns. Keep
+  // those rows visible by calculating a compatibility snapshot only when no
+  // historical snapshot is available.
+  return statementDownloadSnapshotForRecord(record);
 }
 
 function bossUnreceivedLatestRecordLabel(source = {}, record = {}) {
@@ -30093,52 +30124,135 @@ function financeWageStatementFeeTotal(order = {}, keywords = [], currency = "") 
     .reduce((sum, fee) => sum + Number(fee.amount || 0), 0);
 }
 
+const FINANCE_WAGE_STATEMENT_INTERNAL_REMARK_PATTERNS = [
+  /其他支出由公司承担成本/,
+  /公司自费成本由公司承担/,
+  /客户对账单按本项目报价正常展示/,
+  /不计入供应商或司机对账/,
+  /用于公司内部成本和利润核算/
+];
+
+const FINANCE_WAGE_STATEMENT_MISC_EXCLUDED_NAMES = [
+  "基础运费",
+  "运费",
+  "趟费",
+  "装货费",
+  "卸货费",
+  "加点费",
+  "等候费",
+  "装货等候费",
+  "司机装货",
+  "司机卸货",
+  "压夜费",
+  "过海费"
+];
+
+function financeWageStatementFeeName(fee = {}) {
+  return String(fee?.name || "").trim().replace(/[（）()（）\s]/g, "");
+}
+
+function financeWageStatementFeeMatches(fee = {}, keywords = []) {
+  const name = financeWageStatementFeeName(fee);
+  return (Array.isArray(keywords) ? keywords : [keywords])
+    .map((keyword) => String(keyword || "").trim().replace(/[（）()（）\s]/g, ""))
+    .filter(Boolean)
+    .some((keyword) => name.includes(keyword));
+}
+
+function financeWageStatementMiscFeeTotal(order = {}, currency = "") {
+  return (Array.isArray(order?.fees) ? order.fees : [])
+    .filter((fee) => !isAdvanceFee(fee))
+    .filter((fee) => Number(fee?.amount || 0) !== 0)
+    .filter((fee) => !currency || currencyCodeDisplay(fee.currency || "港币") === currency)
+    .filter((fee) => !FINANCE_WAGE_STATEMENT_MISC_EXCLUDED_NAMES.some((name) =>
+      financeWageStatementFeeMatches(fee, [name])
+    ))
+    .reduce((sum, fee) => sum + Number(fee.amount || 0), 0);
+}
+
+function financeWageStatementOtherFeeTotal(order = {}, currency = "") {
+  const mappedKeywords = currency === "RMB"
+    ? [
+      "打的接车", "打车费", "大陆停车费", "大陆/停车费/过磅费", "过磅费", "停车场费",
+      "深圳湾停车场费", "深圳湾口岸停车场", "深圳湾口岸停车费", "洗车", "大陆加油", "ETC费", "加油"
+    ]
+    : [
+      "汽车器材", "油费", "香港坐车", "香港停车费", "香港过夜停车费", "香港过隧费",
+      "香港/停车费/过磅费/登记费", "过磅费", "登记费", "高速费", "存放叉车"
+    ];
+  return financeWageStatementMiscFeeTotal(order, currency)
+    - financeWageStatementFeeTotal(order, mappedKeywords, currency);
+}
+
+function financeWageStatementOrderInPeriod(order = {}) {
+  return dateMatchesPeriodFilter(order?.date, financePeriodFilter.value);
+}
+
+function financeWageStatementPeriodLabel() {
+  const { start, end } = financeDateRangeBounds();
+  if (start && end) return `${inputDateLabel(start)}至${inputDateLabel(end)}`;
+  return financeDateRangeLabel();
+}
+
+function isFinanceWageStatementInternalRemark(value = "") {
+  const text = String(value || "").trim();
+  return !text || FINANCE_WAGE_STATEMENT_INTERNAL_REMARK_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function financeWageStatementCleanRemarkParts(value = "") {
+  return String(value || "")
+    .split(/[；;\r\n]+/)
+    .map((part) => part.trim())
+    .filter((part) => !isFinanceWageStatementInternalRemark(part));
+}
+
 function financeWageStatementRemarkText(order = {}) {
   const remarks = (Array.isArray(order?.fees) ? order.fees : [])
     .map((fee) => String(fee?.remark || "").trim())
-    .filter(Boolean);
+    .flatMap(financeWageStatementCleanRemarkParts);
   const orderRemarks = [
     String(order?.note || "").trim(),
     String(order?.remark || "").trim()
-  ].filter(Boolean);
+  ].flatMap(financeWageStatementCleanRemarkParts);
   return Array.from(new Set([...orderRemarks, ...remarks])).join("；");
 }
 
 function financeWageStatementRows(row = {}) {
   const driver = row?.driver || {};
-  const orders = [...(row?.orders || [])].sort((left, right) => {
+  const orders = [...(row?.orders || [])]
+    .filter(financeWageStatementOrderInPeriod)
+    .sort((left, right) => {
     const leftDate = inputDateUtcValue(left?.date) ?? 0;
     const rightDate = inputDateUtcValue(right?.date) ?? 0;
     if (leftDate !== rightDate) return leftDate - rightDate;
     return String(left?.no || "").localeCompare(String(right?.no || ""), "zh-Hans-CN", { numeric: true, sensitivity: "base" });
   });
   return orders.map((order, index) => {
-    const hkTotal = financeWageStatementFeeTotal(order, ["汽车器材", "油费", "香港坐车", "香港停车费", "香港/停车费/过磅费/登记费", "存放叉车"], "HKD");
-    const rmbTotal = financeWageStatementFeeTotal(order, ["打的接车", "大陆停车费", "大陆/停车费/过磅费", "深圳湾停车场费", "洗车", "大陆加油", "其它", "其他"], "RMB");
+    const hkTotal = financeWageStatementMiscFeeTotal(order, "HKD");
+    const rmbTotal = financeWageStatementMiscFeeTotal(order, "RMB");
     const extraFee = driver ? driverExtraTripFeeTotal(order, driver) : 0;
     return [
       index + 1,
-      parseInputDate(order.date) || order.date || "",
+      String(order.date || "").slice(0, 10),
       order.customer || "",
       relatedOrderRouteText(order),
       order.direction || "",
       financeWageStatementFeeTotal(order, ["汽车器材"], "HKD") || "",
       financeWageStatementFeeTotal(order, ["油费"], "HKD") || "",
       financeWageStatementFeeTotal(order, ["香港坐车"], "HKD") || "",
-      financeWageStatementFeeTotal(order, ["香港停车费", "香港/停车费/过磅费/登记费", "过磅费", "登记费"], "HKD") || "",
+      financeWageStatementFeeTotal(order, ["香港停车费", "香港过夜停车费", "香港过隧费", "香港/停车费/过磅费/登记费", "过磅费", "登记费", "高速费"], "HKD") || "",
       financeWageStatementFeeTotal(order, ["存放叉车"], "HKD") || "",
-      financeWageStatementFeeTotal(order, ["打的接车"], "RMB") || "",
-      financeWageStatementFeeTotal(order, ["大陆停车费", "大陆/停车费/过磅费", "过磅费"], "RMB") || "",
-      financeWageStatementFeeTotal(order, ["深圳湾停车场费"], "RMB") || "",
-      financeWageStatementFeeTotal(order, ["洗车", "大陆加油"], "RMB") || "",
-      financeWageStatementFeeTotal(order, ["其它", "其他"], "RMB") || "",
+      financeWageStatementFeeTotal(order, ["打的接车", "打车费"], "RMB") || "",
+      financeWageStatementFeeTotal(order, ["大陆停车费", "大陆/停车费/过磅费", "过磅费", "停车场费"], "RMB") || "",
+      financeWageStatementFeeTotal(order, ["深圳湾停车场费", "深圳湾口岸停车场", "深圳湾口岸停车费"], "RMB") || "",
+      financeWageStatementFeeTotal(order, ["洗车", "大陆加油", "ETC费", "加油"], "RMB") || "",
+      financeWageStatementOtherFeeTotal(order, "RMB") || "",
       Number(hkTotal || 0),
       Number(rmbTotal || 0),
       Number(order.receivableHKD || 0),
       orderDetailDriverText(order),
       Number(extraFee || 0),
-      financeWageStatementRemarkText(order),
-      ""
+      financeWageStatementRemarkText(order)
     ];
   });
 }
@@ -30148,10 +30262,11 @@ function buildFinanceWageStatementExportPayload(row = {}) {
   const rmbTotal = rows.reduce((sum, item) => sum + Number(item[16] || 0), 0);
   const freightTotal = rows.reduce((sum, item) => sum + Number(item[17] || 0), 0);
   const extraTotal = rows.reduce((sum, item) => sum + Number(item[19] || 0), 0);
-  const advanceHKD = Number(row.adjustments || 0);
+  const advanceHKD = Number(row.advanceFee || 0);
   const exchangeRate = Number(monthlyExchangeRateInputValue(monthlyExchangeRatePeriodMonth("finance")) || 0);
   const convertedRMB = exchangeRate ? Number((rmbTotal * exchangeRate).toFixed(2)) : 0;
   const payableTotal = Number((freightTotal + extraTotal + advanceHKD + convertedRMB).toFixed(2));
+  const payableWithoutAdvance = Number((freightTotal + extraTotal + convertedRMB).toFixed(2));
   const paymentDate = financeWageSettlementDateText(row);
   const paymentLabel = paymentDate ? `${inputDateLabel(paymentDate)}已付款` : "";
   const filenamePaymentLabel = paymentDate ? `${inputDateMonthDayLabel(paymentDate)}已付款` : "";
@@ -30159,14 +30274,14 @@ function buildFinanceWageStatementExportPayload(row = {}) {
   return {
     rows,
     driverName: row?.driver?.name || "司机",
-    periodLabel: financeDateRangeLabel(),
-    summaryNote: `${rows.length}车骑师/口岸过车`,
+    periodLabel: financeWageStatementPeriodLabel(),
+    summaryNote: `${rows.length}车骑师/口岸过车 · ${financeWageStatementPeriodLabel()}`,
     noteLines: [
-      `人民币无预支，司机代垫${formatDriverWageNumber(rmbTotal)}`,
+      `人民币司机代垫${formatDriverWageNumber(Number(row.advanceFeeRMB || 0))}`,
       `预支HKD${formatDriverWageNumber(advanceHKD)}，司机代垫${formatDriverWageNumber(advanceHKD)}`,
-      `${financeDateRangeLabel()}预支杂费${formatDriverWageNumber(Number(row.adjustmentsRMB || 0))}`,
+      `${financeWageStatementPeriodLabel()}预支杂费${formatDriverWageNumber(Number(row.adjustmentsRMB || 0))}`,
       exchangeRate ? `${formatDriverWageNumber(rmbTotal)}/${formatDriverWageNumber(exchangeRate)}=港币${formatDriverWageNumber(convertedRMB)}` : "",
-      `运费${formatDriverWageNumber(freightTotal)}+装卸过海加点${formatDriverWageNumber(extraTotal)}+司机代垫${formatDriverWageNumber(advanceHKD)}+杂费${formatDriverWageNumber(convertedRMB)}=应付${formatDriverWageNumber(payableTotal)}`
+      `运费${formatDriverWageNumber(freightTotal)}+装卸过海加点${formatDriverWageNumber(extraTotal)}+司机代垫${formatDriverWageNumber(advanceHKD)}+杂费${formatDriverWageNumber(convertedRMB)}=应付${formatDriverWageNumber(payableTotal)}；去除系统代垫后${formatDriverWageNumber(payableWithoutAdvance)}`
     ],
     paymentLabel,
     exchangeRate,

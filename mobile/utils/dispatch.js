@@ -385,16 +385,27 @@ function sanitizeDispatchRow(row) {
   const previousStatus = normalizeOptionalDispatchPlanStatus(item.previousStatus || item.previous_status);
   const loadingLocations = normalizeLocationEntries(item.loadingLocations || item.loading_locations, item.loading);
   const unloadingLocations = normalizeLocationEntries(item.unloadingLocations || item.unloading_locations, item.unloading);
+  const customerIds = Array.isArray(item.customerIds || item.customer_ids)
+    ? (item.customerIds || item.customer_ids).map((value) => valueText(value)).filter(Boolean)
+    : [];
+  const customerNames = Array.isArray(item.customerNames || item.customer_names)
+    ? (item.customerNames || item.customer_names).map((value) => valueText(value)).filter(Boolean)
+    : [];
   return {
     id: valueText(item.id),
     date: valueText(item.date),
     createdAt: dispatchRowCreatedAt(item, item.date),
     dispatchNo: valueText(item.dispatchNo || item.dispatch_no),
     orderNo: valueText(item.orderNo || item.order_no),
-    customerId: valueText(item.customerId || item.customer_id),
-    customer: valueText(item.customer),
+    customerId: customerIds[0] || valueText(item.customerId || item.customer_id),
+    customer: customerNames.length ? customerNames.join(" / ") : valueText(item.customer),
+    customerIds,
+    customerNames,
     businessType: valueText(item.businessType || item.business_type),
     currency: valueText(item.currency),
+    operatingUnit: valueText(item.operatingUnit || item.operating_unit),
+    newOld: valueText(item.newOld || item.new_old),
+    specialCar: booleanFlag(item.specialCar ?? item.special_car, false),
     plate: normalizePlateText(item.plate),
     port: normalizePortText(item.port),
     needsWeighing: booleanFlag(item.needsWeighing ?? item.needs_weighing, false),
@@ -418,7 +429,7 @@ function sanitizeDispatchRow(row) {
     createdByAccountId: Number(item.createdByAccountId || item.created_by_account_id || 0) || null,
     createdByUsername: valueText(item.createdByUsername || item.created_by_username),
     createdByName: valueText(item.createdByName || item.createdByDisplayName || item.created_by_display_name || item.createdByUsername || item.created_by_username),
-    note: valueText(item.note),
+    note: normalizeLocationDetailText(item.note),
     tripNoEnabled: booleanFlag(item.tripNoEnabled ?? item.trip_no_enabled, false) ? 1 : 0,
     tripNo: valueText(item.tripNo || item.trip_no),
     sixSheetEnabled: booleanFlag(item.sixSheetEnabled ?? item.six_sheet_enabled, false) ? 1 : 0,
@@ -462,6 +473,9 @@ function rowWithOrder(row, orders, date) {
       customer: row.customer || "",
       businessType: row.businessType || "",
       currency: row.currency || "",
+      operatingUnit: row.operatingUnit || "",
+      newOld: row.newOld || "",
+      specialCar: booleanFlag(row.specialCar, false),
       date: row.date || date,
       port: normalizePortText(row.port),
       needsWeighing: booleanFlag(row.needsWeighing, false),
@@ -726,6 +740,7 @@ function presentDispatchRows(rows, orders, date, options) {
     return Object.assign({}, row, {
       displayIndex: displayIndex + 1,
       customerText: valueText(order.customer || row.customer) || "-",
+      quantity: valueText(order.quantity || row.quantity),
       businessTypeText: businessType || "-",
       dateText: valueText(row.date || date),
       driverText: driverDisplayText(row),
@@ -878,6 +893,12 @@ function dispatchLocationBlock(label, record, field) {
     .join("\n");
 }
 
+function dispatchMessageCustomerPrefix(row = {}) {
+  const order = row && row.order ? row.order : {};
+  const customer = valueText(row.customer || order.customer);
+  return customer && customer !== "-" ? `${customer} ` : "";
+}
+
 function dispatchMessageText(rows, orders, date) {
   const mergedRows = normalizeDispatchRows(rows, date).map((row) => rowWithOrder(row, orders, date));
   return mergedRows.map((row) => {
@@ -893,7 +914,7 @@ function dispatchMessageText(rows, orders, date) {
     const direction = order.direction || row.direction || "";
     const needsWeighing = row.needsWeighing ?? order.needsWeighing;
     return [
-      `装货时间：${rowDate}   ${time}  ${dispatchWeighingText(needsWeighing)} ${dispatchDirectionText(direction)} 口岸：${normalizePortText(order.port || row.port) || "-"}`,
+      `${dispatchMessageCustomerPrefix(row)}装货时间：${rowDate}   ${time}  ${dispatchWeighingText(needsWeighing)} ${dispatchDirectionText(direction)} 口岸：${normalizePortText(order.port || row.port) || "-"}`,
       `车牌：${row.plate || order.plate || "-"} 吨位：${order.tonnage || row.tonnage || "-"}    板数：${order.quantity || row.quantity || "-"}`,
       "",
       dispatchLocationBlock("装货地", record, "loading"),
@@ -941,16 +962,29 @@ function createDispatchRowFromOrder(order, date, existingRows) {
 function formFromDispatchRow(row, date) {
   const source = row || {};
   const order = source.order || {};
+  const customerIds = Array.isArray(source.customerIds || source.customer_ids)
+    ? (source.customerIds || source.customer_ids).map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const customerNames = Array.isArray(source.customerNames || source.customer_names)
+    ? (source.customerNames || source.customer_names).map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const primaryCustomerId = customerIds[0] || order.customerId || source.customerId || "";
+  const primaryCustomerName = customerNames[0] || order.customer || source.customer || "";
   return {
     id: source.id || "",
     date: source.date || date || todayInputValue(),
     createdAt: dispatchRowCreatedAt(source, date),
     dispatchNo: source.dispatchNo || order.dispatchNo || "",
     orderNo: source.orderNo || order.no || "",
-    customerId: order.customerId || source.customerId || "",
-    customer: order.customer || source.customer || "",
+    customerId: primaryCustomerId,
+    customer: primaryCustomerName,
+    customerIds: customerIds.length ? customerIds : (primaryCustomerId ? [String(primaryCustomerId)] : []),
+    customerNames: customerNames.length ? customerNames : (primaryCustomerName ? [String(primaryCustomerName)] : []),
     businessType: order.businessType || source.businessType || "运输",
     currency: order.currency || source.currency || "",
+    operatingUnit: order.operatingUnit || order.operating_unit || source.operatingUnit || source.operating_unit || "",
+    newOld: order.newOld || order.new_old || source.newOld || source.new_old || "",
+    specialCar: booleanFlag(order.specialCar ?? order.special_car ?? source.specialCar ?? source.special_car, false),
     plate: source.plate || order.plate || "",
     port: normalizePortText(order.port || source.port),
     needsWeighing: booleanFlag(source.needsWeighing ?? order.needsWeighing, false),
@@ -984,6 +1018,12 @@ function formFromDispatchRow(row, date) {
 
 function rowFromForm(form, orderNo) {
   const source = form || {};
+  const customerIds = Array.isArray(source.customerIds)
+    ? source.customerIds.map((item) => String(item || "").trim()).filter(Boolean)
+    : (source.customerId ? [String(source.customerId).trim()] : []);
+  const customerNames = Array.isArray(source.customerNames)
+    ? source.customerNames.map((item) => String(item || "").trim()).filter(Boolean)
+    : (source.customer ? [String(source.customer).trim()] : []);
   return sanitizeDispatchRow({
     id: source.id || `dispatch-manual-${Date.now()}`,
     date: source.date,
@@ -992,8 +1032,13 @@ function rowFromForm(form, orderNo) {
     orderNo: orderNo || source.orderNo || "",
     customer: source.customer,
     customerId: source.customerId,
+    customerIds,
+    customerNames,
     businessType: source.businessType || "运输",
     currency: source.currency || "",
+    operatingUnit: source.operatingUnit || source.operating_unit || "",
+    newOld: source.newOld || source.new_old || "",
+    specialCar: booleanFlag(source.specialCar ?? source.special_car, false),
     plate: normalizePlateText(source.plate),
     port: normalizePortText(source.port),
     needsWeighing: booleanFlag(source.needsWeighing, false),
@@ -1031,12 +1076,17 @@ function orderPayloadFromForm(form, customer, includeFees) {
     dispatchNo: source.dispatchNo,
     customerId: customer.id,
     customer: customer.name,
+    dispatchCustomerIds: Array.isArray(source.customerIds) ? source.customerIds : (source.customerId ? [source.customerId] : []),
+    dispatchCustomerNames: Array.isArray(source.customerNames) ? source.customerNames : (source.customer ? [source.customer] : []),
     businessType: source.businessType || "运输",
     port: normalizePortText(source.port),
     needsWeighing: booleanFlag(source.needsWeighing, false),
     direction: source.direction,
     tonnage: source.tonnage,
     currency: source.currency || "",
+    operatingUnit: source.operatingUnit || source.operating_unit || "",
+    newOld: source.newOld || source.new_old || "",
+    specialCar: booleanFlag(source.specialCar ?? source.special_car, false),
     quantity: source.quantity,
     weight: source.weight,
     vehicleSource: normalizeVehicleSource(source.vehicleSource),
@@ -1103,6 +1153,7 @@ module.exports = {
   hasDispatchAccess,
   normalizeDispatchPlanStatus,
   normalizeDispatchRows,
+  normalizeLocationDetailText,
   normalizePlateText,
   normalizePortText,
   normalizeTransportMode,

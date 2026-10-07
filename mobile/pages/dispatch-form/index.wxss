@@ -105,6 +105,26 @@
   font-weight: 700;
 }
 
+.multiline-field-input,
+.location-detail-input {
+  display: block;
+  width: 100%;
+  min-height: 148rpx;
+  padding: 18rpx 14rpx;
+  border: 1rpx solid #d9e1ec;
+  border-radius: 8rpx;
+  background: #ffffff;
+  color: #172033;
+  font-size: 28rpx;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.multiline-field-input {
+  min-height: 132rpx;
+}
+
 .picker-box {
   min-height: 72rpx;
   border: 1rpx solid #d9e1ec;
@@ -192,6 +212,41 @@
   z-index: 2;
 }
 
+.customer-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10rpx;
+  margin-top: 12rpx;
+}
+
+.customer-tag {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-height: 52rpx;
+  padding: 0 12rpx 0 16rpx;
+  border: 1rpx solid #bfd4f2;
+  border-radius: 8rpx;
+  background: #f2f7ff;
+}
+
+.customer-tag-text {
+  max-width: 520rpx;
+  overflow: hidden;
+  color: #1769e0;
+  font-size: 23rpx;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.customer-tag-remove {
+  margin-left: 10rpx;
+  color: #6b7b91;
+  font-size: 28rpx;
+  line-height: 1;
+}
+
 .driver-field {
   z-index: 2;
 }
@@ -247,6 +302,12 @@
 
 .fee-panel {
   display: block;
+}
+
+.fee-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
 }
 
 .fee-add-btn {

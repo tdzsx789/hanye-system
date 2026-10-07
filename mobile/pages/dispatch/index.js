@@ -60,6 +60,9 @@ function compactOrderForDispatchForm(order) {
     customerId: order.customerId || "",
     customer: order.customer || "",
     businessType: order.businessType || "",
+    operatingUnit: order.operatingUnit || order.operating_unit || "",
+    newOld: order.newOld || order.new_old || "",
+    specialCar: Boolean(order.specialCar ?? order.special_car),
     port: normalizePortText(order.port),
     needsWeighing: Boolean(order.needsWeighing),
     direction: order.direction || "",
@@ -215,8 +218,22 @@ function orderBelongsToDate(order, date, rows) {
   return true;
 }
 
+function isOrderVisibleInOrderManagement(order, rows) {
+  if (!order || valueText(order.deletedAt)) return false;
+  if (valueText(order.status) === "预排") return false;
+  const orderNo = valueText(order.no);
+  const dispatchNo = valueText(order.dispatchNo);
+  const dispatchRow = (rows || []).find((row) =>
+    (orderNo && valueText(row.orderNo) === orderNo)
+    || (dispatchNo && valueText(row.dispatchNo) === dispatchNo)
+  );
+  if (!dispatchRow) return true;
+  return ["预排", "已派车"].indexOf(dispatchStatusValueForRow(dispatchRow)) < 0;
+}
+
 function accountCanDeleteAnyStatus(account) {
-  const role = valueText(account && account.role);
+  const roleText = valueText(account && account.role);
+  const role = /管理员|老板|超级|高级/.test(roleText) ? "管理员" : roleText;
   const username = valueText(account && account.username).toLowerCase();
   return role === "管理员" || username === "liaomufeng";
 }
@@ -479,6 +496,12 @@ Page({
     })).map((row) => Object.assign({}, row, {
       selected: selectedIds.has(row.id),
       opening: formOpeningKind === "dispatch" && formOpeningId === String(row.id || ""),
+      customerText: displayNameFromDirectory(
+        this.data.customers,
+        row.customerId || (row.order && row.order.customerId),
+        row.customerText || row.customer || (row.order && row.order.customer),
+        "客户"
+      ),
       supplierHighlightText: row.supplierHighlightText
         ? displayNameOrEmptyFromDirectory(this.data.customers, "", row.supplierHighlightText, "供应商")
         : ""
@@ -495,6 +518,7 @@ Page({
     const emptyText = emptyTextForStatus(activeStatus);
     const currentDateOrders = (this.data.orders || []).filter((order) =>
       orderBelongsToDate(order, date, rawRows)
+      && isOrderVisibleInOrderManagement(order, rawRows)
     );
     const orderDisplayRows = currentDateOrders
       .map((order) => {

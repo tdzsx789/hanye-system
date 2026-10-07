@@ -50,7 +50,7 @@
   </view>
 
   <view class="search-row">
-    <input placeholder="{{activeModule === 'orders' ? '搜索订单号、客户、车牌、司机、地址' : '搜索客户、车牌、订单号、口岸、地址'}}" placeholder-class="placeholder" value="{{searchKeyword}}" bindinput="onSearchInput" />
+    <input placeholder="{{activeModule === 'orders' ? '搜索订单号 / 排车号 / 客户简称 / 车牌 / 司机 / 路线' : '搜索排车号 / 订单号 / 客户简称 / 车牌 / 司机 / 路线'}}" placeholder-class="placeholder" value="{{searchKeyword}}" bindinput="onSearchInput" />
     <button wx:if="{{searchKeyword}}" class="quiet-btn clear-btn" bindtap="clearSearch">清空</button>
   </view>
 
@@ -60,14 +60,14 @@
     <view wx:if="{{activeModule === 'dispatch'}}" class="list-area">
       <view wx:if="{{!displayRows.length}}" class="empty-box">{{emptyText}}</view>
       <view wx:for="{{displayRows}}" wx:key="id" class="dispatch-card {{item.selected ? 'selected' : ''}} {{item.opening ? 'opening' : ''}}">
-        <view class="card-head" data-id="{{item.id}}" bindtap="toggleExpand">
+        <view class="card-head">
           <view class="card-head-main">
             <view class="card-select {{item.selected ? 'checked' : ''}}" catchtap="toggleDispatchSelection" data-id="{{item.id}}">
               <view class="card-select-mark"></view>
             </view>
             <view class="card-title-wrap">
               <text class="dispatch-no">{{item.dispatchNo || '未编号'}}</text>
-              <text class="order-no">订单 {{item.orderNoText}}</text>
+              <text class="order-no">订单号 {{item.orderNoText}}</text>
             </view>
           </view>
           <text class="status-chip {{item.statusClass}}">{{item.status}}</text>
@@ -76,26 +76,20 @@
         <view class="highlight-line">
           <text class="highlight-pill time">{{item.highlightTimeText || item.timeText}}</text>
           <text class="highlight-pill plate">{{item.highlightPlateText || item.plate || '-'}}</text>
-          <text wx:if="{{item.supplierHighlightText}}" class="highlight-pill supplier">外派 {{item.supplierHighlightText}}{{item.driverText && item.driverText !== '-' ? ' ' + item.driverText : ''}}</text>
+          <text wx:if="{{item.supplierHighlightText}}" class="highlight-pill supplier">供应商 {{item.supplierHighlightText}}{{item.driverText && item.driverText !== '-' ? ' ' + item.driverText : ''}}</text>
+          <text wx:if="{{!item.supplierHighlightText && item.driverText !== '-'}}" class="highlight-pill driver">{{item.driverText}}</text>
         </view>
         <view class="meta-line">
           <text>{{item.dateText || dispatchDate}}</text>
           <text>{{item.port || '-'}}</text>
           <text>{{item.direction || '-'}}</text>
           <text>{{item.tonnage || '-'}}</text>
+          <text>{{item.quantity || '-'}}</text>
           <text>{{item.weighingText}}</text>
         </view>
         <view class="route-line">{{item.routeText}}</view>
         <view class="tag-row">
-          <text wx:if="{{!item.supplierHighlightText && item.driverText !== '-'}}" class="driver-tag">{{item.driverText}}</text>
           <text wx:if="{{item.creatorText}}" class="creator-tag">创建者 {{item.creatorText}}</text>
-          <text wx:if="{{item.orderStatusText}}" class="order-status-tag">订单 {{item.orderStatusText}}</text>
-        </view>
-        <view wx:if="{{item.expanded}}" class="expanded-area">
-          <view class="detail-line"><text>装货地</text><text class="detail-value multiline">{{item.loading || '-'}}</text></view>
-          <view class="detail-line"><text>卸货地</text><text class="detail-value multiline">{{item.unloading || '-'}}</text></view>
-          <view class="detail-line"><text>外派供应商</text><text>{{item.supplier || '-'}}</text></view>
-          <view class="detail-line"><text>备注</text><text>{{item.noteText || '-'}}</text></view>
         </view>
         <view class="card-actions">
           <view class="card-action-btn secondary {{saving || formOpening || item.statusActionDisabled ? 'disabled' : ''}}" data-id="{{item.id}}" catchtap="openStatusActions">更改状态</view>
@@ -116,7 +110,7 @@
           <view class="card-head-main">
             <view class="card-title-wrap">
               <text class="dispatch-no">{{item.no || '未编号'}}</text>
-              <text class="order-no">排车 {{item.dispatchNo || '-'}}</text>
+              <text class="order-no">排车单号 {{item.dispatchNo || '-'}}</text>
             </view>
           </view>
           <text class="status-chip {{item.statusClass}}">{{item.status}}</text>
@@ -125,20 +119,18 @@
         <view class="highlight-line">
           <text class="highlight-pill time">{{item.highlightTimeText || '-'}}</text>
           <text class="highlight-pill plate">{{item.highlightPlateText || item.plate || '-'}}</text>
-          <text wx:if="{{item.supplierHighlightText}}" class="highlight-pill supplier">外派 {{item.supplierHighlightText}}{{item.driverText && item.driverText !== '-' ? ' ' + item.driverText : ''}}</text>
+          <text wx:if="{{item.supplierHighlightText}}" class="highlight-pill supplier">供应商 {{item.supplierHighlightText}}{{item.driverText && item.driverText !== '-' ? ' ' + item.driverText : ''}}</text>
+          <text wx:if="{{!item.supplierHighlightText && item.driverText !== '-'}}" class="highlight-pill driver">{{item.driverText}}</text>
         </view>
         <view class="meta-line">
           <text>{{item.date || dispatchDate}}</text>
           <text>{{item.port || '-'}}</text>
           <text>{{item.direction || '-'}}</text>
           <text>{{item.tonnage || '-'}}</text>
+          <text>{{item.quantity || '-'}}</text>
           <text>{{item.needsWeighing ? '过磅' : '不用过磅'}}</text>
         </view>
         <view class="route-line">{{item.routeText}}</view>
-        <view class="tag-row">
-          <text wx:if="{{!item.supplierHighlightText && item.driverText !== '-'}}" class="driver-tag">{{item.driverText}}</text>
-          <text class="order-status-tag">应收 {{item.amountText}}</text>
-        </view>
         <view class="card-actions order-actions">
           <view class="card-action-btn exception {{saving || formOpening || item.exceptionDisabled ? 'disabled' : ''}}" data-no="{{item.no}}" data-status="异常滞留" catchtap="updateOrderStatusFromCard">异常滞留</view>
           <view class="card-action-btn signed {{saving || formOpening || item.signedDisabled ? 'disabled' : ''}}" data-no="{{item.no}}" data-status="已签收" catchtap="updateOrderStatusFromCard">已签收</view>

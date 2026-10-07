@@ -428,11 +428,19 @@ function orderStatusRank(status = "") {
   return ORDER_STATUS_RANK[normalizeOrderStatus(status, "")] || 0;
 }
 
+function orderStatusRollbackAllowed(currentStatus = "", nextStatus = "") {
+  const current = normalizeOrderStatus(currentStatus, "");
+  const next = normalizeOrderStatus(nextStatus, "");
+  if (current !== "已签收") return false;
+  return ["通关中", "费用待确认"].includes(next);
+}
+
 function shouldPreventOrderStatusDowngrade(currentStatus = "", nextStatus = "") {
   const current = normalizeOrderStatus(currentStatus, "");
   const next = normalizeOrderStatus(nextStatus, "");
   if (!current || !next || current === next) return false;
   if (current === "已审核") return true;
+  if (orderStatusRollbackAllowed(current, next)) return false;
   if (["通关中", "费用待确认", "缺票据", "已签收"].includes(current)) {
     return orderStatusRank(next) < orderStatusRank(current);
   }
@@ -4209,7 +4217,7 @@ const DRIVER_WAGE_TEMPLATE_HEADER_LABELS = {
   16: "杂费合计HKD",
   17: "杂费合计RMB",
   18: "运费合计HKD",
-  19: "",
+  19: "司机",
   20: "加点费HKD",
   21: "备注"
 };
@@ -4305,8 +4313,7 @@ async function renderDriverWageSettlementXlsxBuffer(payload = {}) {
     }
   }
 
-  worksheet.getColumn(19).hidden = true;
-  worksheet.getCell(1, 19).value = null;
+  worksheet.getColumn(19).hidden = false;
   for (const [index, label] of Object.entries(DRIVER_WAGE_TEMPLATE_HEADER_LABELS)) {
     worksheet.getCell(1, Number(index)).value = label;
   }
@@ -4345,11 +4352,12 @@ async function renderDriverWageSettlementXlsxBuffer(payload = {}) {
     values.forEach((value, columnIndex) => {
       const cell = row.getCell(columnIndex + 1);
       if (columnIndex === 1 && value) {
-        const date = value instanceof Date
-          ? value
-          : (String(value || "").includes("-") ? new Date(`${String(value).slice(0, 10)}T00:00:00`) : null);
-        cell.value = date || value;
-        if (date) cell.numFmt = "m/d/yy";
+        // Keep the business date as text so Excel/Node timezone conversion
+        // cannot move it to the previous calendar day.
+        const dateText = value instanceof Date
+          ? value.toISOString().slice(0, 10)
+          : String(value || "").slice(0, 10);
+        cell.value = /^\d{4}-\d{2}-\d{2}$/.test(dateText) ? dateText : value;
         return;
       }
       cell.value = value === "" ? null : value;
@@ -4367,9 +4375,10 @@ async function renderDriverWageSettlementXlsxBuffer(payload = {}) {
   const exchangeRate = Number(payload.exchangeRate ?? 0);
   const convertedRMB = exchangeRate ? Number((totalQ * exchangeRate).toFixed(2)) : 0;
   const payableTotal = Number((totalR + totalT + advanceHKD + convertedRMB).toFixed(2));
+  const payableWithoutAdvance = Number((totalR + totalT + convertedRMB).toFixed(2));
   const summaryNote = String(payload.summaryNote || `${rows.length}车骑师/口岸过车`).trim();
   const paymentLabel = String(payload.paymentLabel || "").trim();
-  const payableFormulaText = `运费${formatDriverWageNoteNumber(totalR)} + 装卸过海加点${formatDriverWageNoteNumber(totalT)} + 司机代垫${formatDriverWageNoteNumber(advanceHKD)} + 杂费${formatDriverWageNoteNumber(convertedRMB)} = 应付HKD${formatDriverWageNoteNumber(payableTotal)}`;
+  const payableFormulaText = `运费${formatDriverWageNoteNumber(totalR)} + 装卸过海加点${formatDriverWageNoteNumber(totalT)} + 司机代垫${formatDriverWageNoteNumber(advanceHKD)} + 杂费${formatDriverWageNoteNumber(convertedRMB)} = 应付HKD${formatDriverWageNoteNumber(payableTotal)}；去除系统代垫后HKD${formatDriverWageNoteNumber(payableWithoutAdvance)}`;
 
   worksheet.getCell(`P${summaryRowNumber}`).value = totalP;
   worksheet.getCell(`Q${summaryRowNumber}`).value = totalQ;
@@ -9943,10 +9952,14 @@ async function syncDispatchPlanRowsStatusForOrder(orderRow = {}, dispatchStatus 
       if (previousStatus === normalizedStatus) return row;
       planChanged = true;
       changed += 1;
+      const isRollbackFromSigned = previousStatus === "已签收"
+        && ["通关中", "异常滞留"].includes(normalizedStatus);
       return {
         ...row,
         status: normalizedStatus,
-        previousStatus: previousStatus && previousStatus !== normalizedStatus ? previousStatus : row.previousStatus || ""
+        previousStatus: isRollbackFromSigned
+          ? ""
+          : (previousStatus && previousStatus !== normalizedStatus ? previousStatus : row.previousStatus || "")
       };
     });
     if (!planChanged) continue;
@@ -10363,6 +10376,15 @@ function dispatchStatusFromProtectedOrderStatus(orderStatus = "") {
   return "";
 }
 
+function dispatchStatusRollbackAllowedFromSignedOrder(orderStatus = "", existingRow = {}, nextStatus = "") {
+  if (normalizeOrderStatus(orderStatus, "") !== "已签收") return false;
+  if (normalizeDispatchPlanStatus(existingRow?.status) !== "已签收") return false;
+  const recordedPreviousStatus = normalizeDispatchPlanStatus(existingRow?.previousStatus || "");
+  const fallbackPreviousStatus = recordedPreviousStatus || "通关中";
+  return nextStatus === fallbackPreviousStatus
+    && ["通关中", "异常滞留"].includes(nextStatus);
+}
+
 async function protectDispatchRowsFromOrderDowngrade(rows = [], existingRows = []) {
   const statusMap = await orderStatusByDispatchReferences(rows);
   if (!statusMap.size) return rows;
@@ -10375,12 +10397,18 @@ async function protectDispatchRowsFromOrderDowngrade(rows = [], existingRows = [
     const protectedDispatchStatus = dispatchStatusFromProtectedOrderStatus(orderStatus);
     if (!protectedDispatchStatus) return row;
     const currentStatus = normalizeDispatchPlanStatus(row.status);
-    if (dispatchRowStatusRank({ status: protectedDispatchStatus }) <= dispatchRowStatusRank({ status: currentStatus })) {
-      return row;
-    }
     const existingRow = findExistingDispatchRow(row, existingLookup);
     const existingStatus = normalizeDispatchPlanStatus(existingRow?.status || "");
     const existingPreviousStatus = normalizeDispatchPlanStatus(existingRow?.previousStatus || "");
+    if (dispatchStatusRollbackAllowedFromSignedOrder(orderStatus, existingRow, currentStatus)) {
+      return {
+        ...row,
+        previousStatus: ""
+      };
+    }
+    if (dispatchRowStatusRank({ status: protectedDispatchStatus }) <= dispatchRowStatusRank({ status: currentStatus })) {
+      return row;
+    }
     return {
       ...row,
       status: protectedDispatchStatus,
@@ -10701,6 +10729,7 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
     return;
   }
   const requestCreator = creatorFieldsFromAccount(req.account);
+  const baseRows = Array.isArray(req.body.baseRows) ? req.body.baseRows : [];
   let result;
   try {
     result = await db.transaction(async () => {
@@ -10709,11 +10738,27 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
       const existingPlan = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
       const existingRows = parseDispatchPlanRowsJson(existingPlan?.rows_json);
       const existingRowsLookup = dispatchRowLookup(existingRows);
+      const baseRowsLookup = dispatchRowLookup(baseRows);
+      let staleStatusRows = 0;
       const rowsNeedingOrderSync = [];
       const cleanRows = rows
         .map((row) => {
           const existingRow = findExistingDispatchRow(row, existingRowsLookup);
           const cleanRow = normalizeDispatchPlanRow(row, existingRow, requestCreator, date);
+          const baseRow = findExistingDispatchRow(row, baseRowsLookup);
+          if (existingRow && baseRow) {
+            const incomingStatus = normalizeDispatchPlanStatus(cleanRow.status);
+            const baseStatus = normalizeDispatchPlanStatus(baseRow.status);
+            const existingStatus = normalizeDispatchPlanStatus(existingRow.status);
+            // A status that is unchanged from the client's base snapshot but
+            // already changed on the server is a stale save. Keep the server
+            // status so an old auto-save cannot undo a deliberate rollback.
+            if (incomingStatus === baseStatus && existingStatus !== baseStatus) {
+              cleanRow.status = existingStatus;
+              cleanRow.previousStatus = existingRow.previousStatus || "";
+              staleStatusRows += 1;
+            }
+          }
           if (dispatchRowHasReference(cleanRow) && dispatchRowNeedsOrderSync(cleanRow, existingRow)) {
             rowsNeedingOrderSync.push(cleanRow);
           }
@@ -10730,7 +10775,13 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
       await upsertDispatchPlanRow(date, rowsJson, planCreator);
       await syncDispatchPlanRowsToOrders(date, rowsNeedingOrderSync, savedRows);
       const saved = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
-	      return { saved, incomingCount: cleanRows.length, savedCount: savedRows.length, stats: merged.stats };
+      return {
+        saved,
+        incomingCount: cleanRows.length,
+        savedCount: savedRows.length,
+        staleStatusRows,
+        stats: merged.stats
+      };
     })();
   } catch (error) {
     if (error?.statusCode === 409) {
@@ -10748,7 +10799,7 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
     "update",
     "dispatch_plan",
     date,
-    `修改排车计划：合并保存 ${result.incomingCount} 条，当前 ${result.savedCount} 条，保护 ${result.stats.protected} 条${result.stats.staleSkipped ? `，跳过旧快照 ${result.stats.staleSkipped} 条` : ""}`
+    `修改排车计划：合并保存 ${result.incomingCount} 条，当前 ${result.savedCount} 条，保护 ${result.stats.protected} 条${result.staleStatusRows ? `，忽略旧状态 ${result.staleStatusRows} 条` : ""}${result.stats.staleSkipped ? `，跳过旧快照 ${result.stats.staleSkipped} 条` : ""}`
   );
   res.json(mapDispatchPlanRecord(result.saved));
 });
@@ -11645,6 +11696,10 @@ app.patch("/api/orders/:no", async (req, res) => {
     await lockOrderDispatchSync();
     await updateOrderRow(no, item, { existing: mapOrder(existing) });
     await saveOrderFees(no, item.fees, item.currency);
+    const dispatchStatus = ORDER_STATUS_TO_DISPATCH_STATUS[item.status] || "";
+    if (dispatchStatus) {
+      await syncDispatchPlanRowsStatusForOrder(item, dispatchStatus);
+    }
     await syncDispatchPlanRowsRemarkFromOrder(item);
   });
 

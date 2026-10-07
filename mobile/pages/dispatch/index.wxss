@@ -417,6 +417,11 @@
   color: #b45309;
 }
 
+.highlight-pill.driver {
+  background: #f0f5ff;
+  color: #334e9a;
+}
+
 .meta-line {
   display: flex;
   flex-wrap: wrap;

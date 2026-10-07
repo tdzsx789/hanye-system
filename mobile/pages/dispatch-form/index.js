@@ -12,6 +12,7 @@ const {
   formFromDispatchRow,
   generateDispatchNo,
   normalizePlateText,
+  normalizeLocationDetailText,
   normalizeUserText,
   normalizeDispatchRows,
   normalizeTransportMode,
@@ -74,6 +75,24 @@ function normalizeOrderFeeRows(fees = []) {
   return rows.length ? rows : [createOrderFeeRow()];
 }
 
+function parseOrderFreightTemplate(item) {
+  if (!item) return null;
+  try {
+    const content = typeof item.content === "string" ? JSON.parse(item.content || "{}") : (item.content || {});
+    if (!content || content.type !== "order-freight-template") return null;
+    return {
+      id: item.id || "",
+      name: item.name || item.templateName || "未命名订单模板",
+      description: item.description || "订单运费模板",
+      updatedAt: item.updatedAt || item.updated_at || item.createdAt || item.created_at || "",
+      customer: content.customer || {},
+      fees: Array.isArray(content.fees) ? content.fees : []
+    };
+  } catch (error) {
+    return null;
+  }
+}
+
 function payloadOrderFeeRows(fees = []) {
   return normalizeOrderFeeRows(fees)
     .filter((fee) => fee.name)
@@ -96,6 +115,10 @@ function uniqueTextList(values) {
     if (text && result.indexOf(text) < 0) result.push(text);
   });
   return result;
+}
+
+function uniqueTextValues(values) {
+  return uniqueTextList(values);
 }
 
 function customerShortDisplay(customer) {
@@ -137,6 +160,23 @@ function customerMatchesInput(customer, text) {
   return String(customer.name || "").trim() === target
     || String(customer.shortName || customer.short_name || "").trim() === target
     || String(customer.id || "").trim() === target;
+}
+
+function customerFeatureFlag(customer, camelKey, snakeKey) {
+  if (!customer) return false;
+  const value = customer[camelKey] ?? customer[snakeKey];
+  if (value === undefined || value === null || value === "") return false;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  return ["1", "true", "yes", "on"].indexOf(String(value).trim().toLowerCase()) >= 0;
+}
+
+function customerFeatureFlags(customer) {
+  return {
+    operatingUnitEnabled: customerFeatureFlag(customer, "operatingUnitEnabled", "operating_unit_enabled"),
+    newOldEnabled: customerFeatureFlag(customer, "newOldEnabled", "new_old_enabled"),
+    specialCarEnabled: customerFeatureFlag(customer, "specialCarEnabled", "special_car_enabled")
+  };
 }
 
 function findCustomerByIdOrText(customers, customerId, customerText) {
@@ -183,6 +223,44 @@ function decorateCustomerSuggestion(customer) {
     displayName: customerOptionPrimaryDisplay(customer),
     secondaryText: customerOptionSecondaryDisplay(customer)
   });
+}
+
+function decorateSelectedCustomer(customer) {
+  return Object.assign({}, customer, {
+    displayName: customerOptionPrimaryDisplay(customer)
+  });
+}
+
+function customerSelectionFromValues(customers, customerIds, customerNames) {
+  const rows = (Array.isArray(customers) ? customers : []).filter((item) => item.type === "客户");
+  const ids = uniqueTextValues(customerIds);
+  const names = uniqueTextValues(customerNames);
+  const result = [];
+  const seen = new Set();
+  const add = (customer, fallbackName) => {
+    if (!customer && !fallbackName) return;
+    const key = String(customer && customer.id || fallbackName || "").trim();
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    result.push(decorateSelectedCustomer(customer || {
+      id: "",
+      name: fallbackName,
+      shortName: fallbackName,
+      type: "客户"
+    }));
+  };
+  ids.forEach((id, index) => {
+    const customer = rows.find((item) => String(item.id) === String(id));
+    add(customer, names[index] || id);
+  });
+  names.forEach((name, index) => {
+    const customer = rows.find((item) =>
+      customerMatchesInput(item, name)
+      || String(item.name || "").trim() === String(name).trim()
+    );
+    add(customer, name || ids[index]);
+  });
+  return result;
 }
 
 function decorateDriverSuggestion(driver) {
@@ -234,7 +312,7 @@ function createLocationEntry(value) {
   const parts = hasStructuredParts ? null : splitLocationParts(value && typeof value === "object" ? value.value : value);
   const city = hasStructuredParts ? normalizeUserText(value.city, { singleLine: true, compactCjkSpacing: true }) : parts.city;
   const district = hasStructuredParts ? normalizeUserText(value.district, { singleLine: true, compactCjkSpacing: true }) : parts.district;
-  const detail = hasStructuredParts ? normalizeUserText(value.detail, { singleLine: true, compactCjkSpacing: true }) : parts.detail;
+  const detail = hasStructuredParts ? normalizeLocationDetailText(value.detail) : parts.detail;
   return {
     id: nextLocationEntryId(),
     city,
@@ -272,7 +350,7 @@ function normalizeLocationEntries(entries) {
         const parts = hasStructuredParts ? null : splitLocationParts(item.value);
         const city = hasStructuredParts ? normalizeUserText(item.city, { singleLine: true, compactCjkSpacing: true }) : parts.city;
         const district = hasStructuredParts ? normalizeUserText(item.district, { singleLine: true, compactCjkSpacing: true }) : parts.district;
-        const detail = hasStructuredParts ? normalizeUserText(item.detail, { singleLine: true, compactCjkSpacing: true }) : parts.detail;
+        const detail = hasStructuredParts ? normalizeLocationDetailText(item.detail) : parts.detail;
         return {
           id: item.id || nextLocationEntryId(),
           city,
@@ -351,7 +429,7 @@ function cityNameMatches(left = "", right = "") {
 }
 
 function splitLocationParts(value = "") {
-  const text = normalizeUserText(value, { singleLine: true, compactCjkSpacing: true });
+  const text = normalizeLocationDetailText(value);
   if (!text) return { city: "", district: "", detail: "" };
   const normalized = text
     .replace(/[／｜|]+/g, "/")
@@ -378,14 +456,16 @@ function splitLocationParts(value = "") {
 }
 
 function composeLocationParts(city = "", district = "", detail = "") {
-  return [city, district, detail]
-    .map((part) => normalizeUserText(part, { singleLine: true, compactCjkSpacing: true }))
-    .filter(Boolean)
-    .join(" / ");
+  const cityText = normalizeUserText(city, { singleLine: true, compactCjkSpacing: true });
+  const districtText = normalizeUserText(district, { singleLine: true, compactCjkSpacing: true });
+  const detailText = normalizeLocationDetailText(detail);
+  return [cityText, districtText, detailText].filter(Boolean).join(" / ");
 }
 
 function normalizeLocationPartValue(value = "", part = "") {
-  const text = normalizeUserText(value, { singleLine: true, compactCjkSpacing: true });
+  const text = part === "detail"
+    ? normalizeLocationDetailText(value)
+    : normalizeUserText(value, { singleLine: true, compactCjkSpacing: true });
   if (!text || part === "detail") return text;
   const parsed = splitLocationParts(text);
   if (part === "city") return parsed.city || text;
@@ -443,6 +523,15 @@ function ensureDispatchCurrency(form) {
 
 function normalizeDispatchFormForDisplay(form) {
   if (!form || typeof form !== "object") return form;
+  if (!isOrderEditMode(this && this.data ? this.data.mode : "")) {
+    const driverNames = [form.driver, form.hkDriver, form.mainlandDriver]
+      .map((item) => String(item || "").trim())
+      .filter(Boolean);
+    form.driver = uniqueTextList(driverNames).join(" / ");
+    form.transportMode = "";
+    form.hkDriver = "";
+    form.mainlandDriver = "";
+  }
   form.transportMode = normalizeTransportMode(form.transportMode || "");
   if (!form.transportMode || form.transportMode === "单司机") {
     form.driver = String(form.driver || form.hkDriver || "").trim();
@@ -456,6 +545,17 @@ function normalizeDispatchFormForDisplay(form) {
   }
   ensureDispatchCurrency(form);
   return form;
+}
+
+function invalidLocationMessage(entries, label) {
+  const rows = (Array.isArray(entries) ? entries : []).filter((entry) =>
+    entry && [entry.city, entry.district, entry.detail, entry.value].some((value) => String(value || "").trim())
+  );
+  if (!rows.length) return `请填写${label}`;
+  const invalidIndex = rows.findIndex((entry) =>
+    !String(entry.city || "").trim() && !String(entry.detail || "").trim()
+  );
+  return invalidIndex >= 0 ? `${label}第 ${invalidIndex + 1} 条需要填写市或详细地址` : "";
 }
 
 function normalizeDispatchFormForSave(form) {
@@ -473,7 +573,6 @@ function normalizeDispatchFormForSave(form) {
       form.mainlandDriver = "";
     }
   } else if (vehicleSource === "外派车辆") {
-    form.driver = "";
     form.hkDriver = "";
     form.mainlandDriver = "";
     form.transportMode = "";
@@ -640,8 +739,15 @@ Page({
     addressBookAreaPickerRange: [[], []],
     addressBookAreaPickerValue: [0, 0],
     businessTypeOptions: BUSINESS_TYPE_OPTIONS,
+    customerFeatureFlags: {
+      operatingUnitEnabled: false,
+      newOldEnabled: false,
+      specialCarEnabled: false
+    },
+    customerKeyword: "",
     customerPickerOpen: false,
     customerSuggestions: [],
+    selectedCustomers: [],
     customers: [],
     currencyOptions: ["港币", "人民币"],
     directionOptions: DIRECTION_OPTIONS,
@@ -666,10 +772,14 @@ Page({
     isOrderEditMode: false,
     mainlandDriverOptions: [],
     mode: "new",
+    newOldOptions: ["新货", "旧货"],
     orderFeeRows: [createOrderFeeRow()],
+    orderTemplateLoading: false,
     orderStatusOptions: ORDER_STATUS_OPTIONS,
     originDate: "",
     plateOptions: [],
+    plateValues: [],
+    plateDisplayText: "",
     portOptions: PORT_OPTIONS,
     saving: false,
     sourceRow: null,
@@ -711,7 +821,7 @@ Page({
     if (mode === "order-edit" && sourceRow && sourceRow.order && sourceRow.order.status) {
       form.status = sourceRow.order.status;
     }
-    normalizeDispatchFormForDisplay(form);
+    normalizeDispatchFormForDisplay.call({ data: { mode } }, form);
     const locationPatch = locationEntriesPatchFromForm(form);
     this.setData({
       form,
@@ -809,17 +919,49 @@ Page({
         (Array.isArray(freightRates) ? freightRates : []).filter((item) => !String(item.customerId || item.customer_id || "").trim() && !String(item.customerName || item.customer_name || "").trim())
       );
       const addressBookCityOptions = areaCatalogCityOptions(this.addressBookAreaCatalog, this.data.addressBookRows || []);
-      const form = normalizeDispatchFormForDisplay(Object.assign({}, this.data.form));
-      const matchedCustomer = findCustomerByIdOrText(customers, form.customerId, form.customer);
-      if (matchedCustomer) {
+      const form = normalizeDispatchFormForDisplay.call(this, Object.assign({}, this.data.form));
+      const selectedCustomers = customerSelectionFromValues(
+        customers,
+        form.customerIds || (form.customerId ? [form.customerId] : []),
+        form.customerNames || (form.customer ? [form.customer] : [])
+      );
+      const matchedCustomer = selectedCustomers[0] || findCustomerByIdOrText(customers, form.customerId, form.customer);
+      if (selectedCustomers.length) {
+        form.customerIds = selectedCustomers.map((item) => String(item.id || "").trim()).filter(Boolean);
+        form.customerNames = selectedCustomers.map((item) => String(item.name || "").trim()).filter(Boolean);
+        form.customerId = selectedCustomers[0].id;
+        form.customer = selectedCustomers[0].name;
+      } else if (matchedCustomer) {
+        form.customerIds = [String(matchedCustomer.id || "").trim()].filter(Boolean);
+        form.customerNames = [String(matchedCustomer.name || "").trim()].filter(Boolean);
         form.customerId = matchedCustomer.id;
-        form.customer = customerOptionPrimaryDisplay(matchedCustomer);
+        form.customer = matchedCustomer.name;
       }
+      const featureFlags = customerFeatureFlags(matchedCustomer);
       this.applyOrderRequiredFieldDefaults(form, matchedCustomer);
       const locationPatch = locationEntriesPatchFromForm(form);
+      const plateRows = [];
+      const plateSeen = new Set();
+      (Array.isArray(vehicles) ? vehicles : []).forEach((vehicle) => {
+        const plate = String(vehicle && vehicle.plate || "").trim();
+        if (!plate || plateSeen.has(plate)) return;
+        plateSeen.add(plate);
+        const vehicleType = String(vehicle.type || vehicle.model || vehicle.brand || "车辆").trim();
+        plateRows.push({
+          value: plate,
+          label: `${plate} · ${vehicleType}`
+        });
+      });
+      const plateDisplayMap = {};
+      plateRows.forEach((item) => {
+        plateDisplayMap[item.value] = item.label;
+      });
       this.setData({
         addressBookCityOptions,
         customers,
+        customerFeatureFlags: featureFlags,
+        customerKeyword: "",
+        selectedCustomers,
         drivers,
         driverOptions: uniqueTextList(drivers.map((item) => item.name)),
         form,
@@ -829,7 +971,10 @@ Page({
         loadingRefs: false,
         loadTimePickerValue: loadTimePickerValueFromText(form.loadTime),
         mainlandDriverOptions: uniqueTextList(drivers.filter((item) => item.type === "大陆骑师").map((item) => item.name)),
-        plateOptions: uniqueTextList(vehicles.map((vehicle) => vehicle.plate).filter(Boolean)),
+        plateOptions: plateRows.map((item) => item.label),
+        plateValues: plateRows.map((item) => item.value),
+        plateDisplayText: plateDisplayMap[form.plate] || form.plate || "",
+        plateDisplayMap,
         supplierOptions: uniqueTextList(customers.filter((item) => item.type === "供应商").map((item) => item.name).filter(Boolean)),
         unloadingEntries: locationPatch.unloadingEntries,
         unloadingEntryCount: locationPatch.unloadingEntryCount,
@@ -851,9 +996,11 @@ Page({
   },
 
   refreshCustomerSuggestions() {
-    const keyword = String(this.data.form.customer || "").trim().toLowerCase();
+    const keyword = String(this.data.customerKeyword || "").trim().toLowerCase();
+    const selectedIds = new Set((this.data.selectedCustomers || []).map((item) => String(item.id || "").trim()).filter(Boolean));
     const rows = (this.data.customers || [])
       .filter((item) => item.type === "客户")
+      .filter((item) => !selectedIds.has(String(item.id || "").trim()))
       .filter((item) => {
         if (!keyword) return true;
         return customerSearchText(item).indexOf(keyword) >= 0;
@@ -914,15 +1061,25 @@ Page({
   onFieldInput(event) {
     const field = event.currentTarget.dataset.field;
     const value = event.detail.value;
-    this.setData({ [`form.${field}`]: value });
     if (field === "customer") {
-      this.setData({ "form.customerId": "", customerPickerOpen: true });
+      this.setData({ customerKeyword: value, customerPickerOpen: true });
       this.refreshCustomerSuggestions();
       return;
     }
+    this.setData({ [`form.${field}`]: value });
+    if (field === "plate") {
+      this.setData({ plateDisplayText: value });
+    }
     if (field === "driver") {
-      this.setData({ driverPickerOpen: true });
-      this.refreshDriverSuggestions(value);
+      if (this.data.form.vehicleSource === "汉业物流") {
+        this.setData({ driverPickerOpen: true });
+        this.refreshDriverSuggestions(value);
+      } else {
+        this.setData({
+          driverPickerOpen: false,
+          driverSuggestions: []
+        });
+      }
     }
   },
 
@@ -1068,15 +1225,44 @@ Page({
     const id = event.currentTarget.dataset.id;
     const customer = (this.data.customers || []).find((item) => String(item.id) === String(id));
     if (!customer) return;
+    const selectedCustomers = [...(this.data.selectedCustomers || [])];
+    if (selectedCustomers.some((item) => String(item.id) === String(customer.id))) return;
+    selectedCustomers.push(decorateSelectedCustomer(customer));
+    const primaryCustomer = selectedCustomers[0];
     const form = Object.assign({}, this.data.form, {
-      customer: customerOptionPrimaryDisplay(customer),
-      customerId: customer.id
+      customer: primaryCustomer.name,
+      customerId: primaryCustomer.id,
+      customerIds: selectedCustomers.map((item) => String(item.id || "").trim()).filter(Boolean),
+      customerNames: selectedCustomers.map((item) => String(item.name || "").trim()).filter(Boolean)
     });
-    this.applyOrderRequiredFieldDefaults(form, customer);
+    this.applyOrderRequiredFieldDefaults(form, primaryCustomer);
     this.setData({
       form,
-      customerPickerOpen: false
+      customerFeatureFlags: customerFeatureFlags(primaryCustomer),
+      customerKeyword: "",
+      selectedCustomers,
+      customerPickerOpen: true
     });
+    this.refreshCustomerSuggestions();
+  },
+
+  removeSelectedCustomer(event) {
+    const index = Number(event.currentTarget.dataset.index);
+    const selectedCustomers = (this.data.selectedCustomers || []).filter((_, itemIndex) => itemIndex !== index);
+    const primaryCustomer = selectedCustomers[0] || null;
+    const form = Object.assign({}, this.data.form, {
+      customer: primaryCustomer ? primaryCustomer.name : "",
+      customerId: primaryCustomer ? primaryCustomer.id : "",
+      customerIds: selectedCustomers.map((item) => String(item.id || "").trim()).filter(Boolean),
+      customerNames: selectedCustomers.map((item) => String(item.name || "").trim()).filter(Boolean)
+    });
+    this.setData({
+      form,
+      customerFeatureFlags: customerFeatureFlags(primaryCustomer),
+      selectedCustomers,
+      customerPickerOpen: true
+    });
+    this.refreshCustomerSuggestions();
   },
 
   async onFormDateChange(event) {
@@ -1090,6 +1276,14 @@ Page({
 
   toggleNeedsWeighing() {
     this.setData({ "form.needsWeighing": !Boolean(this.data.form && this.data.form.needsWeighing) });
+  },
+
+  onSpecialCarChange(event) {
+    this.setData({ "form.specialCar": Boolean(event.detail.value) });
+  },
+
+  toggleSpecialCar() {
+    this.setData({ "form.specialCar": !Boolean(this.data.form && this.data.form.specialCar) });
   },
 
   onBooleanFieldChange(event) {
@@ -1140,6 +1334,48 @@ Page({
     this.setData({ orderFeeRows: rows.length ? rows : [createOrderFeeRow()] });
   },
 
+  async openOrderTemplatePicker() {
+    if (this.data.orderTemplateLoading) return;
+    this.setData({ orderTemplateLoading: true });
+    try {
+      const templates = await api.listTemplates();
+      const allTemplates = (Array.isArray(templates) ? templates : [])
+        .map(parseOrderFreightTemplate)
+        .filter(Boolean);
+      const customer = this.findMatchedCustomer();
+      const customerId = String(customer && customer.id || this.data.form.customerId || "").trim();
+      const customerName = customerShortDisplay(customer || { name: this.data.form.customer });
+      const matched = allTemplates.filter((template) => {
+        const templateCustomer = template.customer || {};
+        const templateCustomerId = String(templateCustomer.id || templateCustomer.customerId || "").trim();
+        const templateCustomerName = customerShortDisplay(templateCustomer);
+        return (customerId && templateCustomerId && customerId === templateCustomerId)
+          || (customerName && templateCustomerName && customerName === templateCustomerName);
+      });
+      const options = matched.length ? matched : allTemplates;
+      if (!options.length) {
+        wx.showToast({ title: "暂无可载入的订单模板", icon: "none" });
+        return;
+      }
+      const action = await new Promise((resolve, reject) => {
+        wx.showActionSheet({
+          itemList: options.map((item) => item.name || "未命名订单模板"),
+          success: resolve,
+          fail: reject
+        });
+      });
+      const selected = options[Number(action.tapIndex)];
+      if (!selected) return;
+      this.setData({ orderFeeRows: normalizeOrderFeeRows(selected.fees) });
+      wx.showToast({ title: "已载入收费项目模板", icon: "none" });
+    } catch (error) {
+      if (error && error.errMsg && error.errMsg.indexOf("cancel") >= 0) return;
+      wx.showToast({ title: error.message || "读取订单模板失败", icon: "none" });
+    } finally {
+      this.setData({ orderTemplateLoading: false });
+    }
+  },
+
   handleVehicleSourceChange(value) {
     const form = Object.assign({}, this.data.form, { vehicleSource: value });
     if (value === "汉业物流") {
@@ -1157,7 +1393,7 @@ Page({
       form.mainlandDriver = "";
       form.transportMode = "";
     }
-    normalizeDispatchFormForDisplay(form);
+    normalizeDispatchFormForDisplay.call(this, form);
     this.setData({ form, driverPickerOpen: false, driverSuggestions: [] });
   },
 
@@ -1182,7 +1418,7 @@ Page({
       form.hkDriver = "";
       form.mainlandDriver = "";
     }
-    normalizeDispatchFormForDisplay(form);
+    normalizeDispatchFormForDisplay.call(this, form);
     this.setData({ form, driverPickerOpen: false, driverSuggestions: [] });
   },
 
@@ -1197,6 +1433,15 @@ Page({
     }
     if (field === "transportMode") {
       this.handleTransportModeChange(value);
+      return;
+    }
+    if (field === "plate") {
+      const plateIndex = Number(event.detail.value || 0);
+      const plateValue = (this.data.plateValues || [])[plateIndex] || "";
+      this.setData({
+        "form.plate": plateValue,
+        plateDisplayText: (this.data.plateOptions || [])[plateIndex] || plateValue
+      });
       return;
     }
     const patch = { [`form.${field}`]: value };
@@ -1600,8 +1845,14 @@ Page({
 	    form.unloadingLocations = normalizeLocationEntries(this.data.unloadingEntries)
 	      .filter((entry) => entry.value)
 	      .map((entry) => ({ city: entry.city, district: entry.district, detail: entry.detail }));
-	    form.loading = joinLocationEntries(form.loadingLocations);
-	    form.unloading = joinLocationEntries(form.unloadingLocations);
+    form.loading = joinLocationEntries(form.loadingLocations);
+    form.unloading = joinLocationEntries(form.unloadingLocations);
+    const invalidLocation = invalidLocationMessage(form.loadingLocations, "装货地")
+      || invalidLocationMessage(form.unloadingLocations, "卸货地");
+    if (invalidLocation) {
+      wx.showToast({ title: invalidLocation, icon: "none" });
+      return;
+    }
     this.applyOrderRequiredFieldDefaults(form, customer);
     if (isOrderEditMode(this.data.mode) && form.status === "已签收") {
       const signMissingLabels = missingOrderSignRequiredFieldLabels(form, customer);
@@ -1620,6 +1871,7 @@ Page({
       const createdAt = form.createdAt || currentTimestampInputValue();
       form.createdAt = createdAt;
       const payload = orderPayloadFromForm(form, customer, shouldCreateOrder);
+      payload.currency = payload.currency || "港币";
       if (isOrderEditMode(this.data.mode)) {
         payload.status = form.status || "待确认";
         payload.fees = payloadOrderFeeRows(this.data.orderFeeRows || []);

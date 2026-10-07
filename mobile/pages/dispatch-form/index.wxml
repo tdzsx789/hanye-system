@@ -31,8 +31,14 @@
         </picker>
       </view>
       <view class="field-row customer-field">
-        <text class="field-label">客户</text>
-        <input placeholder="搜索并选择客户" placeholder-class="placeholder" value="{{form.customer}}" data-field="customer" bindfocus="onCustomerFocus" bindinput="onFieldInput" />
+        <text class="field-label">客户简称</text>
+        <input placeholder="搜索并选择客户简称" placeholder-class="placeholder" value="{{customerKeyword}}" data-field="customer" bindfocus="onCustomerFocus" bindinput="onFieldInput" />
+        <view wx:if="{{selectedCustomers.length}}" class="customer-tag-list">
+          <view wx:for="{{selectedCustomers}}" wx:for-item="item" wx:for-index="customerIndex" wx:key="id" class="customer-tag">
+            <text class="customer-tag-text">{{item.displayName || item.shortName || item.name}}</text>
+            <text class="customer-tag-remove" data-index="{{customerIndex}}" bindtap="removeSelectedCustomer">×</text>
+          </view>
+        </view>
         <view wx:if="{{customerPickerOpen}}" class="suggestion-box">
           <view wx:for="{{customerSuggestions}}" wx:key="id" class="suggestion-item" data-id="{{item.id}}" bindtap="selectCustomer">
             <text class="suggestion-primary">{{item.displayName || item.name}}</text>
@@ -42,18 +48,31 @@
           <button class="quiet-btn suggestion-close" bindtap="closeCustomerPicker">收起</button>
         </view>
       </view>
-      <view class="two-col">
-        <view class="field-row">
+      <view wx:if="{{isOrderEditMode}}" class="field-row">
           <text class="field-label">业务类型</text>
           <picker range="{{businessTypeOptions}}" data-field="businessType" data-options-key="businessTypeOptions" bindchange="onPickerChange">
             <view class="picker-box">{{form.businessType || '运输'}}</view>
           </picker>
+      </view>
+      <view wx:if="{{isOrderEditMode && (customerFeatureFlags.operatingUnitEnabled || customerFeatureFlags.newOldEnabled)}}" class="two-col">
+        <view wx:if="{{customerFeatureFlags.operatingUnitEnabled}}" class="field-row">
+          <text class="field-label">经营单位</text>
+          <input placeholder="可不填" placeholder-class="placeholder" value="{{form.operatingUnit}}" data-field="operatingUnit" bindinput="onFieldInput" />
         </view>
-        <view class="field-row">
-          <text class="field-label">币种</text>
-          <picker range="{{currencyOptions}}" data-field="currency" data-options-key="currencyOptions" bindchange="onPickerChange">
-            <view class="picker-box">{{form.currency || '港币'}}</view>
+        <view wx:if="{{customerFeatureFlags.newOldEnabled}}" class="field-row">
+          <text class="field-label">新/旧</text>
+          <picker range="{{newOldOptions}}" data-field="newOld" data-options-key="newOldOptions" bindchange="onPickerChange">
+            <view class="picker-box">{{form.newOld || '请选择'}}</view>
           </picker>
+        </view>
+      </view>
+      <view wx:if="{{isOrderEditMode && customerFeatureFlags.specialCar}}" class="field-row">
+        <view class="switch-field" bindtap="toggleSpecialCar">
+          <view class="switch-copy">
+            <text class="field-label switch-label">专车</text>
+            <text class="switch-hint">{{form.specialCar ? '已启用专车' : '未启用专车'}}</text>
+          </view>
+          <switch checked="{{form.specialCar}}" color="#1769e0" bindchange="onSpecialCarChange" catchtap="noop" />
         </view>
       </view>
     </view>
@@ -69,7 +88,7 @@
       <view class="field-row">
         <text class="field-label">车牌</text>
         <picker wx:if="{{form.vehicleSource === '汉业物流' && plateOptions.length}}" range="{{plateOptions}}" data-field="plate" data-options-key="plateOptions" bindchange="onPickerChange">
-          <view class="picker-box">{{form.plate || '请选择车牌'}}</view>
+          <view class="picker-box">{{plateDisplayText || form.plate || '请选择车牌'}}</view>
         </picker>
         <input wx:else placeholder="输入车牌/待定" placeholder-class="placeholder" value="{{form.plate}}" data-field="plate" bindinput="onFieldInput" />
       </view>
@@ -88,9 +107,13 @@
       <view wx:if="{{form.vehicleSource === '外派车辆'}}" class="field-row">
         <text class="field-label">外派供应商</text>
         <picker wx:if="{{supplierOptions.length}}" range="{{supplierOptions}}" data-field="supplier" data-options-key="supplierOptions" bindchange="onPickerChange">
-          <view class="picker-box">{{form.supplier || '请选择供应商'}}</view>
+          <view class="picker-box">{{form.supplier || '请选择外派供应商'}}</view>
         </picker>
-        <input wx:else placeholder="输入供应商名称" placeholder-class="placeholder" value="{{form.supplier}}" data-field="supplier" bindinput="onFieldInput" />
+        <input wx:else placeholder="输入外派供应商名称" placeholder-class="placeholder" value="{{form.supplier}}" data-field="supplier" bindinput="onFieldInput" />
+      </view>
+      <view wx:if="{{form.vehicleSource === '外派车辆'}}" class="field-row driver-field">
+        <text class="field-label">司机</text>
+        <input placeholder="输入供应商司机名称" placeholder-class="placeholder" value="{{form.driver}}" data-field="driver" bindinput="onFieldInput" />
       </view>
       <view class="two-col">
         <view class="field-row">
@@ -141,7 +164,7 @@
       </view>
       <view class="field-row">
         <text class="field-label">备注</text>
-        <input placeholder="{{isOrderEditMode ? '订单备注' : '排车备注'}}" placeholder-class="placeholder" value="{{form.note}}" data-field="note" bindinput="onFieldInput" />
+        <textarea class="multiline-field-input" auto-height maxlength="-1" placeholder="{{isOrderEditMode ? '订单备注' : '排车备注'}}" placeholder-class="placeholder" value="{{form.note}}" data-field="note" bindinput="onFieldInput"></textarea>
       </view>
       <view wx:if="{{isOrderEditMode}}" class="two-col">
         <view class="field-row">
@@ -173,7 +196,7 @@
       </view>
     </view>
 
-    <view wx:if="{{form.vehicleSource === '汉业物流'}}" class="panel form-panel">
+    <view wx:if="{{isOrderEditMode && form.vehicleSource === '汉业物流'}}" class="panel form-panel">
       <view class="section-title">运输模式</view>
       <view class="field-row">
         <text class="field-label">运输模式</text>
@@ -242,7 +265,7 @@
                 <view wx:else class="mini-suggestion-empty">暂无匹配，可直接输入</view>
               </view>
             </view>
-            <input class="location-detail-input" placeholder="详细地址" placeholder-class="placeholder" value="{{entry.detail}}" data-target="loading" data-index="{{entryIndex}}" data-part="detail" bindfocus="clearLocationSuggestion" bindinput="onLocationPartInput" />
+            <textarea class="location-detail-input" auto-height maxlength="-1" placeholder="详细地址（可换行）" placeholder-class="placeholder" value="{{entry.detail}}" data-target="loading" data-index="{{entryIndex}}" data-part="detail" bindfocus="clearLocationSuggestion" bindinput="onLocationPartInput"></textarea>
           </view>
           <view wx:if="{{loadingEntries.length > 1 && entryIndex > 0}}" class="location-remove-btn" data-target="loading" data-index="{{entryIndex}}" bindtap="removeLocationEntry">
             <text class="location-remove-icon">×</text>
@@ -285,7 +308,7 @@
                 <view wx:else class="mini-suggestion-empty">暂无匹配，可直接输入</view>
               </view>
             </view>
-            <input class="location-detail-input" placeholder="详细地址" placeholder-class="placeholder" value="{{entry.detail}}" data-target="unloading" data-index="{{entryIndex}}" data-part="detail" bindfocus="clearLocationSuggestion" bindinput="onLocationPartInput" />
+            <textarea class="location-detail-input" auto-height maxlength="-1" placeholder="详细地址（可换行）" placeholder-class="placeholder" value="{{entry.detail}}" data-target="unloading" data-index="{{entryIndex}}" data-part="detail" bindfocus="clearLocationSuggestion" bindinput="onLocationPartInput"></textarea>
           </view>
           <view wx:if="{{unloadingEntries.length > 1 && entryIndex > 0}}" class="location-remove-btn" data-target="unloading" data-index="{{entryIndex}}" bindtap="removeLocationEntry">
             <text class="location-remove-icon">×</text>
@@ -304,7 +327,10 @@
           <text class="section-title">收费项目</text>
           <text class="location-hint">和 Web 端订单费用一起保存。</text>
         </view>
-        <button class="ghost-btn fee-add-btn" bindtap="addOrderFeeRow">新增项目</button>
+        <view class="fee-head-actions">
+          <button class="ghost-btn" loading="{{orderTemplateLoading}}" disabled="{{orderTemplateLoading}}" bindtap="openOrderTemplatePicker">载入模板</button>
+          <button class="ghost-btn fee-add-btn" bindtap="addOrderFeeRow">新增项目</button>
+        </view>
       </view>
       <view wx:for="{{orderFeeRows}}" wx:for-item="fee" wx:for-index="feeIndex" wx:key="*this" class="fee-card">
         <view class="fee-card-head">
@@ -399,7 +425,7 @@
         </view>
         <view class="field-row">
           <text class="field-label">详细地址</text>
-          <input placeholder="详细地址" placeholder-class="placeholder" value="{{addressBookForm.address}}" data-field="address" bindfocus="clearAddressBookSuggestion" bindinput="onAddressBookFormInput" />
+          <textarea class="multiline-field-input" auto-height maxlength="-1" placeholder="详细地址（可换行）" placeholder-class="placeholder" value="{{addressBookForm.address}}" data-field="address" bindfocus="clearAddressBookSuggestion" bindinput="onAddressBookFormInput"></textarea>
         </view>
         <view class="two-col">
           <view class="field-row">

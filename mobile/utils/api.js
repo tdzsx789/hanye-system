@@ -84,6 +84,10 @@ function listFreightRates() {
   return requestList("/freight-rates");
 }
 
+function listTemplates() {
+  return requestList("/templates?includeContent=1");
+}
+
 function getDispatchPlan(date) {
   return request(`/dispatch-plans/${encodeURIComponent(date)}`);
 }
@@ -130,6 +134,7 @@ module.exports = {
   listDrivers,
   listExpiryReminders,
   listOrders,
+  listTemplates,
   listVehicles,
   login,
   deleteCustomerContact,
