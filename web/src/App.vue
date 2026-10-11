@@ -19150,8 +19150,13 @@ function syncAutoFreightFee() {
 }
 
 async function ensureReferenceDataLoaded() {
-  if (customerRows.value.length && feeItemRows.value.length && freightRateRows.value.length) return;
-  await loadDatabaseData({ preserveSelection: true });
+  if (!customerRows.value.length || !feeItemRows.value.length || !freightRateRows.value.length) {
+    await loadDatabaseData({ preserveSelection: true });
+  }
+  // Order editors can be opened directly from the order list without ever
+  // visiting the template center. Load saved freight templates here as well,
+  // otherwise the customer-scoped template menu is empty on first open.
+  await ensureTemplateRowsLoaded({ silent: true });
 }
 
 function scheduleAutoFreightSync() {
