@@ -893,13 +893,51 @@ function dispatchLocationBlock(label, record, field) {
     .join("\n");
 }
 
-function dispatchMessageCustomerPrefix(row = {}) {
+function dispatchMessageCustomerShortName(customers, id, name) {
+  const idText = valueText(id);
+  const nameText = valueText(name);
+  const rows = Array.isArray(customers)
+    ? customers.filter((item) => item && (!item.type || item.type === "客户"))
+    : [];
+  const matched = rows.find((item) => idText && valueText(item && item.id) === idText)
+    || rows.find((item) => {
+      const fullName = valueText(item && item.name);
+      const shortName = valueText(item && (item.shortName || item.short_name));
+      return nameText && (fullName === nameText || shortName === nameText);
+    });
+  return valueText(matched && (matched.shortName || matched.short_name))
+    || nameText;
+}
+
+function dispatchMessageCustomerPrefix(row = {}, customers = []) {
   const order = row && row.order ? row.order : {};
-  const customer = valueText(row.customer || order.customer);
+  const customerIds = Array.isArray(row.customerIds) && row.customerIds.length
+    ? row.customerIds
+    : (Array.isArray(order.customerIds) && order.customerIds.length
+      ? order.customerIds
+      : [row.customerId || order.customerId].filter(Boolean));
+  const customerNames = Array.isArray(row.customerNames) && row.customerNames.length
+    ? row.customerNames
+    : (Array.isArray(order.customerNames) && order.customerNames.length ? order.customerNames : []);
+  const fallbackCustomer = valueText(row.customer || order.customer);
+  const fallbackNames = customerNames.length
+    ? customerNames
+    : (fallbackCustomer && fallbackCustomer !== "-" ? fallbackCustomer.split(/\s*\/\s*/) : []);
+  const count = Math.max(customerIds.length, fallbackNames.length);
+  const names = [];
+  for (let index = 0; index < count; index += 1) {
+    const name = dispatchMessageCustomerShortName(
+      customers,
+      customerIds[index],
+      fallbackNames[index]
+    );
+    if (name && name !== "-" && names.indexOf(name) < 0) names.push(name);
+  }
+  const customer = names.join(" / ") || fallbackCustomer;
   return customer && customer !== "-" ? `${customer} ` : "";
 }
 
-function dispatchMessageText(rows, orders, date) {
+function dispatchMessageText(rows, orders, date, customers) {
   const mergedRows = normalizeDispatchRows(rows, date).map((row) => rowWithOrder(row, orders, date));
   return mergedRows.map((row) => {
 	    const order = row.order || {};
@@ -914,7 +952,7 @@ function dispatchMessageText(rows, orders, date) {
     const direction = order.direction || row.direction || "";
     const needsWeighing = row.needsWeighing ?? order.needsWeighing;
     return [
-      `${dispatchMessageCustomerPrefix(row)}装货时间：${rowDate}   ${time}  ${dispatchWeighingText(needsWeighing)} ${dispatchDirectionText(direction)} 口岸：${normalizePortText(order.port || row.port) || "-"}`,
+      `${dispatchMessageCustomerPrefix(row, customers)}装货时间：${rowDate}   ${time}  ${dispatchWeighingText(needsWeighing)} ${dispatchDirectionText(direction)} 口岸：${normalizePortText(order.port || row.port) || "-"}`,
       `车牌：${row.plate || order.plate || "-"} 吨位：${order.tonnage || row.tonnage || "-"}    板数：${order.quantity || row.quantity || "-"}`,
       "",
       dispatchLocationBlock("装货地", record, "loading"),

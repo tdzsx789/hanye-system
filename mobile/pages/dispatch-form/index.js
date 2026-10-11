@@ -1,6 +1,8 @@
 const api = require("../../utils/api");
+const { getApiBaseUrl } = require("../../utils/config");
 const { clearDispatchFormContext, DISPATCH_DATE_KEY, getDispatchFormContext } = require("../../utils/context");
 const { currentTimestampInputValue, todayInputValue } = require("../../utils/date");
+const { requestHeaders } = require("../../utils/request");
 const { dispatchCopyQuery, dispatchSharePath, enableShareMenu, shareImageUrl } = require("../../utils/share");
 const {
   BUSINESS_TYPE_OPTIONS,
@@ -44,6 +46,21 @@ function isOrderEditMode(mode) {
   return mode === "order-edit";
 }
 
+function canDeleteOrderForAccount(account, order) {
+  const role = String(account && account.role || "").trim();
+  const username = String(account && account.username || "").trim().toLowerCase();
+  const isAdmin = /管理员|老板|超级|高级/.test(role) || username === "liaomufeng";
+  return isAdmin || ["预排", "已派车"].indexOf(String(order && order.status || "").trim()) >= 0;
+}
+
+function selectedCustomerDisplay(customers) {
+  return (Array.isArray(customers) ? customers : [])
+    .map((item) => item && (item.displayName || item.shortName || item.short_name || item.name))
+    .map((item) => String(item || "").trim())
+    .filter(Boolean)
+    .join(" / ");
+}
+
 function dispatchStatusFromOrderStatus(status) {
   const text = status === undefined || status === null ? "" : String(status).trim();
   if (text === "已签收" || text === "已审核") return "已签收";
@@ -53,12 +70,16 @@ function dispatchStatusFromOrderStatus(status) {
   return text;
 }
 
+let orderFeeSerial = 0;
+
 function createOrderFeeRow(fee = {}) {
+  orderFeeSerial += 1;
   const quantity = Number(fee.quantity);
   const unitPrice = Number(fee.unitPrice ?? fee.unit_price ?? 0);
   const amount = Number(fee.amount ?? 0);
   const costValue = fee.cost === undefined || fee.cost === null || fee.cost === "" ? "" : Number(fee.cost);
   return {
+    clientKey: String(fee.clientKey || fee.client_key || `mobile-fee-${Date.now()}-${orderFeeSerial}`),
     category: normalizeUserText(fee.category || "正常", { singleLine: true, compactCjkSpacing: true }) || "正常",
     name: normalizeUserText(fee.name, { singleLine: true, compactCjkSpacing: true }),
     quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
@@ -66,7 +87,8 @@ function createOrderFeeRow(fee = {}) {
     currency: normalizeUserText(fee.currency || "港币", { singleLine: true, compactCjkSpacing: true }) || "港币",
     amount: Number.isFinite(amount) && amount >= 0 ? amount : 0,
     cost: Number.isFinite(costValue) && costValue >= 0 ? costValue : "",
-    remark: normalizeUserText(fee.remark, { singleLine: true, compactCjkSpacing: true })
+    remark: normalizeUserText(fee.remark, { singleLine: true, compactCjkSpacing: true }),
+    attachments: Array.isArray(fee.attachments) ? fee.attachments : []
   };
 }
 
@@ -80,17 +102,65 @@ function parseOrderFreightTemplate(item) {
   try {
     const content = typeof item.content === "string" ? JSON.parse(item.content || "{}") : (item.content || {});
     if (!content || content.type !== "order-freight-template") return null;
+    const rawCustomer = content.customer || content.order?.customer || "";
+    const customer = rawCustomer && typeof rawCustomer === "object"
+      ? rawCustomer
+      : {
+        id: content.customerId || content.order?.customerId || "",
+        name: String(rawCustomer || "").trim(),
+        shortName: String(rawCustomer || "").trim()
+      };
     return {
       id: item.id || "",
       name: item.name || item.templateName || "未命名订单模板",
       description: item.description || "订单运费模板",
       updatedAt: item.updatedAt || item.updated_at || item.createdAt || item.created_at || "",
-      customer: content.customer || {},
+      customer,
       fees: Array.isArray(content.fees) ? content.fees : []
     };
   } catch (error) {
     return null;
   }
+}
+
+function orderTemplateMatchesCustomer(template, customer) {
+  const templateCustomer = template && template.customer || {};
+  const customerId = String(customer && customer.id || "").trim();
+  const templateCustomerId = String(templateCustomer.id || templateCustomer.customerId || "").trim();
+  if (customerId && templateCustomerId) return customerId === templateCustomerId;
+  const customerNames = [
+    customer && customer.name,
+    customer && customer.shortName,
+    customer && customer.short_name,
+    customerShortDisplay(customer)
+  ].map((value) => String(value || "").trim()).filter(Boolean);
+  const templateCustomerNames = [
+    templateCustomer && templateCustomer.name,
+    templateCustomer && templateCustomer.shortName,
+    templateCustomer && templateCustomer.short_name,
+    customerShortDisplay(templateCustomer)
+  ].map((value) => String(value || "").trim()).filter(Boolean);
+  if (customerNames.length && templateCustomerNames.length) {
+    return customerNames.some((name) => templateCustomerNames.includes(name));
+  }
+  // Templates created before customer binding have no owner metadata. Keep
+  // those legacy templates selectable so the new filter does not hide them.
+  return !templateCustomerId && !templateCustomerNames.length;
+}
+
+function uniqueOrderTemplatesByName(templates = []) {
+  const seen = new Set();
+  return (Array.isArray(templates) ? templates : [])
+    .sort((left, right) =>
+      String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""))
+      || Number(right.id || 0) - Number(left.id || 0)
+    )
+    .filter((template) => {
+      const key = String(template && template.name || "").trim();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 }
 
 function payloadOrderFeeRows(fees = []) {
@@ -104,8 +174,195 @@ function payloadOrderFeeRows(fees = []) {
       currency: fee.currency || "港币",
       amount: Number(fee.amount || 0),
       cost: fee.cost === "" ? null : Number(fee.cost || 0),
-      remark: fee.remark || ""
+      remark: fee.remark || "",
+      attachments: Array.isArray(fee.attachments)
+        ? fee.attachments.map((file) => {
+          const payloadFile = Object.assign({}, file);
+          delete payloadFile.displayName;
+          return payloadFile;
+        })
+        : []
     }));
+}
+
+function feeAttachmentCategory(fee, index) {
+  const key = String(fee && (fee.clientKey || fee._clientKey || fee.id) || "").trim();
+  if (key) return `收费项目行-${key}`;
+  const name = String(fee && fee.name || "").trim();
+  return `收费项目-${name || `第${Number(index) + 1}行`}`;
+}
+
+function legacyFeeAttachmentCategory(fee, index) {
+  const name = String(fee && fee.name || "").trim();
+  return `收费项目-${name || `第${Number(index) + 1}行`}`;
+}
+
+function displayFilename(filename) {
+  const text = String(filename || "").trim() || "未命名附件";
+  const extensionStart = text.lastIndexOf(".");
+  const extension = extensionStart > 0 ? text.slice(extensionStart) : "";
+  if (text.length <= 30 || !extension || extension.length > 10) return text;
+  const prefixLength = Math.max(8, 30 - extension.length - 3);
+  return `${text.slice(0, prefixLength)}...${extension}`;
+}
+
+function feeAttachmentRows(fee, index, allFiles) {
+  const files = Array.isArray(allFiles) ? allFiles : [];
+  const category = feeAttachmentCategory(fee, index);
+  const legacyCategory = legacyFeeAttachmentCategory(fee, index);
+  const name = String(fee && fee.name || "").trim();
+  const firstSameName = name
+    ? (Array.isArray(this && this.data && this.data.orderFeeRows)
+      ? this.data.orderFeeRows.findIndex((item) => String(item && item.name || "").trim() === name) === Number(index)
+      : true)
+    : true;
+  return files
+    .filter((file) => file.category === category || (firstSameName && file.category === legacyCategory))
+    .map((file) => Object.assign({}, file, {
+      displayName: displayFilename(file.filename)
+    }));
+}
+
+function readFileAsBase64(filePath) {
+  return new Promise((resolve, reject) => {
+    wx.getFileSystemManager().readFile({
+      filePath,
+      encoding: "base64",
+      success: (result) => resolve(result.data),
+      fail: reject
+    });
+  });
+}
+
+function chooseMobileFiles() {
+  return new Promise((resolve, reject) => {
+    wx.showActionSheet({
+      itemList: ["从相册选择图片", "选择文件"],
+      success: (action) => {
+        if (Number(action.tapIndex) === 0) {
+          wx.chooseImage({
+            count: 9,
+            sizeType: ["compressed", "original"],
+            sourceType: ["album", "camera"],
+            success: (result) => resolve((result.tempFiles || []).map((file) => ({
+              path: file.path,
+              name: file.path ? file.path.split("/").pop() : "图片.jpg",
+              size: file.size || 0
+            }))),
+            fail: reject
+          });
+          return;
+        }
+        wx.chooseMessageFile({
+          count: 10,
+          type: "all",
+          success: (result) => resolve(result.tempFiles || []),
+          fail: reject
+        });
+      },
+      fail: reject
+    });
+  });
+}
+
+function mimeFromFilename(filename) {
+  const extension = String(filename || "").toLowerCase().split(".").pop();
+  const map = {
+    pdf: "application/pdf",
+    xls: "application/vnd.ms-excel",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    csv: "text/csv",
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    webp: "image/webp",
+    gif: "image/gif",
+    bmp: "image/bmp"
+  };
+  return map[extension] || "application/octet-stream";
+}
+
+function openMobileFile(file, page) {
+  const fileId = String(file && file.id || "").trim();
+  if (!fileId) {
+    wx.showToast({ title: "附件信息无效，请刷新后重试", icon: "none" });
+    return;
+  }
+  if (page && page._attachmentPreviewLoading) return;
+  if (page) {
+    page._attachmentPreviewLoading = true;
+    page.setData({ attachmentPreviewLoading: true });
+  }
+  wx.showLoading({ title: "正在加载预览", mask: true });
+  const finishLoading = () => {
+    wx.hideLoading();
+    if (page) {
+      page._attachmentPreviewLoading = false;
+      page.setData({ attachmentPreviewLoading: false });
+    }
+  };
+  const url = `${getApiBaseUrl()}/files/${encodeURIComponent(fileId)}/content`;
+  const mime = String(file && file.mime || "").toLowerCase();
+  const filename = String(file && file.filename || "").toLowerCase();
+  wx.downloadFile({
+    url,
+    header: requestHeaders(),
+    success(result) {
+      if (result.statusCode !== 200) {
+        finishLoading();
+        wx.showToast({ title: result.statusCode === 401 ? "登录已失效，请重新登录" : "附件下载失败", icon: "none" });
+        return;
+      }
+      if (mime.indexOf("image/") === 0 || /\.(png|jpe?g|webp|gif|bmp|heic|heif|avif|tiff?)$/i.test(filename)) {
+        wx.getImageInfo({
+          src: result.tempFilePath,
+          success(imageInfo) {
+            const systemInfo = wx.getSystemInfoSync();
+            const scale = Number(systemInfo.windowWidth || 375) / 750;
+            const maxWidth = Number(systemInfo.windowWidth || 375) - 48 * scale;
+            const maxHeight = Number(systemInfo.windowHeight || 667) * 0.9 - 100 * scale;
+            const imageScale = Math.min(
+              maxWidth / Number(imageInfo.width || 1),
+              maxHeight / Number(imageInfo.height || 1),
+              1
+            );
+            finishLoading();
+            if (page && typeof page.setData === "function") {
+              page.setData({
+                imagePreviewOpen: true,
+                imagePreviewPath: result.tempFilePath,
+                imagePreviewName: file.filename || "图片预览",
+                imagePreviewWidth: Math.max(1, Math.round(imageInfo.width * imageScale)),
+                imagePreviewHeight: Math.max(1, Math.round(imageInfo.height * imageScale))
+              });
+            } else {
+              wx.showToast({ title: "图片预览暂时不可用", icon: "none" });
+            }
+          },
+          fail() {
+            finishLoading();
+            wx.showToast({ title: "图片加载失败，请重试", icon: "none" });
+          }
+        });
+        return;
+      }
+      const extension = filename.includes(".") ? filename.split(".").pop() : "";
+      finishLoading();
+      wx.openDocument({
+        filePath: result.tempFilePath,
+        fileType: /^(pdf|doc|docx|xls|xlsx|ppt|pptx)$/i.test(extension) ? extension : undefined,
+        showMenu: true,
+        fail: () => wx.showToast({ title: "当前文件暂不支持预览", icon: "none" })
+      });
+    },
+    fail: (error) => {
+      finishLoading();
+      wx.showToast({
+        title: error && error.errMsg && error.errMsg.indexOf("domain") >= 0 ? "文件服务器域名未加入小程序合法域名" : "附件下载失败",
+        icon: "none"
+      });
+    }
+  });
 }
 
 function uniqueTextList(values) {
@@ -745,6 +1002,8 @@ Page({
       specialCarEnabled: false
     },
     customerKeyword: "",
+    customerInputEditing: false,
+    selectedCustomerInput: "",
     customerPickerOpen: false,
     customerSuggestions: [],
     selectedCustomers: [],
@@ -774,6 +1033,17 @@ Page({
     mode: "new",
     newOldOptions: ["新货", "旧货"],
     orderFeeRows: [createOrderFeeRow()],
+    orderAttachmentRows: [],
+    orderAttachmentUploading: false,
+    attachmentPickerOpen: false,
+    attachmentPickerFeeIndex: -1,
+    attachmentPickerFiles: [],
+    imagePreviewOpen: false,
+    imagePreviewPath: "",
+    imagePreviewName: "",
+    imagePreviewWidth: 0,
+    imagePreviewHeight: 0,
+    attachmentPreviewLoading: false,
     orderTemplateLoading: false,
     orderStatusOptions: ORDER_STATUS_OPTIONS,
     originDate: "",
@@ -801,6 +1071,7 @@ Page({
     const mode = context.mode || "new";
     const date = context.date || todayInputValue();
     const sourceRow = context.row || null;
+    const account = getApp().globalData.account || null;
     let form = formFromDispatchRow(sourceRow || {}, date);
     if (mode === "new") {
       form = formFromDispatchRow({}, date);
@@ -830,6 +1101,7 @@ Page({
       orderFeeRows: isOrderEditMode(mode) ? normalizeOrderFeeRows(sourceRow && sourceRow.order && sourceRow.order.fees) : [createOrderFeeRow()],
       loadTimePickerValue: loadTimePickerValueFromText(form.loadTime),
       mode,
+      canDeleteOrder: isOrderEditMode(mode) && Boolean(form.orderNo) && canDeleteOrderForAccount(account, form),
       originDate: date,
       sourceRow,
       subtitle: subtitleForMode(mode, form),
@@ -837,6 +1109,11 @@ Page({
       isOrderEditMode: isOrderEditMode(mode)
     });
     wx.setNavigationBarTitle({ title: titleForMode(mode) });
+    if (isOrderEditMode(mode) && form.orderNo) {
+      this.loadOrderAttachments(form.orderNo).catch((error) => {
+        console.warn("读取订单附件失败", error);
+      });
+    }
     this.loadReferences();
   },
 
@@ -961,6 +1238,8 @@ Page({
         customers,
         customerFeatureFlags: featureFlags,
         customerKeyword: "",
+        customerInputEditing: false,
+        selectedCustomerInput: selectedCustomerDisplay(selectedCustomers),
         selectedCustomers,
         drivers,
         driverOptions: uniqueTextList(drivers.map((item) => item.name)),
@@ -1062,7 +1341,11 @@ Page({
     const field = event.currentTarget.dataset.field;
     const value = event.detail.value;
     if (field === "customer") {
-      this.setData({ customerKeyword: value, customerPickerOpen: true });
+      this.setData({
+        customerInputEditing: true,
+        customerKeyword: value,
+        customerPickerOpen: true
+      });
       this.refreshCustomerSuggestions();
       return;
     }
@@ -1213,12 +1496,30 @@ Page({
   },
 
   onCustomerFocus() {
-    this.setData({ customerPickerOpen: true });
+    this.setData({
+      customerInputEditing: true,
+      customerKeyword: "",
+      customerPickerOpen: true
+    });
     this.refreshCustomerSuggestions();
   },
 
+  onCustomerBlur() {
+    setTimeout(() => {
+      this.setData({
+        customerInputEditing: false,
+        customerKeyword: "",
+        customerPickerOpen: false
+      });
+    }, 180);
+  },
+
   closeCustomerPicker() {
-    this.setData({ customerPickerOpen: false });
+    this.setData({
+      customerInputEditing: false,
+      customerKeyword: "",
+      customerPickerOpen: false
+    });
   },
 
   selectCustomer(event) {
@@ -1240,8 +1541,10 @@ Page({
       form,
       customerFeatureFlags: customerFeatureFlags(primaryCustomer),
       customerKeyword: "",
+      customerInputEditing: false,
+      selectedCustomerInput: selectedCustomerDisplay(selectedCustomers),
       selectedCustomers,
-      customerPickerOpen: true
+      customerPickerOpen: false
     });
     this.refreshCustomerSuggestions();
   },
@@ -1259,8 +1562,10 @@ Page({
     this.setData({
       form,
       customerFeatureFlags: customerFeatureFlags(primaryCustomer),
+      customerInputEditing: false,
+      selectedCustomerInput: selectedCustomerDisplay(selectedCustomers),
       selectedCustomers,
-      customerPickerOpen: true
+      customerPickerOpen: false
     });
     this.refreshCustomerSuggestions();
   },
@@ -1334,6 +1639,118 @@ Page({
     this.setData({ orderFeeRows: rows.length ? rows : [createOrderFeeRow()] });
   },
 
+  async loadOrderAttachments(orderNo) {
+    const normalizedOrderNo = String(orderNo || "").trim();
+    if (!normalizedOrderNo) {
+      this.setData({ orderAttachmentRows: [] });
+      return [];
+    }
+    const files = await api.listFiles("order", normalizedOrderNo);
+    this.applyOrderAttachmentRows(Array.isArray(files) ? files : []);
+    return files;
+  },
+
+  applyOrderAttachmentRows(files) {
+    const rows = Array.isArray(files) ? files : [];
+    const feeRows = normalizeOrderFeeRows(this.data.orderFeeRows || []).map((fee, index) => Object.assign({}, fee, {
+      attachments: feeAttachmentRows.call(this, fee, index, rows)
+    }));
+    this.setData({ orderAttachmentRows: rows, orderFeeRows: feeRows });
+  },
+
+  attachmentsForFee(fee, index) {
+    return feeAttachmentRows.call(this, fee, index, this.data.orderAttachmentRows || []);
+  },
+
+  async uploadOrderFeeAttachments(event) {
+    const index = Number(event.currentTarget.dataset.index || 0);
+    const fee = (this.data.orderFeeRows || [])[index] || {};
+    if (!this.data.form.orderNo) {
+      wx.showToast({ title: "请先保存订单，再上传附件", icon: "none" });
+      return;
+    }
+    if (!String(fee.name || "").trim()) {
+      wx.showToast({ title: "请先选择收费项目，再上传附件", icon: "none" });
+      return;
+    }
+    if (this.data.orderAttachmentUploading) return;
+    this.setData({ orderAttachmentUploading: true });
+    try {
+      const files = await chooseMobileFiles();
+      if (!files.length) return;
+      const category = feeAttachmentCategory(fee, index);
+      for (const file of files) {
+        const contentBase64 = await readFileAsBase64(file.path);
+        await api.uploadFile({
+          entityType: "order",
+          entityId: this.data.form.orderNo,
+          category,
+          filename: file.name || "订单附件",
+          mime: mimeFromFilename(file.name),
+          size: Number(file.size || 0),
+          contentBase64
+        });
+      }
+      await this.loadOrderAttachments(this.data.form.orderNo);
+      wx.showToast({ title: `已上传 ${files.length} 个附件`, icon: "none" });
+    } catch (error) {
+      if (!(error && error.errMsg && error.errMsg.indexOf("cancel") >= 0)) {
+        wx.showToast({ title: error.message || "附件上传失败", icon: "none" });
+      }
+    } finally {
+      this.setData({ orderAttachmentUploading: false });
+    }
+  },
+
+  openOrderAttachmentPicker(event) {
+    const feeIndex = Number(event.currentTarget.dataset.feeIndex || 0);
+    const fee = (this.data.orderFeeRows || [])[feeIndex] || {};
+    const files = this.attachmentsForFee(fee, feeIndex);
+    if (!files.length) {
+      wx.showToast({ title: "该收费项目暂无附件", icon: "none" });
+      return;
+    }
+    if (files.length === 1) {
+      openMobileFile(files[0], this);
+      return;
+    }
+    this.setData({
+      attachmentPickerOpen: true,
+      attachmentPickerFeeIndex: feeIndex,
+      attachmentPickerFiles: files
+    });
+  },
+
+  closeOrderAttachmentPicker() {
+    this.setData({
+      attachmentPickerOpen: false,
+      attachmentPickerFeeIndex: -1,
+      attachmentPickerFiles: []
+    });
+  },
+
+  selectOrderAttachment(event) {
+    const index = Number(event.currentTarget.dataset.index || 0);
+    const file = (this.data.attachmentPickerFiles || [])[index];
+    this.closeOrderAttachmentPicker();
+    if (file) openMobileFile(file, this);
+  },
+
+  closeImagePreview() {
+    this.setData({
+      imagePreviewOpen: false,
+      imagePreviewPath: "",
+      imagePreviewName: "",
+      imagePreviewWidth: 0,
+      imagePreviewHeight: 0
+    });
+  },
+
+  handleImagePreviewError() {
+    this.closeImagePreview();
+    wx.showToast({ title: "图片加载失败，请重试", icon: "none" });
+  },
+
   async openOrderTemplatePicker() {
     if (this.data.orderTemplateLoading) return;
     this.setData({ orderTemplateLoading: true });
@@ -1345,14 +1762,14 @@ Page({
       const customer = this.findMatchedCustomer();
       const customerId = String(customer && customer.id || this.data.form.customerId || "").trim();
       const customerName = customerShortDisplay(customer || { name: this.data.form.customer });
-      const matched = allTemplates.filter((template) => {
-        const templateCustomer = template.customer || {};
-        const templateCustomerId = String(templateCustomer.id || templateCustomer.customerId || "").trim();
-        const templateCustomerName = customerShortDisplay(templateCustomer);
-        return (customerId && templateCustomerId && customerId === templateCustomerId)
-          || (customerName && templateCustomerName && customerName === templateCustomerName);
-      });
-      const options = matched.length ? matched : allTemplates;
+      const currentCustomer = customer || {
+        id: customerId,
+        name: customerName,
+        shortName: customerName
+      };
+      const options = uniqueOrderTemplatesByName(
+        allTemplates.filter((template) => orderTemplateMatchesCustomer(template, currentCustomer))
+      );
       if (!options.length) {
         wx.showToast({ title: "暂无可载入的订单模板", icon: "none" });
         return;
@@ -1883,6 +2300,9 @@ Page({
       const order = shouldCreateOrder
         ? await api.createOrder(payload)
         : await api.updateOrder(form.orderNo, payload);
+      if (isOrderEditMode(this.data.mode) && Array.isArray(order.fees)) {
+        this.setData({ orderFeeRows: normalizeOrderFeeRows(order.fees) });
+      }
       if (shouldCreateOrder) createdOrderNo = String(order.no || "").trim();
       const dispatchNo = order.dispatchNo || form.dispatchNo || generateDispatchNo(form.date, targetRows);
       const nextForm = Object.assign({}, form, {
@@ -1916,6 +2336,40 @@ Page({
     } finally {
       this.setData({ saving: false });
     }
+  },
+
+  deleteCurrentOrder() {
+    const form = this.data.form || {};
+    if (!isOrderEditMode(this.data.mode) || !form.orderNo || !this.data.canDeleteOrder || this.data.saving || this.orderDeletionConfirming) return;
+    this.orderDeletionConfirming = true;
+    wx.showModal({
+      title: "删除订单",
+      content: `确认删除订单 ${form.orderNo}？订单及关联排车信息将移入回收站。`,
+      confirmText: "删除",
+      confirmColor: "#b42318",
+      success: async (result) => {
+        let deleted = false;
+        try {
+          if (!result.confirm || this.data.saving) return;
+          this.setData({ saving: true });
+          await api.deleteOrder(form.orderNo);
+          deleted = true;
+          wx.showToast({ title: "订单已移入回收站", icon: "none" });
+          setTimeout(() => {
+            this.orderDeletionConfirming = false;
+            wx.navigateBack({ delta: 1 });
+          }, 350);
+        } catch (error) {
+          wx.showToast({ title: error.message || "删除订单失败", icon: "none" });
+        } finally {
+          this.setData({ saving: false });
+          if (!deleted) this.orderDeletionConfirming = false;
+        }
+      },
+      fail: () => {
+        this.orderDeletionConfirming = false;
+      }
+    });
   },
 
   cancelForm() {

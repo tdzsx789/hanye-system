@@ -21318,11 +21318,14 @@ function orderTemplateMatchesCurrentCustomer(content = {}) {
   const owner = orderTemplateCustomerFromContent(content);
   if (current.id && owner.id) return current.id === owner.id;
   if (current.name && owner.name) return current.name === owner.name;
-  return false;
+  // Legacy templates created before customer binding have no owner metadata.
+  // Keep them available instead of hiding existing user data after the
+  // customer-scoped template filter was introduced.
+  return !owner.id && !owner.name;
 }
 
 const orderFreightTemplateOptions = computed(() =>
-  templateRows.value
+  Array.from(templateRows.value
     .map((item) => {
       let content = null;
       try {
@@ -21333,10 +21336,22 @@ const orderFreightTemplateOptions = computed(() =>
       return { item, content };
     })
     .filter(({ content }) => content?.type === "order-freight-template")
+    .filter(({ content }) => orderTemplateMatchesCurrentCustomer(content))
     .map(({ item, content }) => ({
       ...item,
       feeCount: Array.isArray(content.fees) ? content.fees.length : 0
     }))
+    .sort((left, right) =>
+      String(right.updatedAt || right.updated_at || "").localeCompare(String(left.updatedAt || left.updated_at || ""))
+      || Number(right.id || 0) - Number(left.id || 0)
+    )
+    .reduce((map, item) => {
+      const key = String(item.name || "").trim();
+      if (key && !map.has(key)) map.set(key, item);
+      return map;
+    }, new Map())
+    .values()
+  )
 );
 const latestOrderTemplateSource = computed(() => {
   const customerId = orderForm.customerId || selectedCustomer.value?.id || "";
@@ -30111,7 +30126,7 @@ function formatDriverWageNumber(value = 0) {
   const number = Number(value || 0);
   if (!Number.isFinite(number)) return "0";
   const text = number.toFixed(2);
-  return text.replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
+  return text.replace(/\.00$/, "").replace(/(\.\d)0$/, "$1").replace(/\.$/, "");
 }
 
 function financeWageStatementFeeTotal(order = {}, keywords = [], currency = "") {
@@ -30147,8 +30162,39 @@ const FINANCE_WAGE_STATEMENT_MISC_EXCLUDED_NAMES = [
   "过海费"
 ];
 
+const FINANCE_WAGE_STATEMENT_FREIGHT_NAMES = [
+  "中港运费"
+];
+
 function financeWageStatementFeeName(fee = {}) {
   return String(fee?.name || "").trim().replace(/[（）()（）\s]/g, "");
+}
+
+function financeWageStatementProjectName(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return text
+    .replace(/\s*[（(]?\s*(?:HKD|RMB|港币|人民币)\s*[）)]?\s*$/i, "")
+    .trim() || text;
+}
+
+function financeWageStatementProjectCurrency(value = "") {
+  return currencyCodeDisplay(value) === "RMB" ? "RMB" : "HKD";
+}
+
+function financeWageStatementProjectKey(name = "", currency = "HKD") {
+  return `${financeWageStatementProjectName(name)}|${financeWageStatementProjectCurrency(currency)}`;
+}
+
+function financeWageStatementIsFreightName(value = "") {
+  const name = financeWageStatementFeeName({ name: financeWageStatementProjectName(value) });
+  return name === FINANCE_WAGE_STATEMENT_FREIGHT_NAMES[0];
+}
+
+function financeWageStatementProjectLineMatchesExtraField(lineName = "", field = "") {
+  const keywords = DRIVER_EXTRA_FEE_KEYWORDS[field] || [];
+  const name = financeWageStatementFeeName({ name: lineName });
+  return keywords.some((keyword) => name.includes(financeWageStatementFeeName({ name: keyword })));
 }
 
 function financeWageStatementFeeMatches(fee = {}, keywords = []) {
@@ -30157,6 +30203,21 @@ function financeWageStatementFeeMatches(fee = {}, keywords = []) {
     .map((keyword) => String(keyword || "").trim().replace(/[（）()（）\s]/g, ""))
     .filter(Boolean)
     .some((keyword) => name.includes(keyword));
+}
+
+function financeWageStatementUnloadingCount(order = {}) {
+  const fees = Array.isArray(order?.fees) ? order.fees : [];
+  if (fees.some((fee) => financeWageStatementFeeMatches(fee, ["卸货"]))) return 0;
+  const remarks = [
+    String(order?.note || ""),
+    String(order?.remark || ""),
+    ...fees.map((fee) => String(fee?.remark || ""))
+  ].join("；");
+  if (/(?:取消|不需要|无需|不用|不含|免收|不收费)[^；，,。]{0,6}卸货|卸货[^；，,。]{0,6}(?:不收费|不收取|免收|取消|免费)/.test(remarks)) {
+    return 0;
+  }
+  const unloadDates = Array.from(remarks.matchAll(/(\d{1,2})\s*号\s*卸货/g), (match) => match[1]);
+  return new Set(unloadDates).size;
 }
 
 function financeWageStatementMiscFeeTotal(order = {}, currency = "") {
@@ -30217,76 +30278,319 @@ function financeWageStatementRemarkText(order = {}) {
   return Array.from(new Set([...orderRemarks, ...remarks])).join("；");
 }
 
-function financeWageStatementRows(row = {}) {
-  const driver = row?.driver || {};
-  const orders = [...(row?.orders || [])]
+function financeWageStatementOrders(row = {}) {
+  return [...(row?.orders || [])]
     .filter(financeWageStatementOrderInPeriod)
     .sort((left, right) => {
-    const leftDate = inputDateUtcValue(left?.date) ?? 0;
-    const rightDate = inputDateUtcValue(right?.date) ?? 0;
-    if (leftDate !== rightDate) return leftDate - rightDate;
-    return String(left?.no || "").localeCompare(String(right?.no || ""), "zh-Hans-CN", { numeric: true, sensitivity: "base" });
+      const leftDate = inputDateUtcValue(left?.date) ?? 0;
+      const rightDate = inputDateUtcValue(right?.date) ?? 0;
+      if (leftDate !== rightDate) return leftDate - rightDate;
+      return String(left?.no || "").localeCompare(String(right?.no || ""), "zh-Hans-CN", { numeric: true, sensitivity: "base" });
+    });
+}
+
+function financeWageStatementOrderProjectLines(order = {}, driver = null) {
+  const lines = [];
+  const costCenter = driverCostCenterFeeBreakdown(order, driver);
+  (costCenter.details || []).forEach((detail) => {
+    const name = financeWageStatementProjectName(detail.name || detail.item?.name || detail.fee?.name);
+    if (!name || !detail.item) return;
+    const currency = financeWageStatementProjectCurrency(
+      detail.currency || detail.item?.currency || detail.fee?.currency || "港币"
+    );
+    lines.push({
+      name,
+      currency,
+      key: financeWageStatementProjectKey(name, currency),
+      amount: Number(detail.amount || 0),
+      freight: financeWageStatementIsFreightName(name)
+    });
   });
-  return orders.map((order, index) => {
-    const hkTotal = financeWageStatementMiscFeeTotal(order, "HKD");
-    const rmbTotal = financeWageStatementMiscFeeTotal(order, "RMB");
-    const extraFee = driver ? driverExtraTripFeeTotal(order, driver) : 0;
+
+  const unloadingCount = financeWageStatementUnloadingCount(order);
+  if (unloadingCount && driver) {
+    const item = feeItemForFee({ name: "卸货费" });
+    const rule = driverCostCenterRuleForOrder(order, driver);
+    if (item && rule) {
+      const detail = driverCostCenterFeeCostForRule(rule, {
+        feeItemId: item.id,
+        name: item.name,
+        currency: item.currency,
+        quantity: unloadingCount,
+        amount: 0
+      }, driver);
+      if (detail.matched && detail.amount) {
+        lines.push({
+          name: item.name,
+          currency: financeWageStatementProjectCurrency(detail.currency),
+          key: financeWageStatementProjectKey(item.name, detail.currency),
+          amount: Number(detail.amount || 0),
+          freight: false
+        });
+      }
+    }
+  }
+
+  // Driver advances are order projects too. Keep them in the same dynamic
+  // project columns so misc totals include each driver's actual assigned fees.
+  advanceFeesForOrder(order, driver).forEach((fee) => {
+    const item = feeItemForFee(fee);
+    const name = financeWageStatementProjectName(fee.name || item?.name);
+    if (!name || Number(fee.amount || 0) === 0) return;
+    const currency = financeWageStatementProjectCurrency(
+      fee.currency || item?.currency || "港币"
+    );
+    lines.push({
+      name,
+      currency,
+      key: financeWageStatementProjectKey(name, currency),
+      amount: Number(fee.amount || 0),
+      freight: financeWageStatementIsFreightName(name),
+      advance: true
+    });
+  });
+
+  // Some legacy orders calculate driver loading/unloading, crossing and point fees
+  // from the driver's wage rule instead of a cost-center line. Keep those costs
+  // visible without duplicating a matching cost-center project.
+  DRIVER_EXTRA_RULE_FIELDS.forEach((field) => {
+    const amount = driver ? Number(driverExtraTripFee(order, field, driver) || 0) : 0;
+    if (!amount) return;
+    const name = DRIVER_EXTRA_FIELD_LABELS[field] || field;
+    const matchingLines = lines.filter((line) =>
+      line.currency === "HKD" && financeWageStatementProjectLineMatchesExtraField(line.name, field)
+    );
+    if (matchingLines.length === 0) {
+      lines.push({
+        name,
+        currency: "HKD",
+        key: financeWageStatementProjectKey(name, "HKD"),
+        amount,
+        freight: false
+      });
+      return;
+    }
+    const hasMatchedCost = matchingLines.some((line) => Number(line.amount || 0) !== 0);
+    if (!hasMatchedCost) {
+      matchingLines[0].amount = amount;
+    }
+  });
+
+  return lines;
+}
+
+function financeWageStatementOrderProjectMap(order = {}, driver = null) {
+  return financeWageStatementOrderProjectLines(order, driver)
+    .reduce((map, line) => {
+      const current = map.get(line.key) || {
+        name: line.name,
+        currency: line.currency,
+        amount: 0,
+        freight: line.freight
+      };
+      current.amount += Number(line.amount || 0);
+      current.freight = current.freight || line.freight;
+      map.set(line.key, current);
+      return map;
+    }, new Map());
+}
+
+function financeWageStatementProjectColumns(orders = [], driver = null) {
+  const columns = [];
+  const seen = new Set();
+  orders.forEach((order) => {
+    financeWageStatementOrderProjectLines(order, driver).forEach((line) => {
+      if (line.freight || seen.has(line.key)) return;
+      seen.add(line.key);
+      columns.push({
+        key: line.key,
+        name: line.name,
+        currency: line.currency,
+        label: `${line.name}（${line.currency}）`
+      });
+    });
+  });
+  return [
+    ...columns.filter((column) => column.currency === "HKD"),
+    ...columns.filter((column) => column.currency === "RMB")
+  ];
+}
+
+function financeWageStatementOrderFreight(order = {}, driver = null) {
+  const total = { hkd: 0, rmb: 0 };
+  if (!driver?.name) return total;
+
+  const source = driverCostCenterSourceForDriver(driver);
+  driverCostCenterOrderFeeRows(order)
+    .filter((fee) => financeWageStatementIsFreightName(fee.name))
+    .forEach((fee) => {
+      const item = feeItemForFee(fee);
+      if (
+        isAdvanceFee(fee)
+        || item?.category === "代垫"
+        || (item && isCompanyCoveredFeeItem(item))
+        || (item && !feeItemIncludesCostSource(item, source))
+      ) {
+        return;
+      }
+
+      const addAmount = (amount, currency) => {
+        const value = Number(amount || 0);
+        if (!Number.isFinite(value)) return;
+        if (currencyCodeDisplay(currency || "港币") === "RMB") total.rmb += value;
+        else total.hkd += value;
+      };
+      const splitParts = orderFeeCostSplitParts(fee, order);
+      if (Array.isArray(splitParts)) {
+        splitParts
+          .filter((part) => part.driverName
+            ? part.driverName === driver.name
+            : normalizeCostCenterSourceLabel(part.role) === source)
+          .forEach((part) => addAmount(part.amount, part.currency));
+        return;
+      }
+
+      const savedHKD = normalizeOrderFeeCostComponent(fee.costHKD ?? fee.cost_hkd);
+      const savedRMB = normalizeOrderFeeCostComponent(fee.costRMB ?? fee.cost_rmb);
+      if (savedHKD !== null || savedRMB !== null) {
+        if (savedHKD !== null) addAmount(savedHKD, "港币");
+        if (savedRMB !== null) addAmount(savedRMB, "人民币");
+        return;
+      }
+
+      const savedCost = normalizeFeeCost(fee);
+      if (savedCost !== null) {
+        addAmount(savedCost, fee.costCurrency || fee.cost_currency || fee.currency);
+        return;
+      }
+
+      const detail = driverCostCenterFeeCostForRule(
+        driverCostCenterRuleForOrder(order, driver),
+        fee,
+        driver
+      );
+      if (detail.matched) addAmount(detail.amount, detail.currency);
+    });
+
+  return total;
+}
+
+function financeWageStatementCustomerName(order = {}) {
+  const customerId = String(order?.customerId || order?.customer_id || "").trim();
+  const customerName = String(order?.customer || "").trim();
+  const customer = customerRowsById.value.get(customerId)
+    || customerRows.value.find((row) =>
+      row.type === "客户"
+      && [row.name, row.shortName, row.short_name].some((value) => String(value || "").trim() === customerName)
+    );
+  return String(order?.customerShortName || order?.customer_short_name || "").trim()
+    || customerShortDisplay(customer)
+    || customerName;
+}
+
+function financeWageStatementRows(row = {}, projectColumns = [], hasFreightRMB = false) {
+  const driver = row?.driver || {};
+  return financeWageStatementOrders(row).map((order, index) => {
+    const projectMap = financeWageStatementOrderProjectMap(order, driver);
+    const freight = financeWageStatementOrderFreight(order, driver);
     return [
       index + 1,
       String(order.date || "").slice(0, 10),
-      order.customer || "",
+      financeWageStatementCustomerName(order),
       relatedOrderRouteText(order),
       order.direction || "",
-      financeWageStatementFeeTotal(order, ["汽车器材"], "HKD") || "",
-      financeWageStatementFeeTotal(order, ["油费"], "HKD") || "",
-      financeWageStatementFeeTotal(order, ["香港坐车"], "HKD") || "",
-      financeWageStatementFeeTotal(order, ["香港停车费", "香港过夜停车费", "香港过隧费", "香港/停车费/过磅费/登记费", "过磅费", "登记费", "高速费"], "HKD") || "",
-      financeWageStatementFeeTotal(order, ["存放叉车"], "HKD") || "",
-      financeWageStatementFeeTotal(order, ["打的接车", "打车费"], "RMB") || "",
-      financeWageStatementFeeTotal(order, ["大陆停车费", "大陆/停车费/过磅费", "过磅费", "停车场费"], "RMB") || "",
-      financeWageStatementFeeTotal(order, ["深圳湾停车场费", "深圳湾口岸停车场", "深圳湾口岸停车费"], "RMB") || "",
-      financeWageStatementFeeTotal(order, ["洗车", "大陆加油", "ETC费", "加油"], "RMB") || "",
-      financeWageStatementOtherFeeTotal(order, "RMB") || "",
-      Number(hkTotal || 0),
-      Number(rmbTotal || 0),
-      Number(order.receivableHKD || 0),
-      orderDetailDriverText(order),
-      Number(extraFee || 0),
+      ...projectColumns.map((column) => {
+        const line = projectMap.get(column.key);
+        return line && Number(line.amount || 0) !== 0 ? Number(line.amount) : "";
+      }),
+      "",
+      "",
+      Number(freight.hkd || 0) || "",
+      ...(hasFreightRMB ? [Number(freight.rmb || 0) || ""] : []),
+      driver.name || orderDetailDriverText(order),
       financeWageStatementRemarkText(order)
     ];
   });
 }
 
 function buildFinanceWageStatementExportPayload(row = {}) {
-  const rows = financeWageStatementRows(row);
-  const rmbTotal = rows.reduce((sum, item) => sum + Number(item[16] || 0), 0);
-  const freightTotal = rows.reduce((sum, item) => sum + Number(item[17] || 0), 0);
-  const extraTotal = rows.reduce((sum, item) => sum + Number(item[19] || 0), 0);
+  const orders = financeWageStatementOrders(row);
+  const projectColumns = financeWageStatementProjectColumns(orders, row?.driver || null);
+  const hasFreightRMB = orders.some((order) => Number(financeWageStatementOrderFreight(order, row?.driver || null).rmb || 0) !== 0);
+  const columns = [
+    { key: "no", label: "序号", kind: "index" },
+    { key: "date", label: "时间", kind: "date" },
+    { key: "customer", label: "客户", kind: "text" },
+    { key: "route", label: "装/卸", kind: "text" },
+    { key: "direction", label: "进口/出口", kind: "text" },
+    ...projectColumns.map((column) => ({
+      key: `project:${column.key}`,
+      label: column.label,
+      kind: "project",
+      projectKey: column.key,
+      currency: column.currency
+    })),
+    { key: "miscHKD", label: "杂费合计HKD", kind: "miscTotal", currency: "HKD" },
+    { key: "miscRMB", label: "杂费合计RMB", kind: "miscTotal", currency: "RMB" },
+    { key: "freightHKD", label: "运费合计HKD", kind: "freightTotal", currency: "HKD" },
+    ...(hasFreightRMB ? [{ key: "freightRMB", label: "运费合计RMB", kind: "freightTotal", currency: "RMB" }] : []),
+    { key: "driver", label: "司机", kind: "driver" },
+    { key: "remark", label: "备注", kind: "remark" }
+  ];
+  const rows = financeWageStatementRows(row, projectColumns, hasFreightRMB);
+  const projectStartIndex = 5;
+  const projectEndIndex = projectStartIndex + projectColumns.length;
+  const miscHKDIndex = projectEndIndex;
+  const miscRMBIndex = projectEndIndex + 1;
+  const freightHKDIndex = projectEndIndex + 2;
+  const freightRMBIndex = hasFreightRMB ? projectEndIndex + 3 : -1;
+  const driverIndex = hasFreightRMB ? projectEndIndex + 4 : projectEndIndex + 3;
+  const remarkIndex = driverIndex + 1;
+  const miscHKDTotal = rows.reduce((sum, item) => {
+    return sum + projectColumns.reduce((subtotal, column, index) =>
+      column.currency === "HKD" ? subtotal + Number(item[projectStartIndex + index] || 0) : subtotal
+    , 0);
+  }, 0);
+  const miscRMBTotal = rows.reduce((sum, item) => {
+    return sum + projectColumns.reduce((subtotal, column, index) =>
+      column.currency === "RMB" ? subtotal + Number(item[projectStartIndex + index] || 0) : subtotal
+    , 0);
+  }, 0);
+  const freightHKDTotal = rows.reduce((sum, item) => sum + Number(item[freightHKDIndex] || 0), 0);
+  const freightRMBTotal = hasFreightRMB
+    ? rows.reduce((sum, item) => sum + Number(item[freightRMBIndex] || 0), 0)
+    : 0;
   const advanceHKD = Number(row.advanceFee || 0);
+  const advanceRMB = Number(row.advanceFeeRMB || 0);
   const exchangeRate = Number(monthlyExchangeRateInputValue(monthlyExchangeRatePeriodMonth("finance")) || 0);
-  const convertedRMB = exchangeRate ? Number((rmbTotal * exchangeRate).toFixed(2)) : 0;
-  const payableTotal = Number((freightTotal + extraTotal + advanceHKD + convertedRMB).toFixed(2));
-  const payableWithoutAdvance = Number((freightTotal + extraTotal + convertedRMB).toFixed(2));
+  const convertedRMB = exchangeRate
+    ? Number(((miscRMBTotal + freightRMBTotal) / exchangeRate).toFixed(2))
+    : 0;
+  const payableTotal = Number((freightHKDTotal + miscHKDTotal + convertedRMB).toFixed(2));
+  const payableWithoutAdvance = payableTotal;
   const paymentDate = financeWageSettlementDateText(row);
   const paymentLabel = paymentDate ? `${inputDateLabel(paymentDate)}已付款` : "";
   const filenamePaymentLabel = paymentDate ? `${inputDateMonthDayLabel(paymentDate)}已付款` : "";
   const filename = `${financeDateRangeLabel()}${exportFilenamePart(row?.driver?.name || "司机")}登记表${filenamePaymentLabel ? `（${filenamePaymentLabel}）` : ""}.xlsx`;
   return {
+    columns,
     rows,
     driverName: row?.driver?.name || "司机",
     periodLabel: financeWageStatementPeriodLabel(),
     summaryNote: `${rows.length}车骑师/口岸过车 · ${financeWageStatementPeriodLabel()}`,
     noteLines: [
-      `人民币司机代垫${formatDriverWageNumber(Number(row.advanceFeeRMB || 0))}`,
+      `人民币司机代垫${formatDriverWageNumber(advanceRMB)}`,
       `预支HKD${formatDriverWageNumber(advanceHKD)}，司机代垫${formatDriverWageNumber(advanceHKD)}`,
       `${financeWageStatementPeriodLabel()}预支杂费${formatDriverWageNumber(Number(row.adjustmentsRMB || 0))}`,
-      exchangeRate ? `${formatDriverWageNumber(rmbTotal)}/${formatDriverWageNumber(exchangeRate)}=港币${formatDriverWageNumber(convertedRMB)}` : "",
-      `运费${formatDriverWageNumber(freightTotal)}+装卸过海加点${formatDriverWageNumber(extraTotal)}+司机代垫${formatDriverWageNumber(advanceHKD)}+杂费${formatDriverWageNumber(convertedRMB)}=应付${formatDriverWageNumber(payableTotal)}；去除系统代垫后${formatDriverWageNumber(payableWithoutAdvance)}`
+      exchangeRate ? `${formatDriverWageNumber(miscRMBTotal + freightRMBTotal)}/${formatDriverWageNumber(exchangeRate)}=港币${formatDriverWageNumber(convertedRMB)}` : "",
+      `运费${formatDriverWageNumber(freightHKDTotal)}+杂费HKD${formatDriverWageNumber(miscHKDTotal)}（含司机代垫）+杂费/运费RMB折算${formatDriverWageNumber(convertedRMB)}=应付HKD${formatDriverWageNumber(payableTotal)}`
     ],
     paymentLabel,
     exchangeRate,
     advanceHKD,
+    advanceRMB,
     adjustmentsHKD: advanceHKD,
+    advanceIncludedInMisc: true,
     filename
   };
 }
@@ -31787,6 +32091,28 @@ function loadSavedFeeTemplate(item) {
   notify(`已载入模板：${item.name}`);
 }
 
+function currentOrderTemplateCustomerName() {
+  const currentCustomer = customerRowsById.value.get(
+    String(orderForm.customerId || "").trim()
+  ) || transportCustomerByName(orderForm.customer);
+
+  return customerShortDisplay(currentCustomer)
+    || String(orderForm.customer || "").trim();
+}
+
+function freightTemplateNameForCustomer(name, customerName = currentOrderTemplateCustomerName()) {
+  const baseName = String(name || "").trim();
+  const prefix = customerName ? `${customerName}/` : "";
+  if (!baseName || !prefix || baseName.startsWith(prefix)) return baseName;
+  return `${prefix}${baseName}`;
+}
+
+function freightTemplateBaseName(name, customerName = currentOrderTemplateCustomerName()) {
+  const value = String(name || "").trim();
+  const prefix = customerName ? `${customerName}/` : "";
+  return prefix && value.startsWith(prefix) ? value.slice(prefix.length).trim() : value;
+}
+
 function loadLatestOrderTemplate() {
   const order = latestOrderTemplateSource.value;
   if (!order) {
@@ -31803,7 +32129,7 @@ function loadLatestOrderTemplate() {
 
 function editSavedFeeTemplate(item) {
   loadSavedFeeTemplate(item);
-  freightTemplateNameForm.name = item.name || defaultFreightTemplateName();
+  freightTemplateNameForm.name = freightTemplateNameForCustomer(item.name || defaultFreightTemplateName());
   saveFreightTemplateModalOpen.value = true;
 }
 
@@ -31836,7 +32162,7 @@ function defaultFreightTemplateName() {
 }
 
 function openSaveFreightTemplateModal() {
-  freightTemplateNameForm.name = defaultFreightTemplateName();
+  freightTemplateNameForm.name = freightTemplateNameForCustomer(defaultFreightTemplateName());
   saveFreightTemplateModalOpen.value = true;
 }
 
@@ -31845,8 +32171,14 @@ function closeSaveFreightTemplateModal() {
 }
 
 async function saveCurrentFeesAsTemplate() {
-  const name = freightTemplateNameForm.name.trim();
-  if (!name) {
+  const baseName = freightTemplateNameForm.name.trim();
+  const customerName = currentOrderTemplateCustomerName();
+  const name = freightTemplateNameForCustomer(baseName, customerName);
+  if (!customerName) {
+    notify("请先选择当前客户");
+    return;
+  }
+  if (!baseName) {
     notify("请输入模板名称");
     return;
   }
@@ -31932,8 +32264,10 @@ async function saveCurrentFeesAsTemplate() {
       content: JSON.stringify(content)
     };
     const existing = templateRows.value.find((item) => {
-      if (item.name !== name) return false;
-      return orderTemplateMatchesCurrentCustomer(parseOrderFreightTemplate(item) || {});
+      const content = parseOrderFreightTemplate(item) || {};
+      if (!orderTemplateMatchesCurrentCustomer(content)) return false;
+      const existingName = String(item.name || "").trim();
+      return existingName === name || freightTemplateNameForCustomer(existingName, customerName) === name;
     });
     const item = await templatesApi.saveTemplate(existing?.id, existing ? { ...existing, ...payload } : payload);
     templateRows.value = existing

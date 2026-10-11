@@ -88,6 +88,19 @@ function listTemplates() {
   return requestList("/templates?includeContent=1");
 }
 
+function listFiles(entityType, entityId) {
+  const params = `entityType=${encodeURIComponent(entityType)}&entityId=${encodeURIComponent(entityId)}`;
+  return requestList(`/files?${params}`);
+}
+
+function uploadFile(payload) {
+  return request("/files", { method: "POST", data: payload, timeout: 60000 });
+}
+
+function deleteFile(fileId) {
+  return request(`/files/${encodeURIComponent(fileId)}`, { method: "DELETE" });
+}
+
 function getDispatchPlan(date) {
   return request(`/dispatch-plans/${encodeURIComponent(date)}`);
 }
@@ -129,6 +142,7 @@ module.exports = {
   getDispatchPlan,
   listCustomers,
   listFreightRates,
+  listFiles,
   listCustomerContacts,
   listDispatchPlans,
   listDrivers,
@@ -140,6 +154,8 @@ module.exports = {
   deleteCustomerContact,
   deleteDispatchPlanRows,
   saveDispatchPlan,
+  uploadFile,
+  deleteFile,
   updateOrder,
   updateCustomerContact,
   updateOrderStatus

@@ -802,25 +802,41 @@ Page({
   },
 
   async updateOrderStatusFromCard(event) {
-    if (this.data.saving || this.data.formOpening) return;
+    if (this.data.saving || this.data.formOpening || this.orderStatusConfirming) return;
     const no = event.currentTarget.dataset.no;
     const targetStatus = event.currentTarget.dataset.status;
     const order = this.orderByNo(no);
-      if (!order || orderStatusActionDisabled(order, targetStatus)) return;
-      if (valueText(order.status) === "已审核" && targetStatus === "异常滞留") return;
+    if (!order || orderStatusActionDisabled(order, targetStatus)) return;
+    if (valueText(order.status) === "已审核" && targetStatus === "异常滞留") return;
     const orderStatus = targetStatus === "异常滞留" ? "费用待确认" : targetStatus;
     if (["已签收", "费用待确认"].indexOf(orderStatus) < 0) return;
-    this.setData({ saving: true });
+    this.orderStatusConfirming = true;
     try {
-      const updated = await api.updateOrderStatus(no, orderStatus);
-      const nextOrders = (this.data.orders || []).map((item) => item.no === no ? updated : item);
-      this.setData({ orders: nextOrders });
-      await this.loadBoard({ silent: true });
-      wx.showToast({ title: `订单已标记为${targetStatus}`, icon: "none" });
-    } catch (error) {
-      wx.showToast({ title: error.message || `更新${targetStatus}失败`, icon: "none" });
+      const confirmed = await new Promise((resolve) => {
+        wx.showModal({
+          title: "确认订单状态",
+          content: `确定将订单 ${no} 标记为“${targetStatus}”吗？`,
+          confirmText: targetStatus === "已签收" ? "确认签收" : "确认异常",
+          confirmColor: targetStatus === "已签收" ? "#1769e0" : "#b42318",
+          success: (result) => resolve(Boolean(result.confirm)),
+          fail: () => resolve(false)
+        });
+      });
+      if (!confirmed || this.data.saving || this.data.formOpening) return;
+      this.setData({ saving: true });
+      try {
+        const updated = await api.updateOrderStatus(no, orderStatus);
+        const nextOrders = (this.data.orders || []).map((item) => item.no === no ? updated : item);
+        this.setData({ orders: nextOrders });
+        await this.loadBoard({ silent: true });
+        wx.showToast({ title: `订单已标记为${targetStatus}`, icon: "none" });
+      } catch (error) {
+        wx.showToast({ title: error.message || `更新${targetStatus}失败`, icon: "none" });
+      } finally {
+        this.setData({ saving: false });
+      }
     } finally {
-      this.setData({ saving: false });
+      this.orderStatusConfirming = false;
     }
   },
 
@@ -1146,7 +1162,7 @@ Page({
   generateDispatchInfoForRow(id) {
     const row = this.rowById(id);
     if (!row) return;
-    const text = dispatchMessageText([row], this.data.orders, this.data.dispatchDate);
+    const text = dispatchMessageText([row], this.data.orders, this.data.dispatchDate, this.data.customers);
     this.copyDispatchTextToClipboard(text, "已生成并复制 1 单派车信息");
   },
 
@@ -1160,7 +1176,7 @@ Page({
       wx.showToast({ title: "请先勾选要生成派车信息的排车单", icon: "none" });
       return;
     }
-    const text = dispatchMessageText(rows, this.data.orders, this.data.dispatchDate);
+    const text = dispatchMessageText(rows, this.data.orders, this.data.dispatchDate, this.data.customers);
     this.copyDispatchTextToClipboard(text, `已生成并复制 ${rows.length} 单派车信息`);
   },
 

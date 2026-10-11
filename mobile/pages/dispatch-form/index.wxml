@@ -32,8 +32,8 @@
       </view>
       <view class="field-row customer-field">
         <text class="field-label">客户简称</text>
-        <input placeholder="搜索并选择客户简称" placeholder-class="placeholder" value="{{customerKeyword}}" data-field="customer" bindfocus="onCustomerFocus" bindinput="onFieldInput" />
-        <view wx:if="{{selectedCustomers.length}}" class="customer-tag-list">
+        <input placeholder="搜索并选择客户简称" placeholder-class="placeholder" value="{{customerInputEditing ? customerKeyword : selectedCustomerInput}}" data-field="customer" bindfocus="onCustomerFocus" bindblur="onCustomerBlur" bindinput="onFieldInput" />
+        <view wx:if="{{customerInputEditing && selectedCustomers.length}}" class="customer-tag-list">
           <view wx:for="{{selectedCustomers}}" wx:for-item="item" wx:for-index="customerIndex" wx:key="id" class="customer-tag">
             <text class="customer-tag-text">{{item.displayName || item.shortName || item.name}}</text>
             <text class="customer-tag-remove" data-index="{{customerIndex}}" bindtap="removeSelectedCustomer">×</text>
@@ -322,19 +322,19 @@
     </view>
 
     <view wx:if="{{isOrderEditMode}}" class="panel form-panel fee-panel">
-      <view class="location-head">
-        <view>
+      <view class="location-head fee-head">
+        <view class="fee-head-copy">
           <text class="section-title">收费项目</text>
           <text class="location-hint">和 Web 端订单费用一起保存。</text>
         </view>
         <view class="fee-head-actions">
-          <button class="ghost-btn" loading="{{orderTemplateLoading}}" disabled="{{orderTemplateLoading}}" bindtap="openOrderTemplatePicker">载入模板</button>
-          <button class="ghost-btn fee-add-btn" bindtap="addOrderFeeRow">新增项目</button>
+          <button class="ghost-btn fee-head-btn" loading="{{orderTemplateLoading}}" disabled="{{orderTemplateLoading}}" bindtap="openOrderTemplatePicker">载入模板</button>
+          <button class="ghost-btn fee-head-btn" bindtap="addOrderFeeRow">新增项目</button>
         </view>
       </view>
       <view wx:for="{{orderFeeRows}}" wx:for-item="fee" wx:for-index="feeIndex" wx:key="*this" class="fee-card">
         <view class="fee-card-head">
-          <text>项目 {{feeIndex + 1}}</text>
+          <text class="fee-card-title">项目 {{feeIndex + 1}}</text>
           <button wx:if="{{orderFeeRows.length > 1}}" class="fee-remove-btn" data-index="{{feeIndex}}" bindtap="removeOrderFeeRow">删除</button>
         </view>
         <view class="two-col">
@@ -379,9 +379,66 @@
           <text class="field-label">备注</text>
           <input placeholder="费用备注" placeholder-class="placeholder" value="{{fee.remark}}" data-index="{{feeIndex}}" data-field="remark" bindinput="onOrderFeeInput" />
         </view>
+        <view wx:for="{{fee.attachments}}" wx:for-item="file" wx:for-index="fileIndex" wx:key="id" class="fee-file-row">
+          <text class="fee-file-name">{{file.displayName || file.filename}}</text>
+        </view>
+        <view class="fee-file-actions">
+          <button
+            class="fee-file-action-btn fee-file-upload-btn"
+            loading="{{orderAttachmentUploading}}"
+            disabled="{{orderAttachmentUploading}}"
+            data-index="{{feeIndex}}"
+            bindtap="uploadOrderFeeAttachments"
+          >上传附件</button>
+          <button
+            class="fee-file-action-btn fee-file-preview-btn"
+            loading="{{attachmentPreviewLoading}}"
+            disabled="{{attachmentPreviewLoading}}"
+            data-fee-index="{{feeIndex}}"
+            bindtap="openOrderAttachmentPicker"
+          >预览</button>
+        </view>
       </view>
     </view>
   </block>
+
+  <view wx:if="{{attachmentPickerOpen}}" class="sheet-mask attachment-picker-mask" bindtap="closeOrderAttachmentPicker">
+    <view class="attachment-picker-sheet" catchtap="noop">
+      <view class="sheet-head">
+        <view class="sheet-head-copy">
+          <text class="sheet-title">选择要预览的附件</text>
+          <text class="sheet-subtitle">项目 {{attachmentPickerFeeIndex + 1}}</text>
+        </view>
+        <button class="quiet-btn sheet-close" bindtap="closeOrderAttachmentPicker">关闭</button>
+      </view>
+      <scroll-view scroll-y class="attachment-picker-list">
+        <view wx:for="{{attachmentPickerFiles}}" wx:for-item="file" wx:for-index="fileIndex" wx:key="id" class="attachment-picker-item" data-index="{{fileIndex}}" bindtap="selectOrderAttachment">
+          <text class="attachment-picker-name">{{file.displayName || file.filename}}</text>
+          <text class="attachment-picker-open">预览</text>
+        </view>
+      </scroll-view>
+    </view>
+  </view>
+
+  <view wx:if="{{imagePreviewOpen}}" class="image-preview-mask" bindtap="closeImagePreview">
+    <view class="image-preview-panel">
+      <view class="image-preview-head">
+        <text class="image-preview-title">{{imagePreviewName}}</text>
+        <button class="quiet-btn image-preview-close" bindtap="closeImagePreview" catchtap="noop">关闭</button>
+      </view>
+      <view class="image-preview-stage">
+        <image
+          class="image-preview-image"
+          src="{{imagePreviewPath}}"
+          style="width: {{imagePreviewWidth}}px; height: {{imagePreviewHeight}}px;"
+          mode="aspectFit"
+          show-menu-by-longpress="true"
+          binderror="handleImagePreviewError"
+          catchtap="noop"
+        />
+      </view>
+    </view>
+  </view>
 
   <view wx:if="{{locationPickerOpen}}" class="sheet-mask location-picker-mask" bindtap="closeLocationPicker">
     <view class="location-sheet" catchtap="noop">
@@ -476,7 +533,8 @@
     </view>
   </view>
 
-  <view class="bottom-actions">
+  <view class="bottom-actions {{canDeleteOrder ? 'has-delete-order' : ''}}">
+    <button wx:if="{{isOrderEditMode && canDeleteOrder}}" class="danger-btn bottom-btn delete-order-btn" bindtap="deleteCurrentOrder" disabled="{{saving}}">删除订单</button>
     <button class="ghost-btn bottom-btn" bindtap="cancelForm" disabled="{{saving}}">取消</button>
     <button class="primary-btn bottom-btn" bindtap="submitForm" loading="{{saving}}" disabled="{{loadingRefs || saving}}">{{isOrderEditMode ? '保存订单' : '保存排车单'}}</button>
   </view>

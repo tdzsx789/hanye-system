@@ -4251,7 +4251,7 @@ function formatDriverWageNoteNumber(value = 0) {
   const number = Number(value || 0);
   if (!Number.isFinite(number)) return "0";
   const text = number.toFixed(2);
-  return text.replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
+  return text.replace(/\.00$/, "").replace(/(\.\d)0$/, "$1").replace(/\.$/, "");
 }
 
 function sumNumericRowColumn(rows = [], columnIndex = 0) {
@@ -4261,6 +4261,399 @@ function sumNumericRowColumn(rows = [], columnIndex = 0) {
 function setDriverWageNumberFormat(cell) {
   if (!cell) return;
   cell.numFmt = "0";
+}
+
+function setDriverWageTextFormat(cell) {
+  if (!cell) return;
+  cell.numFmt = "@";
+}
+
+function normalizeDriverWageExportColumns(columns = []) {
+  if (!Array.isArray(columns)) return [];
+  return columns
+    .map((column, index) => {
+      if (!column || typeof column !== "object") return null;
+      const key = String(column.key || `column-${index + 1}`).trim();
+      const label = String(column.label || key).trim();
+      const kind = String(column.kind || "").trim();
+      if (!key || !label || !kind) return null;
+      return {
+        ...column,
+        key,
+        label,
+        kind,
+        currency: String(column.currency || "").trim().toUpperCase(),
+        projectKey: String(column.projectKey || "").trim()
+      };
+    })
+    .filter(Boolean);
+}
+
+function excelSumCellFormula(columnIndexes = [], rowNumber = 0) {
+  const references = columnIndexes
+    .map((columnIndex) => `${excelColumnLetter(Number(columnIndex) + 1)}${rowNumber}`)
+    .filter(Boolean);
+  return references.length ? `SUM(${references.join(",")})` : "0";
+}
+
+function excelSumColumnFormula(columnIndex = -1, startRow = 0, endRow = 0) {
+  if (columnIndex < 0 || !startRow || !endRow || endRow < startRow) return "0";
+  const column = excelColumnLetter(Number(columnIndex) + 1);
+  return `SUM(${column}${startRow}:${column}${endRow})`;
+}
+
+function copyDriverWageWorksheetConfig(target, source) {
+  target.pageSetup = {
+    ...(source.pageSetup || {}),
+    orientation: "landscape",
+    fitToPage: true,
+    fitToWidth: 1,
+    fitToHeight: 0
+  };
+  target.pageMargins = cloneExcelStyle(source.pageMargins) || {
+    left: 0.3,
+    right: 0.3,
+    top: 0.5,
+    bottom: 0.5,
+    header: 0.2,
+    footer: 0.2
+  };
+  target.views = cloneExcelStyle(source.views) || [];
+  target.showGridLines = source.showGridLines;
+  target.properties = cloneExcelStyle(source.properties) || {};
+}
+
+function driverWageDynamicCellStyle(cell, sourceCell, alignment = {}) {
+  copyExcelCellStyle(cell, sourceCell);
+  cell.font = {
+    ...(cloneExcelStyle(cell.font) || {}),
+    color: { argb: "FF000000" }
+  };
+  cell.alignment = {
+    ...(cloneExcelStyle(sourceCell.alignment) || {}),
+    ...alignment
+  };
+}
+
+async function renderDynamicDriverWageSettlementXlsxBuffer(payload = {}, templateBuffer = null, columns = []) {
+  if (!templateBuffer || !columns.length) {
+    throw new Error("司机工资单动态列配置缺失");
+  }
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(templateBuffer);
+  const sourceWorksheet = workbook.worksheets[0];
+  if (!sourceWorksheet) {
+    throw new Error("司机工资单模板无可用工作表");
+  }
+
+  const worksheet = workbook.addWorksheet("工资单");
+  copyDriverWageWorksheetConfig(worksheet, sourceWorksheet);
+  const sourceCells = {
+    header: sourceWorksheet.getCell("H1"),
+    headerIndex: sourceWorksheet.getCell("A1"),
+    index: sourceWorksheet.getCell("A2"),
+    date: sourceWorksheet.getCell("B2"),
+    text: sourceWorksheet.getCell("C2"),
+    route: sourceWorksheet.getCell("D2"),
+    amount: sourceWorksheet.getCell("I2"),
+    total: sourceWorksheet.getCell("P75"),
+    driver: sourceWorksheet.getCell("S2"),
+    remark: sourceWorksheet.getCell("U2"),
+    footerLabel: sourceWorksheet.getCell("B76"),
+    footerValue: sourceWorksheet.getCell("P76"),
+    footerFormula: sourceWorksheet.getCell("K78")
+  };
+
+  const rawRows = Array.isArray(payload.rows) ? payload.rows : [];
+  const rows = rawRows.map((row) => {
+    const values = Array.isArray(row) ? [...row] : [];
+    while (values.length < columns.length) values.push("");
+    return values.slice(0, columns.length);
+  });
+  const lastColumn = Math.max(1, columns.length);
+  const dataStartRow = 2;
+  const dataEndRow = rows.length ? dataStartRow + rows.length - 1 : dataStartRow - 1;
+  const summaryRow = Math.max(dataStartRow + 1, dataEndRow + 2);
+  const footerRow1 = summaryRow + 2;
+  const footerRow2 = footerRow1 + 1;
+  const footerRow3 = footerRow2 + 1;
+  const lastColumnLetter = excelColumnLetter(lastColumn);
+  const dataEndReferenceRow = Math.max(dataEndRow, dataStartRow);
+
+  const projectColumnIndexesByCurrency = new Map([
+    ["HKD", []],
+    ["RMB", []]
+  ]);
+  columns.forEach((column, index) => {
+    if (column.kind === "project" && projectColumnIndexesByCurrency.has(column.currency)) {
+      projectColumnIndexesByCurrency.get(column.currency).push(index);
+    }
+  });
+  const freightColumnIndexes = {
+    HKD: columns.findIndex((column) => column.kind === "freightTotal" && column.currency === "HKD"),
+    RMB: columns.findIndex((column) => column.kind === "freightTotal" && column.currency === "RMB")
+  };
+
+  const rowValue = (values, index) => values[index] === "" || values[index] === null || values[index] === undefined
+    ? null
+    : values[index];
+  const numericValue = (value) => {
+    const number = Number(value || 0);
+    return Number.isFinite(number) ? number : 0;
+  };
+  const rowMiscTotal = (values, currency) =>
+    (projectColumnIndexesByCurrency.get(currency) || []).reduce((sum, index) => sum + numericValue(values[index]), 0);
+  const rowFreightTotal = (values, currency) => {
+    const index = freightColumnIndexes[currency];
+    return index >= 0 ? numericValue(values[index]) : 0;
+  };
+
+  columns.forEach((column, index) => {
+    worksheet.getColumn(index + 1).width = (() => {
+      const values = rows.map((row) => rowValue(row, index)).filter((value) => value !== null);
+      const baseWidth = column.kind === "remark"
+        ? 34
+        : column.key === "route"
+          ? 28
+          : column.key === "customer"
+            ? 20
+            : column.kind === "project"
+              ? 13
+              : column.kind === "date"
+                ? 13
+                : 11;
+      return Math.max(baseWidth, Math.min(36, excelColumnWidthForExport(column, column.label, values)));
+    })();
+  });
+  worksheet.getColumn(1).width = Math.max(13, Number(worksheet.getColumn(1).width || 0));
+
+  columns.forEach((column, index) => {
+    const cell = worksheet.getCell(1, index + 1);
+    driverWageDynamicCellStyle(
+      cell,
+      column.kind === "index" ? sourceCells.headerIndex : sourceCells.header,
+      {
+        horizontal: "center",
+        vertical: "middle",
+        wrapText: true
+      }
+    );
+    cell.font = {
+      ...(cloneExcelStyle(cell.font) || {}),
+      bold: true
+    };
+    cell.value = column.label;
+    setDriverWageTextFormat(cell);
+  });
+  const headerLineCount = columns.reduce((max, column, index) => Math.max(
+    max,
+    excelCellLineCount(column.label, Number(worksheet.getColumn(index + 1).width || 12))
+  ), 1);
+  worksheet.getRow(1).height = Math.min(120, Math.max(42, headerLineCount * 18 + 12));
+
+  const sourceCellForColumn = (column) => {
+    if (column.kind === "index") return sourceCells.index;
+    if (column.kind === "date") return sourceCells.date;
+    if (column.kind === "project" || column.kind === "miscTotal" || column.kind === "freightTotal") {
+      return sourceCells.amount;
+    }
+    if (column.kind === "driver") return sourceCells.driver;
+    if (column.kind === "remark") return sourceCells.remark;
+    return sourceCells.text;
+  };
+  const columnAlignment = (column) => {
+    if (column.kind === "remark") return { horizontal: "left", vertical: "top", wrapText: true };
+    if (column.kind === "project" || column.kind === "miscTotal" || column.kind === "freightTotal") {
+      return { horizontal: "center", vertical: "middle", wrapText: false };
+    }
+    return { horizontal: "center", vertical: "middle", wrapText: column.key === "route" || column.kind === "driver" };
+  };
+
+  rows.forEach((values, rowIndex) => {
+    const rowNumber = dataStartRow + rowIndex;
+    const row = worksheet.getRow(rowNumber);
+    row.height = Math.max(24, Math.min(72, excelRowHeightForText(
+      values.find((value, index) => columns[index]?.kind === "remark") || "",
+      10,
+      Number(worksheet.getColumn(lastColumn).width || 12),
+      24
+    )));
+    columns.forEach((column, columnIndex) => {
+      const cell = row.getCell(columnIndex + 1);
+      driverWageDynamicCellStyle(cell, sourceCellForColumn(column), columnAlignment(column));
+      const incoming = rowValue(values, columnIndex);
+      if (column.kind === "miscTotal") {
+        const currency = column.currency === "RMB" ? "RMB" : "HKD";
+        const formula = excelSumCellFormula(projectColumnIndexesByCurrency.get(currency) || [], rowNumber);
+        cell.value = { formula, result: rowMiscTotal(values, currency) };
+        cell.numFmt = "#,##0.##";
+        return;
+      }
+      if (column.kind === "date" && incoming) {
+        const dateText = incoming instanceof Date
+          ? incoming.toISOString().slice(0, 10)
+          : String(incoming).slice(0, 10);
+        cell.value = /^\d{4}-\d{2}-\d{2}$/.test(dateText) ? dateText : incoming;
+        setDriverWageTextFormat(cell);
+        return;
+      }
+      cell.value = incoming;
+      if (column.kind === "project" || column.kind === "freightTotal") {
+        cell.numFmt = "#,##0.##";
+      } else {
+        setDriverWageTextFormat(cell);
+      }
+    });
+  });
+
+  const summaryRowObject = worksheet.getRow(summaryRow);
+  summaryRowObject.height = 28;
+  columns.forEach((column, index) => {
+    const cell = summaryRowObject.getCell(index + 1);
+    driverWageDynamicCellStyle(
+      cell,
+      column.kind === "index" ? sourceCells.total : sourceCells.total,
+      {
+        horizontal: "center",
+        vertical: "middle",
+        wrapText: true
+      }
+    );
+    if (column.kind === "index") {
+      cell.value = "合计";
+      setDriverWageTextFormat(cell);
+    } else if (column.kind === "project") {
+      const formula = excelSumColumnFormula(index, dataStartRow, dataEndReferenceRow);
+      const result = rows.reduce((sum, values) => sum + numericValue(values[index]), 0);
+      cell.value = { formula, result };
+      cell.numFmt = "#,##0.##";
+    } else if (column.kind === "miscTotal") {
+      const currency = column.currency === "RMB" ? "RMB" : "HKD";
+      const formula = excelSumColumnFormula(index, dataStartRow, dataEndReferenceRow);
+      const result = rows.reduce((sum, values) => sum + rowMiscTotal(values, currency), 0);
+      cell.value = { formula, result };
+      cell.numFmt = "#,##0.##";
+    } else if (column.kind === "freightTotal") {
+      const currency = column.currency === "RMB" ? "RMB" : "HKD";
+      const formula = excelSumColumnFormula(index, dataStartRow, dataEndReferenceRow);
+      const result = rows.reduce((sum, values) => sum + rowFreightTotal(values, currency), 0);
+      cell.value = { formula, result };
+      cell.numFmt = "#,##0.##";
+    } else {
+      cell.value = null;
+      setDriverWageTextFormat(cell);
+    }
+  });
+
+  const summaryValueReference = (kind, currency = "") => {
+    const index = columns.findIndex((column) =>
+      column.kind === kind && (!currency || column.currency === currency)
+    );
+    return index >= 0 ? `${excelColumnLetter(index + 1)}${summaryRow}` : "0";
+  };
+  const miscHKDTotal = rows.reduce((sum, values) => sum + rowMiscTotal(values, "HKD"), 0);
+  const miscRMBTotal = rows.reduce((sum, values) => sum + rowMiscTotal(values, "RMB"), 0);
+  const freightHKDTotal = rows.reduce((sum, values) => sum + rowFreightTotal(values, "HKD"), 0);
+  const freightRMBTotal = rows.reduce((sum, values) => sum + rowFreightTotal(values, "RMB"), 0);
+  const advanceIncludedInMisc = booleanFlag(payload.advanceIncludedInMisc, false);
+  const advanceHKD = advanceIncludedInMisc
+    ? 0
+    : numericValue(payload.advanceHKD ?? payload.adjustmentsHKD);
+  const advanceRMB = advanceIncludedInMisc ? 0 : numericValue(payload.advanceRMB);
+  const exchangeRate = numericValue(payload.exchangeRate);
+  const convertedRMB = exchangeRate
+    ? Number(((miscRMBTotal + freightRMBTotal + advanceRMB) / exchangeRate).toFixed(2))
+    : 0;
+  const payableTotal = Number((freightHKDTotal + miscHKDTotal + advanceHKD + convertedRMB).toFixed(2));
+  const payableWithoutAdvance = Number((
+    freightHKDTotal
+    + miscHKDTotal
+    + (exchangeRate ? (miscRMBTotal + freightRMBTotal) / exchangeRate : 0)
+  ).toFixed(2));
+
+  const clearFooterCell = (cell) => {
+    cell.value = null;
+    cell.fill = { type: "pattern", pattern: "none" };
+    driverWageDynamicCellStyle(cell, sourceCells.footerValue, {
+      vertical: "middle",
+      horizontal: "left",
+      wrapText: true
+    });
+    setDriverWageTextFormat(cell);
+  };
+  for (let rowNumber = footerRow1; rowNumber <= footerRow3; rowNumber += 1) {
+    const footerRow = worksheet.getRow(rowNumber);
+    footerRow.height = rowNumber === footerRow2 ? 30 : 24;
+    for (let columnIndex = 1; columnIndex <= lastColumn; columnIndex += 1) {
+      clearFooterCell(footerRow.getCell(columnIndex));
+    }
+  }
+  worksheet.getCell(`A${footerRow1}`).value = "备注：";
+  worksheet.getCell(`A${footerRow2}`).value = "应付金额：";
+  worksheet.getCell(`A${footerRow3}`).value = "计算：";
+  [footerRow1, footerRow2, footerRow3].forEach((rowNumber) => {
+    const cell = worksheet.getCell(`A${rowNumber}`);
+    driverWageDynamicCellStyle(cell, sourceCells.footerLabel, {
+      horizontal: "right",
+      vertical: "middle",
+      wrapText: true
+    });
+    cell.font = {
+      ...(cloneExcelStyle(cell.font) || {}),
+      bold: true,
+      color: { argb: "FF000000" }
+    };
+    setDriverWageTextFormat(cell);
+  });
+
+  const noteText = [String(payload.summaryNote || "").trim(), String(payload.paymentLabel || "").trim()]
+    .filter(Boolean)
+    .join(" · ") || "-";
+  worksheet.mergeCells(`B${footerRow1}:${lastColumnLetter}${footerRow1}`);
+  worksheet.getCell(`B${footerRow1}`).value = noteText;
+  worksheet.getCell(`B${footerRow1}`).alignment = { horizontal: "left", vertical: "middle", wrapText: true };
+  setDriverWageTextFormat(worksheet.getCell(`B${footerRow1}`));
+
+  const payableFormula = [
+    summaryValueReference("freightTotal", "HKD"),
+    summaryValueReference("miscTotal", "HKD"),
+    !exchangeRate || summaryValueReference("freightTotal", "RMB") === "0" ? "" : `${summaryValueReference("freightTotal", "RMB")}/${exchangeRate}`,
+    !exchangeRate || summaryValueReference("miscTotal", "RMB") === "0" ? "" : `${summaryValueReference("miscTotal", "RMB")}/${exchangeRate}`,
+    String(advanceHKD),
+    advanceRMB && exchangeRate ? `${advanceRMB}/${exchangeRate}` : ""
+  ].filter(Boolean).join("+") || "0";
+  const payableCell = worksheet.getCell(`B${footerRow2}`);
+  worksheet.mergeCells(`B${footerRow2}:${lastColumn >= 3 ? "C" : "B"}${footerRow2}`);
+  payableCell.value = {
+    formula: payableFormula,
+    result: payableTotal
+  };
+  payableCell.numFmt = '"HKD "#,##0.##';
+  payableCell.alignment = { horizontal: "center", vertical: "middle", wrapText: false };
+  if (lastColumn >= 4) {
+    worksheet.mergeCells(`D${footerRow2}:${lastColumnLetter}${footerRow2}`);
+    worksheet.getCell(`D${footerRow2}`).value = advanceIncludedInMisc
+      ? `运费合计HKD + 杂费合计HKD（含司机代垫） + 人民币项目÷汇率${formatDriverWageNoteNumber(exchangeRate)} = 应付HKD${formatDriverWageNoteNumber(payableTotal)}`
+      : `运费合计HKD + 杂费合计HKD + 人民币项目÷汇率${formatDriverWageNoteNumber(exchangeRate)} + 司机代垫 = 应付HKD${formatDriverWageNoteNumber(payableTotal)}；去除司机代垫后HKD${formatDriverWageNoteNumber(payableWithoutAdvance)}`;
+    worksheet.getCell(`D${footerRow2}`).alignment = { horizontal: "left", vertical: "middle", wrapText: true };
+    setDriverWageTextFormat(worksheet.getCell(`D${footerRow2}`));
+  }
+  worksheet.mergeCells(`B${footerRow3}:${lastColumnLetter}${footerRow3}`);
+  worksheet.getCell(`B${footerRow3}`).value = `杂费合计HKD ${formatDriverWageNoteNumber(miscHKDTotal)} + 杂费合计RMB ${formatDriverWageNoteNumber(miscRMBTotal)} + 运费合计HKD ${formatDriverWageNoteNumber(freightHKDTotal)}${freightRMBTotal ? ` + 运费合计RMB ${formatDriverWageNoteNumber(freightRMBTotal)}` : ""}`;
+  worksheet.getCell(`B${footerRow3}`).alignment = { horizontal: "left", vertical: "middle", wrapText: true };
+  setDriverWageTextFormat(worksheet.getCell(`B${footerRow3}`));
+
+  worksheet.autoFilter = {
+    from: "A1",
+    to: `${lastColumnLetter}${dataEndReferenceRow}`
+  };
+  worksheet.views = [{ state: "frozen", ySplit: 1 }];
+  worksheet.pageSetup.printTitlesRow = "1:1";
+  workbook.calcProperties.fullCalcOnLoad = true;
+  workbook.calcProperties.forceFullCalc = true;
+  workbook.calcProperties.calcMode = "auto";
+  workbook.removeWorksheet(sourceWorksheet.id);
+  return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 
 async function renderDriverWageSettlementXlsxBuffer(payload = {}) {
@@ -4275,6 +4668,11 @@ async function renderDriverWageSettlementXlsxBuffer(payload = {}) {
   const worksheet = workbook.worksheets[0];
   if (!worksheet) {
     throw new Error("司机工资单模板无可用工作表");
+  }
+
+  const dynamicColumns = normalizeDriverWageExportColumns(payload.columns);
+  if (dynamicColumns.length >= 5) {
+    return renderDynamicDriverWageSettlementXlsxBuffer(payload, templateBuffer, dynamicColumns);
   }
 
   const rawRows = Array.isArray(payload.rows) ? payload.rows : [];
@@ -4373,7 +4771,7 @@ async function renderDriverWageSettlementXlsxBuffer(payload = {}) {
   const totalT = sumNumericRowColumn(rows, 19);
   const advanceHKD = Number(payload.advanceHKD ?? payload.adjustmentsHKD ?? 0);
   const exchangeRate = Number(payload.exchangeRate ?? 0);
-  const convertedRMB = exchangeRate ? Number((totalQ * exchangeRate).toFixed(2)) : 0;
+  const convertedRMB = exchangeRate ? Number((totalQ / exchangeRate).toFixed(2)) : 0;
   const payableTotal = Number((totalR + totalT + advanceHKD + convertedRMB).toFixed(2));
   const payableWithoutAdvance = Number((totalR + totalT + convertedRMB).toFixed(2));
   const summaryNote = String(payload.summaryNote || `${rows.length}车骑师/口岸过车`).trim();
@@ -10656,6 +11054,7 @@ app.post("/api/driver-wage-settlements/export/xlsx", async (req, res) => {
   }
   try {
     const buffer = await renderDriverWageSettlementXlsxBuffer({
+      columns: req.body?.columns,
       rows,
       periodLabel: req.body?.periodLabel,
       summaryNote: req.body?.summaryNote,
@@ -10663,6 +11062,8 @@ app.post("/api/driver-wage-settlements/export/xlsx", async (req, res) => {
       paymentLabel: req.body?.paymentLabel,
       exchangeRate: req.body?.exchangeRate,
       advanceHKD: req.body?.advanceHKD,
+      advanceRMB: req.body?.advanceRMB,
+      advanceIncludedInMisc: req.body?.advanceIncludedInMisc,
       adjustmentsHKD: req.body?.adjustmentsHKD
     });
     const filename = String(req.body?.filename || "").trim() || `司机工资单_${exportFilenamePart(req.body?.driverName || "司机")}.xlsx`;
