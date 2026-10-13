@@ -1056,13 +1056,84 @@ const ORDER_EXPORT_CHARGE_NOTE_COLUMN = { key: "__chargeNote", label: "备注", 
 const ORDER_EXPORT_OPERATING_UNIT_COLUMN = { key: "operatingUnit", label: "经营单位", width: 96, fontSize: 8, system: true };
 const ORDER_EXPORT_NEW_OLD_COLUMN = { key: "newOld", label: "新/旧", width: 52, fontSize: 8, system: true };
 const ORDER_EXPORT_SPECIAL_CAR_COLUMN = { key: "specialCar", label: "专车", width: 52, fontSize: 8, system: true };
+const EXPORT_FEE_NAME_ALIASES = new Map([
+  ["代垫香港政府税金", "香港政府税金"]
+]);
+
+function canonicalExportFeeName(value = "") {
+  const name = textValue(value).trim();
+  return EXPORT_FEE_NAME_ALIASES.get(name) || name;
+}
+
+function exportFeeNameVariants(value = "") {
+  const name = textValue(value).trim();
+  const canonical = canonicalExportFeeName(name);
+  const variants = new Set([name, canonical].filter(Boolean));
+  EXPORT_FEE_NAME_ALIASES.forEach((currentName, legacyName) => {
+    if (currentName === canonical) variants.add(legacyName);
+  });
+  return variants;
+}
+
+function normalizeExportTemplateColumn(column = {}) {
+  const key = textValue(column?.key);
+  const rawName = textValue(column?.feeName || column?.label).trim();
+  if (!rawName && !column?.feeItemId && !key.startsWith("fee-item-")) return column;
+  const canonicalName = canonicalExportFeeName(rawName);
+  if (!canonicalName) return column;
+  return {
+    ...column,
+    label: canonicalName,
+    feeName: canonicalName
+  };
+}
+
+function exportTemplateColumnOrder(column = {}, fallbackIndex = 0) {
+  const rawOrder = column?.order
+    ?? column?.sortOrder
+    ?? column?.displayOrder
+    ?? column?.position
+    ?? column?.sequence;
+  const parsedOrder = Number(rawOrder);
+  return Number.isFinite(parsedOrder) && parsedOrder > 0
+    ? parsedOrder
+    : fallbackIndex + 1;
+}
+
+function exportTemplateColumnHasSavedOrder(column = {}) {
+  return [
+    column?.order,
+    column?.sortOrder,
+    column?.displayOrder,
+    column?.position,
+    column?.sequence
+  ].some((rawOrder) => {
+    const parsedOrder = Number(rawOrder);
+    return Number.isFinite(parsedOrder) && parsedOrder > 0;
+  });
+}
+
+function sortExportTemplateColumns(columns = []) {
+  return (Array.isArray(columns) ? columns : [])
+    .map((column, index) => ({
+      column,
+      index,
+      order: exportTemplateColumnOrder(column, index)
+    }))
+    .sort((left, right) => left.order - right.order || left.index - right.index)
+    .map(({ column }) => column);
+}
 
 function normalizeExportTemplate(template = null) {
   if (!template || template.type !== "visual-export-template") return null;
   const fallbackColumns = ORDER_EXPORT_COLUMNS.map(([label, key, width]) => ({ label, key, width }));
-  const columns = Array.isArray(template.columns) && template.columns.length
+  const sourceColumns = Array.isArray(template.columns) && template.columns.length
     ? template.columns
     : fallbackColumns;
+  // The template editor displays columns by their saved order, while legacy
+  // templates may retain a different JSON array order. Normalize both paths
+  // here so every export format follows the same column order as the editor.
+  const columns = sortExportTemplateColumns(sourceColumns.map(normalizeExportTemplateColumn));
   const headerTextColor = validHexColor(template.headerTextColor, "#17233c");
   const footerTextColor = validHexColor(template.footerTextColor, "#64748b");
   const headerTextItems = Array.isArray(template.headerTextItems) ? template.headerTextItems : [];
@@ -2042,17 +2113,19 @@ function exportFeeItemCurrencyForColumn(column = {}) {
   const feeItemId = textValue(column?.feeItemId).trim();
   const feeName = textValue(column?.feeName || column?.label).trim();
   const columnCurrency = textValue(column?.feeCurrency).trim();
+  if (columnCurrency) return columnCurrency;
   if (feeItemId) {
     const row = db
       .prepare("SELECT currency FROM fee_items WHERE id = ? AND deleted_at IS NULL")
       .get(Number(feeItemId));
     if (row?.currency) return row.currency;
   }
-  if (columnCurrency) return columnCurrency;
   if (feeName) {
-    const row = db
-      .prepare("SELECT currency FROM fee_items WHERE name = ? AND deleted_at IS NULL")
-      .get(feeName);
+    const row = [...exportFeeNameVariants(feeName)]
+      .map((name) => db
+        .prepare("SELECT currency FROM fee_items WHERE name = ? AND deleted_at IS NULL")
+        .get(name))
+      .find(Boolean);
     if (row?.currency) return row.currency;
   }
   return "";
@@ -2111,15 +2184,20 @@ function feeRowsForColumn(order, column) {
   const feeItemId = textValue(column?.feeItemId).trim();
   const rawFeeName = textValue(column?.feeName || column?.label).trim();
   const feeName = exportFeeColumnComparableName(column);
+  const feeNameVariants = new Set([
+    ...exportFeeNameVariants(rawFeeName),
+    ...exportFeeNameVariants(feeName)
+  ]);
   const feeCurrency = exportFeeItemCurrencyForColumn(column);
   const normalizedColumnCurrency = normalizeFeeCurrency(feeCurrency);
   if (!feeItemId && !rawFeeName && !feeName) return [];
   return fees.filter((fee) => {
     const name = textValue(fee.name).trim();
+    const canonicalName = canonicalExportFeeName(name);
     const itemId = textValue(fee.feeItemId || fee.fee_item_id).trim();
     const currencyMatches = !feeCurrency || normalizeFeeCurrency(fee.currency) === normalizedColumnCurrency;
     if (feeItemId && itemId) return itemId === feeItemId && currencyMatches;
-    return (name === rawFeeName || name === feeName) && currencyMatches;
+    return (feeNameVariants.has(name) || feeNameVariants.has(canonicalName)) && currencyMatches;
   });
 }
 
@@ -2399,10 +2477,24 @@ function exportColumnsFromTemplate(template = null) {
   );
   const visibleColumns = withoutSequenceColumn.filter((column) => column.visible !== false);
   const bodyColumns = visibleColumns.filter((column) => !ORDER_EXPORT_SYSTEM_TOTAL_COLUMN_KEYS.has(column.key));
-  const totalColumns = ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS.map((systemColumn) => ({
-    ...systemColumn,
-    ...(visibleColumns.find((column) => column.key === systemColumn.key) || {})
-  }));
+  const configuredTotals = visibleColumns
+    .filter((column) => ORDER_EXPORT_SYSTEM_TOTAL_COLUMN_KEYS.has(column.key))
+    .map((column, index) => ({ column, index }));
+  const hasSavedTotalOrder = configuredTotals.some(({ column }) => exportTemplateColumnHasSavedOrder(column));
+  const totalOrder = hasSavedTotalOrder
+    ? new Map(configuredTotals.map(({ column, index }) => [column.key, index]))
+    : new Map();
+  const totalColumns = ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS
+    .map((systemColumn, index) => ({
+      ...systemColumn,
+      ...(visibleColumns.find((column) => column.key === systemColumn.key) || {}),
+      fallbackOrder: configuredTotals.length + index
+    }))
+    .sort((left, right) =>
+      (totalOrder.get(left.key) ?? left.fallbackOrder)
+      - (totalOrder.get(right.key) ?? right.fallbackOrder)
+    )
+    .map(({ fallbackOrder, ...column }) => column);
   return [{ ...ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN }, ...bodyColumns, ...totalColumns];
 }
 
@@ -2493,8 +2585,35 @@ function dynamicExportFeeColumns(orders = [], existingColumns = []) {
   return feeColumns;
 }
 
+function normalizeTemplateFeeColumnsForOrders(columns = [], orders = []) {
+  const orderFeeCurrenciesByName = new Map();
+  orders.forEach((order) => {
+    (Array.isArray(order?.fees) ? order.fees : []).forEach((fee) => {
+      if (!feeHasRecordedValue(fee)) return;
+      const canonicalName = canonicalExportFeeName(fee.name);
+      if (!canonicalName) return;
+      const currencies = orderFeeCurrenciesByName.get(canonicalName) || new Set();
+      currencies.add(normalizeFeeCurrency(fee.currency));
+      orderFeeCurrenciesByName.set(canonicalName, currencies);
+    });
+  });
+  return columns.map((column) => {
+    if (!isExportFeeItemColumn(column)) return column;
+    const columnName = canonicalExportFeeName(column.feeName || column.label);
+    const actualCurrencies = orderFeeCurrenciesByName.get(columnName);
+    if (!actualCurrencies || actualCurrencies.size !== 1) return column;
+    const actualCurrency = [...actualCurrencies][0];
+    const configuredCurrency = normalizeFeeCurrency(exportFeeItemCurrencyForColumn(column));
+    if (configuredCurrency === actualCurrency) return column;
+    return {
+      ...column,
+      feeCurrency: actualCurrency === "RMB" ? "人民币" : "港币"
+    };
+  });
+}
+
 function exportFeeColumnName(column = {}) {
-  return textValue(column.feeName || column.label).trim();
+  return canonicalExportFeeName(column.feeName || column.label);
 }
 
 function exportFeeColumnKey(column = {}) {
@@ -2568,15 +2687,20 @@ function insertOrderAttributeExportColumn(columns = [], columnConfig = {}, after
 
 function exportColumnsForOrders(templatePayload = null, orders = [], options = {}) {
   const template = normalizeExportTemplate(templatePayload);
-  const columns = exportColumnsFromTemplate(templatePayload);
+  const columns = normalizeTemplateFeeColumnsForOrders(
+    exportColumnsFromTemplate(templatePayload),
+    orders
+  );
   const sequenceColumn = columns.find((column) => column.key === ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key);
   const templateBodyColumns = columns.filter((column) =>
     column.key !== ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key
     && !ORDER_EXPORT_SYSTEM_TOTAL_COLUMN_KEYS.has(column.key)
   );
+  // A visible column in the template is an explicit export requirement. Keep
+  // it even when every order in the selected period has a blank/zero value;
+  // otherwise legacy fee columns disappear from customer statements.
   const bodyColumns = templateBodyColumns.filter((column) =>
     column.key !== ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key
-    && (!isExportFeeItemColumn(column) || feeColumnHasRecordedValue(column, orders))
   );
   const totalColumns = ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS.map((systemColumn) => ({
     ...systemColumn,

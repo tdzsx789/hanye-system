@@ -3653,6 +3653,21 @@ function relatedOrderRouteText(order) {
   return `${relatedOrderLocationText(order?.loading)} → ${relatedOrderLocationText(order?.unloading)}`;
 }
 
+function financeWageStatementLocationText(order = {}, target = "") {
+  const value = order?.[target] || "";
+  const entries = recordDispatchLocationEntries(order, target);
+  return dispatchSummarizeCompactLocationEntries(entries, value)
+    || dispatchSummarizeCompactLocationEntries(value)
+    || "-";
+}
+
+function financeWageStatementRouteText(order = {}) {
+  return [
+    financeWageStatementLocationText(order, "loading"),
+    financeWageStatementLocationText(order, "unloading")
+  ].filter(Boolean).join(" / ") || "-";
+}
+
 function supplierCostRuleLevelParts(value) {
   const parts = String(value || "")
     .split(/[\/｜|>]+/)
@@ -19348,32 +19363,6 @@ function costCenterFeeItemLabel(item = {}) {
   return item.name || "收费项目";
 }
 
-function driverCostStorageFieldForFeeItem(item = {}) {
-  const name = String(item.name || "").trim();
-  if (!name) return "";
-  if (item.category !== "代垫" && /基础|运费|趟费/.test(name)) {
-    return item.currency === "人民币" ? "baseRMB" : "baseHKD";
-  }
-  if (item.category !== "代垫") return driverExtraFieldForFeeName(name);
-  return "";
-}
-
-function driverCostRateValue(rule = {}, item = {}) {
-  const field = driverCostStorageFieldForFeeItem(item);
-  if (field) return Number(rule?.[field] || 0);
-  return advanceFeeRateValue(rule?.advanceFeeRates, item);
-}
-
-function setDriverCostRate(target = {}, item = {}, value = 0) {
-  const field = driverCostStorageFieldForFeeItem(item);
-  if (field) {
-    target[field] = Number(value || 0);
-    return;
-  }
-  target.advanceFeeRates ||= {};
-  setAdvanceFeeRate(target.advanceFeeRates, item, value);
-}
-
 function parseCostCenterValues(value = {}) {
   if (typeof value === "string") {
     try {
@@ -22371,9 +22360,12 @@ function compareSortValues(left, right) {
 }
 
 function orderDefaultGroupKey(order = {}) {
-  const plate = String(order.plate || "").trim();
-  if (plate) return plate;
-  return String(order.supplier || "").trim();
+  const dispatchRow = orderDispatchPlanRow(order);
+  const source = normalizeVehicleSource(order.vehicleSource || dispatchRow?.vehicleSource || "");
+  const group = source === "外派车辆"
+      ? (order.supplier || dispatchRow?.supplier)
+      : (order.plate || dispatchRow?.plate);
+  return String(group || "").trim();
 }
 
 function compareOrderRowsForDefaultSort(left = {}, right = {}) {
@@ -22389,6 +22381,11 @@ function compareOrderRowsForDefaultSort(left = {}, right = {}) {
     orderDispatchLoadSortValue(right.order || right) || right.date || right.order?.date || ""
   );
   if (dateCompare !== 0) return dateCompare;
+
+  const leftDispatchNo = String(orderDispatchPlanRow(left)?.dispatchNo || left.dispatchNo || "").trim();
+  const rightDispatchNo = String(orderDispatchPlanRow(right)?.dispatchNo || right.dispatchNo || "").trim();
+  const dispatchCompare = leftDispatchNo.localeCompare(rightDispatchNo, "zh-Hans-CN", { numeric: true, sensitivity: "base" });
+  if (dispatchCompare !== 0) return dispatchCompare;
 
   const noCompare = String(left.no || "").localeCompare(String(right.no || ""), "zh-Hans-CN", { numeric: true, sensitivity: "base" });
   if (noCompare !== 0) return noCompare;
@@ -30193,7 +30190,9 @@ function financeWageStatementProjectKey(name = "", currency = "HKD") {
 
 function financeWageStatementIsFreightName(value = "") {
   const name = financeWageStatementFeeName({ name: financeWageStatementProjectName(value) });
-  return name === FINANCE_WAGE_STATEMENT_FREIGHT_NAMES[0];
+  return FINANCE_WAGE_STATEMENT_FREIGHT_NAMES.some((freightName) =>
+    name.includes(financeWageStatementFeeName({ name: freightName }))
+  ) || name.includes("运费") || name.includes("趟费");
 }
 
 function financeWageStatementProjectLineMatchesExtraField(lineName = "", field = "") {
@@ -30425,56 +30424,11 @@ function financeWageStatementOrderFreight(order = {}, driver = null) {
   const total = { hkd: 0, rmb: 0 };
   if (!driver?.name) return total;
 
-  const source = driverCostCenterSourceForDriver(driver);
-  driverCostCenterOrderFeeRows(order)
-    .filter((fee) => financeWageStatementIsFreightName(fee.name))
-    .forEach((fee) => {
-      const item = feeItemForFee(fee);
-      if (
-        isAdvanceFee(fee)
-        || item?.category === "代垫"
-        || (item && isCompanyCoveredFeeItem(item))
-        || (item && !feeItemIncludesCostSource(item, source))
-      ) {
-        return;
-      }
-
-      const addAmount = (amount, currency) => {
-        const value = Number(amount || 0);
-        if (!Number.isFinite(value)) return;
-        if (currencyCodeDisplay(currency || "港币") === "RMB") total.rmb += value;
-        else total.hkd += value;
-      };
-      const splitParts = orderFeeCostSplitParts(fee, order);
-      if (Array.isArray(splitParts)) {
-        splitParts
-          .filter((part) => part.driverName
-            ? part.driverName === driver.name
-            : normalizeCostCenterSourceLabel(part.role) === source)
-          .forEach((part) => addAmount(part.amount, part.currency));
-        return;
-      }
-
-      const savedHKD = normalizeOrderFeeCostComponent(fee.costHKD ?? fee.cost_hkd);
-      const savedRMB = normalizeOrderFeeCostComponent(fee.costRMB ?? fee.cost_rmb);
-      if (savedHKD !== null || savedRMB !== null) {
-        if (savedHKD !== null) addAmount(savedHKD, "港币");
-        if (savedRMB !== null) addAmount(savedRMB, "人民币");
-        return;
-      }
-
-      const savedCost = normalizeFeeCost(fee);
-      if (savedCost !== null) {
-        addAmount(savedCost, fee.costCurrency || fee.cost_currency || fee.currency);
-        return;
-      }
-
-      const detail = driverCostCenterFeeCostForRule(
-        driverCostCenterRuleForOrder(order, driver),
-        fee,
-        driver
-      );
-      if (detail.matched) addAmount(detail.amount, detail.currency);
+  financeWageStatementOrderProjectLines(order, driver)
+    .filter((line) => line.freight)
+    .forEach((line) => {
+      if (line.currency === "RMB") total.rmb += Number(line.amount || 0);
+      else total.hkd += Number(line.amount || 0);
     });
 
   return total;
@@ -30502,7 +30456,7 @@ function financeWageStatementRows(row = {}, projectColumns = [], hasFreightRMB =
       index + 1,
       String(order.date || "").slice(0, 10),
       financeWageStatementCustomerName(order),
-      relatedOrderRouteText(order),
+      financeWageStatementRouteText(order),
       order.direction || "",
       ...projectColumns.map((column) => {
         const line = projectMap.get(column.key);
@@ -30600,101 +30554,8 @@ function buildFinanceWageStatementExportPayload(row = {}) {
   };
 }
 
-const FINANCE_WAGE_AUDIT_FEE_COLUMN_LABELS = ["香港停车费", "香港登记费", "加点费", "大陆停车费", "装货等候费"];
-const FINANCE_WAGE_AUDIT_HEADERS = [
-  "序号",
-  "订单号",
-  "日期",
-  "客户",
-  "运输模式",
-  "车辆来源",
-  "车牌",
-  "计价城市",
-  "路线",
-  "基础趟费HKD",
-  "基础趟费RMB",
-  "其他合计HKD",
-  "代垫费HKD",
-  "代垫费RMB",
-  "代垫明细",
-  ...FINANCE_WAGE_AUDIT_FEE_COLUMN_LABELS,
-  "客户调整HKD",
-  "预支/报销HKD",
-  "预支/报销RMB",
-  "应付合计HKD",
-  "应付合计RMB",
-  "状态"
-];
-const FINANCE_WAGE_AUDIT_BASE_FEE_KEYWORDS = ["基础运费", "基础趟费", "中港运费", "运费", "趟费"];
-
-function financeWageAuditBaseCostBreakdown(costCenter = {}) {
-  return (costCenter.details || []).reduce((sum, detail) => {
-    const name = String(detail.name || detail.item?.name || detail.fee?.name || "").trim();
-    if (!FINANCE_WAGE_AUDIT_BASE_FEE_KEYWORDS.some((keyword) => name.includes(keyword))) return sum;
-    const amount = Number(detail.amount || 0);
-    if (currencyCodeDisplay(detail.currency || detail.item?.currency || "港币") === "RMB") {
-      sum.rmb += amount;
-    } else {
-      sum.hkd += amount;
-    }
-    return sum;
-  }, { hkd: 0, rmb: 0 });
-}
-
-function financeWageAuditOtherCostHKD(costCenter = {}, base = financeWageAuditBaseCostBreakdown(costCenter)) {
-  return Number((Number(costCenter.hkd || 0) - Number(base.hkd || 0)).toFixed(2));
-}
-
-function financeWageAuditFeeCellValue(order, feeName, driver) {
-  const targetName = String(feeName || "").trim();
-  if (!targetName) return "-";
-  const advanceText = advanceFeesForOrder(order, driver)
-    .filter((fee) => String(fee?.name || "").trim() === targetName && Number(fee?.amount || 0) !== 0)
-    .map((fee) => `${money(fee.amount)} ${currencyCodeDisplay(fee.currency || "港币")}`)
-    .join("；");
-  const costText = driverCostCenterFeeDetailText(order, targetName, driver);
-  return [costText, advanceText].filter(Boolean).join("；") || "-";
-}
-
-function financeDriverOrderDetailRows(row) {
-  const driver = row?.driver;
-  if (!driver) return [];
-  return (row.orders || []).map((order, index) => {
-    const wage = driverFinanceWageOrderBreakdown(order, driver);
-    const costCenter = driverCostCenterFeeBreakdown(order, driver);
-    const baseCost = financeWageAuditBaseCostBreakdown(costCenter);
-    const advance = driverFinanceAdvanceBreakdown(order, driver);
-    const adjust = driverCustomerTripAdjustBreakdown(order, driver);
-    return [
-      index + 1,
-      order.no || "",
-      order.date || "",
-      order.customer || "",
-      normalizeTransportMode(order.transportMode || "单司机") || "",
-      order.vehicleSource || "",
-      order.plate || "",
-      orderDriverWageCity(order, driver) || "",
-      relatedOrderRouteText(order),
-      money(baseCost.hkd),
-      money(baseCost.rmb || costCenter.rmb),
-      money(financeWageAuditOtherCostHKD(costCenter, baseCost)),
-      money(advance.hkd),
-      money(advance.rmb),
-      orderAdvanceFeeDetailText(order, driver),
-      ...FINANCE_WAGE_AUDIT_FEE_COLUMN_LABELS.map((label) => financeWageAuditFeeCellValue(order, label, driver)),
-      money(adjust.hkd),
-      "",
-      "",
-      money(wage.hkd),
-      money(wage.rmb),
-      order.status || ""
-    ];
-  });
-}
-
 async function exportFinanceWageRow(row) {
-  const detailRows = financeDriverOrderDetailRows(row);
-  if (!detailRows.length) {
+  if (!(row?.orders || []).length) {
     notify("该司机当前期间暂无可导出的订单明细");
     return;
   }

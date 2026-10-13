@@ -15,6 +15,7 @@ const {
   hasDispatchAccess,
   presentDispatchRows,
   normalizePortText,
+  normalizeVehicleSource,
   sanitizeDispatchRow,
   sortDispatchRows
 } = require("../../utils/dispatch");
@@ -36,6 +37,41 @@ function orderDisplayDispatchRows(rows) {
       return (left.index ?? 0) - (right.index ?? 0);
     })
     .map((row, index) => Object.assign({}, row, { displayIndex: index + 1 }));
+}
+
+function dispatchOrderGroupKey(order) {
+  const source = normalizeVehicleSource(valueText(order && order.sortVehicleSource || order && order.vehicleSource));
+  return source === "外派车辆"
+    ? valueText(order && order.sortSupplier || order && order.supplier)
+    : valueText(order && order.sortPlate || order && order.plate);
+}
+
+function dispatchOrderTimeRank(value) {
+  const match = valueText(value).match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return 24 * 60 + 1;
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+function compareOrderRowsLikeDispatch(left, right) {
+  const leftGroup = dispatchOrderGroupKey(left);
+  const rightGroup = dispatchOrderGroupKey(right);
+  if (!leftGroup && rightGroup) return 1;
+  if (!rightGroup && leftGroup) return -1;
+  const groupCompare = leftGroup.localeCompare(rightGroup, "zh-Hans-CN", { numeric: true, sensitivity: "base" });
+  if (groupCompare !== 0) return groupCompare;
+
+  const dateCompare = valueText(left && left.sortDate).localeCompare(valueText(right && right.sortDate));
+  if (dateCompare !== 0) return dateCompare;
+
+  const timeCompare = dispatchOrderTimeRank(left && left.sortLoadTime) - dispatchOrderTimeRank(right && right.sortLoadTime);
+  if (timeCompare !== 0) return timeCompare;
+
+  const dispatchCompare = valueText(left && left.sortDispatchNo)
+    .localeCompare(valueText(right && right.sortDispatchNo), "zh-Hans-CN", { numeric: true });
+  if (dispatchCompare !== 0) return dispatchCompare;
+
+  return valueText(left && left.no)
+    .localeCompare(valueText(right && right.no), "zh-Hans-CN", { numeric: true });
 }
 
 function emptyTextForStatus(status) {
@@ -544,18 +580,19 @@ Page({
           signedDisabled: orderStatusActionDisabled(order, "已签收"),
           exceptionDisabled: orderStatusActionDisabled(order, "异常滞留"),
           dispatchRowId: dispatchRow && dispatchRow.id ? dispatchRow.id : "",
-          opening: formOpeningKind === "order" && formOpeningId === String(order.no || "")
+          opening: formOpeningKind === "order" && formOpeningId === String(order.no || ""),
+          sortVehicleSource: valueText(dispatchRow && dispatchRow.vehicleSource) || source,
+          sortSupplier: valueText(dispatchRow && dispatchRow.supplier) || valueText(order.supplier),
+          sortPlate: valueText(dispatchRow && dispatchRow.plate) || valueText(order.plate),
+          sortDate: valueText(dispatchRow && dispatchRow.date) || valueText(order.date) || date,
+          sortLoadTime: valueText(dispatchRow && dispatchRow.loadTime)
+            || valueText(order.loadTime || order.loadingTime),
+          sortDispatchNo: valueText(dispatchRow && dispatchRow.dispatchNo) || valueText(order.dispatchNo)
         });
         return displayOrder;
       })
       .filter((order) => orderMatchesKeyword(order, this.data.searchKeyword))
-      .sort((left, right) => {
-        const leftDispatch = valueText(left.dispatchNo);
-        const rightDispatch = valueText(right.dispatchNo);
-        const dispatchCompare = leftDispatch.localeCompare(rightDispatch, "zh-Hans-CN", { numeric: true });
-        if (dispatchCompare !== 0) return dispatchCompare;
-        return valueText(left.no).localeCompare(valueText(right.no), "zh-Hans-CN", { numeric: true });
-      })
+      .sort(compareOrderRowsLikeDispatch)
       .map((order, index) => Object.assign({}, order, { displayIndex: index + 1 }));
     const currentOrderCount = this.data.activeModule === "orders" ? currentDateOrders.length : rawRows.length;
     this.setData({

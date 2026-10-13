@@ -2434,17 +2434,16 @@ const DEMO_DRIVERS = [
 ];
 
 const DEMO_FEE_ITEMS = [
-  { category: "正常", name: "基础运费", currency: "港币", defaultAmount: 0, defaultDriverRole: "", sortOrder: 1 },
-  { category: "正常", name: "装货费", currency: "港币", defaultAmount: 120, defaultDriverRole: "", sortOrder: 2 },
-  { category: "正常", name: "卸货费", currency: "港币", defaultAmount: 120, defaultDriverRole: "", sortOrder: 3 },
-  { category: "正常", name: "加点费", currency: "港币", defaultAmount: 180, defaultDriverRole: "", sortOrder: 4 },
-  { category: "正常", name: "等候费", currency: "港币", defaultAmount: 80, defaultDriverRole: "", sortOrder: 5 },
-  { category: "正常", name: "报关服务费", currency: "人民币", defaultAmount: 350, defaultDriverRole: "", sortOrder: 6 },
-  { category: "正常", name: "查验服务费", currency: "人民币", defaultAmount: 500, defaultDriverRole: "", sortOrder: 7 },
-  { category: "代垫", name: "过海费", currency: "港币", defaultAmount: 180, defaultDriverRole: "香港司机", sortOrder: 8 },
-  { category: "代垫", name: "停车费", currency: "港币", defaultAmount: 60, defaultDriverRole: "跟随订单司机", sortOrder: 9 },
-  { category: "代垫", name: "香港司机代垫", currency: "港币", defaultAmount: 120, defaultDriverRole: "香港司机", sortOrder: 10 },
-  { category: "代垫", name: "大陆骑师代垫", currency: "人民币", defaultAmount: 80, defaultDriverRole: "大陆骑师", sortOrder: 11 }
+  { category: "正常", name: "装货费", currency: "港币", defaultAmount: 120, defaultDriverRole: "", sortOrder: 1 },
+  { category: "正常", name: "卸货费", currency: "港币", defaultAmount: 120, defaultDriverRole: "", sortOrder: 2 },
+  { category: "正常", name: "加点费", currency: "港币", defaultAmount: 180, defaultDriverRole: "", sortOrder: 3 },
+  { category: "正常", name: "等候费", currency: "港币", defaultAmount: 80, defaultDriverRole: "", sortOrder: 4 },
+  { category: "正常", name: "报关服务费", currency: "人民币", defaultAmount: 350, defaultDriverRole: "", sortOrder: 5 },
+  { category: "正常", name: "查验服务费", currency: "人民币", defaultAmount: 500, defaultDriverRole: "", sortOrder: 6 },
+  { category: "代垫", name: "过海费", currency: "港币", defaultAmount: 180, defaultDriverRole: "香港司机", sortOrder: 7 },
+  { category: "代垫", name: "停车费", currency: "港币", defaultAmount: 60, defaultDriverRole: "跟随订单司机", sortOrder: 8 },
+  { category: "代垫", name: "香港司机代垫", currency: "港币", defaultAmount: 120, defaultDriverRole: "香港司机", sortOrder: 9 },
+  { category: "代垫", name: "大陆骑师代垫", currency: "人民币", defaultAmount: 80, defaultDriverRole: "大陆骑师", sortOrder: 10 }
 ];
 
 const DEMO_FREIGHT_RATES = [
