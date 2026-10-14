@@ -16054,13 +16054,11 @@ function normalizedOrderSearchText(value = "") {
 
 function orderDriverFilterValues(order = {}) {
   const source = orderDisplaySource(order);
+  if (normalizeVehicleSource(source.vehicleSource) !== OWN_VEHICLE_SOURCE) return [];
+  if (normalizeTransportMode(source.transportMode || "") !== "单司机") return [];
   return uniqueOrderCostNames([
-    source.driver,
-    source.dispatchDriver,
-    source.hkDriver,
-    source.mainlandDriver,
-    ...String(source.driver || "").split(/[\/／|｜、]+/),
-    ...String(source.dispatchDriver || "").split(/[\/／|｜、]+/)
+    source.driver || source.hkDriver,
+    ...String(source.driver || source.hkDriver || "").split(/[\/／|｜、]+/)
   ]);
 }
 
@@ -16590,8 +16588,10 @@ function parseDispatchExcelPort(value = "") {
 function parseDispatchExcelDirection(rows = []) {
   const destination = dispatchExcelValueAfterLabel(rows, ["出口目的港", "目的港"]);
   const origin = dispatchExcelValueAfterLabel(rows, ["起运港", "起運港"]);
-  if (isHongKongLocation(destination)) return "出口";
-  if (isHongKongLocation(origin)) return "进口";
+  const isSpecialRegionText = (value) =>
+    isSpecialRegionLocation(value) || /hong\s*kong|macau|macao/.test(normalizeDispatchExcelLookupText(value));
+  if (isSpecialRegionText(destination)) return "出口";
+  if (isSpecialRegionText(origin)) return "进口";
   const allText = normalizeDispatchExcelLookupText(dispatchExcelAllText(rows));
   if (allText.includes("进口")) return "进口";
   if (allText.includes("出口")) return "出口";
@@ -17021,8 +17021,8 @@ function parseDispatchImageDirection(allText = "", loadingBlock = "", unloadingB
   const normalized = normalizeDispatchExcelLookupText(allText);
   if (normalized.includes("出口")) return "出口";
   if (normalized.includes("进口")) return "进口";
-  if (isHongKongLocation(unloadingBlock) || normalizeDispatchExcelLookupText(unloadingBlock).includes("hongkong")) return "出口";
-  if (isHongKongLocation(loadingBlock) || normalizeDispatchExcelLookupText(loadingBlock).includes("hongkong")) return "进口";
+  if (isSpecialRegionLocation(unloadingBlock) || /hong\s*kong|macau|macao/.test(normalizeDispatchExcelLookupText(unloadingBlock))) return "出口";
+  if (isSpecialRegionLocation(loadingBlock) || /hong\s*kong|macau|macao/.test(normalizeDispatchExcelLookupText(loadingBlock))) return "进口";
   return "";
 }
 
@@ -21039,14 +21039,14 @@ const locationCityOptions = computed(() =>
   ].filter(Boolean))
 );
 
-function dispatchLocationCityRestrictedToHongKong(target = "") {
+function dispatchLocationCityRestrictedToSpecialRegion(target = "") {
   const direction = String(dispatchForm.direction || "").trim();
   return (direction === "出口" && target === "unloading")
     || (direction === "进口" && target === "loading");
 }
 
 function dispatchLocationCityOptionsForTarget(target = "") {
-  return dispatchLocationCityRestrictedToHongKong(target) ? ["香港"] : addressBookCityOptions.value;
+  return dispatchLocationCityRestrictedToSpecialRegion(target) ? ["香港", "澳门"] : addressBookCityOptions.value;
 }
 
 function dispatchLocationCityOptionsListId(target = "") {
@@ -21128,26 +21128,26 @@ const templateLocationGroups = computed(() => {
 });
 
 function templateGroupMatchesOrderTarget(group, target) {
-  const mode = orderLocationHongKongMode(target);
+  const mode = orderLocationSpecialRegionMode(target);
   if (mode === "all") return true;
-  const isHongKongGroup = isHongKongLocation([group.level1, group.level2].join("/"));
-  return mode === "onlyHongKong" ? isHongKongGroup : !isHongKongGroup;
+  const isSpecialRegionGroup = isSpecialRegionLocation([group.level1, group.level2].join("/"));
+  return mode === "onlySpecialRegion" ? isSpecialRegionGroup : !isSpecialRegionGroup;
 }
 
-function orderLocationHongKongMode(target) {
+function orderLocationSpecialRegionMode(target) {
   const direction = orderForm.direction || "";
   if (!direction || !target) return "all";
   if (
     (direction === "出口" && target === "unloading")
     || (direction === "进口" && target === "loading")
   ) {
-    return "onlyHongKong";
+    return "onlySpecialRegion";
   }
   if (
     (direction === "出口" && target === "loading")
     || (direction === "进口" && target === "unloading")
   ) {
-    return "excludeHongKong";
+    return "excludeSpecialRegion";
   }
   return "all";
 }
@@ -21192,8 +21192,8 @@ const routeTreeValue = computed(() =>
   formatFreightLocationOption([routeTreeDropdown.level1, routeTreeDropdown.level2])
 );
 const routeTreeEmptyText = computed(() =>
-  routeTreeLocationGroups.value.length === 0 && orderLocationHongKongMode(routeTreeDropdown.target) === "onlyHongKong"
-    ? "暂无香港运费模板目录"
+  routeTreeLocationGroups.value.length === 0 && orderLocationSpecialRegionMode(routeTreeDropdown.target) === "onlySpecialRegion"
+    ? "暂无港澳运费模板目录"
     : "暂无运费模板目录"
 );
 
@@ -23884,7 +23884,7 @@ function normalizeDispatchLocationCityValue(target = "", value = "") {
 function isDispatchLocationCityLikeValue(target = "", value = "") {
   const text = normalizeDispatchLocationText(value, { singleLine: true });
   if (!text) return false;
-  if (dispatchLocationCityRestrictedToHongKong(target)) return normalizeLocationText(splitLocationParts(text).city).startsWith("香港");
+  if (dispatchLocationCityRestrictedToSpecialRegion(target)) return isSpecialRegionLocation(text);
   const normalized = normalizeLocationText(text);
   return isLikelyDispatchLocationCity(text)
     || locationCityCandidates().some((city) => normalizeLocationText(city) === normalized);
@@ -24231,13 +24231,14 @@ function updateDispatchLocationCity(target, index, value) {
   const persisted = dispatchLocationPersistedParts(target, index);
   const current = dispatchLocationPartsForEdit(target, index);
   const previousCity = normalizeLocationText(persisted.city || current.city || "");
-  const nextCity = dispatchLocationCityRestrictedToHongKong(target)
-    ? "香港"
-    : normalizeDispatchLocationCityValue(target, value);
+  const requestedCity = normalizeDispatchLocationCityValue(target, value);
+  const nextCity = dispatchLocationCityRestrictedToSpecialRegion(target)
+    ? (isSpecialRegionCity(requestedCity) ? requestedCity : "香港")
+    : requestedCity;
   if (persisted.city !== nextCity) {
     current.district = "";
     setDispatchLocationDraftPart(target, index, "district", "");
-    if (previousCity && !previousCity.startsWith("香港")) {
+    if (previousCity && !isSpecialRegionCity(previousCity)) {
       current.detail = "";
       setDispatchLocationDraftPart(target, index, "detail", "");
     }
@@ -26901,19 +26902,24 @@ function selectOrderCustomer(customer) {
   syncOrderCustomerFeatureFields();
 }
 
-function isHongKongLocation(value = "") {
-  const { city = "" } = splitLocationParts(value);
-  return normalizeLocationText(city).startsWith("香港");
+function isSpecialRegionCity(value = "") {
+  const city = normalizeLocationText(value);
+  return city.startsWith("香港") || city.startsWith("澳门");
 }
 
-function normalizeRestrictedHongKongLocationEntry(entry = {}) {
+function isSpecialRegionLocation(value = "") {
+  const { city = "" } = splitLocationParts(value);
+  return isSpecialRegionCity(city);
+}
+
+function normalizeRestrictedSpecialRegionLocationEntry(entry = {}) {
   const city = normalizeLocationText(entry.city || "");
   const next = {
-    city: "香港",
+    city: isSpecialRegionCity(city) ? String(entry.city || "").trim() : "香港",
     district: String(entry.district || "").trim(),
     detail: normalizeDispatchLocationDetailText(entry.detail)
   };
-  if (city && !city.startsWith("香港")) {
+  if (city && !isSpecialRegionCity(city)) {
     next.district = "";
     next.detail = "";
   }
@@ -26924,16 +26930,16 @@ function handleOrderDirectionChange() {
   if (orderHasTransportFields.value) {
     if (orderForm.direction === "出口") {
       const unloadingEntries = recordDispatchLocationEntries(orderForm, "unloading").map((entry) =>
-        normalizeRestrictedHongKongLocationEntry(entry)
+        normalizeRestrictedSpecialRegionLocationEntry(entry)
       );
       setOrderLocationEntries("unloading", unloadingEntries.length ? unloadingEntries : [{ city: "香港", district: "", detail: "" }]);
-      if (isHongKongLocation(orderForm.loading)) setOrderLocationEntries("loading", []);
+      if (isSpecialRegionLocation(orderForm.loading)) setOrderLocationEntries("loading", []);
     } else if (orderForm.direction === "进口") {
       const loadingEntries = recordDispatchLocationEntries(orderForm, "loading").map((entry) =>
-        normalizeRestrictedHongKongLocationEntry(entry)
+        normalizeRestrictedSpecialRegionLocationEntry(entry)
       );
       setOrderLocationEntries("loading", loadingEntries.length ? loadingEntries : [{ city: "香港", district: "", detail: "" }]);
-      if (isHongKongLocation(orderForm.unloading)) setOrderLocationEntries("unloading", []);
+      if (isSpecialRegionLocation(orderForm.unloading)) setOrderLocationEntries("unloading", []);
     }
   }
   scheduleAutoFreightSync();
@@ -26943,8 +26949,8 @@ function handleDispatchFormDirectionChange() {
   ["loading", "unloading"].forEach((target) => {
     const entries = dispatchLocationEntries(target).map((entry, index) => {
       const parts = dispatchLocationPartsForEdit(target, index);
-      if (dispatchLocationCityRestrictedToHongKong(target)) {
-        const normalized = normalizeRestrictedHongKongLocationEntry(parts);
+      if (dispatchLocationCityRestrictedToSpecialRegion(target)) {
+        const normalized = normalizeRestrictedSpecialRegionLocationEntry(parts);
         setDispatchLocationDraftPart(target, index, "city", normalized.city);
         setDispatchLocationDraftPart(target, index, "district", normalized.district);
         setDispatchLocationDraftPart(target, index, "detail", normalized.detail);
@@ -28720,6 +28726,12 @@ function supplierStatementTemplateOrder(order) {
   const detail = supplierOrderPayableDetailText(order);
   return {
     ...order,
+    orderNo: order.orderNo || order.no || order.order_no || "",
+    customerName: order.customerName || order.customer || order.customer_name || "",
+    orderDate: order.orderDate || order.date || order.order_date || "",
+    pieces: order.pieces || order.quantity || order.pieceCount || order.piece_count || "",
+    tons: order.tons || order.tonnage || "",
+    vehiclePlate: order.vehiclePlate || order.plate || order.vehicle_plate || "",
     currency: payable.currency || order.currency || "港币",
     receivableHKD: payable.payableHKD,
     receivableRMB: payable.payableRMB,
@@ -30293,10 +30305,101 @@ function financeWageStatementOrders(row = {}) {
     });
 }
 
+function financeWageStatementFeeLineKey(name = "", currency = "HKD") {
+  return financeWageStatementProjectKey(name, currency);
+}
+
+function financeWageStatementFeeShouldApplyToDriver(order = {}, fee = {}, driver = null) {
+  if (!driver?.name) return true;
+  if (isCompanyCoveredFee(fee)) return true;
+  const names = orderFeeAssigneeNames(fee, order);
+  if (names.includes(driver.name)) return true;
+  const source = driverCostCenterSourceForDriver(driver);
+  const item = feeItemForFee(fee);
+  if (item && feeItemIncludesCostSource(item, source)) return true;
+  if (isCrossBorderFreightFee(fee)) {
+    return crossBorderFreightDriverRoles(order, fee).includes(source);
+  }
+  return false;
+}
+
+function financeWageStatementFeeHasStoredCost(order = {}, fee = {}) {
+  const splitParts = orderFeeCostSplitParts(fee, order);
+  if (Array.isArray(splitParts) && splitParts.length) return true;
+  const costHKD = normalizeOrderFeeCostComponent(fee.costHKD ?? fee.cost_hkd ?? fee._costHKD ?? fee._costHkd);
+  const costRMB = normalizeOrderFeeCostComponent(fee.costRMB ?? fee.cost_rmb ?? fee._costRMB ?? fee._costRmb);
+  return costHKD !== null
+    || costRMB !== null
+    || normalizeFeeCost(fee) !== null;
+}
+
+function financeWageStatementSavedCostLines(order = {}, driver = null) {
+  if (isMainlandRiderDriver(driver) && !orderHasMainlandRiderCostAndWage(order, driver)) return [];
+  const source = driverCostCenterSourceForDriver(driver || {});
+  return (Array.isArray(order?.fees) ? order.fees : [])
+    .filter((fee) => String(fee?.name || "").trim())
+    .flatMap((fee) => {
+      if (!financeWageStatementFeeShouldApplyToDriver(order, fee, driver)) return [];
+      const item = feeItemForFee(fee);
+      const name = financeWageStatementProjectName(fee.name || item?.name);
+      if (!name) return [];
+      const lines = [];
+      const pushLine = (amount, currency) => {
+        const value = Number(amount || 0);
+        if (!Number.isFinite(value) || value === 0) return;
+        const normalizedCurrency = financeWageStatementProjectCurrency(currency || fee.costCurrency || fee.cost_currency || item?.currency || fee.currency || "港币");
+        lines.push({
+          name,
+          currency: normalizedCurrency,
+          key: financeWageStatementFeeLineKey(name, normalizedCurrency),
+          amount: value,
+          freight: financeWageStatementIsFreightName(name),
+          fee,
+          item,
+          advance: isAdvanceFee(fee),
+          savedCost: true
+        });
+      };
+
+      const splitParts = orderFeeCostSplitParts(fee, order);
+      if (Array.isArray(splitParts) && splitParts.length) {
+        splitParts
+          .filter((part) => {
+            const partDriver = String(part.driverName || part.driver_name || "").trim();
+            if (partDriver && driver?.name) return partDriver === driver.name;
+            const role = normalizeCostCenterSourceLabel(part.role || "");
+            return isCompanyCoveredFee(fee) || !driver?.name || role === source;
+          })
+          .forEach((part) => pushLine(part.amount, part.currency));
+        return lines;
+      }
+
+      const costHKD = normalizeOrderFeeCostComponent(fee.costHKD ?? fee.cost_hkd ?? fee._costHKD ?? fee._costHkd);
+      const costRMB = normalizeOrderFeeCostComponent(fee.costRMB ?? fee.cost_rmb ?? fee._costRMB ?? fee._costRmb);
+      if (costHKD !== null || costRMB !== null) {
+        if (costHKD !== null && (source !== "大陆骑师" || isCompanyCoveredFee(fee))) pushLine(costHKD, "港币");
+        if (costRMB !== null && (source === "大陆骑师" || isCompanyCoveredFee(fee))) pushLine(costRMB, "人民币");
+        return lines;
+      }
+
+      const savedCost = normalizeFeeCost(fee);
+      if (savedCost !== null) {
+        pushLine(savedCost, fee.costCurrency || fee.cost_currency || fee._costCurrency || item?.currency || fee.currency || "港币");
+      }
+      return lines;
+    });
+}
+
 function financeWageStatementOrderProjectLines(order = {}, driver = null) {
-  const lines = [];
+  const lines = financeWageStatementSavedCostLines(order, driver);
+  const savedCostFees = new Set(
+    (Array.isArray(order?.fees) ? order.fees : [])
+      .filter((fee) => financeWageStatementFeeShouldApplyToDriver(order, fee, driver))
+      .filter((fee) => financeWageStatementFeeHasStoredCost(order, fee))
+  );
   const costCenter = driverCostCenterFeeBreakdown(order, driver);
   (costCenter.details || []).forEach((detail) => {
+    if (savedCostFees.has(detail.fee)) return;
     const name = financeWageStatementProjectName(detail.name || detail.item?.name || detail.fee?.name);
     if (!name || !detail.item) return;
     const currency = financeWageStatementProjectCurrency(
@@ -30305,7 +30408,7 @@ function financeWageStatementOrderProjectLines(order = {}, driver = null) {
     lines.push({
       name,
       currency,
-      key: financeWageStatementProjectKey(name, currency),
+      key: financeWageStatementFeeLineKey(name, currency),
       amount: Number(detail.amount || 0),
       freight: financeWageStatementIsFreightName(name)
     });
@@ -30327,7 +30430,7 @@ function financeWageStatementOrderProjectLines(order = {}, driver = null) {
         lines.push({
           name: item.name,
           currency: financeWageStatementProjectCurrency(detail.currency),
-          key: financeWageStatementProjectKey(item.name, detail.currency),
+          key: financeWageStatementFeeLineKey(item.name, detail.currency),
           amount: Number(detail.amount || 0),
           freight: false
         });
@@ -30335,24 +30438,8 @@ function financeWageStatementOrderProjectLines(order = {}, driver = null) {
     }
   }
 
-  // Driver advances are order projects too. Keep them in the same dynamic
-  // project columns so misc totals include each driver's actual assigned fees.
-  advanceFeesForOrder(order, driver).forEach((fee) => {
-    const item = feeItemForFee(fee);
-    const name = financeWageStatementProjectName(fee.name || item?.name);
-    if (!name || Number(fee.amount || 0) === 0) return;
-    const currency = financeWageStatementProjectCurrency(
-      fee.currency || item?.currency || "港币"
-    );
-    lines.push({
-      name,
-      currency,
-      key: financeWageStatementProjectKey(name, currency),
-      amount: Number(fee.amount || 0),
-      freight: financeWageStatementIsFreightName(name),
-      advance: true
-    });
-  });
+  // Driver advances are order projects too. Keep only explicitly saved costs
+  // in the wage statement; a missing cost must not expose the order amount.
 
   // Some legacy orders calculate driver loading/unloading, crossing and point fees
   // from the driver's wage rule instead of a cost-center line. Keep those costs
@@ -30368,7 +30455,7 @@ function financeWageStatementOrderProjectLines(order = {}, driver = null) {
       lines.push({
         name,
         currency: "HKD",
-        key: financeWageStatementProjectKey(name, "HKD"),
+        key: financeWageStatementFeeLineKey(name, "HKD"),
         amount,
         freight: false
       });
@@ -30519,8 +30606,15 @@ function buildFinanceWageStatementExportPayload(row = {}) {
   const freightRMBTotal = hasFreightRMB
     ? rows.reduce((sum, item) => sum + Number(item[freightRMBIndex] || 0), 0)
     : 0;
-  const advanceHKD = Number(row.advanceFee || 0);
-  const advanceRMB = Number(row.advanceFeeRMB || 0);
+  const advanceTotals = orders
+    .flatMap((order) => financeWageStatementOrderProjectLines(order, row?.driver || null))
+    .filter((line) => line.advance)
+    .reduce((sum, line) => ({
+      hkd: sum.hkd + (line.currency === "RMB" ? 0 : Number(line.amount || 0)),
+      rmb: sum.rmb + (line.currency === "RMB" ? Number(line.amount || 0) : 0)
+    }), { hkd: 0, rmb: 0 });
+  const advanceHKD = Number(advanceTotals.hkd || 0);
+  const advanceRMB = Number(advanceTotals.rmb || 0);
   const exchangeRate = Number(monthlyExchangeRateInputValue(monthlyExchangeRatePeriodMonth("finance")) || 0);
   const convertedRMB = exchangeRate
     ? Number(((miscRMBTotal + freightRMBTotal) / exchangeRate).toFixed(2))

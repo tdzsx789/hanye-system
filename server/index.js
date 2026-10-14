@@ -1045,6 +1045,14 @@ const ORDER_EXPORT_COLUMNS = [
   ["人民币", "receivableRMB", 54],
   ["状态", "status", 50]
 ];
+const STATEMENT_REQUIRED_COLUMNS = [
+  { label: "订单号", key: "no", width: 82 },
+  { label: "日期", key: "date", width: 64 },
+  { label: "客户", key: "customer", width: 118 },
+  { label: "件/板数", key: "quantity", width: 58 },
+  { label: "吨位", key: "tonnage", width: 52 },
+  { label: "车牌", key: "plate", width: 82 }
+];
 const ORDER_EXPORT_REMOVED_COLUMN_KEYS = new Set(["createdByName"]);
 const ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS = [
   { key: "__rmbTotal", label: "RMB合计", width: 64, fontSize: 8, system: true },
@@ -1077,8 +1085,11 @@ function exportFeeNameVariants(value = "") {
 
 function normalizeExportTemplateColumn(column = {}) {
   const key = textValue(column?.key);
+  const isFeeColumn = Boolean(column?.feeItemId)
+    || key.startsWith("fee-item-")
+    || Boolean(textValue(column?.feeName).trim());
+  if (!isFeeColumn) return column;
   const rawName = textValue(column?.feeName || column?.label).trim();
-  if (!rawName && !column?.feeItemId && !key.startsWith("fee-item-")) return column;
   const canonicalName = canonicalExportFeeName(rawName);
   if (!canonicalName) return column;
   return {
@@ -1689,7 +1700,7 @@ function composeLocationEntryText(city = "", district = "", detail = "") {
   if (!cityText && !districtText) return detailText;
   if (cityText && !districtText && !detailText) return cityText;
   if (cityText && districtText && !detailText) return [cityText, districtText].join(" / ");
-  if (cityText && !districtText && detailText) return [cityText, "", detailText].join(" / ");
+  if (cityText && !districtText && detailText) return [cityText, detailText].join(" / ");
   return [cityText, districtText, detailText].join(" / ");
 }
 
@@ -2205,6 +2216,12 @@ function feeColumnHasRecordedValue(column, orders = []) {
   return orders.some((order) => feeRowsForColumn(order, column).some(feeHasRecordedValue));
 }
 
+function feeColumnHasDisplayValue(column, orders = []) {
+  return orders.some((order) => feeRowsForColumn(order, column).some((fee) =>
+    Number(fee?.amount || 0) !== 0
+  ));
+}
+
 function isExportAmountColumn(column) {
   const key = textValue(column?.key);
   const label = textValue(column?.label);
@@ -2244,6 +2261,41 @@ function exportOrderColumnAmount(order, column) {
   return Number(order?.[key] || 0);
 }
 
+function firstExportFieldValue(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined) continue;
+    if (typeof value === "string" && !value.trim()) continue;
+    return value;
+  }
+  return "";
+}
+
+function exportOrderFieldValue(order = {}, key = "", column = {}) {
+  const label = exportColumnBaseLabel(column);
+  if (key === "no" || key === "orderNo" || key === "order_no" || key === "订单号" || label === "订单号") {
+    return firstExportFieldValue(order?.no, order?.orderNo, order?.order_no);
+  }
+  if (key === "dispatchNo" || key === "dispatch_no" || key === "排车单号" || label === "排车单号") {
+    return firstExportFieldValue(order?.dispatchNo, order?.dispatch_no);
+  }
+  if (key === "date" || key === "orderDate" || key === "order_date" || key === "日期" || label === "日期") {
+    return firstExportFieldValue(order?.date, order?.orderDate, order?.order_date);
+  }
+  if (key === "customer" || key === "customerName" || key === "customer_name" || key === "客户" || label === "客户" || label === "客户简称") {
+    return firstExportFieldValue(order?.customer, order?.customerName, order?.customer_name);
+  }
+  if (key === "quantity" || key === "pieces" || key === "pieceCount" || key === "piece_count" || key === "件数" || key === "件/板数" || key === "件数/板数" || label === "件数" || label === "件/板数" || label === "件数/板数") {
+    return firstExportFieldValue(order?.quantity, order?.pieces, order?.pieceCount, order?.piece_count);
+  }
+  if (key === "tonnage" || key === "tons" || key === "吨位" || label === "吨位") {
+    return firstExportFieldValue(order?.tonnage, order?.tons);
+  }
+  if (key === "plate" || key === "vehiclePlate" || key === "vehicle_plate" || key === "carPlate" || key === "car_plate" || key === "车牌" || label === "车牌") {
+    return firstExportFieldValue(order?.plate, order?.vehiclePlate, order?.vehicle_plate, order?.carPlate, order?.car_plate);
+  }
+  return order?.[key];
+}
+
 function exportOrderColumnValue(order, column, rowIndex = 0, options = {}) {
   const key = textValue(column?.key);
   if (key === "__sequence") return rowIndex + 1;
@@ -2277,7 +2329,7 @@ function exportOrderColumnValue(order, column, rowIndex = 0, options = {}) {
   if (key === "receivableHKD" || key === "receivableRMB") return formatExportAmount(order?.[key]);
   if (key === "newOld") return normalizeOrderNewOld(order?.newOld ?? order?.new_old);
   if (key === "specialCar") return booleanFlag(order?.specialCar ?? order?.special_car, false) ? "专车" : "";
-  const value = order?.[key];
+  const value = exportOrderFieldValue(order, key, column);
   if (value !== undefined && value !== null && value !== "" && Number(value) === 0) return "";
   return value ?? "";
 }
@@ -2375,6 +2427,10 @@ function exportSettlementTotalRow(orders, columns, exchangeInput = null, options
 
 function isCustomerStatementExportTitle(title = "") {
   return textValue(title).trim().startsWith("客户对账单");
+}
+
+function isSupplierStatementExportTitle(title = "") {
+  return textValue(title).trim().startsWith("供应商对账单");
 }
 
 function shouldIncludeSettlementTotal(title = "", exchangeInput = null) {
@@ -2498,6 +2554,35 @@ function exportColumnsFromTemplate(template = null) {
   return [{ ...ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN }, ...bodyColumns, ...totalColumns];
 }
 
+function statementColumnMatchesKey(column = {}, requiredKey = "") {
+  const key = textValue(column?.key).trim();
+  const label = exportColumnBaseLabel(column).trim();
+  const aliases = {
+    no: ["no", "orderNo", "order_no", "订单号"],
+    date: ["date", "orderDate", "order_date", "日期"],
+    customer: ["customer", "customerName", "customer_name", "客户", "客户简称"],
+    quantity: ["quantity", "pieces", "pieceCount", "piece_count", "件数", "件/板数", "件数/板数"],
+    tonnage: ["tonnage", "tons", "吨位"],
+    plate: ["plate", "vehiclePlate", "vehicle_plate", "carPlate", "car_plate", "车牌"]
+  };
+  return (aliases[requiredKey] || []).includes(key) || (aliases[requiredKey] || []).includes(label);
+}
+
+function ensureStatementRequiredColumns(columns = []) {
+  const result = [...columns];
+  const firstBodyDataColumnIndex = () => result.findIndex((column) =>
+    isExportFeeItemColumn(column)
+    || ORDER_EXPORT_SYSTEM_TOTAL_COLUMN_KEYS.has(textValue(column?.key))
+    || textValue(column?.key) === "__chargeNote"
+  );
+  STATEMENT_REQUIRED_COLUMNS.forEach((requiredColumn) => {
+    if (result.some((column) => statementColumnMatchesKey(column, requiredColumn.key))) return;
+    const insertAt = firstBodyDataColumnIndex() >= 0 ? firstBodyDataColumnIndex() : result.length;
+    result.splice(insertAt, 0, { ...requiredColumn });
+  });
+  return result;
+}
+
 function normalizeFeeCurrency(value = "") {
   const text = textValue(value).trim().toUpperCase();
   if (text === "人民币" || text === "RMB") return "RMB";
@@ -2568,7 +2653,7 @@ function dynamicExportFeeColumns(orders = [], existingColumns = []) {
     (Array.isArray(order?.fees) ? order.fees : []).forEach((fee) => {
       const name = textValue(fee.name).trim();
       const currency = normalizeFeeCurrency(fee.currency);
-      if (!feeHasRecordedValue(fee)) return;
+      if (!name || Number(fee?.amount || 0) === 0) return;
       const key = `${name}|${currency}`;
       if (existingFeeKeys.has(key)) return;
       if (seen.has(key)) return;
@@ -2685,22 +2770,37 @@ function insertOrderAttributeExportColumn(columns = [], columnConfig = {}, after
   return nextColumns;
 }
 
+function exportTemplateColumnHasDisplayValue(column = {}, orders = [], options = {}) {
+  if (isExportFeeItemColumn(column)) return feeColumnHasDisplayValue(column, orders);
+  return orders.some((order, index) => {
+    const value = exportOrderColumnValue(order, column, index, {
+      includeAdvanceAddress: Boolean(options.includeAdvanceAddress)
+    });
+    return textValue(value).trim() !== "";
+  });
+}
+
 function exportColumnsForOrders(templatePayload = null, orders = [], options = {}) {
   const template = normalizeExportTemplate(templatePayload);
-  const columns = normalizeTemplateFeeColumnsForOrders(
+  let columns = normalizeTemplateFeeColumnsForOrders(
     exportColumnsFromTemplate(templatePayload),
     orders
   );
+  if (options.includeStatementRequiredColumns) {
+    columns = ensureStatementRequiredColumns(columns);
+  }
   const sequenceColumn = columns.find((column) => column.key === ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key);
   const templateBodyColumns = columns.filter((column) =>
     column.key !== ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key
     && !ORDER_EXPORT_SYSTEM_TOTAL_COLUMN_KEYS.has(column.key)
   );
-  // A visible column in the template is an explicit export requirement. Keep
-  // it even when every order in the selected period has a blank/zero value;
-  // otherwise legacy fee columns disappear from customer statements.
   const bodyColumns = templateBodyColumns.filter((column) =>
     column.key !== ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key
+    && (
+      !options.hideEmptyTemplateColumns
+      || STATEMENT_REQUIRED_COLUMNS.some((requiredColumn) => statementColumnMatchesKey(column, requiredColumn.key))
+      || exportTemplateColumnHasDisplayValue(column, orders, options)
+    )
   );
   const totalColumns = ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS.map((systemColumn) => ({
     ...systemColumn,
@@ -2714,7 +2814,7 @@ function exportColumnsForOrders(templatePayload = null, orders = [], options = {
     ? linkedCustomsBusinessExportColumns(orders)
     : [];
   const mergedBodyColumns = mergeExportColumnsByTemplateOrder(
-    templateBodyColumns,
+    bodyColumns,
     bodyColumns,
     dynamicColumns
   );
@@ -2881,12 +2981,15 @@ function linkedCustomsBusinessExportColumns(orders = []) {
 
 async function renderOrdersCsv(orders, title = "订单导出", templatePayload = null, exchange = null) {
   const isCustomerStatement = isCustomerStatementExportTitle(title);
+  const isSupplierStatement = isSupplierStatementExportTitle(title);
   const exportOrders = isCustomerStatement ? await attachLinkedCustomsBusinessesToOrders(orders) : orders;
   const columns = exportColumnsForOrders(templatePayload, exportOrders, {
     includeChargeNoteColumn: isCustomerStatement,
     includeOperatingUnitColumn: isCustomerStatement,
     includeCustomerOrderAttributeColumns: isCustomerStatement,
-    includeLinkedCustomsColumns: isCustomerStatement
+    includeLinkedCustomsColumns: isCustomerStatement,
+    hideEmptyTemplateColumns: isCustomerStatement || isSupplierStatement,
+    includeStatementRequiredColumns: isCustomerStatement || isSupplierStatement
   });
   const headers = columns.map(exportColumnHeaderText);
   const rows = exportTableRows(exportOrders, columns, exchange, {
@@ -3081,7 +3184,7 @@ function exportExcelAmountRangeFormula(columns = [], columnIndex = -1, detailSta
   const chargeNoteIndex = columns.findIndex((column) => textValue(column?.key) === ORDER_EXPORT_CHARGE_NOTE_COLUMN.key);
   if (chargeNoteIndex < 0) return `SUM(${amountRange})`;
   const chargeNoteRange = `${excelColumnLetter(chargeNoteIndex + 1)}${detailStartRow}:${excelColumnLetter(chargeNoteIndex + 1)}${detailEndRow}`;
-  return `SUMIF(${chargeNoteRange},"<>*已收费*",${amountRange})`;
+  return `SUMIFS(${amountRange},${chargeNoteRange},"<>*已收费*")`;
 }
 
 function exportExcelFeeCellCanBeNumeric(order, column, options = {}) {
@@ -3584,12 +3687,15 @@ async function attachLinkedCustomsBusinessesToOrders(orders = []) {
 async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePayload = null, exchange = null, options = {}) {
   const template = normalizeExportTemplate(templatePayload);
   const isCustomerStatement = isCustomerStatementExportTitle(title);
+  const isSupplierStatement = isSupplierStatementExportTitle(title);
   const exportOrders = isCustomerStatement ? await attachLinkedCustomsBusinessesToOrders(orders) : orders;
   const columns = exportColumnsForOrders(templatePayload, exportOrders, {
     includeChargeNoteColumn: isCustomerStatement,
     includeOperatingUnitColumn: isCustomerStatement,
     includeCustomerOrderAttributeColumns: isCustomerStatement,
-    includeLinkedCustomsColumns: isCustomerStatement
+    includeLinkedCustomsColumns: isCustomerStatement,
+    hideEmptyTemplateColumns: isCustomerStatement || isSupplierStatement,
+    includeStatementRequiredColumns: isCustomerStatement || isSupplierStatement
   });
   const headers = columns.map(exportColumnHeaderText);
   const includeSettlementTotal = shouldIncludeSettlementTotal(title, exchange);
@@ -3792,8 +3898,12 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
         if (formula) {
           const amount = exportOrderColumnAmount(sourceOrder, column);
           cell.value = { formula, result: Number(amount || 0) };
-          cell.numFmt = "#,##0";
+        } else {
+          // Keep currency total detail cells numeric so the settlement formula
+          // can sum them after Excel/WPS recalculates the workbook.
+          cell.value = Number(exportOrderColumnAmount(sourceOrder, column) || 0);
         }
+        cell.numFmt = "#,##0";
       } else if (sourceOrder && !isSummaryRow && isExportAmountColumn(column) && !exportLocationFeeType(column)
         && (!isExportFeeItemColumn(column) || exportExcelFeeCellCanBeNumeric(sourceOrder, column, valueOptions))) {
         const amount = exportOrderColumnAmount(sourceOrder, column);
@@ -4223,11 +4333,14 @@ async function renderKenfaStatementXlsxBuffer(orders, title = "客户对账单",
 async function renderOrdersExcelHtml(orders, title = "订单导出", templatePayload = null, exchange = null) {
   const template = normalizeExportTemplate(templatePayload);
   const isCustomerStatement = isCustomerStatementExportTitle(title);
+  const isSupplierStatement = isSupplierStatementExportTitle(title);
   const exportOrders = isCustomerStatement ? await attachLinkedCustomsBusinessesToOrders(orders) : orders;
   const columns = exportColumnsForOrders(templatePayload, exportOrders, {
     includeChargeNoteColumn: isCustomerStatement,
     includeOperatingUnitColumn: isCustomerStatement,
-    includeLinkedCustomsColumns: isCustomerStatement
+    includeLinkedCustomsColumns: isCustomerStatement,
+    hideEmptyTemplateColumns: isCustomerStatement || isSupplierStatement,
+    includeStatementRequiredColumns: isCustomerStatement || isSupplierStatement
   });
   const context = {
     title,
@@ -5044,20 +5157,21 @@ function normalizeExportOrderSnapshot(order = {}) {
       snapshot[key] = value;
     }
   });
-  snapshot.dispatchNo = String(snapshot.dispatchNo || order.dispatchNo || "");
-  snapshot.no = String(snapshot.no || order.no || "");
+  snapshot.dispatchNo = String(firstExportFieldValue(snapshot.dispatchNo, order.dispatchNo, order.dispatch_no));
+  snapshot.no = String(firstExportFieldValue(snapshot.no, order.no, order.orderNo, order.order_no));
+  snapshot.orderNo = String(firstExportFieldValue(snapshot.orderNo, order.orderNo, order.order_no, snapshot.no));
   snapshot.createdByName = String(snapshot.createdByName || order.createdByName || order.created_by_display_name || order.createdByUsername || order.created_by_username || "");
   snapshot.createdByUsername = String(snapshot.createdByUsername || order.createdByUsername || order.created_by_username || "");
-  snapshot.customer = String(snapshot.customer || order.customer || "");
+  snapshot.customer = String(firstExportFieldValue(snapshot.customer, order.customer, order.customerName, order.customer_name));
   snapshot.businessType = String(snapshot.businessType || order.businessType || "");
   snapshot.port = normalizePortText(snapshot.port || order.port || "");
   snapshot.direction = String(snapshot.direction || order.direction || "");
-  snapshot.tonnage = String(snapshot.tonnage || order.tonnage || "");
+  snapshot.tonnage = String(firstExportFieldValue(snapshot.tonnage, order.tonnage, order.tons));
   snapshot.currency = String(snapshot.currency || order.currency || "港币");
-  snapshot.quantity = snapshot.quantity ?? order.quantity ?? "";
+  snapshot.quantity = firstExportFieldValue(snapshot.quantity, order.quantity, order.pieces, order.pieceCount, order.piece_count);
   snapshot.weight = String(snapshot.weight || order.weight || "");
   snapshot.vehicleSource = String(snapshot.vehicleSource || order.vehicleSource || "");
-  snapshot.plate = String(snapshot.plate || order.plate || "");
+  snapshot.plate = String(firstExportFieldValue(snapshot.plate, order.plate, order.vehiclePlate, order.vehicle_plate, order.carPlate, order.car_plate));
   snapshot.driver = String(snapshot.driver || order.driver || "");
   snapshot.hkDriver = String(snapshot.hkDriver || order.hkDriver || order.hk_driver || "");
   snapshot.mainlandDriver = String(snapshot.mainlandDriver || order.mainlandDriver || order.mainland_driver || "");
@@ -5066,7 +5180,7 @@ function normalizeExportOrderSnapshot(order = {}) {
   snapshot.linkedCustomsBusinessId = String(snapshot.linkedCustomsBusinessId || order.linkedCustomsBusinessId || order.linked_customs_business_id || "");
   snapshot.loading = String(snapshot.loading || order.loading || "");
   snapshot.unloading = String(snapshot.unloading || order.unloading || "");
-  snapshot.date = String(snapshot.date || order.date || "");
+  snapshot.date = String(firstExportFieldValue(snapshot.date, order.date, order.orderDate, order.order_date));
   snapshot.receivableHKD = Number(snapshot.receivableHKD ?? order.receivableHKD ?? 0);
   snapshot.receivableRMB = Number(snapshot.receivableRMB ?? order.receivableRMB ?? 0);
   snapshot.status = String(snapshot.status || order.status || "");
@@ -5101,12 +5215,15 @@ async function loadExportOrdersFromRequest(body = {}, orderNos = [], account = n
 async function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = null, filename = "", exchange = null) {
   const template = normalizeExportTemplate(templatePayload);
   const isCustomerStatement = isCustomerStatementExportTitle(title);
+  const isSupplierStatement = isSupplierStatementExportTitle(title);
   const exportOrders = isCustomerStatement ? await attachLinkedCustomsBusinessesToOrders(orders) : orders;
   const sourceColumns = exportColumnsForOrders(templatePayload, exportOrders, {
     includeChargeNoteColumn: isCustomerStatement,
     includeOperatingUnitColumn: isCustomerStatement,
     includeCustomerOrderAttributeColumns: isCustomerStatement,
-    includeLinkedCustomsColumns: isCustomerStatement
+    includeLinkedCustomsColumns: isCustomerStatement,
+    hideEmptyTemplateColumns: isCustomerStatement || isSupplierStatement,
+    includeStatementRequiredColumns: isCustomerStatement || isSupplierStatement
   });
   const tableWidth = sourceColumns.reduce((sum, column) => sum + Number(column.width || 76), 0);
   const fluidPageWidth = Math.max(842, Math.ceil(tableWidth + 48));
