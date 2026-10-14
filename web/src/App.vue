@@ -11656,12 +11656,13 @@ function resetFinanceWageDetailColumnOrder() {
 
 function buildFinanceWageRows(sourceOrders, sourceAdjustments, sourceSettlements = [], options = {}) {
   const includeAllDrivers = Boolean(options.includeAllDrivers);
+  const sourceDrivers = Array.isArray(options.drivers) ? options.drivers : driverRows.value;
   const settlementMap = new Map(
     (Array.isArray(sourceSettlements) ? sourceSettlements : [])
       .map((item) => [String(item?.driverId || item?.driver_id || ""), item])
       .filter(([key]) => key)
   );
-  const rows = driverRows.value.map((driver) => {
+  const rows = sourceDrivers.map((driver) => {
     const orders = sourceOrders.filter((order) => orderMatchesDriverForWage(order, driver));
     const wageBreakdown = orders.reduce((sum, order) => {
       const amount = driverFinanceWageOrderBreakdown(order, driver);
@@ -11749,7 +11750,7 @@ const financeWageRows = computed(() => buildFinanceWageRows(
   financeOrderRows.value,
   financeAdjustmentRows.value,
   financeWageSettlementRows.value,
-  { includeAllDrivers: true }
+  { includeAllDrivers: true, drivers: activeDriverRows.value }
 ));
 const statementWageRows = computed(() => buildFinanceWageRows(statementBillableOrderRows.value, statementAdjustmentRows.value));
 
