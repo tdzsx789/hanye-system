@@ -1020,6 +1020,7 @@ function normalizeCustomerRecord(customer = {}) {
     operatingUnitEnabled: booleanFlag(row.operatingUnitEnabled ?? row.operating_unit_enabled, false),
     newOldEnabled: booleanFlag(row.newOldEnabled ?? row.new_old_enabled, false),
     specialCarEnabled: booleanFlag(row.specialCarEnabled ?? row.special_car_enabled, false),
+    vatRate: normalizeCustomerVatRate(row.vatRate ?? row.vat_rate),
     customsCustomFields: customsConfig.customsCustomFields
   };
 }
@@ -2391,6 +2392,7 @@ const customerForm = reactive({
   operatingUnitEnabled: false,
   newOldEnabled: false,
   specialCarEnabled: false,
+  vatRate: 0,
   customsCustomFields: [],
   invoicePasteText: ""
 });
@@ -8774,6 +8776,7 @@ function customerStatementOrderSnapshot(order = {}) {
     customerOperatingUnitEnabled: booleanFlag(order.customerOperatingUnitEnabled ?? customer?.operatingUnitEnabled, false),
     customerNewOldEnabled: booleanFlag(order.customerNewOldEnabled ?? customer?.newOldEnabled, false),
     customerSpecialCarEnabled: booleanFlag(order.customerSpecialCarEnabled ?? customer?.specialCarEnabled, false),
+    customerVatRate: normalizeCustomerVatRate(order.customerVatRate ?? customer?.vatRate),
     chargedAt: order.chargedAt || "",
     fees
   };
@@ -18635,6 +18638,13 @@ function orderFeeCostTitle(fee = {}) {
   ].filter(Boolean).join(" / ");
 }
 
+// 增值税税点：百分数，0 表示不含税
+function normalizeCustomerVatRate(value) {
+  const rate = Number(String(value ?? "").replace(/%/g, "").trim());
+  if (!Number.isFinite(rate) || rate <= 0) return 0;
+  return Math.min(100, Number(rate.toFixed(2)));
+}
+
 function booleanFlag(value, fallback = false) {
   if (value === undefined || value === null || value === "") return fallback;
   if (typeof value === "boolean") return value;
@@ -26533,6 +26543,7 @@ watch(() => customerForm.type, (type) => {
     customerForm.operatingUnitEnabled = false;
     customerForm.newOldEnabled = false;
     customerForm.specialCarEnabled = false;
+    customerForm.vatRate = 0;
   }
 });
 
@@ -26546,6 +26557,7 @@ watch(() => customerForm.customerCategory, (category) => {
     customerForm.operatingUnitEnabled = false;
     customerForm.newOldEnabled = false;
     customerForm.specialCarEnabled = false;
+    customerForm.vatRate = 0;
   }
   if (normalizedCategory !== "报关客户") return;
   Object.entries(DEFAULT_CUSTOMS_CUSTOMER_CONFIG).forEach(([key, value]) => {
@@ -26628,6 +26640,7 @@ function buildCustomerPayload() {
     specialCarEnabled: isTransportCustomer
       ? booleanFlag(customerForm.specialCarEnabled, false)
       : false,
+    vatRate: isTransportCustomer ? normalizeCustomerVatRate(customerForm.vatRate) : 0,
     customsCustomFields: [
       {
         name: CUSTOMER_CUSTOMS_FEE_FIELD_NAMES.customsImportDeclarationFee,
@@ -26777,6 +26790,7 @@ function openCustomerModal(customer = null, createType = activePartnerType.value
     operatingUnitEnabled: isTransportCustomer ? booleanFlag(normalizedCustomer?.operatingUnitEnabled ?? normalizedCustomer?.operating_unit_enabled, false) : false,
     newOldEnabled: isTransportCustomer ? booleanFlag(normalizedCustomer?.newOldEnabled ?? normalizedCustomer?.new_old_enabled, false) : false,
     specialCarEnabled: isTransportCustomer ? booleanFlag(normalizedCustomer?.specialCarEnabled ?? normalizedCustomer?.special_car_enabled, false) : false,
+    vatRate: isTransportCustomer ? normalizeCustomerVatRate(normalizedCustomer?.vatRate ?? normalizedCustomer?.vat_rate) : 0,
     customsCustomFields: customsConfig.customsCustomFields
       .map((field) => ({ name: field.name, value: customsBusinessIntegerValue(field.value) })),
     invoicePasteText: ""
@@ -35278,6 +35292,7 @@ function orderDetailFeeRows(order = {}) {
               <span>地址电话</span><strong>{{ selectedCustomer?.invoice?.addressPhone || '-' }}</strong>
               <span>地址</span><strong>{{ selectedCustomer?.address || '-' }}</strong>
               <span v-if="selectedCustomer?.type === '客户'">结算币种</span><strong v-if="selectedCustomer?.type === '客户'">{{ selectedCustomer?.settlementCurrency || '人民币结算' }}</strong>
+              <span v-if="selectedCustomer?.type === '客户' && Number(selectedCustomer?.vatRate) > 0">增值税税点</span><strong v-if="selectedCustomer?.type === '客户' && Number(selectedCustomer?.vatRate) > 0">{{ selectedCustomer.vatRate }}%</strong>
             </div>
             <div v-else-if="activeCustomerDetailTab === '相关费用'" class="info-grid">
               <span>已审核订单</span><strong>{{ selectedCustomerFinanceOrders.length }}</strong>
@@ -40925,6 +40940,9 @@ function orderDetailFeeRows(order = {}) {
                   <option>人民币结算</option>
                   <option>港币结算</option>
                 </select>
+              </label>
+              <label v-if="customerForm.type === '客户' && normalizeCustomerCategory(customerForm.customerCategory) === '运输客户'">增值税税点（%）
+                <input v-model.number="customerForm.vatRate" type="number" min="0" max="100" step="0.01" placeholder="0" />
               </label>
               <template v-if="customerForm.type === '客户' && normalizeCustomerCategory(customerForm.customerCategory) === '报关客户'">
                 <label>主页品名项

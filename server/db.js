@@ -827,6 +827,7 @@ async function ensureRuntimeSchemaCompatibility() {
     ["customers", "operating_unit_enabled BOOLEAN NOT NULL DEFAULT false"],
     ["customers", "new_old_enabled BOOLEAN NOT NULL DEFAULT false"],
     ["customers", "special_car_enabled BOOLEAN NOT NULL DEFAULT false"],
+    ["customers", "vat_rate DOUBLE PRECISION NOT NULL DEFAULT 0"],
     ["customers", "customs_production_certificate_fee DOUBLE PRECISION NOT NULL DEFAULT 150"],
     ["customers", "customs_inspection_fee DOUBLE PRECISION NOT NULL DEFAULT 0"],
     ["customers", "customs_manifest_fee DOUBLE PRECISION NOT NULL DEFAULT 0"],
@@ -1116,6 +1117,7 @@ async function initializeSchema() {
       operating_unit_enabled BOOLEAN NOT NULL DEFAULT false,
       new_old_enabled BOOLEAN NOT NULL DEFAULT false,
       special_car_enabled BOOLEAN NOT NULL DEFAULT false,
+      vat_rate DOUBLE PRECISION NOT NULL DEFAULT 0,
       customs_custom_fields TEXT NOT NULL DEFAULT '[]',
       created_at TEXT NOT NULL DEFAULT (CURRENT_DATE::text),
       deleted_at TEXT
@@ -1776,6 +1778,7 @@ async function initializeSchema() {
     "operating_unit_enabled BOOLEAN NOT NULL DEFAULT false",
     "new_old_enabled BOOLEAN NOT NULL DEFAULT false",
     "special_car_enabled BOOLEAN NOT NULL DEFAULT false",
+    "vat_rate DOUBLE PRECISION NOT NULL DEFAULT 0",
     "customs_custom_fields TEXT NOT NULL DEFAULT '[]'"
     ],
     files: [

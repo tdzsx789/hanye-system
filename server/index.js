@@ -577,6 +577,7 @@ function mapCustomer(row) {
     operatingUnitEnabled: booleanFlag(row.operating_unit_enabled, false),
     newOldEnabled: booleanFlag(row.new_old_enabled, false),
     specialCarEnabled: booleanFlag(row.special_car_enabled, false),
+    vatRate: normalizeCustomerVatRate(row.vat_rate),
     customsCustomFields: customsCustomFields.filter((field) => !["产证地", "报检费", "商检费"].includes(customsBusinessCustomFieldName(field))),
     createdAt: row.created_at,
     invoice: {
@@ -638,7 +639,8 @@ async function loadTransportCustomerFeatureMap() {
         short_name,
         ${support.operatingUnitEnabled ? "operating_unit_enabled" : "false AS operating_unit_enabled"},
         ${support.newOldEnabled ? "new_old_enabled" : "false AS new_old_enabled"},
-        ${support.specialCarEnabled ? "special_car_enabled" : "false AS special_car_enabled"}
+        ${support.specialCarEnabled ? "special_car_enabled" : "false AS special_car_enabled"},
+        ${support.vatRate ? "vat_rate" : "0 AS vat_rate"}
       FROM customers
       WHERE deleted_at IS NULL
         AND type = '客户'
@@ -649,7 +651,8 @@ async function loadTransportCustomerFeatureMap() {
       const flags = {
         operatingUnitEnabled: booleanFlag(row.operating_unit_enabled, false),
         newOldEnabled: booleanFlag(row.new_old_enabled, false),
-        specialCarEnabled: booleanFlag(row.special_car_enabled, false)
+        specialCarEnabled: booleanFlag(row.special_car_enabled, false),
+        vatRate: normalizeCustomerVatRate(row.vat_rate)
       };
       [row.id, row.name, row.short_name]
         .map((value) => String(value || "").trim())
@@ -687,6 +690,13 @@ async function customerColumnExists(column) {
 
 let customerRequirementColumnSupportCache = null;
 
+// 增值税税点：百分数，0 表示不含税；范围 0~100，最多两位小数。
+function normalizeCustomerVatRate(value) {
+  const rate = Number(String(value ?? "").replace(/%/g, "").trim());
+  if (!Number.isFinite(rate) || rate <= 0) return 0;
+  return Math.min(100, Number(rate.toFixed(2)));
+}
+
 async function customerRequirementColumnSupport() {
   if (customerRequirementColumnSupportCache) return customerRequirementColumnSupportCache;
   customerRequirementColumnSupportCache = {
@@ -694,7 +704,8 @@ async function customerRequirementColumnSupport() {
     sixSheetNoRequired: await customerColumnExists("six_sheet_no_required"),
     operatingUnitEnabled: await customerColumnExists("operating_unit_enabled"),
     newOldEnabled: await customerColumnExists("new_old_enabled"),
-    specialCarEnabled: await customerColumnExists("special_car_enabled")
+    specialCarEnabled: await customerColumnExists("special_car_enabled"),
+    vatRate: await customerColumnExists("vat_rate")
   };
   return customerRequirementColumnSupportCache;
 }
@@ -909,6 +920,7 @@ function normalizeCustomerPayload(body, id = "") {
     operatingUnitEnabled: isTransportCustomer ? booleanFlag(body.operatingUnitEnabled ?? body.operating_unit_enabled, false) : false,
     newOldEnabled: isTransportCustomer ? booleanFlag(body.newOldEnabled ?? body.new_old_enabled, false) : false,
     specialCarEnabled: isTransportCustomer ? booleanFlag(body.specialCarEnabled ?? body.special_car_enabled, false) : false,
+    vatRate: isTransportCustomer ? normalizeCustomerVatRate(body.vatRate ?? body.vat_rate) : 0,
     customsCustomFields: normalizeCustomsBusinessCustomFields(body.customsCustomFields ?? body.customs_custom_fields),
     customsCustomFieldsJson: JSON.stringify(normalizeCustomsBusinessCustomFields(body.customsCustomFields ?? body.customs_custom_fields)),
     createdAt: body.createdAt || todayInputValue(),
@@ -1002,10 +1014,41 @@ function orderChargeDateCn(value = "") {
   return `${year}年${month}月${day}日`;
 }
 
-function orderChargeNoteText(order = {}) {
+// 系统自动写入的默认备注（公司自费/其他支出），对账单中不展示。
+const EXPORT_DEFAULT_FEE_REMARK_PATTERNS = [
+  /其他支出由公司承担成本/,
+  /公司自费成本由公司承担/,
+  /公司自费项目会计入客户对账单/,
+  /其他支出会计入客户对账单/,
+  /客户对账单按本项目报价正常展示/,
+  /不计入供应商或司机对账/,
+  /用于公司内部成本和利润核算/,
+  /不计入客户对账单/,
+  /仅参与内部成本与利润核算/,
+  /公司自费：不向客户收费/
+];
+const EXPORT_DEFAULT_FEE_REMARK_EXACT = new Set(["公司自费", "其他支出"]);
+
+function exportFeeUserRemark(fee = {}) {
+  const remark = String(fee?.remark ?? "").trim();
+  if (!remark) return "";
+  if (EXPORT_DEFAULT_FEE_REMARK_EXACT.has(remark)) return "";
+  return EXPORT_DEFAULT_FEE_REMARK_PATTERNS.some((pattern) => pattern.test(remark)) ? "" : remark;
+}
+
+// 所有收费项目的备注，按项目顺序用分号连接；默认备注和重复内容不展示。
+function orderFeeRemarksText(order = {}) {
+  const fees = Array.isArray(order?.fees) ? order.fees : [];
+  const remarks = fees.map((fee) => exportFeeUserRemark(fee)).filter(Boolean);
+  return Array.from(new Set(remarks)).join("；");
+}
+
+function orderChargeNoteText(order = {}, columns = null) {
   const remark = stripOrderCustomsRemarkText(order.remark || "");
+  const feeRemarks = orderFeeRemarksText(order);
+  const feeDetails = Array.isArray(columns) ? orderDuplicateFeeDetailsText(order, columns) : "";
   const dateText = orderChargeDateCn(order.chargedAt || order.charged_at);
-  return [remark, dateText ? `于${dateText}已收费` : ""].filter(Boolean).join("；");
+  return [remark, feeRemarks, feeDetails, dateText ? `于${dateText}已收费` : ""].filter(Boolean).join("；");
 }
 
 function creatorFieldsFromAccount(account = {}) {
@@ -1236,6 +1279,14 @@ function exportTemplateFooterItems(template = null, fallbackColor = "#64748b") {
     bold: false
   }];
 }
+
+// 客户对账单固定追加的收款信息（所有客户对账单模板，肯发专用在总表 sheet）。
+const STATEMENT_PAYEE_LINES = [
+  "收款账号:",
+  "户名:深圳市汉业国际货运代理有限公司",
+  "账号:760164710106",
+  "开户行:中国银行股份有限公司深圳皇岗支行"
+];
 
 function isSystemGeneratedExportFooterText(value = "") {
   const text = String(value || "").replace(/\s+/g, " ").trim();
@@ -2186,7 +2237,7 @@ function feeDisplayForColumn(order, column, options = {}) {
 
 function feeRemarkForColumn(order, column) {
   const remarks = feeRowsForColumn(order, column)
-    .map((fee) => textValue(fee.remark).trim())
+    .map((fee) => exportFeeUserRemark(fee))
     .filter(Boolean);
   return Array.from(new Set(remarks)).join("；");
 }
@@ -2312,7 +2363,7 @@ function exportOrderFieldValue(order = {}, key = "", column = {}) {
 function exportOrderColumnValue(order, column, rowIndex = 0, options = {}) {
   const key = textValue(column?.key);
   if (key === "__sequence") return rowIndex + 1;
-  if (key === "__chargeNote") return orderChargeNoteText(order);
+  if (key === "__chargeNote") return orderChargeNoteText(order, options.columns);
   if (key === "__hkdTotal") return formatExportAmount(order?.receivableHKD);
   if (key === "__rmbTotal") return formatExportAmount(order?.receivableRMB);
   if (key === "linkedCustomsDate"
@@ -2377,6 +2428,19 @@ function exportTotalRow(orders, columns, exchangeInput = null, options = {}) {
     if (!isExportAmountColumn(column)) return "";
     return formatExportAmount(exportTotalAmountForColumn(totalOrders, column, exchange, options), false);
   });
+}
+
+// 对账单客户的增值税税点（%）。一份客户对账单只有一个客户，取第一个有税点的订单。
+function exportStatementVatRate(orders = []) {
+  for (const order of orders) {
+    const rate = normalizeCustomerVatRate(order?.customerVatRate ?? order?.customer_vat_rate);
+    if (rate > 0) return rate;
+  }
+  return 0;
+}
+
+function exportVatRateLabel(rate = 0) {
+  return `含${String(Number(rate))}%增值税价格：`;
 }
 
 function exportSettlementTotalSummary(orders = [], exchangeInput = null) {
@@ -2470,7 +2534,7 @@ function exportTableRowData(orders, columns, exchange = null, options = {}) {
   const rows = sortedOrders.map((order, rowIndex) => ({
     kind: "order",
     order,
-    values: columns.map((column) => exportOrderColumnValue(order, column, rowIndex, valueOptions))
+    values: columns.map((column) => exportOrderColumnValue(order, column, rowIndex, { ...valueOptions, columns }))
   }));
   rows.push({
     kind: "total",
@@ -2481,7 +2545,25 @@ function exportTableRowData(orders, columns, exchange = null, options = {}) {
   });
   if (includeSettlementTotal) {
     const settlementRow = exportSettlementTotalRow(sortedOrders, columns, exchange, { totalOrders });
-    if (settlementRow) rows.push(settlementRow);
+    if (settlementRow) {
+      rows.push(settlementRow);
+      const vatRate = options.includeVatRow ? exportStatementVatRate(sortedOrders) : 0;
+      if (vatRate > 0) {
+        const vatValues = columns.map(() => "");
+        vatValues[settlementRow.labelIndex] = exportVatRateLabel(vatRate);
+        vatValues[settlementRow.targetIndex] = formatExportAmount(
+          Number((settlementRow.summary.amount * (1 + vatRate / 100)).toFixed(2)),
+          false
+        );
+        rows.push({
+          kind: "vatTotal",
+          values: vatValues,
+          summary: { ...settlementRow.summary, vatRate },
+          labelIndex: settlementRow.labelIndex,
+          targetIndex: settlementRow.targetIndex
+        });
+      }
+    }
   }
   return { sortedOrders, totalOrders, rows };
 }
@@ -2718,7 +2800,35 @@ function exportFeeColumnKey(column = {}) {
   return `${exportFeeColumnName(column)}|${normalizeFeeCurrency(exportFeeItemCurrencyForColumn(column))}`;
 }
 
-function mergeExportColumnsByTemplateOrder(templateColumns = [], includedColumns = [], dynamicColumns = []) {
+// 模板里所有费用列（包括没勾选的）的保存位置。
+// 订单里出现、但模板没勾选的费用，也按它在模板里的位置排，而不是统一放到最后。
+function exportTemplateFeePositionLookup(templatePayload = null) {
+  const rawColumns = Array.isArray(templatePayload?.columns) ? templatePayload.columns : [];
+  const entries = [];
+  rawColumns.forEach((column) => {
+    if (!column || typeof column !== "object") return;
+    const key = textValue(column.key);
+    const isFeeColumn = Boolean(column.feeItemId)
+      || key.startsWith("fee-item-")
+      || Boolean(textValue(column.feeName).trim());
+    if (!isFeeColumn) return;
+    const name = canonicalExportFeeName(column.feeName || column.label);
+    const order = Number(column.order || column.sortOrder || 0) || 0;
+    if (!name || order <= 0) return;
+    const currencyText = textValue(column.feeCurrency).trim();
+    entries.push({ name, order, currency: currencyText ? normalizeFeeCurrency(currencyText) : "" });
+  });
+  return (column) => {
+    const name = exportFeeColumnName(column);
+    const sameName = entries.filter((entry) => entry.name === name);
+    if (!sameName.length) return 0;
+    const currency = normalizeFeeCurrency(column.feeCurrency || "");
+    const sameCurrency = sameName.find((entry) => entry.currency === currency);
+    return (sameCurrency || sameName[0]).order;
+  };
+}
+
+function mergeExportColumnsByTemplateOrder(templateColumns = [], includedColumns = [], dynamicColumns = [], positionOf = null) {
   const includedSet = new Set(includedColumns);
   const usedDynamic = new Set();
   const result = [];
@@ -2733,9 +2843,23 @@ function mergeExportColumnsByTemplateOrder(templateColumns = [], includedColumns
       usedDynamic.add(dynamicColumn);
     });
   });
-  dynamicColumns.forEach((column) => {
-    if (!usedDynamic.has(column)) result.push(column);
+  const positioned = [];
+  const unpositioned = [];
+  dynamicColumns.filter((column) => !usedDynamic.has(column)).forEach((column) => {
+    const order = typeof positionOf === "function" ? Number(positionOf(column) || 0) : 0;
+    if (order > 0) positioned.push({ column, order });
+    else unpositioned.push(column);
   });
+  // 有模板位置的：插到第一个位置更靠后的列之前；找不到就放最后。
+  positioned
+    .sort((left, right) => left.order - right.order)
+    .forEach(({ column, order }) => {
+      let at = result.findIndex((item) => Number(item?.order || 0) > order);
+      if (at < 0) at = result.length;
+      result.splice(at, 0, { ...column, order });
+    });
+  // 模板里根本没有的新费用：放在所有列的最后。
+  unpositioned.forEach((column) => result.push(column));
   return result;
 }
 
@@ -2815,10 +2939,15 @@ function exportColumnsForOrders(templatePayload = null, orders = [], options = {
       || exportTemplateColumnHasDisplayValue(column, orders, options)
     )
   );
-  const totalColumns = ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS.map((systemColumn) => ({
-    ...systemColumn,
-    ...(columns.find((column) => column.key === systemColumn.key) || {})
-  }));
+  const totalColumns = ORDER_EXPORT_SYSTEM_TOTAL_COLUMNS
+    .map((systemColumn) => ({
+      ...systemColumn,
+      ...(columns.find((column) => column.key === systemColumn.key) || {})
+    }))
+    .sort((left, right) =>
+      columns.findIndex((column) => column.key === left.key)
+      - columns.findIndex((column) => column.key === right.key)
+    );
   const dynamicColumns = dynamicExportFeeColumns(orders, bodyColumns);
   const chargeNoteColumns = options.includeChargeNoteColumn
     ? [{ ...ORDER_EXPORT_CHARGE_NOTE_COLUMN }]
@@ -2829,7 +2958,8 @@ function exportColumnsForOrders(templatePayload = null, orders = [], options = {
   const mergedBodyColumns = mergeExportColumnsByTemplateOrder(
     bodyColumns,
     bodyColumns,
-    dynamicColumns
+    dynamicColumns,
+    exportTemplateFeePositionLookup(templatePayload)
   );
   let exportBodyColumns = options.includeOperatingUnitColumn && ordersHaveOperatingUnit(orders)
     ? insertOperatingUnitExportColumn(mergedBodyColumns)
@@ -3008,6 +3138,7 @@ async function renderOrdersCsv(orders, title = "订单导出", templatePayload =
   const rows = exportTableRows(exportOrders, columns, exchange, {
     includeSettlementTotal: shouldIncludeSettlementTotal(title, exchange),
     includeAdvanceAddress: isCustomerStatement,
+    includeVatRow: isCustomerStatement,
     excludeChargedFromTotals: isCustomerStatement
   });
   const { headerRows, footerRows } = exportTemplateTextRows(templatePayload, title);
@@ -3192,16 +3323,57 @@ function exportExcelAmountRangeFormula(columns = [], columnIndex = -1, detailSta
     && !options.orders.every((order) => exportExcelFeeCellCanBeNumeric(order, amountColumn, options.valueOptions || {}))) {
     return "";
   }
-  const amountRange = `${excelColumnLetter(columnIndex + 1)}${detailStartRow}:${excelColumnLetter(columnIndex + 1)}${detailEndRow}`;
-  if (!options.excludeChargedFromTotals) return `SUM(${amountRange})`;
-  const chargeNoteIndex = columns.findIndex((column) => textValue(column?.key) === ORDER_EXPORT_CHARGE_NOTE_COLUMN.key);
-  if (chargeNoteIndex < 0) return `SUM(${amountRange})`;
-  const chargeNoteRange = `${excelColumnLetter(chargeNoteIndex + 1)}${detailStartRow}:${excelColumnLetter(chargeNoteIndex + 1)}${detailEndRow}`;
-  return `SUMIFS(${amountRange},${chargeNoteRange},"<>*已收费*")`;
+  const letter = excelColumnLetter(columnIndex + 1);
+  const amountRange = `${letter}${detailStartRow}:${letter}${detailEndRow}`;
+  // 已收费（客户已付款）的订单不计入应收合计：只对未收费的订单行求和，不依赖备注文字。
+  const sortedOrders = Array.isArray(options.sortedOrders) ? options.sortedOrders : null;
+  if (!options.excludeChargedFromTotals || !sortedOrders) return `SUM(${amountRange})`;
+  const unchargedRows = sortedOrders
+    .map((order, index) => (orderIsCharged(order) ? 0 : detailStartRow + index))
+    .filter(Boolean);
+  if (unchargedRows.length === sortedOrders.length) return `SUM(${amountRange})`;
+  if (!unchargedRows.length) return "0";
+  return `SUM(${unchargedRows.map((row) => `${letter}${row}`).join(",")})`;
+}
+
+// 同一列有多条非零费用时，文字展示为"30+120=150"。
+// Excel 里改写成公式 =30+120（保持可计算），明细文字放进单元格批注。
+function exportFeeCellFormulaAmounts(order, column) {
+  if (!isExportFeeItemColumn(column) || exportLocationFeeType(column)) return null;
+  const amounts = feeRowsForColumn(order, column)
+    .map((fee) => Number(fee.amount || 0))
+    .filter((amount) => amount !== 0);
+  return amounts.length > 1 ? amounts : null;
+}
+
+// 同列多条费用的明细文字，放进备注：名称/代垫地址 + 金额，用 + 连接，最后 =合计
+function exportFeeDuplicateDetailText(order, column) {
+  const rows = feeRowsForColumn(order, column).filter((fee) => Number(fee.amount || 0) !== 0);
+  if (rows.length <= 1) return "";
+  const parts = rows.map((fee) => {
+    const address = isAdvanceExportFee(fee) ? exportFeeAdvanceAddressDisplay(fee) : "";
+    const label = address || textValue(fee.name).trim();
+    return `${label}${formatExportAmount(Number(fee.amount || 0), false)}`;
+  });
+  const total = rows.reduce((sum, fee) => sum + Number(fee.amount || 0), 0);
+  return `${parts.join("+")}=${formatExportAmount(total, false)}`;
+}
+
+function orderDuplicateFeeDetailsText(order, columns = []) {
+  return columns
+    .filter((column) => exportFeeCellFormulaAmounts(order, column))
+    .map((column) => exportFeeDuplicateDetailText(order, column))
+    .filter(Boolean)
+    .join("；");
+}
+
+function exportFeeCellFormulaText(amounts = []) {
+  return amounts.map((amount) => (amount < 0 ? `(${amount})` : String(amount))).join("+");
 }
 
 function exportExcelFeeCellCanBeNumeric(order, column, options = {}) {
   if (!isExportFeeItemColumn(column) || exportLocationFeeType(column)) return false;
+  if (exportFeeCellFormulaAmounts(order, column)) return true;
   const amount = Number(exportOrderColumnAmount(order, column) || 0);
   const display = textValue(exportOrderColumnValue(order, column, 0, options)).replaceAll(",", "").trim();
   if (!display) return amount === 0;
@@ -3224,7 +3396,11 @@ function exportExcelOrderCurrencyTotalFormula(order, columns = [], rowNumber = 0
   const matchedColumns = feeColumns.filter((column) =>
     feeRowsForColumn(order, column).some((fee) => orderFees.includes(fee))
   );
-  if (matchedColumns.length === 0 || matchedColumns.length < orderFees.length) return "";
+  if (matchedColumns.length === 0) return "";
+  const allFeesCovered = orderFees.every((fee) =>
+    matchedColumns.some((column) => feeRowsForColumn(order, column).includes(fee))
+  );
+  if (!allFeesCovered) return "";
   if (!matchedColumns.every((column) => exportExcelFeeCellCanBeNumeric(order, column, options))) return "";
   const references = matchedColumns.map((column) => {
     const columnIndex = columns.indexOf(column);
@@ -3715,6 +3891,7 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
   const tableData = exportTableRowData(exportOrders, columns, exchange, {
     includeSettlementTotal,
     includeAdvanceAddress: isCustomerStatement,
+    includeVatRow: isCustomerStatement,
     excludeChargedFromTotals: isCustomerStatement
   });
   const rows = tableData.rows.map((row) => row.values);
@@ -3859,7 +4036,8 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
   rows.forEach((rowValues, rowIndex) => {
     const rowMeta = tableData.rows[rowIndex] || {};
     const isTotalRow = rowMeta.kind === "total";
-    const isSettlementTotalRow = rowMeta.kind === "settlementTotal";
+    const isVatTotalRow = rowMeta.kind === "vatTotal";
+    const isSettlementTotalRow = rowMeta.kind === "settlementTotal" || isVatTotalRow;
     const isSummaryRow = isTotalRow || isSettlementTotalRow;
     const sourceOrder = rowMeta.kind === "order" ? rowMeta.order : null;
     const row = worksheet.getRow(tableStartRow + 1 + rowIndex);
@@ -3870,7 +4048,15 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
       const column = columns[columnNumber - 1] || {};
       const isChargeNoteColumn = textValue(column.key) === ORDER_EXPORT_CHARGE_NOTE_COLUMN.key;
       const isChargeNoteCell = isChargeNoteColumn && !isSummaryRow && sourceOrder && orderIsCharged(sourceOrder);
-      if (isSettlementTotalRow && columnNumber - 1 === rowMeta.targetIndex) {
+      if (isVatTotalRow && columnNumber - 1 === rowMeta.targetIndex) {
+        const totalCellRef = `${excelColumnLetter(rowMeta.targetIndex + 1)}${row.number - 1}`;
+        const vatRate = Number(rowMeta.summary?.vatRate || 0);
+        cell.value = {
+          formula: `${totalCellRef}*(1+${vatRate}/100)`,
+          result: Number((Number(rowMeta.summary?.amount || 0) * (1 + vatRate / 100)).toFixed(2))
+        };
+        cell.numFmt = "#,##0.00";
+      } else if (isSettlementTotalRow && columnNumber - 1 === rowMeta.targetIndex) {
         const formula = exportSettlementTotalExcelFormula(
           rowMeta.summary,
           columns,
@@ -3879,6 +4065,7 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
           {
             excludeChargedFromTotals: isCustomerStatement,
             orders: totalOrders,
+            sortedOrders,
             valueOptions
           }
         );
@@ -3898,6 +4085,7 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
           {
             excludeChargedFromTotals: isCustomerStatement,
             orders: totalOrders,
+            sortedOrders,
             valueOptions
           }
         );
@@ -3920,7 +4108,15 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
       } else if (sourceOrder && !isSummaryRow && isExportAmountColumn(column) && !exportLocationFeeType(column)
         && (!isExportFeeItemColumn(column) || exportExcelFeeCellCanBeNumeric(sourceOrder, column, valueOptions))) {
         const amount = exportOrderColumnAmount(sourceOrder, column);
-        cell.value = Number(amount || 0) !== 0 ? Number(amount || 0) : "";
+        const formulaAmounts = exportFeeCellFormulaAmounts(sourceOrder, column);
+        if (formulaAmounts) {
+          cell.value = {
+            formula: exportFeeCellFormulaText(formulaAmounts),
+            result: Number(Number(amount || 0).toFixed(2))
+          };
+        } else {
+          cell.value = Number(amount || 0) !== 0 ? Number(amount || 0) : "";
+        }
         cell.numFmt = "#,##0";
       }
       cell.font = {
@@ -3955,9 +4151,9 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
         : excelAlignment(template?.tableAlign);
       cell.alignment = { vertical: "middle", horizontal, wrapText: isChargeNoteColumn };
       if (!isSummaryRow && sourceOrder) {
-        const comment = exportOrderColumnComment(sourceOrder, column);
-        if (comment) {
-          cell.note = comment;
+        const noteText = exportOrderColumnComment(sourceOrder, column);
+        if (noteText) {
+          cell.note = noteText;
         }
       }
       cell.border = tableBorder;
@@ -3966,6 +4162,17 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
 
   const footerItems = exportTemplateFooterItems(template, template?.footerTextColor);
   let footerRowNumber = tableStartRow + rows.length + 2;
+  if (isCustomerStatement) {
+    // 客户对账单固定收款信息：放在现有所有行的下一行，一个单元格内换行显示。
+    const payeeRow = worksheet.getRow(tableStartRow + rows.length + 1);
+    const payeeCell = payeeRow.getCell(1);
+    payeeCell.value = STATEMENT_PAYEE_LINES.join("\n");
+    payeeCell.font = { name: "Microsoft YaHei", size: 10, bold: false, color: { argb: "FFFF0000" } };
+    payeeCell.alignment = { vertical: "middle", horizontal: "left", wrapText: true };
+    payeeRow.height = STATEMENT_PAYEE_LINES.length * 18 + 6;
+    if (mergeEndColumn > 1) worksheet.mergeCells(payeeRow.number, 1, payeeRow.number, Math.min(mergeEndColumn, 4));
+    footerRowNumber = payeeRow.number + 2;
+  }
   footerItems.forEach((item) => {
     const lines = templateText(item.text, context).split(/\r?\n/).filter(Boolean);
     lines.forEach((line) => {
@@ -4128,25 +4335,8 @@ function kenfaFeeLabel(name = "") {
   return labels.find(([pattern]) => pattern.test(text))?.[1] || text || "收费项目";
 }
 
-const KENFA_DEFAULT_REMARK_PATTERNS = [
-  /其他支出由公司承担成本/,
-  /公司自费成本由公司承担/,
-  /公司自费项目会计入客户对账单/,
-  /其他支出会计入客户对账单/,
-  /客户对账单按本项目报价正常展示/,
-  /不计入供应商或司机对账/,
-  /用于公司内部成本和利润核算/,
-  /不计入客户对账单/,
-  /仅参与内部成本与利润核算/,
-  /公司自费：不向客户收费/
-];
-const KENFA_DEFAULT_REMARK_EXACT = new Set(["公司自费", "其他支出"]);
-
 function kenfaFeeRemark(fee = {}) {
-  const remark = textValue(fee.remark).trim();
-  if (!remark) return "";
-  if (KENFA_DEFAULT_REMARK_EXACT.has(remark)) return "";
-  return KENFA_DEFAULT_REMARK_PATTERNS.some((pattern) => pattern.test(remark)) ? "" : remark;
+  return exportFeeUserRemark(fee);
 }
 
 function kenfaDayWeight(dayOrders = []) {
@@ -4363,6 +4553,13 @@ async function renderKenfaStatementXlsxBuffer(orders, title = "客户对账单",
     formula: `I${totalRow}*1.06`,
     result: summaryTotal * 1.06
   }, { bold: true, align: "right", numFmt: "#,##0.00", size: 12, border: false });
+  // 收款信息：放在总表现有所有行（含税价格行）的下一行
+  const payeeRowNumber = vatRow + 1;
+  kenfaMerge(summary, `A${payeeRowNumber}:F${payeeRowNumber}`);
+  kenfaSetCell(summary.getCell(payeeRowNumber, 1), STATEMENT_PAYEE_LINES.join("\n"), {
+    size: 10, color: "#ff0000", border: false, wrap: true
+  });
+  summary.getRow(payeeRowNumber).height = STATEMENT_PAYEE_LINES.length * 18 + 6;
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 
@@ -4426,11 +4623,12 @@ async function renderOrdersExcelHtml(orders, title = "订单导出", templatePay
   const tableData = exportTableRowData(exportOrders, columns, exchange, {
     includeSettlementTotal: shouldIncludeSettlementTotal(title, exchange),
     includeAdvanceAddress: isCustomerStatement,
+    includeVatRow: isCustomerStatement,
     excludeChargedFromTotals: isCustomerStatement
   });
   const rowsHtml = tableData.rows.map((rowData) => `
-    <tr${rowData.kind === "total" || rowData.kind === "settlementTotal" ? ' class="total-row"' : ""}>
-      ${rowData.values.map((value, columnIndex) => `<td${rowData.kind === "settlementTotal" && columnIndex === rowData.labelIndex ? ' class="settlement-total-label"' : ""}>${htmlEscape(value)}</td>`).join("")}
+    <tr${rowData.kind === "total" || rowData.kind === "settlementTotal" || rowData.kind === "vatTotal" ? ' class="total-row"' : ""}>
+      ${rowData.values.map((value, columnIndex) => `<td${(rowData.kind === "settlementTotal" || rowData.kind === "vatTotal") && columnIndex === rowData.labelIndex ? ' class="settlement-total-label"' : ""}>${htmlEscape(value)}</td>`).join("")}
     </tr>
   `).join("");
   return `<!doctype html>
@@ -5227,6 +5425,7 @@ function normalizeExportOrderSnapshot(order = {}) {
   snapshot.customerOperatingUnitEnabled = normalizeExportBoolean(snapshot.customerOperatingUnitEnabled ?? order.customerOperatingUnitEnabled ?? order.customer_operating_unit_enabled);
   snapshot.customerNewOldEnabled = normalizeExportBoolean(snapshot.customerNewOldEnabled ?? order.customerNewOldEnabled ?? order.customer_new_old_enabled);
   snapshot.customerSpecialCarEnabled = normalizeExportBoolean(snapshot.customerSpecialCarEnabled ?? order.customerSpecialCarEnabled ?? order.customer_special_car_enabled);
+  snapshot.customerVatRate = normalizeCustomerVatRate(snapshot.customerVatRate ?? order.customerVatRate ?? order.customer_vat_rate);
   snapshot.chargedAt = normalizeOrderChargedAt(snapshot.chargedAt || order.chargedAt || order.charged_at || "");
   snapshot.remark = String(snapshot.remark || order.remark || "");
   snapshot.tripNoEnabled = normalizeExportBoolean(snapshot.tripNoEnabled ?? order.tripNoEnabled ?? order.trip_no_enabled);
@@ -5403,6 +5602,7 @@ async function renderOrdersPdf(res, orders, title = "订单导出", templatePayl
   const { rows: pdfRows } = exportTableRowData(exportOrders, columns, exchange, {
     includeSettlementTotal,
     includeAdvanceAddress: isCustomerStatement,
+    includeVatRow: isCustomerStatement,
     excludeChargedFromTotals: isCustomerStatement
   });
   let y = drawHeader();
@@ -5418,11 +5618,11 @@ async function renderOrdersPdf(res, orders, title = "订单导出", templatePayl
     columns.forEach((column, columnIndex) => {
       usePdfFont();
       doc.fontSize(column.fontSize || template?.tableFontSize || 7.3);
-      if (rowData.kind === "total" || rowData.kind === "settlementTotal") {
+      if (rowData.kind === "total" || rowData.kind === "settlementTotal" || rowData.kind === "vatTotal") {
         doc.rect(x, y, column.width, currentRowHeight).fill(template?.tableHeaderBgColor || "#f1f5f9");
         doc.fillColor(template?.tableTextColor || "#17233c");
       }
-      if (rowData.kind === "settlementTotal" && columnIndex === rowData.labelIndex) {
+      if ((rowData.kind === "settlementTotal" || rowData.kind === "vatTotal") && columnIndex === rowData.labelIndex) {
         doc.rect(x, y, column.width, currentRowHeight).fill("#ffff00");
         doc.fillColor(template?.tableTextColor || "#17233c");
       }
@@ -7497,6 +7697,12 @@ function isProtectedTemplateName(name = "") {
   return ["通用模板", "肯发专用"].includes(String(name || "").trim());
 }
 
+// 通用模板允许修改内容（表头位置、表格明细列等），但不能改名或删除；
+// 肯发专用由系统固定生成，完全不允许修改。
+function isEditableProtectedTemplateName(name = "") {
+  return String(name || "").trim() === "通用模板";
+}
+
 function mapRule(row) {
   return {
     id: row.id,
@@ -7726,7 +7932,8 @@ async function attachTransportCustomerFeatureFlagsToOrders(orders = []) {
       ...order,
       customerOperatingUnitEnabled: Boolean(feature.operatingUnitEnabled),
       customerNewOldEnabled: Boolean(feature.newOldEnabled),
-      customerSpecialCarEnabled: Boolean(feature.specialCarEnabled)
+      customerSpecialCarEnabled: Boolean(feature.specialCarEnabled),
+      customerVatRate: normalizeCustomerVatRate(feature.vatRate)
     };
   });
 }
@@ -8865,6 +9072,7 @@ app.patch("/api/customers/:id", async (req, res) => {
   if (requirementSupport.operatingUnitEnabled) updateSets.push("operating_unit_enabled = @operatingUnitEnabled");
   if (requirementSupport.newOldEnabled) updateSets.push("new_old_enabled = @newOldEnabled");
   if (requirementSupport.specialCarEnabled) updateSets.push("special_car_enabled = @specialCarEnabled");
+  if (requirementSupport.vatRate) updateSets.push("vat_rate = @vatRate");
   if (hasCustomsManifestFee) updateSets.push("customs_manifest_fee = @customsManifestFee");
   if (hasCustomsVerificationFee) updateSets.push("customs_verification_fee = @customsVerificationFee");
   if (hasCustomsCustomFields) updateSets.push("customs_custom_fields = @customsCustomFieldsJson");
@@ -8895,6 +9103,7 @@ app.patch("/api/customers/:id", async (req, res) => {
       { key: "operatingUnitEnabled", label: "经营单位必须" },
       { key: "newOldEnabled", label: "新/旧" },
       { key: "specialCarEnabled", label: "专车" },
+      { key: "vatRate", label: "增值税税点" },
       { key: "customsProductionCertificateFee", label: "产证地" },
       { key: "customsInspectionFee", label: "报检费" }
     ], { entityLabel: "客户" })
@@ -9017,6 +9226,10 @@ app.post("/api/customers", async (req, res) => {
   if (requirementSupport.specialCarEnabled) {
     insertColumns.push("special_car_enabled");
     insertValues.push("@specialCarEnabled");
+  }
+  if (requirementSupport.vatRate) {
+    insertColumns.push("vat_rate");
+    insertValues.push("@vatRate");
   }
   if (hasCustomsManifestFee) {
     insertColumns.push("customs_manifest_fee");
@@ -9630,6 +9843,7 @@ async function hydrateOrderRowsForApi(orders = [], options = {}) {
       customerOperatingUnitEnabled: Boolean(feature.operatingUnitEnabled),
       customerNewOldEnabled: Boolean(feature.newOldEnabled),
       customerSpecialCarEnabled: Boolean(feature.specialCarEnabled),
+      customerVatRate: normalizeCustomerVatRate(feature.vatRate),
       customerShortName
     };
   });
@@ -14652,7 +14866,14 @@ app.patch("/api/templates/:id", async (req, res) => {
     res.status(400).json({ message: "模板名称不能为空" });
     return;
   }
-  if (isProtectedTemplateName(item.name)) {
+  if (isProtectedTemplateName(current.name)) {
+    if (!isEditableProtectedTemplateName(current.name)) {
+      res.status(400).json({ message: `${current.name}为系统保留模板，不能修改` });
+      return;
+    }
+    // 通用模板：只允许改内容，名称保持不变
+    item.name = current.name;
+  } else if (isProtectedTemplateName(item.name)) {
     res.status(400).json({ message: `${item.name}为系统保留模板，不能修改` });
     return;
   }
