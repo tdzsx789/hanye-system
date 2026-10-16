@@ -1268,6 +1268,12 @@ function missingOrderSignRequiredFieldLabels() {
     if (!String(source[field.key] ?? "").trim()) labels.push(field.label);
   });
   const requirement = currentOrderSignRequirement();
+  const signCustomer = currentOrderCustomerRecord();
+  const signShortName = String(signCustomer?.shortName || signCustomer?.short_name || "").trim();
+  const signCustomerName = String(signCustomer?.name || orderForm.customer || "").trim();
+  const isKenfaOrder = signShortName === "肯发" || (!signShortName && signCustomerName === "肯发");
+  if (isKenfaOrder && !String(source.weight ?? orderForm.weight ?? "").trim()) labels.push("重量");
+  if (currentOrderOperatingUnitEnabled.value && !String(source.operatingUnit ?? orderForm.operatingUnit ?? "").trim()) labels.push("经营单位");
   if (requirement?.tripNo && (!source.tripNoEnabled || !String(source.tripNo || "").trim())) labels.push("车次号");
   if (requirement?.sixSheetNo && (!source.sixSheetEnabled || !String(source.sixSheetNo || "").trim())) labels.push("六联单号");
   return Array.from(new Set(labels));
@@ -40881,7 +40887,7 @@ function orderDetailFeeRows(order = {}) {
                   <label class="order-switch-field"><input v-model="customerForm.sixSheetNoRequired" type="checkbox" />六联单号必须</label>
                   <label v-if="currentAccountCanViewSpecialCustomerOrders" class="order-switch-field"><input v-model="customerForm.specialCustomer" type="checkbox" />特殊客户</label>
                 </template>
-                <label v-if="normalizeCustomerCategory(customerForm.customerCategory) === '运输客户'" class="order-switch-field"><input v-model="customerForm.operatingUnitEnabled" type="checkbox" />经营单位</label>
+                <label v-if="normalizeCustomerCategory(customerForm.customerCategory) === '运输客户'" class="order-switch-field"><input v-model="customerForm.operatingUnitEnabled" type="checkbox" />经营单位必须</label>
                 <label v-if="normalizeCustomerCategory(customerForm.customerCategory) === '运输客户'" class="order-switch-field"><input v-model="customerForm.newOldEnabled" type="checkbox" />新/旧</label>
                 <label v-if="normalizeCustomerCategory(customerForm.customerCategory) === '运输客户'" class="order-switch-field"><input v-model="customerForm.specialCarEnabled" type="checkbox" />专车</label>
               </div>
@@ -41768,7 +41774,7 @@ function orderDetailFeeRows(order = {}) {
               <label class="order-compact-field order-meta-date-field">订单日期<input v-model="orderForm.date" type="date" /></label>
               <label class="order-compact-field order-meta-status-field">状态<select v-model="orderForm.status"><option v-for="status in ORDER_STATUS_OPTIONS" :key="status">{{ status }}</option></select></label>
               <div class="order-operating-unit-field order-operating-unit-link-field">
-                <label v-if="currentOrderOperatingUnitEnabled" class="order-compact-field">经营单位<input v-model.trim="orderForm.operatingUnit" placeholder="可不填" /></label>
+                <label v-if="currentOrderOperatingUnitEnabled" class="order-compact-field">经营单位<input v-model.trim="orderForm.operatingUnit" placeholder="必填" /></label>
                 <label v-if="currentOrderNewOldEnabled" class="order-compact-field order-new-old-field">新/旧
                   <select v-model="orderForm.newOld">
                     <option value="">请选择</option>

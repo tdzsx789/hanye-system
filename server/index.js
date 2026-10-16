@@ -307,6 +307,12 @@ const ORDER_SIGN_BASE_REQUIRED_FIELDS = [
   { keys: ["date", "order_date"], label: "订单日期" }
 ];
 
+function isKenfaCustomer(customer = {}, fallbackName = "") {
+  const shortName = String(customer?.shortName || customer?.short_name || "").trim();
+  const name = String(customer?.name || fallbackName || "").trim();
+  return shortName === "肯发" || (!shortName && name === "肯发");
+}
+
 function requestHasAdminOrderDeletePermission(req) {
   const username = String(req.account?.username || "").trim().toLowerCase();
   return normalizeAccountRole(req.account?.role) === "管理员" || username === "liaomufeng";
@@ -413,6 +419,13 @@ async function missingOrderSignRequiredFieldLabels(order = {}, customer = {}) {
     })
     .map((field) => field.label);
   const requirement = orderSignRequirementForCustomer(customer, order.customer);
+  if (isKenfaCustomer(customer, order.customer) && !String(order.weight || "").trim()) {
+    labels.push("重量");
+  }
+  const operatingUnitRequired = booleanFlag(customer?.operatingUnitEnabled ?? customer?.operating_unit_enabled, false);
+  if (operatingUnitRequired && !String(order.operatingUnit || order.operating_unit || "").trim()) {
+    labels.push("经营单位");
+  }
   const tripNoEnabled = booleanFlag(order.tripNoEnabled ?? order.trip_no_enabled, false);
   const sixSheetNoEnabled = booleanFlag(order.sixSheetEnabled ?? order.six_sheet_enabled, false);
   if (requirement?.tripNo && (!tripNoEnabled || !String(order.tripNo || order.trip_no || "").trim())) labels.push("车次号");
@@ -3986,8 +3999,8 @@ const KENFA_LOGO_FILE_URL = new URL("./assets/kenfa-logo.png", import.meta.url);
 const KENFA_LOGO_BUFFER = fs.existsSync(KENFA_LOGO_FILE_URL) ? fs.readFileSync(KENFA_LOGO_FILE_URL) : null;
 const KENFA_LOGO_DATA_URL = KENFA_LOGO_BUFFER ? `data:image/png;base64,${KENFA_LOGO_BUFFER.toString("base64")}` : "";
 const KENFA_COMPANY_NAME = "深圳市汉业国际货运代理有限公司";
-const KENFA_COMPANY_ADDRESS = "ADD:深圳市南山区招商街道桃花园社区南海大道1115号美年国际广场4栋1205A";
-const KENFA_COMPANY_CONTACT = "联系人:刘先生   TEL:0755-83007202";
+const KENFA_COMPANY_ADDRESS = "地址：深圳市南山区招商街道桃花园社区南海大道1115号美年国际广场4栋1205A";
+const KENFA_COMPANY_CONTACT = "联系人：刘先生   电话：0755-83007202";
 
 function kenfaAmountToRmb(amount = 0, currency = "人民币", exchange = null) {
   const value = Number(amount || 0);
@@ -4026,13 +4039,10 @@ function kenfaCargoOwner(orders = []) {
 }
 
 function groupedKenfaOrders(orders = []) {
-  const groups = new Map();
-  sortOrdersForExport(orders).forEach((order) => {
-    const date = kenfaInvoiceDate(order);
-    if (!groups.has(date)) groups.set(date, []);
-    groups.get(date).push(order);
-  });
-  return [...groups.entries()].sort(([left], [right]) => left.localeCompare(right));
+  // 一个订单一个 INVOICE sheet；同一天的多个订单按原有顺序依次排列。
+  return sortOrdersForExport(orders)
+    .map((order) => [kenfaInvoiceDate(order), [order]])
+    .sort(([left], [right]) => left.localeCompare(right));
 }
 
 function kenfaSetCell(cell, value, options = {}) {
@@ -4109,13 +4119,39 @@ function kenfaFormatDateCn(date = "") {
 function kenfaFeeLabel(name = "") {
   const text = textValue(name).trim();
   const labels = [
-    [/中港|吨车|运费/, "China Hong Kong ton fare                              中港吨车费"],
-    [/香港报关|报关/, "Customs declaration in Hong Kong                                     香港报关"],
-    [/无缝/, "Hong Kong seamless         香港无缝"],
-    [/过磅|称重/, "Weighing fee                   过磅费"],
-    [/停车/, "Factory parking fee            工厂停车费"]
+    [/中港|吨车|运费/, "中港吨车费"],
+    [/香港报关|报关/, "香港报关"],
+    [/无缝/, "香港无缝"],
+    [/过磅|称重/, "过磅费"],
+    [/停车/, "工厂停车费"]
   ];
-  return labels.find(([pattern]) => pattern.test(text))?.[1] || text || "Service fee";
+  return labels.find(([pattern]) => pattern.test(text))?.[1] || text || "收费项目";
+}
+
+const KENFA_DEFAULT_REMARK_PATTERNS = [
+  /其他支出由公司承担成本/,
+  /公司自费成本由公司承担/,
+  /公司自费项目会计入客户对账单/,
+  /其他支出会计入客户对账单/,
+  /客户对账单按本项目报价正常展示/,
+  /不计入供应商或司机对账/,
+  /用于公司内部成本和利润核算/,
+  /不计入客户对账单/,
+  /仅参与内部成本与利润核算/,
+  /公司自费：不向客户收费/
+];
+const KENFA_DEFAULT_REMARK_EXACT = new Set(["公司自费", "其他支出"]);
+
+function kenfaFeeRemark(fee = {}) {
+  const remark = textValue(fee.remark).trim();
+  if (!remark) return "";
+  if (KENFA_DEFAULT_REMARK_EXACT.has(remark)) return "";
+  return KENFA_DEFAULT_REMARK_PATTERNS.some((pattern) => pattern.test(remark)) ? "" : remark;
+}
+
+function kenfaDayWeight(dayOrders = []) {
+  const weights = dayOrders.map((order) => textValue(order.weight).trim()).filter(Boolean);
+  return weights.length ? weights.join("、") : 0;
 }
 
 function kenfaDailyFeeRows(dayOrders = [], exchange = null) {
@@ -4125,19 +4161,19 @@ function kenfaDailyFeeRows(dayOrders = [], exchange = null) {
     feeRows.forEach((fee) => {
       rows.push({
         name: kenfaFeeLabel(fee.name),
-        remark: fee.note || (order.no ? `Order: ${order.no}` : ""),
+        remark: kenfaFeeRemark(fee),
         amount: Number(kenfaAmountToRmb(fee.amount, fee.currency, exchange).toFixed(2))
       });
     });
     if (!feeRows.length) {
       rows.push({
-        name: order.businessType || "China Hong Kong ton fare                              中港吨车费",
-        remark: [order.no ? `Order: ${order.no}` : "", normalizePortText(order.port), order.direction || ""].filter(Boolean).join("  "),
+        name: order.businessType || "中港吨车费",
+        remark: "",
         amount: Number(kenfaOrderRmbAmount(order, exchange).toFixed(2))
       });
     }
   });
-  return rows.length ? rows : [{ name: "China Hong Kong ton fare                              中港吨车费", remark: "", amount: 0 }];
+  return rows.filter((row) => Number(row.amount || 0) !== 0);
 }
 
 function kenfaMerge(worksheet, range) {
@@ -4178,7 +4214,7 @@ function addKenfaDailySheet(workbook, date, dayOrders, index, exchange = null) {
   kenfaSetCell(worksheet.getCell("A4"), "", { border: false });
 
   kenfaBlankMergedCell(worksheet, "A5:K5", { value: "INVOICE", bold: true, size: 22, align: "center" });
-  kenfaBlankMergedCell(worksheet, "A6:A6", { value: "Cargo owner        货主：", bold: true, size: 11 });
+  kenfaBlankMergedCell(worksheet, "A6:A6", { value: "货主：", bold: true, size: 11 });
   kenfaBlankMergedCell(worksheet, "B6:F6", { value: kenfaCargoOwner(dayOrders), bold: true, size: 11, align: "center" });
   kenfaBlankMergedCell(worksheet, "G6:I6", { value: "INV No.:", bold: true, size: 11, align: "right" });
   kenfaBlankMergedCell(worksheet, "J6:K6", { value: invoiceNo, color: "#ff0000", size: 11 });
@@ -4186,23 +4222,23 @@ function addKenfaDailySheet(workbook, date, dayOrders, index, exchange = null) {
   kenfaBlankMergedCell(worksheet, "E7:G7", { value: "" });
   kenfaBlankMergedCell(worksheet, "H7:J7", { value: "运输時間:", bold: true, size: 11 });
   kenfaSetCell(worksheet.getCell("K7"), kenfaFormatDateCn(date), { size: 11 });
-  kenfaSetCell(worksheet.getCell("A8"), "Port of departure            起運港：", { bold: true, size: 11 });
+  kenfaSetCell(worksheet.getCell("A8"), "起運港：", { bold: true, size: 11 });
   kenfaBlankMergedCell(worksheet, "B8:C8", { value: kenfaPortOfDeparture(first), size: 11 });
-  kenfaSetCell(worksheet.getCell("D8"), "Port of destination\n目的港：", { bold: true, size: 11 });
+  kenfaSetCell(worksheet.getCell("D8"), "目的港：", { bold: true, size: 11 });
   kenfaBlankMergedCell(worksheet, "E8:G8", { value: kenfaDestination(first), size: 11 });
-  kenfaBlankMergedCell(worksheet, "H8:J8", { value: "Delivery license plate\n交货车牌：", bold: true, size: 11 });
+  kenfaBlankMergedCell(worksheet, "H8:J8", { value: "交货车牌：", bold: true, size: 11 });
   kenfaSetCell(worksheet.getCell("K8"), first.plate || "", { size: 11 });
-  kenfaSetCell(worksheet.getCell("A9"), "number of packages\n件數：", { bold: true, size: 11 });
+  kenfaSetCell(worksheet.getCell("A9"), "件數：", { bold: true, size: 11 });
   kenfaBlankMergedCell(worksheet, "B9:C9", { value: first.quantity || "", size: 11 });
-  kenfaSetCell(worksheet.getCell("D9"), "number of packages\n重量(KG):", { bold: true, size: 11 });
-  kenfaBlankMergedCell(worksheet, "E9:G9", { value: first.weight || "", size: 11 });
-  kenfaBlankMergedCell(worksheet, "H9:J9", { value: "exchange rate\n汇率：", bold: true, size: 11 });
-  kenfaSetCell(worksheet.getCell("K9"), exchange?.mode === "hkd-to-rmb" ? Number(exchange.rate || 0) : "", { size: 11 });
-  kenfaSetCell(worksheet.getCell("A10"), "model of car          车型：", { bold: true, size: 11 });
+  kenfaSetCell(worksheet.getCell("D9"), "重量(KG):", { bold: true, size: 11 });
+  kenfaBlankMergedCell(worksheet, "E9:G9", { value: kenfaDayWeight(dayOrders), size: 11 });
+  kenfaBlankMergedCell(worksheet, "H9:J9", { value: "汇率：", bold: true, size: 11 });
+  kenfaSetCell(worksheet.getCell("K9"), exchange?.rate ? Number(exchange.rate) : "", { size: 11 });
+  kenfaSetCell(worksheet.getCell("A10"), "车型：", { bold: true, size: 11 });
   kenfaBlankMergedCell(worksheet, "B10:C10", { value: first.tonnage || first.transportMode || "", bold: true, size: 11 });
-  kenfaSetCell(worksheet.getCell("D10"), "Number of plates板", { bold: true, size: 11 });
+  kenfaSetCell(worksheet.getCell("D10"), "板数：", { bold: true, size: 11 });
   kenfaBlankMergedCell(worksheet, "E10:G10", { value: first.quantity || "", size: 11 });
-  kenfaBlankMergedCell(worksheet, "H10:J10", { value: "currency system币制", bold: true, size: 11 });
+  kenfaBlankMergedCell(worksheet, "H10:J10", { value: "币制：", bold: true, size: 11 });
   kenfaSetCell(worksheet.getCell("K10"), "人民币/RMB", { size: 11 });
 
   kenfaBlankMergedCell(worksheet, "A11:B11", { value: "費用名称:", bold: true, align: "center", size: 11 });
@@ -4276,20 +4312,20 @@ async function renderKenfaStatementXlsxBuffer(orders, title = "客户对账单",
   kenfaSetCell(summary.getCell("A5"), titleMonth, { bold: true, size: 22, align: "center", border: false });
   kenfaSetCell(summary.getCell("A6"), "TO：", { bold: true, size: 12, border: false });
   kenfaSetCell(summary.getCell("B6"), customer, { bold: true, size: 11, align: "center", border: false });
-  kenfaSetCell(summary.getCell("A7"), `statement No 对帐单号：KFJM${(endDate || todayInputValue()).replaceAll("-", "").slice(0, 6)}A`, { bold: true, size: 11, border: false });
+  kenfaSetCell(summary.getCell("A7"), `对帐单号：KFJM${(endDate || todayInputValue()).replaceAll("-", "").slice(0, 6)}A`, { bold: true, size: 11, border: false });
   kenfaSetCell(summary.getCell("F7"), `${startDate || "全部"}-${endDate || "全部"}`, { size: 11, border: false });
 
   const headerRow = 8;
   const headers = [
     "序号",
-    "Invoice date\n发票日期",
-    "Port of departure\n起运地",
-    "Port of destination\n目的地",
+    "发票日期",
+    "起运地",
+    "目的地",
     "",
     "",
-    "Invoice No\n发票编号",
+    "发票编号",
     "",
-    "Total amount（RMB）\n总金额(人民币)"
+    "总金额(人民币)"
   ];
   headers.forEach((value, index) => {
     kenfaSetCell(summary.getCell(headerRow, index + 1), value, { bold: true, align: "center", size: index === 8 ? 12 : 11 });
@@ -5140,7 +5176,8 @@ function normalizeExportOrderFee(fee = {}) {
     driverRole: String(fee.driverRole || fee.driver_role || "").trim(),
     driverName: String(fee.driverName || fee.driver_name || "").trim(),
     advanceAddress: String(fee.advanceAddress || fee.advance_address || "").trim(),
-    note: String(fee.note || "").trim()
+    note: String(fee.note || "").trim(),
+    remark: String(fee.remark || "").trim()
   };
 }
 
@@ -8855,7 +8892,7 @@ app.patch("/api/customers/:id", async (req, res) => {
       { key: "tripNoRequired", label: "车次号必须" },
       { key: "sixSheetNoRequired", label: "六联单号必须" },
       { key: "specialCustomer", label: "特殊客户" },
-      { key: "operatingUnitEnabled", label: "经营单位" },
+      { key: "operatingUnitEnabled", label: "经营单位必须" },
       { key: "newOldEnabled", label: "新/旧" },
       { key: "specialCarEnabled", label: "专车" },
       { key: "customsProductionCertificateFee", label: "产证地" },
@@ -12389,7 +12426,10 @@ app.patch("/api/orders/:no/status", async (req, res) => {
       : "NULL AS customer_trip_no_required",
     requirementSupport.sixSheetNoRequired
       ? "customers.six_sheet_no_required AS customer_six_sheet_no_required"
-      : "NULL AS customer_six_sheet_no_required"
+      : "NULL AS customer_six_sheet_no_required",
+    requirementSupport.operatingUnitEnabled
+      ? "customers.operating_unit_enabled AS customer_operating_unit_enabled"
+      : "NULL AS customer_operating_unit_enabled"
   ];
   if (hasSpecialCustomerColumn) {
     customerSelectColumns.push("customers.special_customer AS customer_special_customer");
@@ -12425,13 +12465,18 @@ app.patch("/api/orders/:no/status", async (req, res) => {
     res.status(409).json({ message: `${current.status}订单不能退回${status}` });
     return;
   }
-  if (!skipSignValidation && status === "已签收" && current.status !== "已审核") {
+  const isKenfaOrder = isKenfaCustomer({
+    short_name: current.customer_short_name,
+    name: current.customer
+  }, current.customer);
+  if ((!skipSignValidation || isKenfaOrder) && status === "已签收" && current.status !== "已审核") {
     const labels = await missingOrderSignRequiredFieldLabels(current, {
       id: current.customer_id,
       name: current.customer,
       short_name: current.customer_short_name,
       tripNoRequired: current.customer_trip_no_required,
-      sixSheetNoRequired: current.customer_six_sheet_no_required
+      sixSheetNoRequired: current.customer_six_sheet_no_required,
+      operatingUnitEnabled: current.customer_operating_unit_enabled
     });
     if (labels.length) {
       res.status(409).json({ message: orderSignRequiredMessage(labels) });
