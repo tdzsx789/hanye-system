@@ -1281,12 +1281,41 @@ function exportTemplateFooterItems(template = null, fallbackColor = "#64748b") {
 }
 
 // 客户对账单固定追加的收款信息（所有客户对账单模板，肯发专用在总表 sheet）。
-const STATEMENT_PAYEE_LINES = [
+// 人民币结算用国内账户；港币结算（总计港币合计）用香港账户。
+const STATEMENT_PAYEE_LINES_RMB = [
   "收款账号:",
   "户名:深圳市汉业国际货运代理有限公司",
   "账号:760164710106",
   "开户行:中国银行股份有限公司深圳皇岗支行"
 ];
+const STATEMENT_PAYEE_LINES_HKD = [
+  "香港账户信息：",
+  "Bank name: HSBC Hong Kong",
+  "Bank Address: 1 Queen's Road Central, Hong Kong",
+  "Bank Code: 004",
+  "SWIFT: HSBCHKHHHKH",
+  "公司名: HANYE INTERNATIONAL LOGISTICS (HONG KONG) CO., LIMITED",
+  "香港汇丰银行账号:040266918838"
+];
+const STATEMENT_PAYEE_LINES = STATEMENT_PAYEE_LINES_RMB;
+
+function statementPayeeLinesForCurrency(currency = "") {
+  const text = String(currency || "").trim();
+  if (text === "港币" || /^HKD$/i.test(text) || text.includes("港币")) {
+    return STATEMENT_PAYEE_LINES_HKD;
+  }
+  return STATEMENT_PAYEE_LINES_RMB;
+}
+
+function statementPayeeLinesForExport(orders = [], exchange = null) {
+  const summary = exportSettlementTotalSummary(orders, exchange);
+  if (summary?.currency) return statementPayeeLinesForCurrency(summary.currency);
+  for (const order of orders) {
+    const settlement = String(order?.settlementCurrency || order?.settlement_currency || "").trim();
+    if (settlement) return statementPayeeLinesForCurrency(settlement);
+  }
+  return STATEMENT_PAYEE_LINES_RMB;
+}
 
 function isSystemGeneratedExportFooterText(value = "") {
   const text = String(value || "").replace(/\s+/g, " ").trim();
@@ -1297,10 +1326,17 @@ function isSystemGeneratedExportFooterText(value = "") {
     : text;
   const compact = stripped.replace(/\s+/g, "");
   const looksLikeGeneratedPayee =
-    compact.includes("收款账号")
-    && /户名[:：]/.test(compact)
-    && /账号[:：]/.test(compact)
-    && /开户行[:：]/.test(compact);
+    (
+      compact.includes("收款账号")
+      && /户名[:：]/.test(compact)
+      && /账号[:：]/.test(compact)
+      && /开户行[:：]/.test(compact)
+    )
+    || (
+      compact.includes("香港账户信息")
+      && /HSBCHongKong/i.test(compact)
+      && /HSBCHKHHHKH/i.test(compact)
+    );
   return stripped === "制表人：{{user}}" || stripped === "制表人:{{user}}" || looksLikeGeneratedPayee;
 }
 
@@ -4164,12 +4200,14 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
   let footerRowNumber = tableStartRow + rows.length + 2;
   if (isCustomerStatement) {
     // 客户对账单固定收款信息：放在现有所有行的下一行，一个单元格内换行显示。
+    // 港币结算显示香港账户，人民币结算显示国内账户。
+    const payeeLines = statementPayeeLinesForExport(exportOrders, exchange);
     const payeeRow = worksheet.getRow(tableStartRow + rows.length + 1);
     const payeeCell = payeeRow.getCell(1);
-    payeeCell.value = STATEMENT_PAYEE_LINES.join("\n");
+    payeeCell.value = payeeLines.join("\n");
     payeeCell.font = { name: "Microsoft YaHei", size: 10, bold: false, color: { argb: "FFFF0000" } };
     payeeCell.alignment = { vertical: "middle", horizontal: "left", wrapText: true };
-    payeeRow.height = STATEMENT_PAYEE_LINES.length * 18 + 6;
+    payeeRow.height = payeeLines.length * 18 + 6;
     if (mergeEndColumn > 1) worksheet.mergeCells(payeeRow.number, 1, payeeRow.number, Math.min(mergeEndColumn, 4));
     footerRowNumber = payeeRow.number + 2;
   }
@@ -4537,12 +4575,14 @@ async function renderKenfaStatementXlsxBuffer(orders, title = "客户对账单",
       result: Number(item.total || 0)
     }, { align: "right", numFmt: "#,##0.00", size: 11, color: index === 10 ? "#ff0000" : "#000000" });
   });
-  const totalRow = Math.max(headerRow + 1 + dailySummaries.length, 24);
+  // 合计紧跟最后一笔明细，不再固定落到第 24 行，避免中间空一大截。
+  const lastDetailRow = headerRow + dailySummaries.length;
+  const totalRow = lastDetailRow > headerRow ? lastDetailRow + 1 : headerRow + 1;
   kenfaMerge(summary, `A${totalRow}:H${totalRow}`);
   kenfaSetCell(summary.getCell(totalRow, 1), "", { bold: true, align: "right" });
   const summaryTotal = dailySummaries.reduce((sum, item) => sum + Number(item.total || 0), 0);
   kenfaSetCell(summary.getCell(totalRow, 9), {
-    formula: `SUM(I${headerRow + 1}:I${totalRow - 1})`,
+    formula: lastDetailRow > headerRow ? `SUM(I${headerRow + 1}:I${lastDetailRow})` : "0",
     result: summaryTotal
   }, { bold: true, align: "right", numFmt: "#,##0.00", size: 12 });
   const vatRow = totalRow + 1;
@@ -4554,12 +4594,14 @@ async function renderKenfaStatementXlsxBuffer(orders, title = "客户对账单",
     result: summaryTotal * 1.06
   }, { bold: true, align: "right", numFmt: "#,##0.00", size: 12, border: false });
   // 收款信息：放在总表现有所有行（含税价格行）的下一行
+  // 港币结算显示香港账户，人民币结算显示国内账户。
+  const payeeLines = statementPayeeLinesForExport(orders, exchange);
   const payeeRowNumber = vatRow + 1;
   kenfaMerge(summary, `A${payeeRowNumber}:F${payeeRowNumber}`);
-  kenfaSetCell(summary.getCell(payeeRowNumber, 1), STATEMENT_PAYEE_LINES.join("\n"), {
+  kenfaSetCell(summary.getCell(payeeRowNumber, 1), payeeLines.join("\n"), {
     size: 10, color: "#ff0000", border: false, wrap: true
   });
-  summary.getRow(payeeRowNumber).height = STATEMENT_PAYEE_LINES.length * 18 + 6;
+  summary.getRow(payeeRowNumber).height = payeeLines.length * 18 + 6;
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 
@@ -7681,8 +7723,9 @@ function templateContentType(content = "") {
 function mapTemplate(row, options = {}) {
   const contentType = templateContentType(row.content);
   const includeContent = options.includeContent !== false;
+  const numericId = Number(row.id);
   return {
-    id: row.id,
+    id: Number.isFinite(numericId) ? numericId : row.id,
     name: row.name,
     format: row.format,
     description: row.description,
@@ -14835,17 +14878,30 @@ app.post("/api/templates", async (req, res) => {
     res.status(400).json({ message: `${item.name}为系统保留模板，不能新建` });
     return;
   }
-  const duplicate = await db.prepare("SELECT id FROM templates WHERE name = ? AND deleted_at IS NULL").get(item.name);
+  // 唯一约束 templates_name_key 覆盖已删除记录，查重不能只看 deleted_at IS NULL。
+  const duplicate = await db.prepare("SELECT id, deleted_at FROM templates WHERE name = ?").get(item.name);
   if (duplicate) {
-    res.status(409).json({ message: "模板名称已存在" });
+    res.status(409).json({
+      message: duplicate.deleted_at
+        ? "模板名称已存在于回收站，请换一个名称或先从回收站清理同名模板"
+        : "模板名称已存在"
+    });
     return;
   }
-  const result = await db.prepare(`
-    INSERT INTO templates (name, format, description, content, updated_at)
-    VALUES (@name, @format, @description, @content, CURRENT_TIMESTAMP)
-  `).run(item);
-  await writeAudit("create", "template", String(result.lastInsertId), item.name);
-  res.status(201).json(mapTemplate(await db.prepare("SELECT * FROM templates WHERE id = ?").get(result.lastInsertId)));
+  try {
+    const result = await db.prepare(`
+      INSERT INTO templates (name, format, description, content, updated_at)
+      VALUES (@name, @format, @description, @content, CURRENT_TIMESTAMP)
+    `).run(item);
+    await writeAudit("create", "template", String(result.lastInsertId), item.name);
+    res.status(201).json(mapTemplate(await db.prepare("SELECT * FROM templates WHERE id = ?").get(result.lastInsertId)));
+  } catch (error) {
+    if (String(error?.code || "") === "23505" || /templates_name_key|duplicate key/i.test(String(error?.message || ""))) {
+      res.status(409).json({ message: "模板名称已存在" });
+      return;
+    }
+    throw error;
+  }
 });
 
 app.patch("/api/templates/:id", async (req, res) => {
@@ -14877,32 +14933,45 @@ app.patch("/api/templates/:id", async (req, res) => {
     res.status(400).json({ message: `${item.name}为系统保留模板，不能修改` });
     return;
   }
-  const duplicate = await db.prepare("SELECT id FROM templates WHERE name = ? AND id != ? AND deleted_at IS NULL").get(item.name, id);
+  // 唯一约束 templates_name_key 覆盖已删除记录，查重不能只看 deleted_at IS NULL。
+  const duplicate = await db.prepare("SELECT id, deleted_at FROM templates WHERE name = ? AND id != ?").get(item.name, id);
   if (duplicate) {
-    res.status(409).json({ message: "模板名称已存在" });
+    res.status(409).json({
+      message: duplicate.deleted_at
+        ? "模板名称已存在于回收站，请换一个名称或先从回收站清理同名模板"
+        : "模板名称已存在"
+    });
     return;
   }
-  const result = await db.prepare(`
-    UPDATE templates
-    SET name = @name, format = @format, description = @description,
-        content = @content, updated_at = CURRENT_TIMESTAMP
-    WHERE id = @id AND deleted_at IS NULL
-  `).run(item);
-  if (result.changes === 0) {
-    res.status(404).json({ message: "模板不存在或已删除" });
-    return;
+  try {
+    const result = await db.prepare(`
+      UPDATE templates
+      SET name = @name, format = @format, description = @description,
+          content = @content, updated_at = CURRENT_TIMESTAMP
+      WHERE id = @id AND deleted_at IS NULL
+    `).run(item);
+    if (result.changes === 0) {
+      res.status(404).json({ message: "模板不存在或已删除" });
+      return;
+    }
+    await writeAudit(
+      "update",
+      "template",
+      String(id),
+      auditChangeSummary(current, item, [
+        { key: "name", label: "模板名称" },
+        { key: "description", label: "说明" },
+        { key: "content", label: "内容", formatBefore: (value) => auditPreviewValue(value, 18), formatAfter: (value) => auditPreviewValue(value, 18) }
+      ], { entityLabel: "模板" })
+    );
+    res.json(mapTemplate(await db.prepare("SELECT * FROM templates WHERE id = ?").get(id)));
+  } catch (error) {
+    if (String(error?.code || "") === "23505" || /templates_name_key|duplicate key/i.test(String(error?.message || ""))) {
+      res.status(409).json({ message: "模板名称已存在" });
+      return;
+    }
+    throw error;
   }
-  await writeAudit(
-    "update",
-    "template",
-    String(id),
-    auditChangeSummary(current, item, [
-      { key: "name", label: "模板名称" },
-      { key: "description", label: "说明" },
-      { key: "content", label: "内容", formatBefore: (value) => auditPreviewValue(value, 18), formatAfter: (value) => auditPreviewValue(value, 18) }
-    ], { entityLabel: "模板" })
-  );
-  res.json(mapTemplate(await db.prepare("SELECT * FROM templates WHERE id = ?").get(id)));
 });
 
 app.delete("/api/templates/:id", async (req, res) => {

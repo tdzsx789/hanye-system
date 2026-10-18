@@ -8219,6 +8219,8 @@ function driverCostCenterFeeBreakdown(order = {}, driver = null) {
   const rule = driverCostCenterRuleForOrder(order, driver);
   return driverCostCenterOrderFeeRows(order)
     .reduce((sum, fee) => {
+      // 订单成本归属不是该司机时（如吉华仓库/供应商/公司承担），不计入司机成本。
+      if (!feeCostAssigneeBelongsToDriver(order, fee, driver)) return sum;
       const detail = driverCostCenterFeeCostForRule(rule, fee, driver);
       if (
         !detail.item
@@ -11291,6 +11293,7 @@ function driverCostCenterFeeDetailText(order, feeName, driver) {
   const rule = driverCostCenterRuleForOrder(order, driver);
   const details = driverCostCenterOrderFeeRows(order)
     .filter((fee) => String(fee?.name || "").trim() === targetName)
+    .filter((fee) => feeCostAssigneeBelongsToDriver(order, fee, driver))
     .map((fee) => driverCostCenterFeeCostForRule(rule, fee, driver))
     .filter((detail) =>
       detail.item
@@ -11405,6 +11408,8 @@ function financeWageDetailFeeColumns(row) {
       const name = String(fee?.name || "").trim();
       const label = financeWageFeeColumnLabel(name);
       if (!name) return;
+      // 明细列也按订单成本归属过滤，避免吉华仓库/供应商等非司机归属出现在工资明细。
+      if (!feeCostAssigneeBelongsToDriver(order, fee, row?.driver)) return;
       const isDriverAdvance = isAdvanceFee(fee)
         && advanceFeesForOrder(order, row?.driver).includes(fee);
       const item = feeItemForFee(fee);
@@ -25840,7 +25845,9 @@ function fileSizeText(size) {
 }
 
 function keepSelection(previousValue, rows, key, fallback = "") {
-  return rows.some((item) => item?.[key] === previousValue) ? previousValue : fallback;
+  if (previousValue === undefined || previousValue === null || previousValue === "") return fallback;
+  const matched = rows.find((item) => String(item?.[key]) === String(previousValue));
+  return matched ? matched[key] : fallback;
 }
 
 function dataLoadActiveScope(moduleScope = "all") {
@@ -26273,7 +26280,10 @@ async function loadDatabaseData(options = {}) {
     }
     editFreightRate(freightRateData.find((item) => item.id === selectedFreightRateId.value) || freightRateData[0] || null, { silent: true });
     editDriverWageRule(driverWageRuleData.find((item) => item.id === selectedDriverWageRuleId.value) || driverWageRuleData.find((item) => item.driverId === selectedDriverId.value) || null);
-    editTemplate(visibleTemplateData.find((item) => item.id === selectedTemplateId.value) || visibleTemplateData[0] || null);
+    // 模板编辑弹窗打开时不要重置 templateForm，否则复制后保存会丢掉 id 又新建一份。
+    if (!templateModalOpen.value) {
+      editTemplate(visibleTemplateData.find((item) => String(item.id) === String(selectedTemplateId.value)) || visibleTemplateData[0] || null);
+    }
     editRule(ruleData.find((item) => item.id === selectedRuleId.value) || null);
     editMaster(masterData.find((item) => item.id === selectedMasterId.value) || masterData[0] || null);
     editAccount(accountData.find((item) => item.id === selectedAccountId.value) || accountData[0] || null);
@@ -30330,18 +30340,25 @@ function financeWageStatementFeeLineKey(name = "", currency = "HKD") {
   return financeWageStatementProjectKey(name, currency);
 }
 
-function financeWageStatementFeeShouldApplyToDriver(order = {}, fee = {}, driver = null) {
-  if (!driver?.name) return true;
-  if (isCompanyCoveredFee(fee)) return true;
-  const names = orderFeeAssigneeNames(fee, order);
-  if (names.includes(driver.name)) return true;
-  const source = driverCostCenterSourceForDriver(driver);
-  const item = feeItemForFee(fee);
-  if (item && feeItemIncludesCostSource(item, source)) return true;
-  if (isCrossBorderFreightFee(fee)) {
-    return crossBorderFreightDriverRoles(order, fee).includes(source);
+function feeCostAssigneeBelongsToDriver(order = {}, fee = {}, driver = null) {
+  if (!driver?.name || !fee) return false;
+  // 公司承担 / 供应商 / 仓库等非司机归属，一律不进司机工资单。
+  if (isCompanyCoveredFee(fee)) return false;
+  if (isAdvanceFee(fee)) {
+    return advanceFeesForOrder(order, driver).includes(fee);
   }
-  return false;
+  const names = orderFeeAssigneeNames(fee, order)
+    .map((name) => String(name || "").trim())
+    .filter(Boolean);
+  if (!names.length) return false;
+  if (names.includes("公司承担")) return false;
+  return names.includes(String(driver.name || "").trim());
+}
+
+function financeWageStatementFeeShouldApplyToDriver(order = {}, fee = {}, driver = null) {
+  // 只看订单里的成本归属：只有归属该司机才进入工资单。
+  // 不再因为收费项目勾了“香港司机/大陆骑师”就自动带入。
+  return feeCostAssigneeBelongsToDriver(order, fee, driver);
 }
 
 function financeWageStatementFeeHasStoredCost(order = {}, fee = {}) {
@@ -30388,24 +30405,30 @@ function financeWageStatementSavedCostLines(order = {}, driver = null) {
           .filter((part) => {
             const partDriver = String(part.driverName || part.driver_name || "").trim();
             if (partDriver && driver?.name) return partDriver === driver.name;
+            // 拆分成本若未标明司机名，则按角色匹配；归属过滤已在上面完成。
             const role = normalizeCostCenterSourceLabel(part.role || "");
-            return isCompanyCoveredFee(fee) || !driver?.name || role === source;
+            return !driver?.name || role === source;
           })
           .forEach((part) => pushLine(part.amount, part.currency));
-        return lines;
+        if (lines.length) return lines;
       }
 
       const costHKD = normalizeOrderFeeCostComponent(fee.costHKD ?? fee.cost_hkd ?? fee._costHKD ?? fee._costHkd);
       const costRMB = normalizeOrderFeeCostComponent(fee.costRMB ?? fee.cost_rmb ?? fee._costRMB ?? fee._costRmb);
       if (costHKD !== null || costRMB !== null) {
-        if (costHKD !== null && (source !== "大陆骑师" || isCompanyCoveredFee(fee))) pushLine(costHKD, "港币");
-        if (costRMB !== null && (source === "大陆骑师" || isCompanyCoveredFee(fee))) pushLine(costRMB, "人民币");
-        return lines;
+        // 按费用实际结算/成本币种入账，不再按司机角色把 RMB 强行丢掉。
+        // 否则香港司机工资单里“大陆过磅费/停车费”等 RMB 项目会进不了杂费合计RMB。
+        if (costHKD !== null) pushLine(costHKD, "港币");
+        if (costRMB !== null) pushLine(costRMB, "人民币");
+        if (lines.length) return lines;
       }
 
       const savedCost = normalizeFeeCost(fee);
       if (savedCost !== null) {
-        pushLine(savedCost, fee.costCurrency || fee.cost_currency || fee._costCurrency || item?.currency || fee.currency || "港币");
+        pushLine(
+          savedCost,
+          fee.costCurrency || fee.cost_currency || fee._costCurrency || item?.currency || fee.currency || "港币"
+        );
       }
       return lines;
     });
@@ -32428,8 +32451,14 @@ function markTemplateSnapshot(payload = templateForm) {
 
 function applyTemplateServerItem(item) {
   templateAutosaveApplying = true;
-  Object.assign(templateForm, item);
-  markTemplateSnapshot(item);
+  Object.assign(templateForm, {
+    id: item?.id ?? null,
+    name: item?.name || "",
+    format: "通用",
+    description: item?.description || "",
+    content: item?.content || templateForm.content || ""
+  });
+  markTemplateSnapshot(templateForm);
   nextTick(() => {
     templateAutosaveApplying = false;
   });
@@ -32447,10 +32476,16 @@ async function saveTemplate() {
   if (templateEditorLoading.value) return;
   try {
     const payload = templateDesignerPayload();
+    // 弹窗编辑中若 id 被实时刷新冲掉，回退到当前选中模板，避免保存时又走新建。
+    if (!payload.id && selectedTemplateId.value) {
+      payload.id = selectedTemplateId.value;
+      templateForm.id = selectedTemplateId.value;
+    }
     const item = await templatesApi.saveTemplate(payload.id, payload);
-    templateRows.value = templateForm.id
-      ? templateRows.value.map((row) => row.id === item.id ? item : row)
-      : [item, ...templateRows.value];
+    const editingExisting = Boolean(payload.id);
+    templateRows.value = editingExisting
+      ? templateRows.value.map((row) => String(row.id) === String(item.id) ? item : row)
+      : [item, ...templateRows.value.filter((row) => String(row.id) !== String(item.id))];
     applyTemplateServerItem(item);
     selectedTemplateId.value = item.id;
     notify("模板已保存");
@@ -32683,9 +32718,12 @@ async function closeTemplateEditor() {
   templateModalOpen.value = false;
 }
 
-function nextTemplateCopyName(name) {
+function nextTemplateCopyName(name, reservedNames = []) {
   const baseName = `${name || "未命名模板"} 副本`;
-  const names = new Set(templateRows.value.map((item) => item.name));
+  const names = new Set([
+    ...templateRows.value.map((item) => item.name),
+    ...reservedNames
+  ]);
   if (!names.has(baseName)) return baseName;
   let index = 2;
   while (names.has(`${baseName} ${index}`)) index += 1;
@@ -32698,16 +32736,34 @@ async function duplicateTemplate(item) {
   }
   try {
     const sourceItem = await ensureTemplateContent(item);
-    const payload = {
-      name: nextTemplateCopyName(sourceItem.name),
-      format: "通用",
-      description: sourceItem.description || "",
-      content: sourceItem.content || ""
-    };
-    const copied = await templatesApi.createTemplate(payload);
-    templateRows.value = [copied, ...templateRows.value];
+    const reservedNames = [];
+    let copied = null;
+    let lastError = null;
+    // 回收站里的同名模板也会撞唯一约束；本地列表看不到它们，冲突时自动换名重试。
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const payload = {
+        name: nextTemplateCopyName(sourceItem.name, reservedNames),
+        format: "通用",
+        description: sourceItem.description || "",
+        content: sourceItem.content || ""
+      };
+      try {
+        copied = await templatesApi.createTemplate(payload);
+        break;
+      } catch (error) {
+        lastError = error;
+        if (Number(error?.status) !== 409) throw error;
+        reservedNames.push(payload.name);
+      }
+    }
+    if (!copied?.id) throw lastError || new Error("复制模板失败：服务端未返回模板 ID");
+    templateRows.value = [copied, ...templateRows.value.filter((row) => String(row.id) !== String(copied.id))];
     selectedTemplateId.value = copied.id;
-    openTemplateEditor(copied);
+    await openTemplateEditor(copied);
+    if (!templateForm.id) {
+      templateForm.id = copied.id;
+      templateForm.name = copied.name || templateForm.name;
+    }
     notify(`已复制模板：${copied.name}`);
   } catch (error) {
     notify(error.message);
