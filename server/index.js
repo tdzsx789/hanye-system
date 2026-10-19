@@ -1120,6 +1120,7 @@ const ORDER_EXPORT_CHARGE_NOTE_COLUMN = { key: "__chargeNote", label: "备注", 
 const ORDER_EXPORT_OPERATING_UNIT_COLUMN = { key: "operatingUnit", label: "经营单位", width: 96, fontSize: 8, system: true };
 const ORDER_EXPORT_NEW_OLD_COLUMN = { key: "newOld", label: "新/旧", width: 52, fontSize: 8, system: true };
 const ORDER_EXPORT_SPECIAL_CAR_COLUMN = { key: "specialCar", label: "专车", width: 52, fontSize: 8, system: true };
+const ORDER_EXPORT_SIX_SHEET_NO_COLUMN = { key: "sixSheetNo", label: "六联单号", width: 148, fontSize: 8, system: true };
 const EXPORT_FEE_NAME_ALIASES = new Map([
   ["代垫香港政府税金", "香港政府税金"]
 ]);
@@ -2393,6 +2394,12 @@ function exportOrderFieldValue(order = {}, key = "", column = {}) {
   if (key === "plate" || key === "vehiclePlate" || key === "vehicle_plate" || key === "carPlate" || key === "car_plate" || key === "车牌" || label === "车牌") {
     return firstExportFieldValue(order?.plate, order?.vehiclePlate, order?.vehicle_plate, order?.carPlate, order?.car_plate);
   }
+  if (key === "sixSheetNo" || key === "six_sheet_no" || key === "六联单号" || key === "六连单号" || label === "六联单号" || label === "六连单号") {
+    return orderSixSheetNoValue(order);
+  }
+  if (key === "tripNo" || key === "trip_no" || key === "车次号" || label === "车次号") {
+    return firstExportFieldValue(order?.tripNo, order?.trip_no);
+  }
   return order?.[key];
 }
 
@@ -2943,6 +2950,44 @@ function insertOrderAttributeExportColumn(columns = [], columnConfig = {}, after
   return nextColumns;
 }
 
+function orderSixSheetNoValue(order = {}) {
+  return textValue(order?.sixSheetNo || order?.six_sheet_no).trim();
+}
+
+function ordersHaveSixSheetNo(orders = []) {
+  return orders.some((order) => Boolean(orderSixSheetNoValue(order)));
+}
+
+function isMainlandHongKongFreightExportColumn(column = {}) {
+  const name = exportFeeColumnName(column) || exportColumnBaseLabel(column);
+  return name === "中港运费";
+}
+
+function insertSixSheetNoExportColumn(columns = []) {
+  const nextColumns = [...columns];
+  const existingIndex = nextColumns.findIndex((column) =>
+    textValue(column?.key) === ORDER_EXPORT_SIX_SHEET_NO_COLUMN.key
+    || exportColumnBaseLabel(column) === ORDER_EXPORT_SIX_SHEET_NO_COLUMN.label
+  );
+  const existingColumn = existingIndex >= 0
+    ? nextColumns.splice(existingIndex, 1)[0]
+    : { ...ORDER_EXPORT_SIX_SHEET_NO_COLUMN };
+  const freightIndex = nextColumns.findIndex((column) => isMainlandHongKongFreightExportColumn(column));
+  const insertAt = freightIndex >= 0
+    ? freightIndex
+    : (() => {
+      const firstFeeIndex = nextColumns.findIndex((column) => isExportFeeItemColumn(column));
+      return firstFeeIndex >= 0 ? firstFeeIndex : nextColumns.length;
+    })();
+  nextColumns.splice(insertAt, 0, {
+    ...ORDER_EXPORT_SIX_SHEET_NO_COLUMN,
+    ...existingColumn,
+    key: ORDER_EXPORT_SIX_SHEET_NO_COLUMN.key,
+    label: ORDER_EXPORT_SIX_SHEET_NO_COLUMN.label
+  });
+  return nextColumns;
+}
+
 function exportTemplateColumnHasDisplayValue(column = {}, orders = [], options = {}) {
   if (isExportFeeItemColumn(column)) return feeColumnHasDisplayValue(column, orders);
   return orders.some((order, index) => {
@@ -3005,6 +3050,10 @@ function exportColumnsForOrders(templatePayload = null, orders = [], options = {
   }
   if (options.includeCustomerOrderAttributeColumns && ordersHaveSpecialCar(orders)) {
     exportBodyColumns = insertOrderAttributeExportColumn(exportBodyColumns, ORDER_EXPORT_SPECIAL_CAR_COLUMN, ["newOld", "operatingUnit", "customer"]);
+  }
+  // 客户对账单：只要本批订单有六联单号，就把该列放到“中港运费”前面；没有则不插入。
+  if (options.includeSixSheetNoColumn && ordersHaveSixSheetNo(orders)) {
+    exportBodyColumns = insertSixSheetNoExportColumn(exportBodyColumns);
   }
   return [
     sequenceColumn || { ...ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN },
@@ -3166,6 +3215,7 @@ async function renderOrdersCsv(orders, title = "订单导出", templatePayload =
     includeChargeNoteColumn: isCustomerStatement,
     includeOperatingUnitColumn: isCustomerStatement,
     includeCustomerOrderAttributeColumns: isCustomerStatement,
+    includeSixSheetNoColumn: isCustomerStatement,
     includeLinkedCustomsColumns: isCustomerStatement,
     hideEmptyTemplateColumns: isCustomerStatement || isSupplierStatement,
     includeStatementRequiredColumns: isCustomerStatement || isSupplierStatement
@@ -3216,6 +3266,7 @@ function isExportFeeItemColumn(column = {}) {
 
 function exportColumnMinimumWidth(column = {}) {
   const key = textValue(column.key);
+  if (key === "sixSheetNo" || key === "linkedCustomsSixSheetNo") return 148;
   if (key === ORDER_EXPORT_CHARGE_NOTE_COLUMN.key) return 104;
   const isFeeColumn = isExportFeeItemColumn(column);
   const widthUnits = Math.max(
@@ -3237,7 +3288,8 @@ function exportColumnMaxWidth(column = {}) {
   if (["linkedCustomsDirection"].includes(key)) return 50;
   if (["quantity", "weight", "status"].includes(key)) return 68;
   if (["plate", "driver", "hkDriver", "mainlandDriver"].includes(key)) return 82;
-  if (["dispatchNo", "no", "sixSheetNo", "tripNo"].includes(key)) return 98;
+  if (["sixSheetNo", "linkedCustomsSixSheetNo"].includes(key)) return 168;
+  if (["dispatchNo", "no", "tripNo"].includes(key)) return 98;
   if (["customer", "supplier", "operatingUnit"].includes(key)) return 138;
   if (["loading", "unloading"].includes(key)) return 132;
   if (["linkedCustomsDeclarationNo", "linkedCustomsSixSheetNo"].includes(key)) return 98;
@@ -3303,8 +3355,16 @@ function excelColumnWidthForExport(column = {}, headerValue = "", rowValues = []
   const bodyWidth = rowValues.reduce((max, value) => {
     return Math.max(max, cellDisplayWidth(value) * fontScale);
   }, 0);
+  const key = textValue(column?.key);
+  const label = exportColumnBaseLabel(column);
+  // 六联单号经常是 18 位数字；fluid 模板按内容估算会偏窄，导致末尾被截断。
+  const isSixSheetNoColumn = key === "sixSheetNo"
+    || key === "linkedCustomsSixSheetNo"
+    || label === "六联单号"
+    || label === "六连单号";
   const maxWidth = template?.orientation === "fluid" ? 72 : 46;
-  return Math.max(6, Math.min(maxWidth, Math.ceil(Math.max(headerWidth, bodyWidth) + 2)));
+  const minWidth = isSixSheetNoColumn ? Math.max(22, Math.ceil(18 * fontScale + 4)) : 6;
+  return Math.max(minWidth, Math.min(maxWidth, Math.ceil(Math.max(headerWidth, bodyWidth) + 2)));
 }
 
 function excelCellLineCount(value, excelColumnWidth = 12) {
@@ -3918,6 +3978,7 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
     includeChargeNoteColumn: isCustomerStatement,
     includeOperatingUnitColumn: isCustomerStatement,
     includeCustomerOrderAttributeColumns: isCustomerStatement,
+    includeSixSheetNoColumn: isCustomerStatement,
     includeLinkedCustomsColumns: isCustomerStatement,
     hideEmptyTemplateColumns: isCustomerStatement || isSupplierStatement,
     includeStatementRequiredColumns: isCustomerStatement || isSupplierStatement
@@ -4613,6 +4674,7 @@ async function renderOrdersExcelHtml(orders, title = "订单导出", templatePay
   const columns = exportColumnsForOrders(templatePayload, exportOrders, {
     includeChargeNoteColumn: isCustomerStatement,
     includeOperatingUnitColumn: isCustomerStatement,
+    includeSixSheetNoColumn: isCustomerStatement,
     includeLinkedCustomsColumns: isCustomerStatement,
     hideEmptyTemplateColumns: isCustomerStatement || isSupplierStatement,
     includeStatementRequiredColumns: isCustomerStatement || isSupplierStatement
@@ -4771,9 +4833,23 @@ function sumNumericRowColumn(rows = [], columnIndex = 0) {
   return Number(rows.reduce((sum, row) => sum + Number(row?.[columnIndex] ?? 0), 0).toFixed(2));
 }
 
-function setDriverWageNumberFormat(cell) {
+function setDriverWageNumberFormat(cell, prefix = "") {
   if (!cell) return;
-  cell.numFmt = "0";
+  const raw = cell.value;
+  let number = null;
+  if (raw && typeof raw === "object" && Object.prototype.hasOwnProperty.call(raw, "result")) {
+    number = Number(raw.result);
+  } else if (raw !== null && raw !== undefined && raw !== "") {
+    number = Number(raw);
+  } else {
+    // 空单元格不要套小数格式，避免 Excel 显示成 "0."
+    cell.numFmt = prefix ? `"${prefix} "#,##0` : "#,##0";
+    return;
+  }
+  // 0 / 整数用 #,##0；只有真有小数时才用 #.##，避免 200. / 0.
+  const isInteger = Number.isFinite(number) && Math.abs(number - Math.round(number)) < 1e-9;
+  const pattern = (!Number.isFinite(number) || isInteger) ? "#,##0" : "#,##0.##";
+  cell.numFmt = prefix ? `"${prefix} "${pattern}` : pattern;
 }
 
 function setDriverWageTextFormat(cell) {
@@ -4999,7 +5075,7 @@ async function renderDynamicDriverWageSettlementXlsxBuffer(payload = {}, templat
         const currency = column.currency === "RMB" ? "RMB" : "HKD";
         const formula = excelSumCellFormula(projectColumnIndexesByCurrency.get(currency) || [], rowNumber);
         cell.value = { formula, result: rowMiscTotal(values, currency) };
-        cell.numFmt = "#,##0.##";
+        setDriverWageNumberFormat(cell);
         return;
       }
       if (column.kind === "date" && incoming) {
@@ -5012,7 +5088,7 @@ async function renderDynamicDriverWageSettlementXlsxBuffer(payload = {}, templat
       }
       cell.value = incoming;
       if (column.kind === "project" || column.kind === "freightTotal") {
-        cell.numFmt = "#,##0.##";
+        setDriverWageNumberFormat(cell);
       } else {
         setDriverWageTextFormat(cell);
       }
@@ -5039,19 +5115,19 @@ async function renderDynamicDriverWageSettlementXlsxBuffer(payload = {}, templat
       const formula = excelSumColumnFormula(index, dataStartRow, dataEndReferenceRow);
       const result = rows.reduce((sum, values) => sum + numericValue(values[index]), 0);
       cell.value = { formula, result };
-      cell.numFmt = "#,##0.##";
+      setDriverWageNumberFormat(cell);
     } else if (column.kind === "miscTotal") {
       const currency = column.currency === "RMB" ? "RMB" : "HKD";
       const formula = excelSumColumnFormula(index, dataStartRow, dataEndReferenceRow);
       const result = rows.reduce((sum, values) => sum + rowMiscTotal(values, currency), 0);
       cell.value = { formula, result };
-      cell.numFmt = "#,##0.##";
+      setDriverWageNumberFormat(cell);
     } else if (column.kind === "freightTotal") {
       const currency = column.currency === "RMB" ? "RMB" : "HKD";
       const formula = excelSumColumnFormula(index, dataStartRow, dataEndReferenceRow);
       const result = rows.reduce((sum, values) => sum + rowFreightTotal(values, currency), 0);
       cell.value = { formula, result };
-      cell.numFmt = "#,##0.##";
+      setDriverWageNumberFormat(cell);
     } else {
       cell.value = null;
       setDriverWageTextFormat(cell);
@@ -5141,7 +5217,7 @@ async function renderDynamicDriverWageSettlementXlsxBuffer(payload = {}, templat
     formula: payableFormula,
     result: payableTotal
   };
-  payableCell.numFmt = '"HKD "#,##0.##';
+  setDriverWageNumberFormat(payableCell, "HKD");
   payableCell.alignment = { horizontal: "center", vertical: "middle", wrapText: false };
   if (lastColumn >= 4) {
     worksheet.mergeCells(`D${footerRow2}:${lastColumnLetter}${footerRow2}`);
@@ -5499,6 +5575,7 @@ async function renderOrdersPdf(res, orders, title = "订单导出", templatePayl
     includeChargeNoteColumn: isCustomerStatement,
     includeOperatingUnitColumn: isCustomerStatement,
     includeCustomerOrderAttributeColumns: isCustomerStatement,
+    includeSixSheetNoColumn: isCustomerStatement,
     includeLinkedCustomsColumns: isCustomerStatement,
     hideEmptyTemplateColumns: isCustomerStatement || isSupplierStatement,
     includeStatementRequiredColumns: isCustomerStatement || isSupplierStatement
