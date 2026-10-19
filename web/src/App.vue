@@ -30578,6 +30578,11 @@ function financeWageStatementCustomerName(order = {}) {
     || customerName;
 }
 
+function financeWageStatementMainlandRiderName(order = {}) {
+  if (!orderIsDoubleDriverMode(order)) return "";
+  return orderRelayDriverPair(order).mainland || String(order?.mainlandDriver || "").trim();
+}
+
 function financeWageStatementRows(row = {}, projectColumns = [], hasFreightRMB = false) {
   const driver = row?.driver || {};
   return financeWageStatementOrders(row).map((order, index) => {
@@ -30598,6 +30603,7 @@ function financeWageStatementRows(row = {}, projectColumns = [], hasFreightRMB =
       Number(freight.hkd || 0) || "",
       ...(hasFreightRMB ? [Number(freight.rmb || 0) || ""] : []),
       driver.name || orderDetailDriverText(order),
+      financeWageStatementMainlandRiderName(order),
       financeWageStatementRemarkText(order)
     ];
   });
@@ -30625,6 +30631,7 @@ function buildFinanceWageStatementExportPayload(row = {}) {
     { key: "freightHKD", label: "运费合计HKD", kind: "freightTotal", currency: "HKD" },
     ...(hasFreightRMB ? [{ key: "freightRMB", label: "运费合计RMB", kind: "freightTotal", currency: "RMB" }] : []),
     { key: "driver", label: "司机", kind: "driver" },
+    { key: "mainlandRider", label: "大陆骑师", kind: "driver" },
     { key: "remark", label: "备注", kind: "remark" }
   ];
   const rows = financeWageStatementRows(row, projectColumns, hasFreightRMB);
@@ -30635,7 +30642,8 @@ function buildFinanceWageStatementExportPayload(row = {}) {
   const freightHKDIndex = projectEndIndex + 2;
   const freightRMBIndex = hasFreightRMB ? projectEndIndex + 3 : -1;
   const driverIndex = hasFreightRMB ? projectEndIndex + 4 : projectEndIndex + 3;
-  const remarkIndex = driverIndex + 1;
+  const mainlandRiderIndex = driverIndex + 1;
+  const remarkIndex = mainlandRiderIndex + 1;
   const miscHKDTotal = rows.reduce((sum, item) => {
     return sum + projectColumns.reduce((subtotal, column, index) =>
       column.currency === "HKD" ? subtotal + Number(item[projectStartIndex + index] || 0) : subtotal
@@ -30674,7 +30682,7 @@ function buildFinanceWageStatementExportPayload(row = {}) {
     rows,
     driverName: row?.driver?.name || "司机",
     periodLabel: financeWageStatementPeriodLabel(),
-    summaryNote: `${rows.length}车骑师/口岸过车 · ${financeWageStatementPeriodLabel()}`,
+    summaryNote: `${orders.filter((order) => orderIsDoubleDriverMode(order)).length}车骑师/口岸过车 · ${financeWageStatementPeriodLabel()}`,
     noteLines: [
       `人民币司机代垫${formatDriverWageNumber(advanceRMB)}`,
       `预支HKD${formatDriverWageNumber(advanceHKD)}，司机代垫${formatDriverWageNumber(advanceHKD)}`,
