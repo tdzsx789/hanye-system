@@ -1820,6 +1820,16 @@ const otherBusinessRecycleRows = ref([]);
 const linkedCustomsBusinessIdSet = computed(() => {
   const ids = new Set();
   orderRows.value.forEach((order) => {
+    const fromArray = Array.isArray(order.linkedCustomsBusinessIds)
+      ? order.linkedCustomsBusinessIds
+      : (Array.isArray(order.linked_customs_business_ids) ? order.linked_customs_business_ids : []);
+    if (fromArray.length) {
+      fromArray.forEach((value) => {
+        const id = String(value || "").trim();
+        if (id) ids.add(id);
+      });
+      return;
+    }
     const id = String(order.linkedCustomsBusinessId || order.linked_customs_business_id || "").trim();
     if (id) ids.add(id);
   });
@@ -2203,6 +2213,7 @@ const orderCustomsStatementModalOpen = ref(false);
 const orderCustomsStatementLoading = ref(false);
 const orderCustomsStatementCompany = ref("");
 const orderCustomsStatementSelectedId = ref("");
+const orderCustomsStatementSelectedIds = ref([]);
 const orderDetailNo = ref("");
 const orderListDetailOpen = ref(false);
 const orderListDetailScope = ref("orders");
@@ -2541,6 +2552,7 @@ const orderForm = reactive({
   customerId: "",
   customer: "",
   linkedCustomsBusinessId: "",
+  linkedCustomsBusinessIds: [],
   businessType: "",
   port: "",
   needsWeighing: false,
@@ -8814,7 +8826,7 @@ function customerStatementOrderDisplayChargeNote(order = {}) {
 }
 
 function orderLinkedCustomsBusinessId(order = {}) {
-  return String(order?.linkedCustomsBusinessId || order?.linked_customs_business_id || "").trim();
+  return orderLinkedCustomsBusinessIdsValue(order)[0] || "";
 }
 
 function orderLinkedCustomsBusinessRow(order = {}) {
@@ -11075,6 +11087,7 @@ function normalizeFinanceWageSettlementRow(item = {}) {
     settledAt: String(item.settledAt || item.settled_at || "").trim(),
     adjustmentsHKD: item.adjustmentsHKD ?? item.adjustments_hkd ?? null,
     adjustmentsRMB: item.adjustmentsRMB ?? item.adjustments_rmb ?? null,
+    advanceAt: String(item.advanceAt || item.advance_at || "").trim(),
     note: String(item.note || "").trim(),
     createdAt: String(item.createdAt || item.created_at || "").trim(),
     updatedAt: String(item.updatedAt || item.updated_at || item.createdAt || item.created_at || "").trim()
@@ -11177,9 +11190,10 @@ async function saveFinanceWageSettlement(row = {}, status = financeWageSettlemen
   const nextStatus = status === DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS
     ? DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS
     : DRIVER_WAGE_SETTLEMENT_PENDING_STATUS;
-  const nextSettledAt = nextStatus === DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS
-    ? String(settledAt || "").trim() || todayInputValue()
-    : "";
+  // 结算时间永久展示，未结算时也保留用户填写的日期。
+  const nextSettledAt = String(settledAt || "").trim() || (
+    nextStatus === DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS ? todayInputValue() : ""
+  );
   const currentSettlement = financeWageSettlementRowFor(row);
   const nextNote = Object.prototype.hasOwnProperty.call(patch, "note")
     ? String(patch.note ?? "").trim()
@@ -11190,6 +11204,15 @@ async function saveFinanceWageSettlement(row = {}, status = financeWageSettlemen
   const nextAdjustmentsRMB = Object.prototype.hasOwnProperty.call(patch, "adjustmentsRMB")
     ? patch.adjustmentsRMB
     : (currentSettlement?.adjustmentsRMB ?? null);
+  const adjustmentsChanged = Object.prototype.hasOwnProperty.call(patch, "adjustmentsHKD")
+    || Object.prototype.hasOwnProperty.call(patch, "adjustmentsRMB");
+  const nextAdvanceAt = Object.prototype.hasOwnProperty.call(patch, "advanceAt")
+    ? String(patch.advanceAt || "").trim()
+    : (
+      adjustmentsChanged
+        ? todayInputValue()
+        : String(currentSettlement?.advanceAt || "").trim()
+    );
   const payload = {
     periodKey,
     driverId,
@@ -11197,7 +11220,8 @@ async function saveFinanceWageSettlement(row = {}, status = financeWageSettlemen
     settledAt: nextSettledAt,
     note: nextNote,
     adjustmentsHKD: nextAdjustmentsHKD,
-    adjustmentsRMB: nextAdjustmentsRMB
+    adjustmentsRMB: nextAdjustmentsRMB,
+    advanceAt: nextAdvanceAt
   };
   try {
     upsertFinanceWageSettlementRow(payload);
@@ -11226,6 +11250,7 @@ function openFinanceWageSettlementEditModal(row = null) {
   );
   financeWageSettlementEditForm.adjustmentsHKD = settlement?.adjustmentsHKD ?? financeWageSettlementBaseAmountValue(row, "HKD");
   financeWageSettlementEditForm.adjustmentsRMB = settlement?.adjustmentsRMB ?? financeWageSettlementBaseAmountValue(row, "RMB");
+  financeWageSettlementEditForm.advanceAt = String(settlement?.advanceAt || settlement?.advance_at || "").trim();
   financeWageSettlementEditForm.note = String(settlement?.note || "").trim();
   financeWageSettlementEditModalOpen.value = true;
 }
@@ -11241,13 +11266,18 @@ async function saveFinanceWageSettlementFromEditor() {
   if (!row) return;
   financeWageSettlementEditSaving.value = true;
   try {
-    const settledAt = financeWageSettlementEditForm.status === DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS
-      ? String(financeWageSettlementEditForm.settledAt || "").trim() || todayInputValue()
-      : "";
+    const settledAt = String(financeWageSettlementEditForm.settledAt || "").trim();
+    const nextAdjustmentsHKD = normalizeFinanceWageSettlementManualAmount(financeWageSettlementEditForm.adjustmentsHKD, financeWageSettlementBaseAmountValue(row, "HKD"));
+    const nextAdjustmentsRMB = normalizeFinanceWageSettlementManualAmount(financeWageSettlementEditForm.adjustmentsRMB, financeWageSettlementBaseAmountValue(row, "RMB"));
+    const currentSettlement = financeWageSettlementRowFor(row);
+    const adjustmentsChanged = Number(currentSettlement?.adjustmentsHKD ?? NaN) !== Number(nextAdjustmentsHKD ?? NaN)
+      || Number(currentSettlement?.adjustmentsRMB ?? NaN) !== Number(nextAdjustmentsRMB ?? NaN);
     const item = await saveFinanceWageSettlement(row, financeWageSettlementEditForm.status, settledAt, {
       note: financeWageSettlementEditForm.note,
-      adjustmentsHKD: normalizeFinanceWageSettlementManualAmount(financeWageSettlementEditForm.adjustmentsHKD, financeWageSettlementBaseAmountValue(row, "HKD")),
-      adjustmentsRMB: normalizeFinanceWageSettlementManualAmount(financeWageSettlementEditForm.adjustmentsRMB, financeWageSettlementBaseAmountValue(row, "RMB"))
+      adjustmentsHKD: nextAdjustmentsHKD,
+      adjustmentsRMB: nextAdjustmentsRMB,
+      advanceAt: String(financeWageSettlementEditForm.advanceAt || "").trim()
+        || (adjustmentsChanged ? todayInputValue() : String(currentSettlement?.advanceAt || "").trim())
     });
     if (!item) return;
     financeWageSettlementEditModalOpen.value = false;
@@ -11750,6 +11780,7 @@ function buildFinanceWageRows(sourceOrders, sourceAdjustments, sourceSettlements
         ? DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS
         : DRIVER_WAGE_SETTLEMENT_PENDING_STATUS,
       settledAt: String(settlement?.settledAt || settlement?.settled_at || "").trim(),
+      advanceAt: String(settlement?.advanceAt || settlement?.advance_at || "").trim(),
       note: String(settlement?.note || "").trim(),
       settlementExists: Boolean(settlement)
     };
@@ -14623,23 +14654,69 @@ const linkedOrderCustomsBusinessRows = computed(() => {
   );
 });
 
+function normalizeOrderLinkedCustomsBusinessIds(value = [], fallbackSingle = "") {
+  const fromArray = Array.isArray(value)
+    ? value.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  if (fromArray.length) return [...new Set(fromArray)];
+  const single = String(fallbackSingle || "").trim();
+  return single ? [single] : [];
+}
+
+function orderLinkedCustomsBusinessIdsValue(order = {}) {
+  const source = orderDisplaySource(order);
+  return normalizeOrderLinkedCustomsBusinessIds(
+    source?.linkedCustomsBusinessIds ?? source?.linked_customs_business_ids ?? [],
+    source?.linkedCustomsBusinessId || source?.linked_customs_business_id || ""
+  );
+}
+
+function orderLinkedCustomsBusinessIdValue(order = {}) {
+  return orderLinkedCustomsBusinessIdsValue(order)[0] || "";
+}
+
+function orderHasLinkedCustomsBusiness(order = {}) {
+  return orderLinkedCustomsBusinessIdsValue(order).length > 0;
+}
+
+const currentOrderLinkedCustomsBusinessIds = computed(() => {
+  const selected = normalizeOrderLinkedCustomsBusinessIds(
+    orderCustomsStatementSelectedIds.value,
+    orderCustomsStatementSelectedId.value
+  );
+  if (orderCustomsStatementModalOpen.value) return selected;
+  return normalizeOrderLinkedCustomsBusinessIds(
+    orderForm.linkedCustomsBusinessIds,
+    orderForm.linkedCustomsBusinessId
+  );
+});
+
 const currentOrderLinkedCustomsBusinessId = computed(() =>
-  String(orderForm.linkedCustomsBusinessId || orderCustomsStatementSelectedId.value || "").trim()
+  currentOrderLinkedCustomsBusinessIds.value[0] || ""
+);
+
+const currentOrderLinkedCustomsBusinessCount = computed(() =>
+  currentOrderLinkedCustomsBusinessIds.value.length
 );
 
 const linkedOrderCustomsBusinessSelectedRow = computed(() =>
   linkedOrderCustomsBusinessRows.value.find((row) => String(row.id || "").trim() === currentOrderLinkedCustomsBusinessId.value) || null
 );
 
-const orderCustomsStatementHasSelection = computed(() => Boolean(currentOrderLinkedCustomsBusinessId.value));
+const orderCustomsStatementHasSelection = computed(() => currentOrderLinkedCustomsBusinessCount.value > 0);
 
-function orderLinkedCustomsBusinessIdValue(order = {}) {
-  const source = orderDisplaySource(order);
-  return String(source?.linkedCustomsBusinessId || source?.linked_customs_business_id || "").trim();
+function isOrderCustomsStatementSelected(row = {}) {
+  const rowId = String(row?.id || "").trim();
+  if (!rowId) return false;
+  return currentOrderLinkedCustomsBusinessIds.value.includes(rowId);
 }
 
-function orderHasLinkedCustomsBusiness(order = {}) {
-  return Boolean(orderLinkedCustomsBusinessIdValue(order));
+function orderedSelectedCustomsBusinessIds(selectedIds = []) {
+  const selectedSet = new Set(normalizeOrderLinkedCustomsBusinessIds(selectedIds));
+  // 按弹窗列表当前展示顺序保存，而不是点击先后。
+  return linkedOrderCustomsBusinessRows.value
+    .map((row) => String(row.id || "").trim())
+    .filter((id) => id && selectedSet.has(id));
 }
 
 const linkedOrderCustomsStatementSummary = computed(() => ({
@@ -14722,7 +14799,12 @@ async function openOrderCustomsStatementModal() {
     return;
   }
   orderCustomsStatementCompany.value = company;
-  orderCustomsStatementSelectedId.value = currentOrderLinkedCustomsBusinessId.value;
+  const currentIds = normalizeOrderLinkedCustomsBusinessIds(
+    orderForm.linkedCustomsBusinessIds,
+    orderForm.linkedCustomsBusinessId
+  );
+  orderCustomsStatementSelectedIds.value = [...currentIds];
+  orderCustomsStatementSelectedId.value = currentIds[0] || "";
   orderCustomsStatementModalOpen.value = true;
   if (!customsBusinessAllRows.value.length) {
     try {
@@ -14734,27 +14816,53 @@ async function openOrderCustomsStatementModal() {
   }
 }
 
-async function persistOrderCustomsStatementAssociation(rowId = "") {
-  const nextId = String(rowId || "").trim();
-  const previousId = String(orderForm.linkedCustomsBusinessId || "").trim();
+async function persistOrderCustomsStatementAssociation(rowIds = []) {
+  const nextIds = orderedSelectedCustomsBusinessIds(
+    Array.isArray(rowIds) ? rowIds : [rowIds]
+  );
+  const previousIds = normalizeOrderLinkedCustomsBusinessIds(
+    orderForm.linkedCustomsBusinessIds,
+    orderForm.linkedCustomsBusinessId
+  );
+  const nextId = nextIds[0] || "";
+  orderForm.linkedCustomsBusinessIds = [...nextIds];
   orderForm.linkedCustomsBusinessId = nextId;
+  orderCustomsStatementSelectedIds.value = [...nextIds];
   orderCustomsStatementSelectedId.value = nextId;
   try {
     if (!editingOrderNo.value) {
-      return nextId;
+      return nextIds;
     }
-    const updated = await ordersApi.updateOrder(editingOrderNo.value, { linkedCustomsBusinessId: nextId });
-    const persistedLinkedCustomsBusinessId = String(updated?.linkedCustomsBusinessId || nextId).trim();
+    const updated = await ordersApi.updateOrder(editingOrderNo.value, {
+      // 显式传数组；同时保留单字段兼容老后端。
+      linkedCustomsBusinessIds: nextIds,
+      linkedCustomsBusinessId: nextId || null
+    });
+    const persistedIds = normalizeOrderLinkedCustomsBusinessIds(
+      updated?.linkedCustomsBusinessIds ?? updated?.linked_customs_business_ids ?? nextIds,
+      nextId ? (updated?.linkedCustomsBusinessId || nextId) : ""
+    );
+    // 取消关联时强制清空；不要用 updated 里的旧值把关联又带回来。
+    const finalIds = nextIds.length ? (persistedIds.length ? persistedIds : nextIds) : [];
+    const finalId = finalIds[0] || "";
+    if (nextIds.length > 1 && finalIds.length <= 1 && !Array.isArray(updated?.linkedCustomsBusinessIds)) {
+      notify("当前服务端暂未支持多选关联，仅保存了第 1 张报关单");
+    }
     replaceOrder({
       ...updated,
-      linkedCustomsBusinessId: persistedLinkedCustomsBusinessId
+      linkedCustomsBusinessId: finalId || null,
+      linkedCustomsBusinessIds: finalIds
     });
-    orderForm.linkedCustomsBusinessId = persistedLinkedCustomsBusinessId;
-    orderCustomsStatementSelectedId.value = persistedLinkedCustomsBusinessId;
-    return persistedLinkedCustomsBusinessId;
+    orderForm.linkedCustomsBusinessIds = [...finalIds];
+    orderForm.linkedCustomsBusinessId = finalId;
+    orderCustomsStatementSelectedIds.value = [...finalIds];
+    orderCustomsStatementSelectedId.value = finalId;
+    return finalIds;
   } catch (error) {
-    orderForm.linkedCustomsBusinessId = previousId;
-    orderCustomsStatementSelectedId.value = previousId;
+    orderForm.linkedCustomsBusinessIds = [...previousIds];
+    orderForm.linkedCustomsBusinessId = previousIds[0] || "";
+    orderCustomsStatementSelectedIds.value = [...previousIds];
+    orderCustomsStatementSelectedId.value = previousIds[0] || "";
     throw error;
   }
 }
@@ -14788,19 +14896,36 @@ function openCustomsBusinessFromOrderStatement() {
 async function selectOrderCustomsStatement(row = {}) {
   const rowId = String(row?.id || "").trim();
   if (!rowId) return;
+  const selected = new Set(currentOrderLinkedCustomsBusinessIds.value);
+  if (selected.has(rowId)) selected.delete(rowId);
+  else selected.add(rowId);
+  const nextIds = orderedSelectedCustomsBusinessIds([...selected]);
+  orderCustomsStatementSelectedIds.value = [...nextIds];
+  orderCustomsStatementSelectedId.value = nextIds[0] || "";
   try {
-    await persistOrderCustomsStatementAssociation(rowId);
-    closeOrderCustomsStatementModal();
-    notify("已关联报关单");
+    await persistOrderCustomsStatementAssociation(nextIds);
+    notify(nextIds.length ? `已关联报关单${nextIds.length}单` : "已取消关联");
   } catch (error) {
     notify(error.message);
   }
 }
 
-async function clearOrderCustomsStatementAssociation() {
-  if (!orderCustomsStatementHasSelection.value && !String(orderForm.linkedCustomsBusinessId || "").trim()) return;
+async function clearOrderCustomsStatementAssociation(row = null) {
+  if (row) {
+    const rowId = String(row?.id || "").trim();
+    if (!rowId) return;
+    const nextIds = currentOrderLinkedCustomsBusinessIds.value.filter((id) => id !== rowId);
+    try {
+      await persistOrderCustomsStatementAssociation(nextIds);
+      notify(nextIds.length ? `已关联报关单${nextIds.length}单` : "已取消关联");
+    } catch (error) {
+      notify(error.message);
+    }
+    return;
+  }
+  if (!orderCustomsStatementHasSelection.value && !currentOrderLinkedCustomsBusinessCount.value) return;
   try {
-    await persistOrderCustomsStatementAssociation("");
+    await persistOrderCustomsStatementAssociation([]);
     notify("已取消关联");
   } catch (error) {
     notify(error.message);
@@ -15849,7 +15974,8 @@ function orderDisplaySource(order = {}) {
   if (!dispatchRow) return sourceOrder;
   return {
     ...sourceOrder,
-    linkedCustomsBusinessId: sourceOrder.linkedCustomsBusinessId || sourceOrder.linked_customs_business_id || "",
+    linkedCustomsBusinessId: orderLinkedCustomsBusinessIdValue(sourceOrder),
+    linkedCustomsBusinessIds: orderLinkedCustomsBusinessIdsValue(sourceOrder),
     dispatchNo: String(sourceOrder.dispatchNo || dispatchRow.dispatchNo || "").trim(),
     businessType: String(sourceOrder.businessType || dispatchRow.businessType || "").trim(),
     port: displayPortText(sourceOrder.port || dispatchRow.port || ""),
@@ -24432,7 +24558,11 @@ function buildNormalizedOrderPayload() {
   );
   payload.newOld = currentOrderNewOldEnabled.value || payload.newOld ? normalizeOrderNewOld(payload.newOld) : "";
   payload.specialCar = currentOrderSpecialCarEnabled.value || payload.specialCar ? booleanFlag(payload.specialCar, false) : false;
-  payload.linkedCustomsBusinessId = String(payload.linkedCustomsBusinessId || "").trim();
+  payload.linkedCustomsBusinessIds = normalizeOrderLinkedCustomsBusinessIds(
+    payload.linkedCustomsBusinessIds,
+    payload.linkedCustomsBusinessId
+  );
+  payload.linkedCustomsBusinessId = payload.linkedCustomsBusinessIds[0] || "";
 		  payload.plate = normalizePlateText(payload.plate);
 		  const loadingText = normalizeDispatchLocationDetailText(payload.loading).trim();
 		  const unloadingText = normalizeDispatchLocationDetailText(payload.unloading).trim();
@@ -26847,6 +26977,7 @@ function resetOrderForm() {
     customerId: "",
     customer: "",
     linkedCustomsBusinessId: "",
+    linkedCustomsBusinessIds: [],
     businessType: "",
     port: "",
     needsWeighing: false,
@@ -27162,6 +27293,7 @@ async function openOrderModal(customer = null, order = null, options = {}) {
   await ensureReferenceDataLoaded();
   closeOrderDetail();
   orderCustomsStatementSelectedId.value = "";
+  orderCustomsStatementSelectedIds.value = [];
   if (customer && !customerMatchesCategory(customer, "运输客户")) customer = null;
   orderAuditMode.value = Boolean(options.audit && order);
   orderViewMode.value = Boolean(order && !orderAuditMode.value && (options.view || !canEditOrder(order)));
@@ -27178,7 +27310,8 @@ async function openOrderModal(customer = null, order = null, options = {}) {
       dispatchNo: displayOrder.dispatchNo || "",
       customerId: displayOrder.customerId || "",
       customer: displayOrder.customer || "",
-      linkedCustomsBusinessId: String(displayOrder.linkedCustomsBusinessId || "").trim(),
+      linkedCustomsBusinessId: orderLinkedCustomsBusinessIdValue(displayOrder),
+      linkedCustomsBusinessIds: orderLinkedCustomsBusinessIdsValue(displayOrder),
       businessType: displayOrder.businessType || "",
       port: displayPortText(displayOrder.port),
       needsWeighing: booleanFlag(displayOrder.needsWeighing, false),
@@ -27227,7 +27360,8 @@ async function openOrderModal(customer = null, order = null, options = {}) {
       orderForm.driver = "";
     }
     loadCustomsFieldsFromRemark(displayOrder.remark || "");
-    orderCustomsStatementSelectedId.value = String(displayOrder.linkedCustomsBusinessId || "").trim();
+    orderCustomsStatementSelectedIds.value = orderLinkedCustomsBusinessIdsValue(displayOrder);
+    orderCustomsStatementSelectedId.value = orderCustomsStatementSelectedIds.value[0] || "";
     applyOrderRequiredFieldDefaults({ force: true });
     syncOrderCustomerFeatureFields({ preserveExisting: true });
     orderFees.value = (order.fees?.length ? order.fees : [
@@ -27336,6 +27470,7 @@ function closeOrderModal() {
   closeOrderCustomsStatementModal();
   closeCustomsBusinessModal();
   orderCustomsStatementSelectedId.value = "";
+  orderCustomsStatementSelectedIds.value = [];
   closeOrderFeeFxContextMenu();
   closeOrderFeeNamePicker();
   orderSupplierPickerOpen.value = false;
@@ -30127,6 +30262,7 @@ function financeWageExportValue(row, key) {
     tripFee: moneyPair(row.payable, row.payableRMB),
     advanceFee: moneyPair(row.advanceFee, row.advanceFeeRMB),
     adjustments: moneyPair(row.adjustments, row.adjustmentsRMB),
+    advanceAt: row.advanceAt ? inputDateLabel(row.advanceAt) : "-",
     note: row.note || "-",
     total: driverWagePayableText(row.total, row.totalRMB),
     status: row.settlementStatus || DRIVER_WAGE_SETTLEMENT_PENDING_STATUS,
@@ -32541,6 +32677,28 @@ function defaultTemplateColumnWidth(key = "") {
     || 86;
 }
 
+function isLegacyGeneratedTemplateFooter(value = "") {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  const pageSuffix = "第 {{page}} 页 / 共 {{pages}} 页";
+  const stripped = text.endsWith(pageSuffix)
+    ? text.slice(0, -pageSuffix.length).trim()
+    : text;
+  const compact = stripped.replace(/\s+/g, "");
+  const looksLikeGeneratedPayee = (
+    compact.includes("收款账号")
+    && /户名[:：]/.test(compact)
+    && /账号[:：]/.test(compact)
+    && /开户行[:：]/.test(compact)
+  ) || (
+    compact.includes("香港账户信息")
+    && /HSBCHongKong/i.test(compact)
+    && /HSBCHKHHHKH/i.test(compact)
+  );
+  return stripped === "制表人：{{user}}"
+    || stripped === "制表人:{{user}}"
+    || looksLikeGeneratedPayee;
+}
+
 function defaultHeaderTextItems(header = "客户 / 导出标题\n日期：{{date}}") {
   return [{
     id: `header-text-${Date.now()}`,
@@ -32578,6 +32736,8 @@ function loadTemplateDesigner(content = "") {
       x: Number(item.x ?? templateDesigner.headerX ?? 18),
       y: Number(item.y ?? templateDesigner.headerY ?? 18),
       width: Math.max(80, Math.min(520, Number(item.width || 260))),
+      height: Math.max(24, Math.min(480, Number(item.height || 44))),
+      free: item.free === true,
       fontFamily: normalizeFontPreset(item.fontFamily || parsed?.headerFontFamily),
       fontSize: Number(item.fontSize || parsed?.headerFontSize || 14),
       color: item.color || parsed?.headerTextColor || "#17233c",
@@ -32594,11 +32754,14 @@ function loadTemplateDesigner(content = "") {
   templateDesigner.logoX = Number(parsed?.logoX ?? 18);
   templateDesigner.logoY = Number(parsed?.logoY ?? 12);
   templateDesigner.footer = parsed?.footer || "制表人：{{user}}    第 {{page}} 页 / 共 {{pages}} 页";
-  const footerItems = Array.isArray(parsed?.footerTextItems) && parsed.footerTextItems.length
-    ? parsed.footerTextItems
-    : [{
+  const pagePixelHeight = templateDesigner.orientation === "portrait" ? 842 : 594;
+  const visibleBottom = Math.max(1200, pagePixelHeight + 400);
+  const rawFooterItems = Array.isArray(parsed?.footerTextItems) ? parsed.footerTextItems : [];
+  const legacyFooterText = String(parsed?.footer || "").replace(/\r\n/g, "\n").trim();
+  const legacyFooterItems = legacyFooterText && !isLegacyGeneratedTemplateFooter(legacyFooterText)
+    ? [{
       id: `footer-text-${Date.now()}`,
-      text: templateDesigner.footer,
+      text: legacyFooterText,
       x: 18,
       y: 12,
       width: 280,
@@ -32607,7 +32770,16 @@ function loadTemplateDesigner(content = "") {
       color: parsed?.footerTextColor || "#64748b",
       bold: false,
       align: "left"
-    }];
+    }]
+    : [];
+  // 过滤历史遗留的超大 Y 页脚文本（编辑器里看不到，但导出会冒出来）。
+  const footerItems = rawFooterItems.length
+    ? rawFooterItems.filter((item) => {
+      const y = Number(item?.y);
+      if (!Number.isFinite(y)) return true;
+      return y <= visibleBottom;
+    })
+    : legacyFooterItems;
   templateDesigner.footerTextItems.splice(
     0,
     templateDesigner.footerTextItems.length,
@@ -32617,6 +32789,8 @@ function loadTemplateDesigner(content = "") {
       x: Number(item.x ?? 18),
       y: Number(item.y ?? 12),
       width: Math.max(80, Math.min(520, Number(item.width || 280))),
+      height: Math.max(24, Math.min(480, Number(item.height || 44))),
+      free: item.free === true,
       fontFamily: normalizeFontPreset(item.fontFamily || parsed?.footerFontFamily),
       fontSize: Number(item.fontSize || parsed?.footerFontSize || 12),
       color: item.color || parsed?.footerTextColor || "#64748b",
@@ -36803,7 +36977,7 @@ function orderDetailFeeRows(order = {}) {
           <div class="finance-summary-card"><span>关联订单</span><strong>{{ financeSummary.orderCount }}</strong></div>
           <div class="finance-summary-card"><span>司机成本</span><strong>{{ driverWagePayableText(financeSummary.driverPayableHKD, financeSummary.driverPayableRMB) }}</strong></div>
           <div class="finance-summary-card"><span>司机代垫</span><strong>{{ moneyPair(financeSummary.driverAdvanceHKD, financeSummary.driverAdvanceRMB) }}</strong></div>
-          <div class="finance-summary-card"><span>预支/报销</span><strong>{{ moneyPair(financeWageRows.reduce((sum, row) => sum + row.adjustments, 0), financeWageRows.reduce((sum, row) => sum + row.adjustmentsRMB, 0)) }}</strong></div>
+          <div class="finance-summary-card"><span>预支杂费</span><strong>{{ moneyPair(financeWageRows.reduce((sum, row) => sum + row.adjustments, 0), financeWageRows.reduce((sum, row) => sum + row.adjustmentsRMB, 0)) }}</strong></div>
           <div class="finance-summary-card"><span>供应商代垫</span><strong>{{ moneyPair(financeSummary.supplierAdvanceHKD, financeSummary.supplierAdvanceRMB) }}</strong></div>
           <div class="finance-summary-card"><span>外派应付</span><strong>{{ moneyPair(financeSummary.supplierPayableHKD, financeSummary.supplierPayableRMB) }}</strong></div>
         </div>
@@ -36869,9 +37043,9 @@ function orderDetailFeeRows(order = {}) {
 	                    <template v-if="column.key === 'driver'">{{ row.driver.name }}</template>
 	                    <template v-else-if="column.key === 'type'">{{ row.driver.type || '香港司机' }}</template>
 	                    <template v-else-if="column.key === 'orderCount'">{{ row.orderCount }}</template>
-	                    <template v-else-if="column.key === 'tripFee'">{{ moneyPair(row.payable, row.payableRMB) }}</template>
 	                    <template v-else-if="column.key === 'advanceFee'">{{ moneyPair(row.advanceFee, row.advanceFeeRMB) }}</template>
 	                    <template v-else-if="column.key === 'adjustments'">{{ moneyPair(row.adjustments, row.adjustmentsRMB) }}</template>
+	                    <template v-else-if="column.key === 'advanceAt'">{{ row.advanceAt ? inputDateLabel(row.advanceAt) : '-' }}</template>
 	                    <template v-else-if="column.key === 'note'">{{ row.note || '-' }}</template>
 	                    <template v-else-if="column.key === 'total'"><strong>{{ driverWagePayableText(row.total, row.totalRMB) }}</strong></template>
 	                    <template v-else-if="column.key === 'status'">
@@ -36886,13 +37060,13 @@ function orderDetailFeeRows(order = {}) {
 	                    </template>
 	                    <template v-else-if="column.key === 'settledAt'">
 	                      <input
-	                        v-if="financeWageSettlementStatusText(row) === DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS"
+	                        v-if="financeWageSettlementDateInputValue(row)"
 	                        class="finance-wage-settlement-date"
 	                        type="date"
 	                        :value="financeWageSettlementDateInputValue(row)"
 	                        @click.stop
 	                        @change="saveFinanceWageSettlement(row, financeWageSettlementStatusText(row), $event.target.value)"
-	                        />
+	                      />
 	                      <span v-else>-</span>
 	                    </template>
 	                    <template v-else-if="column.key === 'actions'">
@@ -36945,7 +37119,7 @@ function orderDetailFeeRows(order = {}) {
               </div>
 
               <div class="finance-wage-settlement-editor">
-                <label class="finance-wage-settlement-field">预支/报销HKD
+                <label class="finance-wage-settlement-field">预支港币
                   <input
                     v-model.number="financeWageSettlementEditForm.adjustmentsHKD"
                     class="finance-wage-settlement-number"
@@ -36955,7 +37129,7 @@ function orderDetailFeeRows(order = {}) {
                     inputmode="decimal"
                   />
                 </label>
-                <label class="finance-wage-settlement-field">预支/报销RMB
+                <label class="finance-wage-settlement-field">预支人民币
                   <input
                     v-model.number="financeWageSettlementEditForm.adjustmentsRMB"
                     class="finance-wage-settlement-number"
@@ -36965,12 +37139,15 @@ function orderDetailFeeRows(order = {}) {
                     inputmode="decimal"
                   />
                 </label>
+                <label class="finance-wage-settlement-field">预支日期
+                  <input v-model="financeWageSettlementEditForm.advanceAt" type="date" />
+                </label>
                 <label class="finance-wage-settlement-field">结算状态
                   <select v-model="financeWageSettlementEditForm.status">
                     <option v-for="status in DRIVER_WAGE_SETTLEMENT_STATUS_OPTIONS" :key="status" :value="status">{{ status }}</option>
                   </select>
                 </label>
-                <label v-if="financeWageSettlementEditForm.status === DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS" class="finance-wage-settlement-field">结算时间
+                <label class="finance-wage-settlement-field">结算时间
                   <input v-model="financeWageSettlementEditForm.settledAt" type="date" />
                 </label>
                 <label class="finance-wage-settlement-field finance-wage-settlement-note">备注
@@ -37326,7 +37503,7 @@ function orderDetailFeeRows(order = {}) {
             <thead><tr><th>项目</th><th>数量</th><th>港币</th><th>人民币</th><th>说明</th></tr></thead>
             <tbody>
               <tr><td>订单应收</td><td>{{ statementSummary.orderCount }}</td><td>HKD {{ money(statementSummary.receivableHKD) }}</td><td>RMB {{ money(statementSummary.receivableRMB) }}</td><td>按订单应收金额汇总</td></tr>
-              <tr><td>司机工资</td><td>{{ statementWageRows.length }}</td><td>HKD {{ money(statementSummary.driverPayableHKD) }}</td><td>RMB {{ money(statementSummary.driverPayableRMB) }}</td><td>按成本中心、订单代垫和预支/报销汇总</td></tr>
+              <tr><td>司机工资</td><td>{{ statementWageRows.length }}</td><td>HKD {{ money(statementSummary.driverPayableHKD) }}</td><td>RMB {{ money(statementSummary.driverPayableRMB) }}</td><td>按订单代垫和预支杂费汇总</td></tr>
               <tr><td>外派车辆成本</td><td>{{ statementSummary.outsourcedOrderCount }}</td><td>HKD {{ money(statementSummary.supplierPayableHKD) }}</td><td>RMB {{ money(statementSummary.supplierPayableRMB) }}</td><td>按外派订单收费项目的成本汇总</td></tr>
             </tbody>
           </table>
@@ -41874,9 +42051,9 @@ function orderDetailFeeRows(order = {}) {
                   type="button"
                   :disabled="!canOpenOrderCustomsStatement"
                   :aria-disabled="!canOpenOrderCustomsStatement"
-                  :title="orderCustomsStatementHasSelection ? '已关联报关单，点击查看' : (canOpenOrderCustomsStatement ? '查看匹配的报关客户报关单' : '当前客户未匹配到可关联的报关客户')"
+                  :title="orderCustomsStatementHasSelection ? `已关联报关单${currentOrderLinkedCustomsBusinessCount}单，点击查看` : (canOpenOrderCustomsStatement ? '查看匹配的报关客户报关单' : '当前客户未匹配到可关联的报关客户')"
                   @click.stop="openOrderCustomsStatementModal"
-                ><IconSvg name="list" />{{ orderCustomsStatementHasSelection ? '已关联报关单' : '关联报关单' }}</button>
+                ><IconSvg name="list" />{{ orderCustomsStatementHasSelection ? `已关联报关单${currentOrderLinkedCustomsBusinessCount}单` : '关联报关单' }}</button>
               </div>
               <label v-if="orderHasTransportFields" class="order-compact-field order-location-field order-location-wide order-loading-field">装货
                 <span class="location-input-row route-tree-wrap" @click.stop>
@@ -42355,7 +42532,7 @@ function orderDetailFeeRows(order = {}) {
                     <tr
                       v-for="row in linkedOrderCustomsBusinessRows"
                       :key="row.id"
-                      :class="{ 'is-selected': String(row.id || '').trim() === currentOrderLinkedCustomsBusinessId }"
+                      :class="{ 'is-selected': isOrderCustomsStatementSelected(row) }"
                       @dblclick.stop="openEditCustomsBusinessModal(row)"
                     >
                       <template v-for="column in linkedOrderCustomsBusinessColumns" :key="`${row.id}-${column.key}`">
@@ -42364,7 +42541,7 @@ function orderDetailFeeRows(order = {}) {
                           class="customs-business-actions-col"
                         >
                           <span
-                            v-if="String(row.id || '').trim() === currentOrderLinkedCustomsBusinessId"
+                            v-if="isOrderCustomsStatementSelected(row)"
                             class="order-customs-select-group"
                           >
                             <button
@@ -42372,11 +42549,11 @@ function orderDetailFeeRows(order = {}) {
                               type="button"
                               @click.stop="selectOrderCustomsStatement(row)"
                               @dblclick.stop
-                            >已关联报关单</button>
+                            >已关联</button>
                             <button
                               class="ghost-btn small order-customs-cancel-btn"
                               type="button"
-                              @click.stop="clearOrderCustomsStatementAssociation"
+                              @click.stop="clearOrderCustomsStatementAssociation(row)"
                               @dblclick.stop
                             >取消</button>
                           </span>

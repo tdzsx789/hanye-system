@@ -731,6 +731,7 @@ async function orderWriteColumnSupport() {
     dispatchNo: await orderColumnExists("dispatch_no"),
     dispatchGroupId: await orderColumnExists("dispatch_group_id"),
     linkedCustomsBusinessId: await orderColumnExists("linked_customs_business_id"),
+    linkedCustomsBusinessIds: await orderColumnExists("linked_customs_business_ids"),
     loadingLocations: await orderColumnExists("loading_locations"),
     unloadingLocations: await orderColumnExists("unloading_locations"),
     operatingUnit: await orderColumnExists("operating_unit"),
@@ -791,6 +792,7 @@ async function driverWageSettlementWriteColumnSupport() {
   driverWageSettlementWriteColumnSupportCache = {
     adjustmentsHKD: await tableColumnExists("driver_wage_settlements", "adjustments_hkd"),
     adjustmentsRMB: await tableColumnExists("driver_wage_settlements", "adjustments_rmb"),
+    advanceAt: await tableColumnExists("driver_wage_settlements", "advance_at"),
     note: await tableColumnExists("driver_wage_settlements", "note"),
     updatedAt: await tableColumnExists("driver_wage_settlements", "updated_at")
   };
@@ -946,6 +948,12 @@ function mapOrder(row) {
     dispatchNo: row.dispatch_no || "",
     dispatchGroupId: row.dispatch_group_id || "",
     linkedCustomsBusinessId: row.linked_customs_business_id || null,
+    linkedCustomsBusinessIds: (() => {
+      const ids = parseLinkedCustomsBusinessIds(row.linked_customs_business_ids);
+      if (ids.length) return ids;
+      const single = String(row.linked_customs_business_id || "").trim();
+      return single ? [single] : [];
+    })(),
     customerId: row.customer_id,
     customer: userTextValue(row.customer),
     businessType: userTextValue(row.business_type),
@@ -1043,12 +1051,52 @@ function orderFeeRemarksText(order = {}) {
   return Array.from(new Set(remarks)).join("；");
 }
 
+function orderFeeRemarkPartsForExport(order = {}, columns = null) {
+  const fees = Array.isArray(order?.fees) ? order.fees : [];
+  const parts = [];
+  const consumedLocationColumns = new Set();
+  const columnList = Array.isArray(columns) ? columns : [];
+
+  fees.forEach((fee) => {
+    const userRemark = exportFeeUserRemark(fee);
+    const matchedLocationColumn = columnList.find((column) => {
+      if (!exportLocationFeeType(column)) return false;
+      const key = textValue(column?.key) || exportFeeColumnComparableName(column);
+      if (consumedLocationColumns.has(key)) return false;
+      return feeRowsForColumn(order, column).includes(fee)
+        || exportFeeNameVariants(exportFeeColumnComparableName(column)).has(textValue(fee?.name).trim());
+    });
+    if (matchedLocationColumn) {
+      const key = textValue(matchedLocationColumn?.key) || exportFeeColumnComparableName(matchedLocationColumn);
+      consumedLocationColumns.add(key);
+      const locationDetail = locationFeeDetailForColumn(order, matchedLocationColumn);
+      if (locationDetail) {
+        // 例：司机卸货 + 卸货费：香港葵涌 1*100=100 => 司机卸货卸货费：香港葵涌 1*100=100
+        parts.push(`${userRemark || ""}${locationDetail}`);
+        return;
+      }
+    }
+    if (userRemark) parts.push(userRemark);
+  });
+
+  // 若装货费/卸货费没有对应 fee.remark，也要把地点明细补进备注。
+  columnList.forEach((column) => {
+    if (!exportLocationFeeType(column)) return;
+    const key = textValue(column?.key) || exportFeeColumnComparableName(column);
+    if (consumedLocationColumns.has(key)) return;
+    const locationDetail = locationFeeDetailForColumn(order, column);
+    if (locationDetail) parts.push(locationDetail);
+  });
+
+  return Array.from(new Set(parts.filter(Boolean)));
+}
+
 function orderChargeNoteText(order = {}, columns = null) {
   const remark = stripOrderCustomsRemarkText(order.remark || "");
-  const feeRemarks = orderFeeRemarksText(order);
+  const feeRemarkParts = orderFeeRemarkPartsForExport(order, columns);
   const feeDetails = Array.isArray(columns) ? orderDuplicateFeeDetailsText(order, columns) : "";
   const dateText = orderChargeDateCn(order.chargedAt || order.charged_at);
-  return [remark, feeRemarks, feeDetails, dateText ? `于${dateText}已收费` : ""].filter(Boolean).join("；");
+  return [remark, ...feeRemarkParts, feeDetails, dateText ? `于${dateText}已收费` : ""].filter(Boolean).join("；");
 }
 
 function creatorFieldsFromAccount(account = {}) {
@@ -1212,12 +1260,16 @@ function normalizeExportTemplate(template = null) {
       ...item,
       color: validHexColor(item.color, headerTextColor),
       width: Math.max(80, Math.min(520, Number(item.width || 260))),
+      height: Math.max(24, Math.min(480, Number(item.height || 44))),
+      free: item.free === true,
       align: ["left", "center", "right"].includes(item.align) ? item.align : "left"
     })),
     footerTextItems: footerTextItems.map((item) => ({
       ...item,
       color: validHexColor(item.color, footerTextColor),
       width: Math.max(80, Math.min(520, Number(item.width || 280))),
+      height: Math.max(24, Math.min(480, Number(item.height || 44))),
+      free: item.free === true,
       align: ["left", "center", "right"].includes(item.align) ? item.align : "left"
     })),
     header: String(template.header || ""),
@@ -1260,17 +1312,31 @@ function normalizeExportTemplate(template = null) {
   };
 }
 
+function isOffscreenTemplateTextItem(item = {}, template = null) {
+  const y = Number(item?.y);
+  if (!Number.isFinite(y)) return false;
+  // 编辑器里拖飞到超大 Y 的历史页脚文本（例如 y=17820）对用户不可见，导出也不应展示。
+  const footerHeight = Math.max(28, Math.min(400, Number(template?.footerHeight || 70)));
+  const headerHeight = Math.max(48, Math.min(400, Number(template?.headerHeight || 92)));
+  const visibleBottom = Math.max(1200, headerHeight + footerHeight + 900);
+  return y > visibleBottom;
+}
+
 function exportTemplateFooterItems(template = null, fallbackColor = "#64748b") {
   const footerTextItems = Array.isArray(template?.footerTextItems) ? template.footerTextItems : [];
   const explicitItems = footerTextItems
     .map((item) => ({
       ...item,
-      text: String(item?.text || "").replace(/\s+/g, " ").trim()
+      // 保留原始换行，避免收款账号被压成一行灰色长文本。
+      text: String(item?.text || "").replace(/\r\n/g, "\n").trim()
     }))
-    .filter((item) => item.text && !isSystemGeneratedExportFooterText(item.text));
+    .filter((item) => item.text && !isSystemGeneratedExportFooterText(item.text))
+    .filter((item) => !isOffscreenTemplateTextItem(item, template));
   if (explicitItems.length) return explicitItems;
-  const footerText = String(template?.footer || "").replace(/\s+/g, " ").trim();
-  if (!footerText || isSystemGeneratedExportFooterText(footerText)) return [];
+  if (footerTextItems.length) return [];
+
+  const footerText = String(template?.footer || "").replace(/\r\n/g, "\n").trim();
+  if (!footerText || isLegacyGeneratedExportFooterText(footerText)) return [];
   return [{
     text: footerText,
     x: 0,
@@ -1325,20 +1391,30 @@ function isSystemGeneratedExportFooterText(value = "") {
   const stripped = text.endsWith(pageSuffix)
     ? text.slice(0, -pageSuffix.length).trim()
     : text;
+  // 收款账号已改为模板配置，不再当作系统生成页脚过滤掉。
+  return stripped === "制表人：{{user}}" || stripped === "制表人:{{user}}";
+}
+
+function isLegacyGeneratedExportFooterText(value = "") {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  const pageSuffix = "第 {{page}} 页 / 共 {{pages}} 页";
+  const stripped = text.endsWith(pageSuffix)
+    ? text.slice(0, -pageSuffix.length).trim()
+    : text;
   const compact = stripped.replace(/\s+/g, "");
-  const looksLikeGeneratedPayee =
-    (
-      compact.includes("收款账号")
-      && /户名[:：]/.test(compact)
-      && /账号[:：]/.test(compact)
-      && /开户行[:：]/.test(compact)
-    )
-    || (
-      compact.includes("香港账户信息")
-      && /HSBCHongKong/i.test(compact)
-      && /HSBCHKHHHKH/i.test(compact)
-    );
-  return stripped === "制表人：{{user}}" || stripped === "制表人:{{user}}" || looksLikeGeneratedPayee;
+  const looksLikeGeneratedPayee = (
+    compact.includes("收款账号")
+    && /户名[:：]/.test(compact)
+    && /账号[:：]/.test(compact)
+    && /开户行[:：]/.test(compact)
+  ) || (
+    compact.includes("香港账户信息")
+    && /HSBCHongKong/i.test(compact)
+    && /HSBCHKHHHKH/i.test(compact)
+  );
+  return stripped === "制表人：{{user}}"
+    || stripped === "制表人:{{user}}"
+    || looksLikeGeneratedPayee;
 }
 
 function validHexColor(value, fallback) {
@@ -2172,13 +2248,16 @@ function exportFeeCalculationText(fee = {}) {
 function locationFeeDetailForColumn(order, column) {
   const locationType = exportLocationFeeType(column);
   if (!locationType) return "";
+  const feeName = exportFeeColumnComparableName(column) || exportColumnBaseLabel(column) || "费用";
   const locationText = exportLocationCityDistrict(order?.[locationType]);
   const rows = feeRowsForColumn(order, column)
     .filter((fee) => Number(fee.amount || 0) !== 0);
-  return rows
+  const detail = rows
     .map((fee) => [locationText, exportFeeCalculationText(fee)].filter(Boolean).join(" "))
     .filter(Boolean)
     .join("；");
+  if (!detail) return "";
+  return `${feeName}：${detail}`;
 }
 
 function exportFeeAdvanceAddress(fee = {}) {
@@ -2250,10 +2329,13 @@ function feeAmountForColumn(order, column) {
 
 function feeDisplayForColumn(order, column, options = {}) {
   const rows = feeRowsForColumn(order, column);
+  // 装货费/卸货费明细改放到备注，单元格只保留金额，便于合计公式计算。
+  if (exportLocationFeeType(column)) {
+    const amount = rows.reduce((sum, fee) => sum + Number(fee.amount || 0), 0);
+    return formatExportAmount(amount);
+  }
   const duplicateDetail = duplicateFeeDisplayForColumn(rows);
   if (duplicateDetail) return duplicateDetail;
-  const locationDetail = locationFeeDetailForColumn(order, column);
-  if (locationDetail) return locationDetail;
   if (options.includeAdvanceAddress) {
     const detailRows = rows
       .filter((fee) => Number(fee.amount || 0) !== 0 || exportFeeAdvanceAddress(fee))
@@ -2342,6 +2424,9 @@ function exportOrderColumnAmount(order, column) {
   if (key === "__chargeNote") return 0;
   if (key === "__hkdTotal") return Number(order?.receivableHKD || 0);
   if (key === "__rmbTotal") return Number(order?.receivableRMB || 0);
+  if (column?.linkedCustomsField === "itemCount" || key.startsWith("linkedCustomsItemCount:")) {
+    return Number(linkedCustomsIndexedColumnValue(order, column) || 0);
+  }
   if (key === "linkedCustomsItemCount") return Number(order?.linkedCustomsBusiness?.itemCount || 0);
   if (key === "linkedCustomsPageCount") return Number(order?.linkedCustomsBusiness?.pageCount || 0);
   if (key === "linkedCustomsPageFee") return Number(order?.linkedCustomsBusiness?.pageFee || 0);
@@ -2409,6 +2494,13 @@ function exportOrderColumnValue(order, column, rowIndex = 0, options = {}) {
   if (key === "__chargeNote") return orderChargeNoteText(order, options.columns);
   if (key === "__hkdTotal") return formatExportAmount(order?.receivableHKD);
   if (key === "__rmbTotal") return formatExportAmount(order?.receivableRMB);
+  if (column?.linkedCustomsField || key.startsWith("linkedCustomsDeclarationNo:") || key.startsWith("linkedCustomsItemCount:")) {
+    const value = linkedCustomsIndexedColumnValue(order, column);
+    if (column?.linkedCustomsField === "itemCount" || key.startsWith("linkedCustomsItemCount:")) {
+      return formatExportAmount(value);
+    }
+    return value ?? "";
+  }
   if (key === "linkedCustomsDate"
     || key === "linkedCustomsDeclarationNo"
     || key === "linkedCustomsSixSheetNo"
@@ -2463,12 +2555,20 @@ function exportTotalAmountForColumn(orders, column, exchange = null, options = {
   return orders.reduce((sum, order) => sum + exportOrderColumnAmount(order, column), 0);
 }
 
+function isLinkedCustomsItemCountExportColumn(column = {}) {
+  const key = textValue(column?.key);
+  return column?.linkedCustomsField === "itemCount"
+    || key === "linkedCustomsItemCount"
+    || key.startsWith("linkedCustomsItemCount:");
+}
+
 function exportTotalRow(orders, columns, exchangeInput = null, options = {}) {
   const exchange = normalizeExportExchange(exchangeInput);
   const totalOrders = Array.isArray(options.totalOrders) ? options.totalOrders : orders;
   return columns.map((column, index) => {
     if (index === 0) return "合计";
-    if (!isExportAmountColumn(column)) return "";
+    // 品名项数只做展示，不参与底部合计。
+    if (!isExportAmountColumn(column) || isLinkedCustomsItemCountExportColumn(column)) return "";
     return formatExportAmount(exportTotalAmountForColumn(totalOrders, column, exchange, options), false);
   });
 }
@@ -3096,8 +3196,45 @@ function exportTemplateTextRows(templatePayload = null, title = "订单导出") 
   };
 }
 
+function parseLinkedCustomsBusinessIds(value = []) {
+  if (Array.isArray(value)) {
+    return [...new Set(value.map((item) => String(item || "").trim()).filter(Boolean))];
+  }
+  if (value === null || value === undefined) return [];
+  const text = String(value || "").trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) {
+      return [...new Set(parsed.map((item) => String(item || "").trim()).filter(Boolean))];
+    }
+  } catch {
+    // fall through: comma/space separated fallback
+  }
+  return [...new Set(text.split(/[\s,，、;；]+/).map((item) => item.trim()).filter(Boolean))];
+}
+
+function normalizeLinkedCustomsBusinessIdsInput(value = [], fallbackSingle = null) {
+  const ids = parseLinkedCustomsBusinessIds(value);
+  if (ids.length) return ids;
+  const single = String(fallbackSingle || "").trim();
+  return single ? [single] : [];
+}
+
+function orderLinkedCustomsBusinessIds(order = {}) {
+  const fromArray = parseLinkedCustomsBusinessIds(
+    order?.linkedCustomsBusinessIds
+    ?? order?.linked_customs_business_ids
+    ?? order?.linkedCustomsBusinesses?.map?.((item) => item?.id)
+    ?? []
+  );
+  if (fromArray.length) return fromArray;
+  const single = String(order?.linkedCustomsBusinessId || order?.linked_customs_business_id || "").trim();
+  return single ? [single] : [];
+}
+
 function orderLinkedCustomsBusinessId(order = {}) {
-  return String(order?.linkedCustomsBusinessId || order?.linked_customs_business_id || "").trim();
+  return orderLinkedCustomsBusinessIds(order)[0] || "";
 }
 
 async function loadLinkedCustomsBusinessesByIds(ids = []) {
@@ -3113,24 +3250,38 @@ async function loadLinkedCustomsBusinessesByIds(ids = []) {
 }
 
 async function loadLinkedCustomsBusinessIdSet() {
-  if (!(await orderColumnExists("linked_customs_business_id"))) {
-    return new Set();
+  const ids = new Set();
+  if (await orderColumnExists("linked_customs_business_id")) {
+    const rows = await db.prepare(`
+      SELECT DISTINCT linked_customs_business_id AS id
+      FROM orders
+      WHERE deleted_at IS NULL
+        AND linked_customs_business_id IS NOT NULL
+    `).all();
+    rows.forEach((row) => {
+      const id = String(row.id || "").trim();
+      if (id) ids.add(id);
+    });
   }
-  const rows = await db.prepare(`
-    SELECT DISTINCT linked_customs_business_id AS id
-    FROM orders
-    WHERE deleted_at IS NULL
-      AND linked_customs_business_id IS NOT NULL
-  `).all();
-  return new Set(rows.map((row) => String(row.id || "").trim()).filter(Boolean));
+  if (await orderColumnExists("linked_customs_business_ids")) {
+    const rows = await db.prepare(`
+      SELECT linked_customs_business_ids AS ids
+      FROM orders
+      WHERE deleted_at IS NULL
+        AND COALESCE(linked_customs_business_ids, '') <> ''
+        AND COALESCE(linked_customs_business_ids, '[]') <> '[]'
+    `).all();
+    rows.forEach((row) => {
+      parseLinkedCustomsBusinessIds(row.ids).forEach((id) => ids.add(id));
+    });
+  }
+  return ids;
 }
 
 const ORDER_EXPORT_LINKED_CUSTOMS_FIXED_COLUMNS = [
-  { key: "linkedCustomsDate", label: "报关日期", width: 12, pdfWidth: 52 },
-  { key: "linkedCustomsDeclarationNo", label: "报关单号", width: 18, pdfWidth: 70 },
+  // 客户对账单不导出关联报关单的“报关日期/报关客户/进出口”，避免与订单主列重复。
+  { key: "linkedCustomsDeclarationNo", label: "报关单号", width: 22, pdfWidth: 86 },
   { key: "linkedCustomsSixSheetNo", label: "六联单号", width: 16, pdfWidth: 60 },
-  { key: "linkedCustomsCompany", label: "报关客户", width: 28, pdfWidth: 110 },
-  { key: "linkedCustomsDirection", label: "进出口", width: 10, pdfWidth: 42 },
   { key: "linkedCustomsItemCount", label: "品名项数", width: 10, pdfWidth: 34, amount: true },
   { key: "linkedCustomsPageCount", label: "续页", width: 8, pdfWidth: 30, amount: true },
   { key: "linkedCustomsPageFee", label: "续页费", width: 11, pdfWidth: 44, amount: true },
@@ -3177,34 +3328,56 @@ function linkedCustomsBusinessCustomFieldValue(order = {}, fieldName = "") {
 }
 
 function linkedCustomsBusinessExportColumns(orders = []) {
-  const ordersWithCustoms = orders.filter((order) => Boolean(order?.linkedCustomsBusiness));
-  if (!ordersWithCustoms.length) return [];
-  const visibleFixedColumns = ORDER_EXPORT_LINKED_CUSTOMS_FIXED_COLUMNS.filter((column) =>
-    ordersWithCustoms.some((order) => {
-      const value = linkedCustomsBusinessFixedColumnValue(order, column);
-      return value !== "" && value !== null && value !== undefined;
-    })
-  );
-  const customFieldNames = [];
-  const seenFieldNames = new Set();
-  ordersWithCustoms.forEach((order) => {
-    normalizeCustomsBusinessCustomFields(order.linkedCustomsBusiness?.customFields).forEach((field) => {
-      const name = textValue(field.name).trim();
-      if (!name || seenFieldNames.has(name)) return;
-      if (!ordersWithCustoms.some((item) => Number(linkedCustomsBusinessCustomFieldValue(item, name) || 0) !== 0)) return;
-      seenFieldNames.add(name);
-      customFieldNames.push(name);
-    });
-  });
-  const customColumns = customFieldNames.map((name) => ({
-    key: `linkedCustomsCustom:${name}`,
-    label: name,
-    width: Math.max(10, Math.min(24, Math.ceil(stringDisplayWidth(name) * 1.6 + 6))),
-    pdfWidth: 44,
-    amount: true,
-    custom: true
-  }));
-  return [...visibleFixedColumns, ...customColumns];
+  // 客户对账单：按每张订单已关联报关单的列表顺序，追加“报关单号/品名项数”列（可重复列名）。
+  const maxLinkedCount = orders.reduce((max, order) => {
+    const count = Array.isArray(order?.linkedCustomsBusinesses) && order.linkedCustomsBusinesses.length
+      ? order.linkedCustomsBusinesses.length
+      : (order?.linkedCustomsBusiness || orderLinkedCustomsBusinessId(order) ? 1 : 0);
+    return Math.max(max, count);
+  }, 0);
+  if (!maxLinkedCount) return [];
+  const columns = [];
+  for (let index = 0; index < maxLinkedCount; index += 1) {
+    columns.push(
+      {
+        key: `linkedCustomsDeclarationNo:${index}`,
+        label: "报关单号",
+        width: 22,
+        pdfWidth: 86,
+        linkedCustomsIndex: index,
+        linkedCustomsField: "declarationNo"
+      },
+      {
+        key: `linkedCustomsItemCount:${index}`,
+        label: "品名项数",
+        width: 10,
+        pdfWidth: 34,
+        amount: true,
+        linkedCustomsIndex: index,
+        linkedCustomsField: "itemCount"
+      }
+    );
+  }
+  return columns;
+}
+
+function linkedCustomsBusinessAt(order = {}, index = 0) {
+  if (Array.isArray(order?.linkedCustomsBusinesses) && order.linkedCustomsBusinesses.length) {
+    return order.linkedCustomsBusinesses[index] || null;
+  }
+  if (Number(index) === 0) return order?.linkedCustomsBusiness || null;
+  return null;
+}
+
+function linkedCustomsIndexedColumnValue(order = {}, column = {}) {
+  const index = Number(column?.linkedCustomsIndex);
+  if (!Number.isFinite(index) || index < 0) return "";
+  const customs = linkedCustomsBusinessAt(order, index);
+  if (!customs) return "";
+  const field = textValue(column?.linkedCustomsField);
+  if (field === "declarationNo") return customs.declarationNo || "";
+  if (field === "itemCount") return Number(customs.itemCount || 0) || "";
+  return "";
 }
 
 async function renderOrdersCsv(orders, title = "订单导出", templatePayload = null, exchange = null) {
@@ -3267,6 +3440,7 @@ function isExportFeeItemColumn(column = {}) {
 function exportColumnMinimumWidth(column = {}) {
   const key = textValue(column.key);
   if (key === "sixSheetNo" || key === "linkedCustomsSixSheetNo") return 148;
+  if (key === "linkedCustomsDeclarationNo" || exportColumnBaseLabel(column) === "报关单号") return 120;
   if (key === ORDER_EXPORT_CHARGE_NOTE_COLUMN.key) return 104;
   const isFeeColumn = isExportFeeItemColumn(column);
   const widthUnits = Math.max(
@@ -3289,10 +3463,10 @@ function exportColumnMaxWidth(column = {}) {
   if (["quantity", "weight", "status"].includes(key)) return 68;
   if (["plate", "driver", "hkDriver", "mainlandDriver"].includes(key)) return 82;
   if (["sixSheetNo", "linkedCustomsSixSheetNo"].includes(key)) return 168;
+  if (key === "linkedCustomsDeclarationNo") return 150;
   if (["dispatchNo", "no", "tripNo"].includes(key)) return 98;
   if (["customer", "supplier", "operatingUnit"].includes(key)) return 138;
   if (["loading", "unloading"].includes(key)) return 132;
-  if (["linkedCustomsDeclarationNo", "linkedCustomsSixSheetNo"].includes(key)) return 98;
   if (["linkedCustomsCompany"].includes(key)) return 138;
   if (["linkedCustomsItemCount", "linkedCustomsPageCount"].includes(key)) return 68;
   if (["linkedCustomsPageFee", "linkedCustomsProductionCertificateFee", "linkedCustomsCustomsFee", "linkedCustomsManifestFee", "linkedCustomsInspectionFee", "linkedCustomsCheckFee", "linkedCustomsVerificationFee", "linkedCustomsOtherFee", "linkedCustomsTotal"].includes(key)) return 76;
@@ -3309,7 +3483,8 @@ function exportColumnFluidMaxWidth(column = {}) {
   if (key === ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN.key) return 42;
   if (key === ORDER_EXPORT_CHARGE_NOTE_COLUMN.key) return 240;
   if (key === "linkedCustomsDate") return 76;
-  if (["linkedCustomsDeclarationNo", "linkedCustomsSixSheetNo"].includes(key)) return 120;
+  if (key === "linkedCustomsDeclarationNo") return 180;
+  if (["linkedCustomsSixSheetNo"].includes(key)) return 120;
   if (key === "linkedCustomsCompany" || key === "linkedCustomsRemark") return 240;
   if (["linkedCustomsDirection"].includes(key)) return 56;
   if (["linkedCustomsItemCount", "linkedCustomsPageCount"].includes(key)) return 72;
@@ -3362,8 +3537,11 @@ function excelColumnWidthForExport(column = {}, headerValue = "", rowValues = []
     || key === "linkedCustomsSixSheetNo"
     || label === "六联单号"
     || label === "六连单号";
+  const isDeclarationNoColumn = key === "linkedCustomsDeclarationNo" || label === "报关单号";
   const maxWidth = template?.orientation === "fluid" ? 72 : 46;
-  const minWidth = isSixSheetNoColumn ? Math.max(22, Math.ceil(18 * fontScale + 4)) : 6;
+  const minWidth = isSixSheetNoColumn
+    ? Math.max(22, Math.ceil(18 * fontScale + 4))
+    : (isDeclarationNoColumn ? Math.max(14, Math.ceil(stringDisplayWidth("报关单号") * headerScale + 4)) : 6);
   return Math.max(minWidth, Math.min(maxWidth, Math.ceil(Math.max(headerWidth, bodyWidth) + 2)));
 }
 
@@ -3414,7 +3592,7 @@ function exportSettlementTotalExcelFormula(summary, columns = [], detailStartRow
 function exportExcelAmountRangeFormula(columns = [], columnIndex = -1, detailStartRow = 0, detailEndRow = 0, options = {}) {
   if (columnIndex < 0 || !detailStartRow || !detailEndRow) return "";
   const amountColumn = columns[columnIndex];
-  if (!amountColumn || !isExportAmountColumn(amountColumn) || exportLocationFeeType(amountColumn)) return "";
+  if (!amountColumn || !isExportAmountColumn(amountColumn)) return "";
   if (isExportFeeItemColumn(amountColumn) && Array.isArray(options.orders)
     && !options.orders.every((order) => exportExcelFeeCellCanBeNumeric(order, amountColumn, options.valueOptions || {}))) {
     return "";
@@ -3435,7 +3613,7 @@ function exportExcelAmountRangeFormula(columns = [], columnIndex = -1, detailSta
 // 同一列有多条非零费用时，文字展示为"30+120=150"。
 // Excel 里改写成公式 =30+120（保持可计算），明细文字放进单元格批注。
 function exportFeeCellFormulaAmounts(order, column) {
-  if (!isExportFeeItemColumn(column) || exportLocationFeeType(column)) return null;
+  if (!isExportFeeItemColumn(column)) return null;
   const amounts = feeRowsForColumn(order, column)
     .map((fee) => Number(fee.amount || 0))
     .filter((amount) => amount !== 0);
@@ -3455,6 +3633,14 @@ function exportFeeDuplicateDetailText(order, column) {
   return `${parts.join("+")}=${formatExportAmount(total, false)}`;
 }
 
+function orderLocationFeeDetailsText(order, columns = []) {
+  return columns
+    .filter((column) => exportLocationFeeType(column))
+    .map((column) => locationFeeDetailForColumn(order, column))
+    .filter(Boolean)
+    .join("；");
+}
+
 function orderDuplicateFeeDetailsText(order, columns = []) {
   return columns
     .filter((column) => exportFeeCellFormulaAmounts(order, column))
@@ -3468,7 +3654,7 @@ function exportFeeCellFormulaText(amounts = []) {
 }
 
 function exportExcelFeeCellCanBeNumeric(order, column, options = {}) {
-  if (!isExportFeeItemColumn(column) || exportLocationFeeType(column)) return false;
+  if (!isExportFeeItemColumn(column)) return false;
   if (exportFeeCellFormulaAmounts(order, column)) return true;
   const amount = Number(exportOrderColumnAmount(order, column) || 0);
   const display = textValue(exportOrderColumnValue(order, column, 0, options)).replaceAll(",", "").trim();
@@ -3481,7 +3667,6 @@ function exportExcelOrderCurrencyTotalFormula(order, columns = [], rowNumber = 0
   const normalizedCurrency = normalizeFeeCurrency(currency);
   const feeColumns = columns.filter((column) =>
     isExportFeeItemColumn(column)
-    && !exportLocationFeeType(column)
     && normalizeFeeCurrency(exportFeeItemCurrencyForColumn(column)) === normalizedCurrency
   );
   if (!feeColumns.length) return "";
@@ -3954,17 +4139,29 @@ function pdfFooterItemY(item = {}, template = null) {
 }
 
 async function attachLinkedCustomsBusinessesToOrders(orders = []) {
-  const linkedIds = [...new Set(orders.map(orderLinkedCustomsBusinessId).filter(Boolean))];
+  const linkedIds = [...new Set(orders.flatMap((order) => orderLinkedCustomsBusinessIds(order)))];
   if (!linkedIds.length) {
-    return orders.map((order) => ({ ...order, linkedCustomsBusiness: null }));
+    return orders.map((order) => ({
+      ...order,
+      linkedCustomsBusinessId: null,
+      linkedCustomsBusinessIds: [],
+      linkedCustomsBusiness: null,
+      linkedCustomsBusinesses: []
+    }));
   }
   const linkedBusinesses = await loadLinkedCustomsBusinessesByIds(linkedIds);
   return orders.map((order) => {
-    const linkedCustomsBusinessId = orderLinkedCustomsBusinessId(order);
+    const linkedCustomsBusinessIds = orderLinkedCustomsBusinessIds(order);
+    const linkedCustomsBusinesses = linkedCustomsBusinessIds
+      .map((id) => linkedBusinesses.get(String(id)) || null)
+      .filter(Boolean);
+    const linkedCustomsBusinessId = linkedCustomsBusinessIds[0] || null;
     return {
       ...order,
-      linkedCustomsBusinessId: linkedCustomsBusinessId || order.linkedCustomsBusinessId || order.linked_customs_business_id || null,
-      linkedCustomsBusiness: linkedCustomsBusinessId ? linkedBusinesses.get(linkedCustomsBusinessId) || null : null
+      linkedCustomsBusinessId,
+      linkedCustomsBusinessIds,
+      linkedCustomsBusiness: linkedCustomsBusinessId ? linkedBusinesses.get(String(linkedCustomsBusinessId)) || null : null,
+      linkedCustomsBusinesses
     };
   });
 }
@@ -4049,13 +4246,22 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
   const headerHeight = template?.headerHeight || 72;
   const headerBlockRows = Math.max(2, Math.ceil(headerHeight / 20));
   const mergeEndColumn = Math.max(1, columns.length);
-  const headerItems = template
+  const rawHeaderItems = template
     ? (
       template.headerTextItems.length
         ? template.headerTextItems
         : [{ text: template.header || "{{title}}\n日期：{{date}}", color: template.headerTextColor, fontSize: template.headerFontSize, bold: true }]
     )
     : [{ text: title, fontSize: 15, bold: true }, { text: `导出时间：${todayInputValue()}    订单数：${orders.length}`, fontSize: 9, color: "#64748b" }];
+  // 画布里拖到表头区域之外的自由文本，导出时放到表格下方，避免“编辑在下、Excel在上”。
+  const headerItems = [];
+  const deferredBodyTextItems = [];
+  rawHeaderItems.forEach((item, itemIndex) => {
+    const y = Number(item?.y ?? itemIndex * 18);
+    const isFreeBelowHeader = item?.free === true && Number.isFinite(y) && y >= Number(headerHeight || 72);
+    if (isFreeBelowHeader) deferredBodyTextItems.push(item);
+    else headerItems.push(item);
+  });
 
   applyExcelTemplateLogo(workbook, worksheet, template, headerBlockRows, excelColumnWidths);
 
@@ -4073,11 +4279,13 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
       bold: Boolean(item.bold),
       color: { argb: excelArgb(item.color || template?.headerTextColor || "#17233c") }
     };
-    cell.alignment = { vertical: "middle", horizontal: excelAlignment(item.align), wrapText: true };
+    cell.alignment = { vertical: "top", horizontal: excelAlignment(item.align), wrapText: true };
     const mergedWidth = excelColumnWidths.slice(columnNumber - 1).reduce((sum, width) => sum + Number(width || 0), 0);
     const row = worksheet.getRow(rowNumber);
+    const heightFromBox = Math.max(20, Number(item.height || 0));
     row.height = Math.max(
       Number(row.height || 0),
+      heightFromBox,
       excelRowHeightForText(text, fontSize, Math.max(mergedWidth, excelColumnWidths[columnNumber - 1] || 12), 20)
     );
     if (columnNumber < mergeEndColumn) {
@@ -4170,7 +4378,7 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
           ? { formula, result: Number(rowMeta.summary?.amount || 0) }
           : Number(rowMeta.summary?.amount || 0);
         cell.numFmt = "#,##0.00";
-      } else if (isTotalRow && isExportAmountColumn(column)) {
+      } else if (isTotalRow && isExportAmountColumn(column) && !isLinkedCustomsItemCountExportColumn(column)) {
         const amount = isTotalRow
           ? exportTotalAmountForColumn(totalOrders, column, exchange, { rawCurrencyTotals: includeSettlementTotal })
           : exportOrderColumnAmount(sourceOrder, column);
@@ -4202,7 +4410,7 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
           cell.value = Number(exportOrderColumnAmount(sourceOrder, column) || 0);
         }
         cell.numFmt = "#,##0";
-      } else if (sourceOrder && !isSummaryRow && isExportAmountColumn(column) && !exportLocationFeeType(column)
+      } else if (sourceOrder && !isSummaryRow && isExportAmountColumn(column)
         && (!isExportFeeItemColumn(column) || exportExcelFeeCellCanBeNumeric(sourceOrder, column, valueOptions))) {
         const amount = exportOrderColumnAmount(sourceOrder, column);
         const formulaAmounts = exportFeeCellFormulaAmounts(sourceOrder, column);
@@ -4259,39 +4467,45 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
 
   const footerItems = exportTemplateFooterItems(template, template?.footerTextColor);
   let footerRowNumber = tableStartRow + rows.length + 2;
-  if (isCustomerStatement) {
-    // 客户对账单固定收款信息：放在现有所有行的下一行，一个单元格内换行显示。
-    // 港币结算显示香港账户，人民币结算显示国内账户。
-    const payeeLines = statementPayeeLinesForExport(exportOrders, exchange);
-    const payeeRow = worksheet.getRow(tableStartRow + rows.length + 1);
-    const payeeCell = payeeRow.getCell(1);
-    payeeCell.value = payeeLines.join("\n");
-    payeeCell.font = { name: "Microsoft YaHei", size: 10, bold: false, color: { argb: "FFFF0000" } };
-    payeeCell.alignment = { vertical: "middle", horizontal: "left", wrapText: true };
-    payeeRow.height = payeeLines.length * 18 + 6;
-    if (mergeEndColumn > 1) worksheet.mergeCells(payeeRow.number, 1, payeeRow.number, Math.min(mergeEndColumn, 4));
-    footerRowNumber = payeeRow.number + 2;
-  }
+  const writeTemplateTextBlock = (item, defaultFontSize = 9, defaultColor = "#64748b") => {
+    const text = templateText(item?.text, context);
+    if (!text) return;
+    const row = worksheet.getRow(footerRowNumber);
+    const columnNumber = Math.max(1, Math.min(mergeEndColumn, 1 + Math.floor(Number(item?.x || 0) / 72)));
+    const cell = row.getCell(columnNumber);
+    cell.value = text;
+    const fontSize = Number(item?.fontSize || defaultFontSize);
+    cell.font = {
+      name: "Microsoft YaHei",
+      size: fontSize,
+      bold: Boolean(item?.bold),
+      color: { argb: excelArgb(item?.color || defaultColor) }
+    };
+    cell.alignment = { vertical: "top", horizontal: excelAlignment(item?.align), wrapText: true };
+    const mergedWidth = excelColumnWidths.slice(columnNumber - 1).reduce((sum, width) => sum + Number(width || 0), 0);
+    const heightFromBox = Math.max(18, Number(item?.height || 0));
+    row.height = Math.max(
+      Number(row.height || 0),
+      heightFromBox,
+      excelRowHeightForText(text, fontSize, Math.max(mergedWidth, excelColumnWidths[columnNumber - 1] || 12), 18)
+    );
+    if (columnNumber < mergeEndColumn) {
+      try {
+        worksheet.mergeCells(footerRowNumber, columnNumber, footerRowNumber, mergeEndColumn);
+      } catch {
+        // Keep export alive when merges overlap.
+      }
+    }
+    footerRowNumber += 1;
+  };
+  // 先写编辑器里放在列表下方的自由文本（例如收款账号），保证和画布位置一致。
+  // 收款账号已改由模板中心配置，不再按结算币种强行追加。
+  deferredBodyTextItems
+    .slice()
+    .sort((left, right) => Number(left?.y || 0) - Number(right?.y || 0))
+    .forEach((item) => writeTemplateTextBlock(item, template?.headerFontSize || 14, template?.headerTextColor || "#17233c"));
   footerItems.forEach((item) => {
-    const lines = templateText(item.text, context).split(/\r?\n/).filter(Boolean);
-    lines.forEach((line) => {
-      const row = worksheet.getRow(footerRowNumber);
-      const cell = row.getCell(1);
-      cell.value = line;
-      cell.font = {
-        name: "Microsoft YaHei",
-        size: Number(item.fontSize || template?.footerFontSize || 9),
-        bold: Boolean(item.bold),
-        color: { argb: excelArgb(item.color || template?.footerTextColor || "#64748b") }
-      };
-      cell.alignment = { vertical: "middle", horizontal: excelAlignment(item.align), wrapText: true };
-      row.height = Math.max(
-        Number(row.height || 0),
-        excelRowHeightForText(line, Number(item.fontSize || template?.footerFontSize || 9), excelColumnWidths.reduce((sum, width) => sum + Number(width || 0), 0), 18)
-      );
-      if (mergeEndColumn > 1) worksheet.mergeCells(footerRowNumber, 1, footerRowNumber, mergeEndColumn);
-      footerRowNumber += 1;
-    });
+    writeTemplateTextBlock(item, template?.footerFontSize || 9, template?.footerTextColor || "#64748b");
   });
 
   const shouldIncludeReceiptSheet = Boolean(options.includeReceiptSheet) || String(title || "").startsWith("客户对账单");
@@ -4423,15 +4637,8 @@ function kenfaFormatDateCn(date = "") {
 }
 
 function kenfaFeeLabel(name = "") {
-  const text = textValue(name).trim();
-  const labels = [
-    [/中港|吨车|运费/, "中港吨车费"],
-    [/香港报关|报关/, "香港报关"],
-    [/无缝/, "香港无缝"],
-    [/过磅|称重/, "过磅费"],
-    [/停车/, "工厂停车费"]
-  ];
-  return labels.find(([pattern]) => pattern.test(text))?.[1] || text || "收费项目";
+  // 肯发专用明细直接使用订单费用名称，避免把“香港停车费”等映射成“工厂停车费”。
+  return textValue(name).trim() || "收费项目";
 }
 
 function kenfaFeeRemark(fee = {}) {
@@ -4654,15 +4861,7 @@ async function renderKenfaStatementXlsxBuffer(orders, title = "客户对账单",
     formula: `I${totalRow}*1.06`,
     result: summaryTotal * 1.06
   }, { bold: true, align: "right", numFmt: "#,##0.00", size: 12, border: false });
-  // 收款信息：放在总表现有所有行（含税价格行）的下一行
-  // 港币结算显示香港账户，人民币结算显示国内账户。
-  const payeeLines = statementPayeeLinesForExport(orders, exchange);
-  const payeeRowNumber = vatRow + 1;
-  kenfaMerge(summary, `A${payeeRowNumber}:F${payeeRowNumber}`);
-  kenfaSetCell(summary.getCell(payeeRowNumber, 1), payeeLines.join("\n"), {
-    size: 10, color: "#ff0000", border: false, wrap: true
-  });
-  summary.getRow(payeeRowNumber).height = payeeLines.length * 18 + 6;
+  // 收款信息改由模板中心配置，肯发总表不再按币种强行追加。
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 
@@ -5530,7 +5729,11 @@ function normalizeExportOrderSnapshot(order = {}) {
   snapshot.mainlandDriver = String(snapshot.mainlandDriver || order.mainlandDriver || order.mainland_driver || "");
   snapshot.transportMode = String(snapshot.transportMode || order.transportMode || "");
   snapshot.supplier = String(snapshot.supplier || order.supplier || "");
-  snapshot.linkedCustomsBusinessId = String(snapshot.linkedCustomsBusinessId || order.linkedCustomsBusinessId || order.linked_customs_business_id || "");
+  snapshot.linkedCustomsBusinessIds = orderLinkedCustomsBusinessIds({
+    ...order,
+    ...snapshot
+  });
+  snapshot.linkedCustomsBusinessId = snapshot.linkedCustomsBusinessIds[0] || "";
   snapshot.loading = String(snapshot.loading || order.loading || "");
   snapshot.unloading = String(snapshot.unloading || order.unloading || "");
   snapshot.date = String(firstExportFieldValue(snapshot.date, order.date, order.orderDate, order.order_date));
@@ -6796,6 +6999,7 @@ function mapDriverWageSettlement(row) {
     settledAt: row.settled_at || "",
     adjustmentsHKD: row.adjustments_hkd ?? null,
     adjustmentsRMB: row.adjustments_rmb ?? null,
+    advanceAt: row.advance_at || "",
     note: row.note || "",
     createdAt: row.created_at || "",
     updatedAt: row.updated_at || row.created_at || ""
@@ -6811,6 +7015,7 @@ function readDriverWageSettlementPayload(body = {}, current = null) {
     settledAt: String(body.settledAt ?? body.settled_at ?? current?.settled_at ?? "").trim(),
     adjustmentsHKD: normalizeOptionalDriverWageAmount(pickBody(body, "adjustmentsHKD", "adjustments_hkd", current?.adjustments_hkd)),
     adjustmentsRMB: normalizeOptionalDriverWageAmount(pickBody(body, "adjustmentsRMB", "adjustments_rmb", current?.adjustments_rmb)),
+    advanceAt: String(body.advanceAt ?? body.advance_at ?? current?.advance_at ?? "").trim(),
     note: noteValue === null || noteValue === undefined ? "" : String(noteValue).trim()
   };
 }
@@ -12019,15 +12224,23 @@ async function readOrderPayload(body, existing = null) {
   const transportModeInput = userTextValue(pickBody(body, "transportMode", "transport_mode", existing?.transport_mode || ""));
   const transportMode = normalizeTransportMode(transportModeInput || (vehicleSource === OWN_VEHICLE_SOURCE ? "单司机" : ""))
     || (vehicleSource === OWN_VEHICLE_SOURCE ? "单司机" : "");
-  const linkedCustomsBusinessIdInput = pickBody(
-    body,
-    "linkedCustomsBusinessId",
-    "linked_customs_business_id",
-    existing?.linked_customs_business_id ?? existing?.linkedCustomsBusinessId ?? null
-  );
-  const linkedCustomsBusinessId = String(linkedCustomsBusinessIdInput ?? "").trim()
-    ? Number(linkedCustomsBusinessIdInput)
-    : null;
+  const hasLinkedIdsArray = Object.prototype.hasOwnProperty.call(body || {}, "linkedCustomsBusinessIds")
+    || Object.prototype.hasOwnProperty.call(body || {}, "linked_customs_business_ids");
+  const linkedCustomsBusinessIds = hasLinkedIdsArray
+    ? normalizeLinkedCustomsBusinessIdsInput(
+      body.linkedCustomsBusinessIds ?? body.linked_customs_business_ids,
+      null
+    )
+    : normalizeLinkedCustomsBusinessIdsInput(
+      existing?.linked_customs_business_ids ?? existing?.linkedCustomsBusinessIds ?? [],
+      pickBody(
+        body,
+        "linkedCustomsBusinessId",
+        "linked_customs_business_id",
+        existing?.linked_customs_business_id ?? existing?.linkedCustomsBusinessId ?? null
+      )
+    );
+  const linkedCustomsBusinessId = linkedCustomsBusinessIds[0] ? Number(linkedCustomsBusinessIds[0]) : null;
   const loadingText = pickBody(body, "loading", "loading_place", existing?.loading || "");
   const unloadingText = pickBody(body, "unloading", "unloading_place", existing?.unloading || "");
   const loadingLocations = normalizeLocationEntriesFromPayload(body, "loading", loadingText, existing?.loading_locations || "");
@@ -12037,6 +12250,8 @@ async function readOrderPayload(body, existing = null) {
     dispatchNo: resolvedDispatchNo,
     dispatchGroupId,
     linkedCustomsBusinessId: Number.isFinite(linkedCustomsBusinessId) && linkedCustomsBusinessId > 0 ? linkedCustomsBusinessId : null,
+    linkedCustomsBusinessIds,
+    linkedCustomsBusinessIdsJson: JSON.stringify(linkedCustomsBusinessIds),
     customerId: pickBody(body, "customerId", "customer_id", existing?.customer_id || null),
     customer: userTextValue(pickBody(body, "customer", "customer_name", existing?.customer || "")),
     businessType: userTextValue(businessTypeInput || "运输"),
@@ -12113,7 +12328,12 @@ function orderWriteEntries(item = {}, support = {}, existing = {}) {
 
   if (support.dispatchNo) entries.splice(1, 0, ["dispatch_no", userTextValue(item.dispatchNo ?? existing.dispatchNo ?? existing.dispatch_no)]);
   if (support.dispatchGroupId) entries.splice(2, 0, ["dispatch_group_id", userTextValue(item.dispatchGroupId ?? existing.dispatchGroupId ?? existing.dispatch_group_id)]);
-  if (support.linkedCustomsBusinessId) entries.splice(entries.findIndex(([column]) => column === "vehicle_source") + 1, 0, ["linked_customs_business_id", item.linkedCustomsBusinessId ?? existing.linkedCustomsBusinessId ?? existing.linked_customs_business_id ?? null]);
+  if (support.linkedCustomsBusinessId) entries.splice(entries.findIndex(([column]) => column === "vehicle_source") + 1, 0, ["linked_customs_business_id", item.linkedCustomsBusinessId]);
+  if (support.linkedCustomsBusinessIds) {
+    const idsJson = item.linkedCustomsBusinessIdsJson
+      || JSON.stringify(normalizeLinkedCustomsBusinessIdsInput(item.linkedCustomsBusinessIds, item.linkedCustomsBusinessId));
+    entries.splice(entries.findIndex(([column]) => column === "vehicle_source") + 1, 0, ["linked_customs_business_ids", idsJson]);
+  }
   if (support.loadingLocations) entries.splice(entries.findIndex(([column]) => column === "loading") + 1, 0, ["loading_locations", loadingLocationsJson]);
   if (support.unloadingLocations) entries.splice(entries.findIndex(([column]) => column === "unloading") + 1, 0, ["unloading_locations", unloadingLocationsJson]);
   if (support.operatingUnit) entries.push(["operating_unit", userTextValue(item.operatingUnit ?? existing.operatingUnit ?? existing.operating_unit)]);
@@ -14137,10 +14357,25 @@ app.post("/api/driver-wage-settlements", async (req, res) => {
     res.status(503).json({ message: "司机工资结算表未就绪" });
     return;
   }
-  const incoming = readDriverWageSettlementPayload(req.body || {});
+  const current = await db.prepare(`
+    SELECT * FROM driver_wage_settlements
+    WHERE period_key = ? AND driver_id = ?
+  `).get(
+    String(req.body?.periodKey ?? req.body?.period_key ?? "").trim(),
+    Number(req.body?.driverId ?? req.body?.driver_id ?? 0)
+  );
+  const incoming = readDriverWageSettlementPayload(req.body || {}, current);
+  const adjustmentsChanged = !current
+    || Number(current.adjustments_hkd ?? NaN) !== Number(incoming.adjustmentsHKD ?? NaN)
+    || Number(current.adjustments_rmb ?? NaN) !== Number(incoming.adjustmentsRMB ?? NaN);
   const item = {
     ...incoming,
-    settledAt: incoming.status === DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS ? incoming.settledAt : ""
+    // 结算时间永久展示；状态不影响已填日期保留。
+    settledAt: incoming.settledAt || "",
+    // 编辑预支港币/人民币后更新预支日期；未改金额则保留原预支日期。
+    advanceAt: adjustmentsChanged
+      ? (incoming.advanceAt || todayInputValue())
+      : (incoming.advanceAt || current?.advance_at || "")
   };
   const validationMessage = validateDriverWageSettlementPayload(item);
   if (validationMessage) {
@@ -14152,10 +14387,6 @@ app.post("/api/driver-wage-settlements", async (req, res) => {
     res.status(404).json({ message: "司机不存在或已删除" });
     return;
   }
-  const current = await db.prepare(`
-    SELECT * FROM driver_wage_settlements
-    WHERE period_key = ? AND driver_id = ?
-  `).get(item.periodKey, item.driverId);
   const support = await driverWageSettlementWriteColumnSupport();
   const entries = [
     ["period_key", "periodKey"],
@@ -14164,6 +14395,7 @@ app.post("/api/driver-wage-settlements", async (req, res) => {
     ["settled_at", "settledAt"],
     ...(support.adjustmentsHKD ? [["adjustments_hkd", "adjustmentsHKD"]] : []),
     ...(support.adjustmentsRMB ? [["adjustments_rmb", "adjustmentsRMB"]] : []),
+    ...(support.advanceAt ? [["advance_at", "advanceAt"]] : []),
     ...(support.note ? [["note", "note"]] : [])
   ];
   const { columnSql, valueSql, updateSql } = buildNamedColumns(entries);
