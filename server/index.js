@@ -4524,7 +4524,7 @@ const KENFA_COMPANY_CONTACT = "联系人：刘先生   电话：0755-83007202";
 
 function kenfaAmountToRmb(amount = 0, currency = "人民币", exchange = null) {
   const value = Number(amount || 0);
-  if (normalizeFeeCurrency(currency) === "HKD" && exchange?.mode === "hkd-to-rmb" && exchange.rate) {
+  if (normalizeFeeCurrency(currency) === "HKD" && Number(exchange?.rate) > 0) {
     return value * Number(exchange.rate || 0);
   }
   return value;
@@ -4533,7 +4533,7 @@ function kenfaAmountToRmb(amount = 0, currency = "人民币", exchange = null) {
 function kenfaOrderRmbAmount(order = {}, exchange = null) {
   const rmb = Number(order.receivableRMB || 0);
   const hkd = Number(order.receivableHKD || 0);
-  if (exchange?.mode === "hkd-to-rmb" && exchange.rate) return rmb + hkd * Number(exchange.rate || 0);
+  if (Number(exchange?.rate) > 0) return rmb + hkd * Number(exchange.rate || 0);
   return rmb;
 }
 
@@ -4641,8 +4641,25 @@ function kenfaFeeLabel(name = "") {
   return textValue(name).trim() || "收费项目";
 }
 
-function kenfaFeeRemark(fee = {}) {
-  return exportFeeUserRemark(fee);
+function kenfaFormulaNumber(value = 0) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? String(number) : "0";
+}
+
+function kenfaHkdConversionRemark(amount = 0, exchange = null) {
+  const value = Number(amount || 0);
+  const rate = Number(exchange?.rate || 0);
+  if (!Number.isFinite(value) || !Number.isFinite(rate) || rate <= 0) return "";
+  const converted = Number((value * rate).toFixed(2));
+  return `HKD${kenfaFormulaNumber(value)}*${kenfaFormulaNumber(rate)}=${kenfaFormulaNumber(converted)}`;
+}
+
+function kenfaFeeRemark(fee = {}, exchange = null) {
+  const originalRemark = exportFeeUserRemark(fee);
+  const conversionRemark = normalizeFeeCurrency(fee.currency) === "HKD"
+    ? kenfaHkdConversionRemark(fee.amount, exchange)
+    : "";
+  return [originalRemark, conversionRemark].filter(Boolean).join("；");
 }
 
 function kenfaDayWeight(dayOrders = []) {
@@ -4657,14 +4674,14 @@ function kenfaDailyFeeRows(dayOrders = [], exchange = null) {
     feeRows.forEach((fee) => {
       rows.push({
         name: kenfaFeeLabel(fee.name),
-        remark: kenfaFeeRemark(fee),
+        remark: kenfaFeeRemark(fee, exchange),
         amount: Number(kenfaAmountToRmb(fee.amount, fee.currency, exchange).toFixed(2))
       });
     });
     if (!feeRows.length) {
       rows.push({
         name: order.businessType || "中港吨车费",
-        remark: "",
+        remark: kenfaHkdConversionRemark(order.receivableHKD, exchange),
         amount: Number(kenfaOrderRmbAmount(order, exchange).toFixed(2))
       });
     }
