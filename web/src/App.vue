@@ -15972,10 +15972,14 @@ function orderDisplaySource(order = {}) {
   const sourceOrder = liveOrder || order;
   const dispatchRow = orderDispatchPlanRow(sourceOrder);
   if (!dispatchRow) return sourceOrder;
+  const linkedCustomsBusinessIds = normalizeOrderLinkedCustomsBusinessIds(
+    sourceOrder?.linkedCustomsBusinessIds ?? sourceOrder?.linked_customs_business_ids ?? [],
+    sourceOrder?.linkedCustomsBusinessId || sourceOrder?.linked_customs_business_id || ""
+  );
   return {
     ...sourceOrder,
-    linkedCustomsBusinessId: orderLinkedCustomsBusinessIdValue(sourceOrder),
-    linkedCustomsBusinessIds: orderLinkedCustomsBusinessIdsValue(sourceOrder),
+    linkedCustomsBusinessId: linkedCustomsBusinessIds[0] || "",
+    linkedCustomsBusinessIds,
     dispatchNo: String(sourceOrder.dispatchNo || dispatchRow.dispatchNo || "").trim(),
     businessType: String(sourceOrder.businessType || dispatchRow.businessType || "").trim(),
     port: displayPortText(sourceOrder.port || dispatchRow.port || ""),
