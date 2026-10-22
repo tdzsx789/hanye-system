@@ -375,7 +375,12 @@ const CUSTOMER_CUSTOMS_FEE_FIELD_NAMES = {
   customsProductionCertificateFee: "产证地",
   customsInspectionFee: "报检费"
 };
-const CUSTOMER_CUSTOMS_FEE_FIELD_NAME_SET = new Set(["舱单费", ...Object.values(CUSTOMER_CUSTOMS_FEE_FIELD_NAMES)]);
+const TRANSPORT_CUSTOMS_DECLARATION_NO_FLAG_FIELD = "__transport_customs_declaration_no_enabled__";
+const CUSTOMER_CUSTOMS_FEE_FIELD_NAME_SET = new Set([
+  "舱单费",
+  TRANSPORT_CUSTOMS_DECLARATION_NO_FLAG_FIELD,
+  ...Object.values(CUSTOMER_CUSTOMS_FEE_FIELD_NAMES)
+]);
 const DEFAULT_CUSTOMS_CUSTOMER_CONFIG = {
   customsHomeItemCount: 6,
   customsPageItemCount: 14,
@@ -1020,6 +1025,7 @@ function normalizeCustomerRecord(customer = {}) {
     operatingUnitEnabled: booleanFlag(row.operatingUnitEnabled ?? row.operating_unit_enabled, false),
     newOldEnabled: booleanFlag(row.newOldEnabled ?? row.new_old_enabled, false),
     specialCarEnabled: booleanFlag(row.specialCarEnabled ?? row.special_car_enabled, false),
+    customsDeclarationNoEnabled: booleanFlag(row.customsDeclarationNoEnabled ?? row.customs_declaration_no_enabled, false),
     vatRate: normalizeCustomerVatRate(row.vatRate ?? row.vat_rate),
     customsCustomFields: customsConfig.customsCustomFields
   };
@@ -1225,6 +1231,9 @@ const currentOrderSixSheetNoRequired = computed(() => Boolean(currentOrderSignRe
 const currentOrderOperatingUnitEnabled = computed(() => currentOrderCustomerFeatureEnabled("operatingUnitEnabled", "operating_unit_enabled"));
 const currentOrderNewOldEnabled = computed(() => currentOrderCustomerFeatureEnabled("newOldEnabled", "new_old_enabled"));
 const currentOrderSpecialCarEnabled = computed(() => currentOrderCustomerFeatureEnabled("specialCarEnabled", "special_car_enabled"));
+const currentOrderCustomsDeclarationNoEnabled = computed(() =>
+  currentOrderCustomerFeatureEnabled("customsDeclarationNoEnabled", "customs_declaration_no_enabled")
+);
 
 function normalizeOrderNewOld(value = "") {
   const text = String(value || "").trim();
@@ -1237,6 +1246,7 @@ function syncOrderCustomerFeatureFields({ preserveExisting = false } = {}) {
   if (!currentOrderNewOldEnabled.value && !preserveExisting) orderForm.newOld = "";
   else orderForm.newOld = normalizeOrderNewOld(orderForm.newOld);
   if (!currentOrderSpecialCarEnabled.value && !preserveExisting) orderForm.specialCar = false;
+  if (!currentOrderCustomsDeclarationNoEnabled.value && !preserveExisting) orderForm.customsDeclarationNos = [];
 }
 
 function orderSignRequirementKey(requirement = null) {
@@ -2214,6 +2224,7 @@ const orderCustomsStatementLoading = ref(false);
 const orderCustomsStatementCompany = ref("");
 const orderCustomsStatementSelectedId = ref("");
 const orderCustomsStatementSelectedIds = ref([]);
+const orderCustomsDeclarationNoDraft = ref("");
 const orderDetailNo = ref("");
 const orderListDetailOpen = ref(false);
 const orderListDetailScope = ref("orders");
@@ -2403,6 +2414,7 @@ const customerForm = reactive({
   operatingUnitEnabled: false,
   newOldEnabled: false,
   specialCarEnabled: false,
+  customsDeclarationNoEnabled: false,
   vatRate: 0,
   customsCustomFields: [],
   invoicePasteText: ""
@@ -2583,6 +2595,7 @@ const orderForm = reactive({
   operatingUnit: "",
   newOld: "",
   specialCar: false,
+  customsDeclarationNos: [],
   remark: "",
   tripNoEnabled: false,
   tripNo: "",
@@ -14663,6 +14676,51 @@ function normalizeOrderLinkedCustomsBusinessIds(value = [], fallbackSingle = "")
   return single ? [single] : [];
 }
 
+function normalizeOrderCustomsDeclarationNos(value = []) {
+  const source = Array.isArray(value) ? value : [value];
+  return [...new Set(source
+    .flatMap((item) => String(item || "").split(/[\r\n,，;；、]+/))
+    .map((item) => item.trim())
+    .filter(Boolean))]
+    .slice(0, 100);
+}
+
+function addOrderCustomsDeclarationNos() {
+  const additions = normalizeOrderCustomsDeclarationNos(orderCustomsDeclarationNoDraft.value);
+  if (!additions.length) return;
+  const existing = normalizeOrderCustomsDeclarationNos(orderForm.customsDeclarationNos);
+  const seen = new Set(existing);
+  const uniqueAdditions = additions.filter((item) => !seen.has(item));
+  const availableSlots = Math.max(0, 100 - existing.length);
+  if (!availableSlots && uniqueAdditions.length) {
+    notify("报关单号最多可添加100个");
+    return;
+  }
+  if (uniqueAdditions.length > availableSlots) notify("报关单号最多可添加100个，超出部分未添加");
+  orderForm.customsDeclarationNos = [...existing, ...uniqueAdditions.slice(0, availableSlots)];
+  orderCustomsDeclarationNoDraft.value = "";
+}
+
+function handleOrderCustomsDeclarationNoPaste(event) {
+  const text = event.clipboardData?.getData("text") || "";
+  if (!/[\r\n,，;；、]/.test(text)) return;
+  event.preventDefault();
+  orderCustomsDeclarationNoDraft.value = text;
+  nextTick(addOrderCustomsDeclarationNos);
+}
+
+function handleOrderCustomsDeclarationNoKeydown(event) {
+  if (["Enter", ",", "，", ";", "；", "、"].includes(event.key)) {
+    event.preventDefault();
+    addOrderCustomsDeclarationNos();
+  }
+}
+
+function removeOrderCustomsDeclarationNo(value = "") {
+  const target = String(value || "").trim();
+  orderForm.customsDeclarationNos = orderForm.customsDeclarationNos.filter((item) => item !== target);
+}
+
 function orderLinkedCustomsBusinessIdsValue(order = {}) {
   const source = orderDisplaySource(order);
   return normalizeOrderLinkedCustomsBusinessIds(
@@ -14676,7 +14734,12 @@ function orderLinkedCustomsBusinessIdValue(order = {}) {
 }
 
 function orderHasLinkedCustomsBusiness(order = {}) {
-  return orderLinkedCustomsBusinessIdsValue(order).length > 0;
+  const source = orderDisplaySource(order);
+  return normalizeOrderLinkedCustomsBusinessIds(
+    source?.linkedCustomsBusinessIds ?? source?.linked_customs_business_ids ?? [],
+    source?.linkedCustomsBusinessId || source?.linked_customs_business_id || ""
+  ).length > 0
+    || normalizeOrderCustomsDeclarationNos(source?.customsDeclarationNos ?? source?.customs_declaration_nos).length > 0;
 }
 
 const currentOrderLinkedCustomsBusinessIds = computed(() => {
@@ -24562,6 +24625,9 @@ function buildNormalizedOrderPayload() {
   );
   payload.newOld = currentOrderNewOldEnabled.value || payload.newOld ? normalizeOrderNewOld(payload.newOld) : "";
   payload.specialCar = currentOrderSpecialCarEnabled.value || payload.specialCar ? booleanFlag(payload.specialCar, false) : false;
+  payload.customsDeclarationNos = currentOrderCustomsDeclarationNoEnabled.value || payload.customsDeclarationNos?.length
+    ? normalizeOrderCustomsDeclarationNos(payload.customsDeclarationNos)
+    : [];
   payload.linkedCustomsBusinessIds = normalizeOrderLinkedCustomsBusinessIds(
     payload.linkedCustomsBusinessIds,
     payload.linkedCustomsBusinessId
@@ -26784,8 +26850,14 @@ function buildCustomerPayload() {
     specialCarEnabled: isTransportCustomer
       ? booleanFlag(customerForm.specialCarEnabled, false)
       : false,
+    customsDeclarationNoEnabled: isTransportCustomer
+      ? booleanFlag(customerForm.customsDeclarationNoEnabled, false)
+      : false,
     vatRate: isTransportCustomer ? normalizeCustomerVatRate(customerForm.vatRate) : 0,
     customsCustomFields: [
+      ...(isTransportCustomer && booleanFlag(customerForm.customsDeclarationNoEnabled, false)
+        ? [{ name: TRANSPORT_CUSTOMS_DECLARATION_NO_FLAG_FIELD, value: 1 }]
+        : []),
       {
         name: CUSTOMER_CUSTOMS_FEE_FIELD_NAMES.customsImportDeclarationFee,
         value: customsConfig.customsImportDeclarationFee
@@ -26934,6 +27006,9 @@ function openCustomerModal(customer = null, createType = activePartnerType.value
     operatingUnitEnabled: isTransportCustomer ? booleanFlag(normalizedCustomer?.operatingUnitEnabled ?? normalizedCustomer?.operating_unit_enabled, false) : false,
     newOldEnabled: isTransportCustomer ? booleanFlag(normalizedCustomer?.newOldEnabled ?? normalizedCustomer?.new_old_enabled, false) : false,
     specialCarEnabled: isTransportCustomer ? booleanFlag(normalizedCustomer?.specialCarEnabled ?? normalizedCustomer?.special_car_enabled, false) : false,
+    customsDeclarationNoEnabled: isTransportCustomer
+      ? booleanFlag(normalizedCustomer?.customsDeclarationNoEnabled ?? normalizedCustomer?.customs_declaration_no_enabled, false)
+      : false,
     vatRate: isTransportCustomer ? normalizeCustomerVatRate(normalizedCustomer?.vatRate ?? normalizedCustomer?.vat_rate) : 0,
     customsCustomFields: customsConfig.customsCustomFields
       .map((field) => ({ name: field.name, value: customsBusinessIntegerValue(field.value) })),
@@ -26976,6 +27051,7 @@ async function saveCustomer() {
 
 function resetOrderForm() {
   autoEnabledOrderRequiredFieldKey.value = "";
+  orderCustomsDeclarationNoDraft.value = "";
   Object.assign(orderForm, {
     dispatchNo: "",
     customerId: "",
@@ -27012,6 +27088,7 @@ function resetOrderForm() {
     operatingUnit: "",
     newOld: "",
     specialCar: false,
+    customsDeclarationNos: [],
     remark: "",
     tripNoEnabled: false,
     tripNo: "",
@@ -27040,6 +27117,10 @@ function handleOrderCustomerInput() {
   // The input is only a search box. A typed value must resolve to a customer
   // record instead of silently becoming a new customer name.
   const customer = transportCustomerByReference(orderCustomerKeyword.value, "");
+  if (String(orderForm.customerId || "") !== String(customer?.id || "")) {
+    orderForm.customsDeclarationNos = [];
+    orderCustomsDeclarationNoDraft.value = "";
+  }
   orderForm.customerId = customer?.id || "";
   orderForm.customer = customer?.name || "";
   orderCustomerPickerOpen.value = true;
@@ -27050,6 +27131,10 @@ function handleOrderCustomerInput() {
 }
 
 function selectOrderCustomer(customer) {
+  if (String(orderForm.customerId || "") !== String(customer?.id || "")) {
+    orderForm.customsDeclarationNos = [];
+    orderCustomsDeclarationNoDraft.value = "";
+  }
   orderForm.customerId = customer?.id || "";
   orderForm.customer = customer?.name || "";
   orderCustomerKeyword.value = customerShortDisplay(customer) || "";
@@ -27298,6 +27383,7 @@ async function openOrderModal(customer = null, order = null, options = {}) {
   closeOrderDetail();
   orderCustomsStatementSelectedId.value = "";
   orderCustomsStatementSelectedIds.value = [];
+  orderCustomsDeclarationNoDraft.value = "";
   if (customer && !customerMatchesCategory(customer, "运输客户")) customer = null;
   orderAuditMode.value = Boolean(options.audit && order);
   orderViewMode.value = Boolean(order && !orderAuditMode.value && (options.view || !canEditOrder(order)));
@@ -27346,6 +27432,7 @@ async function openOrderModal(customer = null, order = null, options = {}) {
       operatingUnit: displayOrder.operatingUnit || displayOrder.operating_unit || "",
       newOld: normalizeOrderNewOld(displayOrder.newOld || displayOrder.new_old || ""),
       specialCar: booleanFlag(displayOrder.specialCar ?? displayOrder.special_car, false),
+      customsDeclarationNos: normalizeOrderCustomsDeclarationNos(displayOrder.customsDeclarationNos ?? displayOrder.customs_declaration_nos ?? []),
       remark: displayOrder.remark || "",
       tripNoEnabled: Boolean(displayOrder.tripNoEnabled),
       tripNo: displayOrder.tripNo || "",
@@ -27475,6 +27562,7 @@ function closeOrderModal() {
   closeCustomsBusinessModal();
   orderCustomsStatementSelectedId.value = "";
   orderCustomsStatementSelectedIds.value = [];
+  orderCustomsDeclarationNoDraft.value = "";
   closeOrderFeeFxContextMenu();
   closeOrderFeeNamePicker();
   orderSupplierPickerOpen.value = false;
@@ -41150,6 +41238,7 @@ function orderDetailFeeRows(order = {}) {
                 <label v-if="normalizeCustomerCategory(customerForm.customerCategory) === '运输客户'" class="order-switch-field"><input v-model="customerForm.operatingUnitEnabled" type="checkbox" />经营单位必须</label>
                 <label v-if="normalizeCustomerCategory(customerForm.customerCategory) === '运输客户'" class="order-switch-field"><input v-model="customerForm.newOldEnabled" type="checkbox" />新/旧</label>
                 <label v-if="normalizeCustomerCategory(customerForm.customerCategory) === '运输客户'" class="order-switch-field"><input v-model="customerForm.specialCarEnabled" type="checkbox" />专车</label>
+                <label v-if="normalizeCustomerCategory(customerForm.customerCategory) === '运输客户'" class="order-switch-field"><input v-model="customerForm.customsDeclarationNoEnabled" type="checkbox" />报关单号</label>
               </div>
               <label v-if="customerForm.type === '客户' && normalizeCustomerCategory(customerForm.customerCategory) === '报关客户'">客户类型
                 <input v-model.trim="customerForm.customsCustomerType" placeholder="例如：一般贸易 / 跨境电商" />
@@ -42058,6 +42147,31 @@ function orderDetailFeeRows(order = {}) {
                   :title="orderCustomsStatementHasSelection ? `已关联报关单${currentOrderLinkedCustomsBusinessCount}单，点击查看` : (canOpenOrderCustomsStatement ? '查看匹配的报关客户报关单' : '当前客户未匹配到可关联的报关客户')"
                   @click.stop="openOrderCustomsStatementModal"
                 ><IconSvg name="list" />{{ orderCustomsStatementHasSelection ? `已关联报关单${currentOrderLinkedCustomsBusinessCount}单` : '关联报关单' }}</button>
+                <div v-if="currentOrderCustomsDeclarationNoEnabled" class="order-customs-declaration-field">
+                  <span class="order-customs-declaration-label">报关单号 <small>{{ orderForm.customsDeclarationNos.length }}/100</small></span>
+                  <div class="order-customs-declaration-values">
+                    <span v-for="value in orderForm.customsDeclarationNos" :key="value" class="order-customs-declaration-chip">
+                      {{ value }}
+                      <button type="button" :title="`删除报关单号 ${value}`" :aria-label="`删除报关单号 ${value}`" @click="removeOrderCustomsDeclarationNo(value)"><IconSvg name="close" /></button>
+                    </span>
+                    <input
+                      v-model="orderCustomsDeclarationNoDraft"
+                      aria-label="输入报关单号"
+                      placeholder="输入后按回车，可粘贴多个"
+                      @keydown="handleOrderCustomsDeclarationNoKeydown"
+                      @paste="handleOrderCustomsDeclarationNoPaste"
+                      @blur="addOrderCustomsDeclarationNos"
+                    />
+                    <button
+                      class="order-customs-declaration-add"
+                      type="button"
+                      title="添加报关单号"
+                      aria-label="添加报关单号"
+                      :disabled="!orderCustomsDeclarationNoDraft.trim()"
+                      @click="addOrderCustomsDeclarationNos"
+                    ><IconSvg name="plus" /></button>
+                  </div>
+                </div>
               </div>
               <label v-if="orderHasTransportFields" class="order-compact-field order-location-field order-location-wide order-loading-field">装货
                 <span class="location-input-row route-tree-wrap" @click.stop>

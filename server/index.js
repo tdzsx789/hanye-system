@@ -523,6 +523,48 @@ function customsBusinessCustomFieldName(field = {}) {
   return userTextValue(field?.name ?? field?.label ?? field?.key ?? "");
 }
 
+const TRANSPORT_CUSTOMS_DECLARATION_NO_FLAG_FIELD = "__transport_customs_declaration_no_enabled__";
+const ORDER_CUSTOMS_DECLARATION_NOS_REMARK_PREFIX = "运输客户报关单号：";
+
+function normalizeOrderCustomsDeclarationNos(value = []) {
+  const source = Array.isArray(value) ? value : String(value || "").split(/[\r\n,，;；、]+/);
+  return [...new Set(source.map((item) => userTextValue(item)).filter(Boolean))].slice(0, 100);
+}
+
+function orderCustomsDeclarationNosFromRemark(remark = "") {
+  const line = String(remark || "").split(/\r?\n/)
+    .find((item) => item.startsWith(ORDER_CUSTOMS_DECLARATION_NOS_REMARK_PREFIX)) || "";
+  const value = line.slice(ORDER_CUSTOMS_DECLARATION_NOS_REMARK_PREFIX.length).trim();
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed)) return normalizeOrderCustomsDeclarationNos(parsed);
+  } catch {}
+  return normalizeOrderCustomsDeclarationNos(value);
+}
+
+function stripOrderCustomsDeclarationNosRemark(remark = "") {
+  return String(remark || "")
+    .split(/\r?\n/)
+    .filter((line) => !line.startsWith(ORDER_CUSTOMS_DECLARATION_NOS_REMARK_PREFIX))
+    .join("\n")
+    .trim();
+}
+
+function mergeOrderCustomsDeclarationNosRemark(remark = "", declarationNos = []) {
+  const base = stripOrderCustomsDeclarationNosRemark(remark);
+  const values = normalizeOrderCustomsDeclarationNos(declarationNos);
+  return [base, values.length ? `${ORDER_CUSTOMS_DECLARATION_NOS_REMARK_PREFIX}${JSON.stringify(values)}` : ""]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function transportCustomsDeclarationNoEnabled(customFields = []) {
+  return normalizeCustomsBusinessCustomFields(customFields)
+    .some((field) => customsBusinessCustomFieldName(field) === TRANSPORT_CUSTOMS_DECLARATION_NO_FLAG_FIELD
+      && integerField(field.value) > 0);
+}
+
 function mapCustomer(row) {
   const customerCategory = row.type === "客户" && row.customer_category === "报关客户" ? "报关客户" : row.type === "客户" ? "运输客户" : "";
   const customsDefaults = {
@@ -577,8 +619,11 @@ function mapCustomer(row) {
     operatingUnitEnabled: booleanFlag(row.operating_unit_enabled, false),
     newOldEnabled: booleanFlag(row.new_old_enabled, false),
     specialCarEnabled: booleanFlag(row.special_car_enabled, false),
+    customsDeclarationNoEnabled: transportCustomsDeclarationNoEnabled(customsCustomFields),
     vatRate: normalizeCustomerVatRate(row.vat_rate),
-    customsCustomFields: customsCustomFields.filter((field) => !["产证地", "报检费", "商检费"].includes(customsBusinessCustomFieldName(field))),
+    customsCustomFields: customsCustomFields.filter((field) =>
+      !["产证地", "报检费", "商检费", TRANSPORT_CUSTOMS_DECLARATION_NO_FLAG_FIELD].includes(customsBusinessCustomFieldName(field))
+    ),
     createdAt: row.created_at,
     invoice: {
       title: row.invoice_title || row.name || "",
@@ -640,6 +685,7 @@ async function loadTransportCustomerFeatureMap() {
         ${support.operatingUnitEnabled ? "operating_unit_enabled" : "false AS operating_unit_enabled"},
         ${support.newOldEnabled ? "new_old_enabled" : "false AS new_old_enabled"},
         ${support.specialCarEnabled ? "special_car_enabled" : "false AS special_car_enabled"},
+        ${support.customsCustomFields ? "customs_custom_fields" : "'[]' AS customs_custom_fields"},
         ${support.vatRate ? "vat_rate" : "0 AS vat_rate"}
       FROM customers
       WHERE deleted_at IS NULL
@@ -652,6 +698,7 @@ async function loadTransportCustomerFeatureMap() {
         operatingUnitEnabled: booleanFlag(row.operating_unit_enabled, false),
         newOldEnabled: booleanFlag(row.new_old_enabled, false),
         specialCarEnabled: booleanFlag(row.special_car_enabled, false),
+        customsDeclarationNoEnabled: transportCustomsDeclarationNoEnabled(row.customs_custom_fields),
         vatRate: normalizeCustomerVatRate(row.vat_rate)
       };
       [row.id, row.name, row.short_name]
@@ -705,6 +752,7 @@ async function customerRequirementColumnSupport() {
     operatingUnitEnabled: await customerColumnExists("operating_unit_enabled"),
     newOldEnabled: await customerColumnExists("new_old_enabled"),
     specialCarEnabled: await customerColumnExists("special_car_enabled"),
+    customsCustomFields: await customerColumnExists("customs_custom_fields"),
     vatRate: await customerColumnExists("vat_rate")
   };
   return customerRequirementColumnSupportCache;
@@ -885,6 +933,17 @@ function normalizeCustomerPayload(body, id = "") {
   const type = body.type === "供应商" ? "供应商" : "客户";
   const customerCategory = type === "客户" && (body.customerCategory || body.customer_category) === "报关客户" ? "报关客户" : type === "客户" ? "运输客户" : "";
   const isTransportCustomer = type === "客户" && customerCategory === "运输客户";
+  const customsCustomFields = normalizeCustomsBusinessCustomFields(body.customsCustomFields ?? body.customs_custom_fields);
+  const customsDeclarationNoEnabled = isTransportCustomer
+    ? (Object.prototype.hasOwnProperty.call(body, "customsDeclarationNoEnabled")
+      ? booleanFlag(body.customsDeclarationNoEnabled, false)
+      : transportCustomsDeclarationNoEnabled(customsCustomFields))
+    : false;
+  const persistedCustomsCustomFields = customsCustomFields
+    .filter((field) => customsBusinessCustomFieldName(field) !== TRANSPORT_CUSTOMS_DECLARATION_NO_FLAG_FIELD);
+  if (customsDeclarationNoEnabled) {
+    persistedCustomsCustomFields.unshift({ name: TRANSPORT_CUSTOMS_DECLARATION_NO_FLAG_FIELD, value: 1 });
+  }
   const settlementCurrency = userTextValue(body.settlementCurrency);
   return {
     id,
@@ -922,9 +981,10 @@ function normalizeCustomerPayload(body, id = "") {
     operatingUnitEnabled: isTransportCustomer ? booleanFlag(body.operatingUnitEnabled ?? body.operating_unit_enabled, false) : false,
     newOldEnabled: isTransportCustomer ? booleanFlag(body.newOldEnabled ?? body.new_old_enabled, false) : false,
     specialCarEnabled: isTransportCustomer ? booleanFlag(body.specialCarEnabled ?? body.special_car_enabled, false) : false,
+    customsDeclarationNoEnabled,
     vatRate: isTransportCustomer ? normalizeCustomerVatRate(body.vatRate ?? body.vat_rate) : 0,
-    customsCustomFields: normalizeCustomsBusinessCustomFields(body.customsCustomFields ?? body.customs_custom_fields),
-    customsCustomFieldsJson: JSON.stringify(normalizeCustomsBusinessCustomFields(body.customsCustomFields ?? body.customs_custom_fields)),
+    customsCustomFields: persistedCustomsCustomFields,
+    customsCustomFieldsJson: JSON.stringify(persistedCustomsCustomFields),
     createdAt: body.createdAt || todayInputValue(),
     invoiceTitle: userTextValue(body.invoiceTitle || invoice.title || name),
     invoiceTaxNo: userTextValue(body.invoiceTax || invoice.taxNo || taxNo),
@@ -954,6 +1014,7 @@ function mapOrder(row) {
       const single = String(row.linked_customs_business_id || "").trim();
       return single ? [single] : [];
     })(),
+    customsDeclarationNos: orderCustomsDeclarationNosFromRemark(row.remark),
     customerId: row.customer_id,
     customer: userTextValue(row.customer),
     businessType: userTextValue(row.business_type),
@@ -986,7 +1047,7 @@ function mapOrder(row) {
     createdByAccountId: row.created_by_account_id || null,
     createdByUsername: row.created_by_username || "",
     createdByName,
-    remark: userMultilineTextValue(row.remark),
+    remark: stripOrderCustomsDeclarationNosRemark(userMultilineTextValue(row.remark)),
     tripNoEnabled: Boolean(row.trip_no_enabled),
     tripNo: userTextValue(row.trip_no),
     sixSheetEnabled: Boolean(row.six_sheet_enabled),
@@ -1004,7 +1065,7 @@ function normalizeOrderChargedAt(value = "") {
 const ORDER_CUSTOMS_REMARK_PREFIX = "报关信息：";
 
 function stripOrderCustomsRemarkText(remark = "") {
-  return String(remark || "")
+  return stripOrderCustomsDeclarationNosRemark(remark)
     .split("\n")
     .filter((line) => !line.startsWith(ORDER_CUSTOMS_REMARK_PREFIX))
     .join("\n")
@@ -2490,6 +2551,10 @@ function exportOrderFieldValue(order = {}, key = "", column = {}) {
 
 function exportOrderColumnValue(order, column, rowIndex = 0, options = {}) {
   const key = textValue(column?.key);
+  const customDeclarationNoIndex = Number(column?.orderCustomsDeclarationNoIndex);
+  if (Number.isInteger(customDeclarationNoIndex) && customDeclarationNoIndex >= 0) {
+    return order?.customsDeclarationNosForExport?.[customDeclarationNoIndex] || "";
+  }
   if (key === "__sequence") return rowIndex + 1;
   if (key === "__chargeNote") return orderChargeNoteText(order, options.columns);
   if (key === "__hkdTotal") return formatExportAmount(order?.receivableHKD);
@@ -3134,7 +3199,10 @@ function exportColumnsForOrders(templatePayload = null, orders = [], options = {
     ? [{ ...ORDER_EXPORT_CHARGE_NOTE_COLUMN }]
     : [];
   const linkedCustomsColumns = options.includeLinkedCustomsColumns
-    ? linkedCustomsBusinessExportColumns(orders)
+    ? [
+      ...linkedCustomsBusinessExportColumns(orders),
+      ...orderCustomsDeclarationNoExportColumns(orders)
+    ]
     : [];
   const mergedBodyColumns = mergeExportColumnsByTemplateOrder(
     bodyColumns,
@@ -3328,7 +3396,7 @@ function linkedCustomsBusinessCustomFieldValue(order = {}, fieldName = "") {
 }
 
 function linkedCustomsBusinessExportColumns(orders = []) {
-  // 客户对账单：按每张订单已关联报关单的列表顺序，追加“报关单号/品名项数”列（可重复列名）。
+  // 已关联的报关业务保留原有“报关单号/品名项数”列对。
   const maxLinkedCount = orders.reduce((max, order) => {
     const count = Array.isArray(order?.linkedCustomsBusinesses) && order.linkedCustomsBusinesses.length
       ? order.linkedCustomsBusinesses.length
@@ -3359,6 +3427,18 @@ function linkedCustomsBusinessExportColumns(orders = []) {
     );
   }
   return columns;
+}
+
+function orderCustomsDeclarationNoExportColumns(orders = []) {
+  const maxDeclarationCount = orders.reduce((max, order) =>
+    Math.max(max, Array.isArray(order?.customsDeclarationNosForExport) ? order.customsDeclarationNosForExport.length : 0), 0);
+  return Array.from({ length: maxDeclarationCount }, (_, index) => ({
+    key: `orderCustomsDeclarationNo:${index}`,
+    label: "报关单号",
+    width: 22,
+    pdfWidth: 86,
+    orderCustomsDeclarationNoIndex: index
+  }));
 }
 
 function linkedCustomsBusinessAt(order = {}, index = 0) {
@@ -4140,28 +4220,32 @@ function pdfFooterItemY(item = {}, template = null) {
 
 async function attachLinkedCustomsBusinessesToOrders(orders = []) {
   const linkedIds = [...new Set(orders.flatMap((order) => orderLinkedCustomsBusinessIds(order)))];
-  if (!linkedIds.length) {
-    return orders.map((order) => ({
-      ...order,
-      linkedCustomsBusinessId: null,
-      linkedCustomsBusinessIds: [],
-      linkedCustomsBusiness: null,
-      linkedCustomsBusinesses: []
-    }));
-  }
-  const linkedBusinesses = await loadLinkedCustomsBusinessesByIds(linkedIds);
+  const linkedBusinesses = linkedIds.length
+    ? await loadLinkedCustomsBusinessesByIds(linkedIds)
+    : new Map();
   return orders.map((order) => {
     const linkedCustomsBusinessIds = orderLinkedCustomsBusinessIds(order);
     const linkedCustomsBusinesses = linkedCustomsBusinessIds
       .map((id) => linkedBusinesses.get(String(id)) || null)
       .filter(Boolean);
+    const linkedDeclarationNos = new Set(linkedCustomsBusinesses
+      .map((business) => String(business?.declarationNo || "").trim())
+      .filter(Boolean));
+    const customsDeclarationNosForExport = booleanFlag(
+      order.customerCustomsDeclarationNoEnabled ?? order.customer_customs_declaration_no_enabled,
+      false
+    )
+      ? normalizeOrderCustomsDeclarationNos(order.customsDeclarationNos ?? order.customs_declaration_nos)
+        .filter((declarationNo) => !linkedDeclarationNos.has(declarationNo))
+      : [];
     const linkedCustomsBusinessId = linkedCustomsBusinessIds[0] || null;
     return {
       ...order,
       linkedCustomsBusinessId,
       linkedCustomsBusinessIds,
       linkedCustomsBusiness: linkedCustomsBusinessId ? linkedBusinesses.get(String(linkedCustomsBusinessId)) || null : null,
-      linkedCustomsBusinesses
+      linkedCustomsBusinesses,
+      customsDeclarationNosForExport
     };
   });
 }
@@ -5732,6 +5816,14 @@ function normalizeExportOrderSnapshot(order = {}) {
   snapshot.createdByName = String(snapshot.createdByName || order.createdByName || order.created_by_display_name || order.createdByUsername || order.created_by_username || "");
   snapshot.createdByUsername = String(snapshot.createdByUsername || order.createdByUsername || order.created_by_username || "");
   snapshot.customer = String(firstExportFieldValue(snapshot.customer, order.customer, order.customerName, order.customer_name));
+  snapshot.customsDeclarationNos = normalizeOrderCustomsDeclarationNos(
+    order.customsDeclarationNos ?? order.customs_declaration_nos ?? []
+  );
+  snapshot.customerCustomsDeclarationNoEnabled = normalizeExportBoolean(
+    order.customerCustomsDeclarationNoEnabled
+      ?? order.customer_customs_declaration_no_enabled
+      ?? false
+  );
   snapshot.businessType = String(snapshot.businessType || order.businessType || "");
   snapshot.port = normalizePortText(snapshot.port || order.port || "");
   snapshot.direction = String(snapshot.direction || order.direction || "");
@@ -8275,6 +8367,7 @@ async function attachTransportCustomerFeatureFlagsToOrders(orders = []) {
       customerOperatingUnitEnabled: Boolean(feature.operatingUnitEnabled),
       customerNewOldEnabled: Boolean(feature.newOldEnabled),
       customerSpecialCarEnabled: Boolean(feature.specialCarEnabled),
+      customerCustomsDeclarationNoEnabled: Boolean(feature.customsDeclarationNoEnabled),
       customerVatRate: normalizeCustomerVatRate(feature.vatRate)
     };
   });
@@ -9353,7 +9446,17 @@ app.patch("/api/customers/:id", async (req, res) => {
     res.status(404).json({ message: "客户不存在或已删除" });
     return;
   }
-  const item = normalizeCustomerPayload(req.body, id);
+  const hasCustomsDeclarationNoFlag = Object.prototype.hasOwnProperty.call(req.body || {}, "customsDeclarationNoEnabled")
+    || Object.prototype.hasOwnProperty.call(req.body || {}, "customs_declaration_no_enabled");
+  const item = normalizeCustomerPayload(
+    hasCustomsDeclarationNoFlag
+      ? req.body
+      : {
+          ...req.body,
+          customsDeclarationNoEnabled: transportCustomsDeclarationNoEnabled(existing.customs_custom_fields)
+        },
+    id
+  );
   if (item.type === "客户" && item.customerCategory !== "运输客户") {
     item.tripNoRequired = false;
     item.sixSheetNoRequired = false;
@@ -10185,6 +10288,7 @@ async function hydrateOrderRowsForApi(orders = [], options = {}) {
       customerOperatingUnitEnabled: Boolean(feature.operatingUnitEnabled),
       customerNewOldEnabled: Boolean(feature.newOldEnabled),
       customerSpecialCarEnabled: Boolean(feature.specialCarEnabled),
+      customerCustomsDeclarationNoEnabled: Boolean(feature.customsDeclarationNoEnabled),
       customerVatRate: normalizeCustomerVatRate(feature.vatRate),
       customerShortName
     };
@@ -12262,6 +12366,12 @@ async function readOrderPayload(body, existing = null) {
   const unloadingText = pickBody(body, "unloading", "unloading_place", existing?.unloading || "");
   const loadingLocations = normalizeLocationEntriesFromPayload(body, "loading", loadingText, existing?.loading_locations || "");
   const unloadingLocations = normalizeLocationEntriesFromPayload(body, "unloading", unloadingText, existing?.unloading_locations || "");
+  const submittedRemark = userMultilineTextValue(pickBody(body, "remark", null, existing?.remark || ""));
+  const hasCustomsDeclarationNos = Object.prototype.hasOwnProperty.call(body || {}, "customsDeclarationNos")
+    || Object.prototype.hasOwnProperty.call(body || {}, "customs_declaration_nos");
+  const customsDeclarationNos = hasCustomsDeclarationNos
+    ? normalizeOrderCustomsDeclarationNos(body.customsDeclarationNos ?? body.customs_declaration_nos)
+    : orderCustomsDeclarationNosFromRemark(existing?.remark || submittedRemark || "");
   return {
     no,
     dispatchNo: resolvedDispatchNo,
@@ -12269,6 +12379,7 @@ async function readOrderPayload(body, existing = null) {
     linkedCustomsBusinessId: Number.isFinite(linkedCustomsBusinessId) && linkedCustomsBusinessId > 0 ? linkedCustomsBusinessId : null,
     linkedCustomsBusinessIds,
     linkedCustomsBusinessIdsJson: JSON.stringify(linkedCustomsBusinessIds),
+    customsDeclarationNos,
     customerId: pickBody(body, "customerId", "customer_id", existing?.customer_id || null),
     customer: userTextValue(pickBody(body, "customer", "customer_name", existing?.customer || "")),
     businessType: userTextValue(businessTypeInput || "运输"),
@@ -12299,7 +12410,7 @@ async function readOrderPayload(body, existing = null) {
     operatingUnit: userTextValue(pickBody(body, "operatingUnit", "operating_unit", existing?.operating_unit || "")),
     newOld: normalizeOrderNewOld(pickBody(body, "newOld", "new_old", existing?.new_old || "")),
     specialCar: booleanFlag(pickBody(body, "specialCar", "special_car", existing?.special_car || false), false),
-    remark: userMultilineTextValue(pickBody(body, "remark", null, existing?.remark || "")),
+    remark: mergeOrderCustomsDeclarationNosRemark(submittedRemark, customsDeclarationNos),
     tripNoEnabled: booleanFlag(pickBody(body, "tripNoEnabled", "trip_no_enabled", existing?.trip_no_enabled || 0), false) ? 1 : 0,
     tripNo: userTextValue(pickBody(body, "tripNo", "trip_no", existing?.trip_no || "")),
     sixSheetEnabled: booleanFlag(pickBody(body, "sixSheetEnabled", "six_sheet_enabled", existing?.six_sheet_enabled || 0), false) ? 1 : 0,
@@ -12316,6 +12427,11 @@ async function readOrderPayload(body, existing = null) {
 function orderWriteEntries(item = {}, support = {}, existing = {}) {
   const loadingLocationsJson = item.loadingLocationsJson || locationEntriesJson(item.loadingLocations || item.loading_locations || []);
   const unloadingLocationsJson = item.unloadingLocationsJson || locationEntriesJson(item.unloadingLocations || item.unloading_locations || []);
+  const remark = item.remark ?? existing.remark ?? existing.remarks ?? "";
+  const customsDeclarationNos = item.customsDeclarationNos
+    ?? existing.customsDeclarationNos
+    ?? existing.customs_declaration_nos
+    ?? orderCustomsDeclarationNosFromRemark(remark);
   const entries = [
     ["customer_id", item.customerId ?? null],
     ["customer", userTextValue(item.customer)],
@@ -12340,7 +12456,7 @@ function orderWriteEntries(item = {}, support = {}, existing = {}) {
     ["receivable_hkd", Number(item.receivableHKD || 0)],
     ["receivable_rmb", Number(item.receivableRMB || 0)],
     ["status", normalizeOrderStatus(item.status, "待确认")],
-    ["remark", userMultilineTextValue(item.remark)]
+    ["remark", mergeOrderCustomsDeclarationNosRemark(userMultilineTextValue(remark), customsDeclarationNos)]
   ];
 
   if (support.dispatchNo) entries.splice(1, 0, ["dispatch_no", userTextValue(item.dispatchNo ?? existing.dispatchNo ?? existing.dispatch_no)]);
