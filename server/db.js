@@ -1168,6 +1168,7 @@ async function initializeSchema() {
       created_by_account_id BIGINT,
       created_by_username TEXT NOT NULL DEFAULT '',
       created_by_display_name TEXT NOT NULL DEFAULT '',
+      customs_declaration_nos TEXT NOT NULL DEFAULT '[]',
       remark TEXT NOT NULL DEFAULT '',
       trip_no_enabled INTEGER NOT NULL DEFAULT 0,
       trip_no TEXT NOT NULL DEFAULT '',
@@ -1694,7 +1695,8 @@ async function initializeSchema() {
     ],
     orders: [
       "dispatch_group_id TEXT NOT NULL DEFAULT ''",
-      "linked_customs_business_id BIGINT"
+      "linked_customs_business_id BIGINT",
+      "customs_declaration_nos TEXT NOT NULL DEFAULT '[]'"
     ],
     drivers: [
       "type TEXT NOT NULL DEFAULT '香港司机'",

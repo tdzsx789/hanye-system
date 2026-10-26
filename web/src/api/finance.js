@@ -81,6 +81,17 @@ export function saveVehicleProfitExchangeRate(payload) {
   });
 }
 
+export function listStatementCustomerExchangeRates() {
+  return apiFetchList("/statement-customer-exchange-rates");
+}
+
+export function saveStatementCustomerExchangeRate(payload) {
+  return apiFetch("/statement-customer-exchange-rates", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
 export function listDriverWageSettlements(periodKey = "") {
   const query = periodKey ? `?periodKey=${encodeURIComponent(periodKey)}` : "";
   return apiFetchList(`/driver-wage-settlements${query}`);

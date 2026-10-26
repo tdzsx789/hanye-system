@@ -1814,12 +1814,20 @@ const statementExportEntity = ref("");
 const statementExportStart = ref(localStorage.getItem("hanye_statement_export_start") || "");
 const statementExportEnd = ref(localStorage.getItem("hanye_statement_export_end") || "");
 const statementSettlementCurrency = ref(localStorage.getItem("hanye_statement_settlement_currency") || "人民币");
-const statementExchangeRate = ref(localStorage.getItem("hanye_statement_exchange_rate") || STATEMENT_DEFAULT_EXCHANGE_RATE);
+const statementExchangeRate = ref(STATEMENT_DEFAULT_EXCHANGE_RATE);
 const statementDownloadRows = ref([]);
 const CUSTOMER_STATEMENT_STATUS_FLOW = ["未导出", "已导出", "已发送", "已开票", "已收款"];
 const CUSTOMS_STATEMENT_STATUS_FLOW = CUSTOMER_STATEMENT_STATUS_FLOW;
 const SUPPLIER_STATEMENT_STATUS_FLOW = ["未导出", "已导出", "已发送", "已开票", "已付款"];
-const statementCustomerExchangeRates = reactive(loadStoredJson(STATEMENT_CUSTOMER_EXCHANGE_RATES_KEY, {}));
+const statementCustomerExchangeRateRows = ref([]);
+const legacyStatementCustomerExchangeRates = reactive(loadStoredJson(STATEMENT_CUSTOMER_EXCHANGE_RATES_KEY, {}));
+const statementCustomerExchangeRateDrafts = reactive({});
+const statementCustomerExchangeRateDraftVersions = {};
+const statementCustomerExchangeRateSaveQueues = {};
+const statementCustomerExchangeRateSaveVersions = {};
+const statementCustomerExchangeRateLocalMutationSerials = {};
+let statementCustomerExchangeRateLoadRequestId = 0;
+let statementCustomerExchangeRateMutationSerial = 0;
 const statementCustomerUnreceivedAmounts = reactive(loadStoredJson(STATEMENT_CUSTOMER_UNRECEIVED_AMOUNTS_KEY, {}));
 const customsBusinessRows = ref([]);
 const customsBusinessAllRows = ref([]);
@@ -15017,6 +15025,71 @@ function statementCustomerRowKey(row = {}) {
   return statementCustomerRowKeyForFilter(row);
 }
 
+function statementCustomerExchangeRateCustomerKeyForFilter(row = {}, filterKey = activeStatementMonthFilter.value) {
+  const customer = statementCustomerRecordForFilter(row, filterKey);
+  const customerId = String(customer?.id || row.customerId || "").trim();
+  if (customerId) return `id:${customerId}`;
+  const customerName = String(customer?.name || row.customer || "").trim().replace(/\s+/g, " ").toLowerCase();
+  return customerName ? `name:${customerName}` : "";
+}
+
+function statementCustomerExchangeRateEntryKeyForFilter(row = {}, filterKey = activeStatementMonthFilter.value) {
+  const periodMonth = bossVehicleExchangeRatePeriodMonth(filterKey);
+  const customerKey = statementCustomerExchangeRateCustomerKeyForFilter(row, filterKey);
+  return periodMonth && customerKey ? `${periodMonth}|${customerKey}` : "";
+}
+
+function statementCustomerExchangeRateEntryKey(item = {}) {
+  const periodMonth = String(item.periodMonth || item.period_month || "").trim();
+  const customerKey = String(item.customerKey || item.customer_key || "").trim();
+  return periodMonth && customerKey ? `${periodMonth}|${customerKey}` : "";
+}
+
+function statementCustomerExchangeRateRowForFilter(row = {}, filterKey = activeStatementMonthFilter.value) {
+  const entryKey = statementCustomerExchangeRateEntryKeyForFilter(row, filterKey);
+  return entryKey
+    ? statementCustomerExchangeRateRows.value.find((item) => statementCustomerExchangeRateEntryKey(item) === entryKey) || null
+    : null;
+}
+
+function upsertStatementCustomerExchangeRateRow(item = {}) {
+  const entryKey = statementCustomerExchangeRateEntryKey(item);
+  if (!entryKey) return;
+  const next = { ...item, rate: Number(item.rate) };
+  const index = statementCustomerExchangeRateRows.value.findIndex(
+    (row) => statementCustomerExchangeRateEntryKey(row) === entryKey
+  );
+  if (index < 0) statementCustomerExchangeRateRows.value = [next, ...statementCustomerExchangeRateRows.value];
+  else statementCustomerExchangeRateRows.value = statementCustomerExchangeRateRows.value.map(
+    (row, rowIndex) => rowIndex === index ? { ...row, ...next } : row
+  );
+}
+
+async function loadStatementCustomerExchangeRateRows(options = {}) {
+  const requestId = ++statementCustomerExchangeRateLoadRequestId;
+  const mutationSerialAtStart = statementCustomerExchangeRateMutationSerial;
+  try {
+    const responseRows = await financeApi.listStatementCustomerExchangeRates();
+    if (requestId !== statementCustomerExchangeRateLoadRequestId) return statementCustomerExchangeRateRows.value;
+    const mergedRows = new Map(
+      (Array.isArray(responseRows) ? responseRows : [])
+        .map((row) => [statementCustomerExchangeRateEntryKey(row), row])
+        .filter(([key]) => key)
+    );
+    statementCustomerExchangeRateRows.value.forEach((row) => {
+      const key = statementCustomerExchangeRateEntryKey(row);
+      if (key && (statementCustomerExchangeRateLocalMutationSerials[key] || 0) > mutationSerialAtStart) {
+        mergedRows.set(key, row);
+      }
+    });
+    statementCustomerExchangeRateRows.value = Array.from(mergedRows.values());
+  } catch (error) {
+    console.warn("客户月度汇率加载失败", error);
+    if (!options.silent) notify(`客户月度汇率加载失败：${error.message || "请稍后重试"}`);
+  }
+  return statementCustomerExchangeRateRows.value;
+}
+
 function statementCustomerSettlementCurrencyForFilter(row = {}, filterKey = activeStatementMonthFilter.value) {
   const raw = statementCustomerRecordForFilter(row, filterKey)?.settlementCurrency || "人民币结算";
   return String(raw || "").includes("港") ? "港币" : "人民币";
@@ -15027,11 +15100,18 @@ function statementCustomerSettlementCurrency(row = {}) {
 }
 
 function statementCustomerExchangeRateForFilter(row = {}, filterKey = activeStatementMonthFilter.value) {
-  const key = statementCustomerRowKeyForFilter(row, filterKey);
-  const saved = key ? statementCustomerExchangeRates[key] : "";
-  if (saved) return String(saved);
+  const entryKey = statementCustomerExchangeRateEntryKeyForFilter(row, filterKey);
+  if (entryKey && Object.prototype.hasOwnProperty.call(statementCustomerExchangeRateDrafts, entryKey)) {
+    return statementCustomerExchangeRateDrafts[entryKey];
+  }
+  const saved = statementCustomerExchangeRateRowForFilter(row, filterKey);
+  if (saved && Number(saved.rate) > 0) return String(saved.rate);
+  const legacyCustomerKey = statementCustomerRowKeyForFilter(row, filterKey);
+  const legacySaved = legacyCustomerKey ? legacyStatementCustomerExchangeRates[legacyCustomerKey] : "";
+  if (legacySaved && Number(legacySaved) > 0) return String(legacySaved);
   const periodMonth = bossVehicleExchangeRatePeriodMonth(filterKey);
-  return String(monthlyExchangeRateInputValue(periodMonth) || STATEMENT_DEFAULT_EXCHANGE_RATE);
+  const monthlyRate = Number(monthlyExchangeRateInputValue(periodMonth));
+  return Number.isFinite(monthlyRate) && monthlyRate > 0 ? String(monthlyRate) : STATEMENT_DEFAULT_EXCHANGE_RATE;
 }
 
 function statementCustomerExchangeRate(row = {}) {
@@ -15039,18 +15119,70 @@ function statementCustomerExchangeRate(row = {}) {
 }
 
 function setStatementCustomerExchangeRate(row = {}, value = "") {
-  const key = statementCustomerRowKeyForFilter(row);
-  if (!key) return;
-  const raw = String(value || "").trim();
-  const parsed = Number(raw);
-  const nextValue = Number.isFinite(parsed) && parsed > 0 ? raw : STATEMENT_DEFAULT_EXCHANGE_RATE;
-  statementCustomerExchangeRates[key] = nextValue;
-  saveStoredJson(STATEMENT_CUSTOMER_EXCHANGE_RATES_KEY, { ...statementCustomerExchangeRates });
-  if (statementExportMenuType.value === "customer" && statementExportMenuKey.value === key) {
-    statementExchangeRate.value = nextValue;
-    saveStatementExportSettings();
-  }
+  const entryKey = statementCustomerExchangeRateEntryKeyForFilter(row);
+  if (!entryKey) return;
+  statementCustomerExchangeRateDraftVersions[entryKey] = (statementCustomerExchangeRateDraftVersions[entryKey] || 0) + 1;
+  statementCustomerExchangeRateDrafts[entryKey] = String(value ?? "").trim();
   scheduleOrderFeeFxSync();
+}
+
+async function saveStatementCustomerExchangeRate(row = {}) {
+  const filterKey = activeStatementMonthFilter.value;
+  const periodMonth = bossVehicleExchangeRatePeriodMonth(filterKey);
+  const customer = statementCustomerRecordForFilter(row, filterKey);
+  const customerId = String(customer?.id || row.customerId || "").trim();
+  const customerName = String(customer?.name || row.customer || "").trim();
+  const entryKey = statementCustomerExchangeRateEntryKeyForFilter(row, filterKey);
+  const raw = entryKey ? String(statementCustomerExchangeRateDrafts[entryKey] ?? "").trim() : "";
+  const rate = Number(raw);
+  if (!periodMonth || !entryKey) return;
+  if (!Number.isFinite(rate) || rate <= 0) {
+    delete statementCustomerExchangeRateDrafts[entryKey];
+    notify("请填写大于 0 的有效汇率");
+    return;
+  }
+
+  const existing = statementCustomerExchangeRateRowForFilter(row, filterKey);
+  if (existing && Number(existing.rate) === rate) {
+    delete statementCustomerExchangeRateDrafts[entryKey];
+    return;
+  }
+
+  const draftVersion = statementCustomerExchangeRateDraftVersions[entryKey] || 0;
+  const saveVersion = (statementCustomerExchangeRateSaveVersions[entryKey] || 0) + 1;
+  statementCustomerExchangeRateSaveVersions[entryKey] = saveVersion;
+  const previousSave = statementCustomerExchangeRateSaveQueues[entryKey] || Promise.resolve();
+  const saveRequest = previousSave.catch(() => {}).then(() => financeApi.saveStatementCustomerExchangeRate({
+    periodMonth,
+    customerId,
+    customerName,
+    rate
+  }));
+  statementCustomerExchangeRateSaveQueues[entryKey] = saveRequest;
+
+  try {
+    const saved = await saveRequest;
+    statementCustomerExchangeRateMutationSerial += 1;
+    statementCustomerExchangeRateLocalMutationSerials[entryKey] = statementCustomerExchangeRateMutationSerial;
+    upsertStatementCustomerExchangeRateRow(saved);
+    if (statementCustomerExchangeRateSaveVersions[entryKey] === saveVersion
+      && statementCustomerExchangeRateDraftVersions[entryKey] === draftVersion) {
+      delete statementCustomerExchangeRateDrafts[entryKey];
+      if (statementExportMenuType.value === "customer" && statementExportMenuKey.value === statementCustomerRowKey(row)) {
+        statementExchangeRate.value = String(saved.rate);
+        saveStatementExportSettings();
+      }
+    }
+    scheduleOrderFeeFxSync();
+  } catch (error) {
+    if (statementCustomerExchangeRateSaveVersions[entryKey] === saveVersion) {
+      notify(`客户汇率保存失败：${error.message || "请稍后重试"}`);
+    }
+  } finally {
+    if (statementCustomerExchangeRateSaveQueues[entryKey] === saveRequest) {
+      delete statementCustomerExchangeRateSaveQueues[entryKey];
+    }
+  }
 }
 
 function statementDownloadRecordForEntityForFilter(type = "customer", entityName = "", filterKey = activeStatementMonthFilter.value) {
@@ -16011,7 +16143,6 @@ function saveStatementExportSettings() {
   localStorage.setItem("hanye_statement_export_start", statementExportStart.value);
   localStorage.setItem("hanye_statement_export_end", statementExportEnd.value);
   localStorage.setItem("hanye_statement_settlement_currency", statementSettlementCurrency.value);
-  localStorage.setItem("hanye_statement_exchange_rate", statementExchangeRate.value);
 }
 
 function orderBelongsToPartner(order, partner) {
@@ -18447,9 +18578,13 @@ function scheduleOrderFeeFxSync() {
 }
 
 function orderFeeFxDependencySignature() {
-  const customerRates = Object.keys(statementCustomerExchangeRates)
+  const customerRates = statementCustomerExchangeRateRows.value
+    .map((row) => `${statementCustomerExchangeRateEntryKey(row)}:${row.rate}`)
     .sort()
-    .map((key) => `${key}:${statementCustomerExchangeRates[key]}`)
+    .join("|");
+  const customerRateDrafts = Object.keys(statementCustomerExchangeRateDrafts)
+    .sort()
+    .map((key) => `${key}:${statementCustomerExchangeRateDrafts[key]}`)
     .join("|");
   const monthlyRates = Object.keys(monthlyExchangeRateDrafts)
     .sort()
@@ -18465,6 +18600,7 @@ function orderFeeFxDependencySignature() {
     orderForm.customer,
     orderForm.date,
     customerRates,
+    customerRateDrafts,
     monthlyRates,
     feeLinks
   ]);
@@ -22352,6 +22488,9 @@ function realtimeRefreshBucketsForEvent(event = {}) {
     case "vehicle_profit_exchange_rate":
       buckets.add("bossVehicleExchangeRates");
       break;
+    case "statement_customer_exchange_rate":
+      buckets.add("statementCustomerExchangeRates");
+      break;
     case "cost_center_rate":
       buckets.add("costCenterRates");
       break;
@@ -26209,6 +26348,10 @@ async function loadDatabaseDataRefreshBuckets(refreshBuckets = new Set(), option
       syncBossVehicleExchangeRateFromRows();
     }
 
+    if (buckets.has("statementCustomerExchangeRates")) {
+      await loadStatementCustomerExchangeRateRows({ silent: true });
+    }
+
     if (buckets.has("feeItems")) {
       feeItemRows.value = sortFeeItems(await apiFetchListFrom(masterDataApi.listFeeItems, "收费项目", { silent: true }));
     }
@@ -26299,6 +26442,10 @@ async function loadDatabaseData(options = {}) {
   const canReadDriverRouteAdjustRules = canAccessModule("financeWages");
   const canReadFinanceWageSettlements = canAccessModule("financeWages");
   const canReadStatementDownloads = canAccessModule("financeCosts") || canAccessModule("financeSupplierStatements") || canAccessModule("financeCustomsStatements") || canLoadBossCenterData;
+  const canReadStatementCustomerExchangeRates = canAccessModule("financeCosts")
+    || canAccessModule("orders")
+    || canAccessModule("dispatchBoard")
+    || canLoadBossCenterData;
   const canLoadCustomers = canReadCustomers && shouldLoadCustomers;
   const canLoadOrders = canReadOrders && shouldLoadOrders;
   const canLoadCustomsBusiness = canReadCustomsBusiness && shouldLoadCustomsBusiness;
@@ -26317,6 +26464,8 @@ async function loadDatabaseData(options = {}) {
   const canLoadFinanceWageSettlements = canReadFinanceWageSettlements && dataLoadScopeMatches(moduleScope, ["financeWages"]);
   const canLoadStatementDownloads = canReadStatementDownloads
     && dataLoadScopeMatches(moduleScope, ["financeCosts", "financeSupplierStatements", "financeCustomsStatements", ...BOSS_CENTER_MODULES]);
+  const canLoadStatementCustomerExchangeRates = canReadStatementCustomerExchangeRates
+    && dataLoadScopeMatches(moduleScope, ["home", "orders", "dispatchBoard", "financeCosts", ...BOSS_CENTER_MODULES]);
   const canLoadFeeItems = shouldLoadFreightConfig;
   const canLoadFreightRates = shouldLoadFreightConfig;
   const canLoadAddressBook = shouldLoadAddressBook;
@@ -26354,6 +26503,7 @@ async function loadDatabaseData(options = {}) {
       driverWageRuleData,
       costCenterRateData,
       bossVehicleExchangeRateData,
+      statementCustomerExchangeRateData,
       driverAdjustmentData,
       financeWageSettlementData,
       feeItemData,
@@ -26383,6 +26533,7 @@ async function loadDatabaseData(options = {}) {
       canLoadDriverWageRules ? apiFetchListFrom(vehiclesApi.listDriverWageRules, "司机费用规则") : Promise.resolve(skippedRows(canReadDriverWageRules, driverWageRuleRows.value)),
       canLoadCostCenterRates ? apiFetchListFrom(financeApi.listCostCenterRates, "成本中心") : Promise.resolve(skippedRows(canReadCostCenterRates, costCenterRateRows.value)),
       canLoadBossVehicleExchangeRates ? apiFetchListFrom(financeApi.listVehicleProfitExchangeRates, "车辆利润汇率") : Promise.resolve(skippedRows(canReadBossVehicleExchangeRates, bossVehicleExchangeRateRows.value)),
+      canLoadStatementCustomerExchangeRates ? loadStatementCustomerExchangeRateRows({ silent }) : Promise.resolve(skippedRows(canReadStatementCustomerExchangeRates, statementCustomerExchangeRateRows.value)),
       canLoadVehicleDriver ? apiFetchListFrom(vehiclesApi.listDriverAdjustments, "司机预支/报销") : Promise.resolve(skippedRows(canReadVehicleDriver, driverAdjustmentRows.value)),
       canLoadFinanceWageSettlements ? apiFetchListFrom(() => financeApi.listDriverWageSettlements(financeWageSettlementPeriodKey()), "司机工资结算") : Promise.resolve(skippedRows(canReadFinanceWageSettlements, financeWageSettlementRows.value)),
       canLoadFeeItems ? apiFetchListFrom(masterDataApi.listFeeItems, "收费项目") : Promise.resolve(scopedLoad ? feeItemRows.value : []),
@@ -37527,7 +37678,7 @@ function orderDetailFeeRows(order = {}) {
                       :value="statementCustomerExchangeRate(row)"
                       @click.stop
                       @input="setStatementCustomerExchangeRate(row, $event.target.value)"
-                      @change="setStatementCustomerExchangeRate(row, $event.target.value)"
+                      @change="saveStatementCustomerExchangeRate(row)"
                     />
                   </td>
                   <td>{{ row.count }}</td>

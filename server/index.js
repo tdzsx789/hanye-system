@@ -524,39 +524,120 @@ function customsBusinessCustomFieldName(field = {}) {
 }
 
 const TRANSPORT_CUSTOMS_DECLARATION_NO_FLAG_FIELD = "__transport_customs_declaration_no_enabled__";
-const ORDER_CUSTOMS_DECLARATION_NOS_REMARK_PREFIX = "运输客户报关单号：";
+const ORDER_CUSTOMS_DECLARATION_NOS_REMARK_PATTERN = "运输(客户)?报关单号[：:]";
 
 function normalizeOrderCustomsDeclarationNos(value = []) {
   const source = Array.isArray(value) ? value : String(value || "").split(/[\r\n,，;；、]+/);
   return [...new Set(source.map((item) => userTextValue(item)).filter(Boolean))].slice(0, 100);
 }
 
-function orderCustomsDeclarationNosFromRemark(remark = "") {
-  const line = String(remark || "").split(/\r?\n/)
-    .find((item) => item.startsWith(ORDER_CUSTOMS_DECLARATION_NOS_REMARK_PREFIX)) || "";
-  const value = line.slice(ORDER_CUSTOMS_DECLARATION_NOS_REMARK_PREFIX.length).trim();
-  if (!value) return [];
+function orderCustomsDeclarationNosFromColumn(value = "") {
+  if (Array.isArray(value)) return normalizeOrderCustomsDeclarationNos(value);
+  const text = String(value || "").trim();
+  if (!text) return [];
   try {
-    const parsed = JSON.parse(value);
+    const parsed = JSON.parse(text);
     if (Array.isArray(parsed)) return normalizeOrderCustomsDeclarationNos(parsed);
   } catch {}
-  return normalizeOrderCustomsDeclarationNos(value);
+  return normalizeOrderCustomsDeclarationNos(text);
+}
+
+function orderCustomsDeclarationRemarkEntries(remark = "") {
+  const text = String(remark || "");
+  const entries = [];
+  const markers = [...text.matchAll(new RegExp(`${ORDER_CUSTOMS_DECLARATION_NOS_REMARK_PATTERN}[ \\t]*`, "g"))];
+  let searchFrom = 0;
+  for (let markerIndex = 0; markerIndex < markers.length; markerIndex += 1) {
+    const marker = markers[markerIndex];
+    const start = marker.index;
+    if (start < searchFrom) continue;
+    const valueStart = start + marker[0].length;
+    let end = valueStart;
+    let values = [];
+
+    if (text[valueStart] === "[") {
+      let depth = 0;
+      let inString = false;
+      let escaped = false;
+      for (let index = valueStart; index < text.length && text[index] !== "\n"; index += 1) {
+        const character = text[index];
+        if (inString) {
+          if (escaped) escaped = false;
+          else if (character === "\\") escaped = true;
+          else if (character === '"') inString = false;
+          continue;
+        }
+        if (character === '"') inString = true;
+        else if (character === "[") depth += 1;
+        else if (character === "]") {
+          depth -= 1;
+          if (depth === 0) {
+            end = index + 1;
+            try {
+              const parsed = JSON.parse(text.slice(valueStart, end));
+              if (Array.isArray(parsed)) values = normalizeOrderCustomsDeclarationNos(parsed);
+            } catch {}
+            break;
+          }
+        }
+      }
+    }
+
+    if (end === valueStart) {
+      const nextPrefix = markers[markerIndex + 1]?.index ?? -1;
+      const nextLine = text.indexOf("\n", valueStart);
+      end = [nextPrefix, nextLine]
+        .filter((position) => position >= 0)
+        .reduce((earliest, position) => Math.min(earliest, position), text.length);
+      values = normalizeOrderCustomsDeclarationNos(text.slice(valueStart, end).replace(/\r$/, "").trim());
+    }
+    entries.push({ start, end, values });
+    searchFrom = Math.max(valueStart, end);
+  }
+  return entries;
+}
+
+function orderCustomsDeclarationNosFromRemark(remark = "") {
+  return normalizeOrderCustomsDeclarationNos(
+    orderCustomsDeclarationRemarkEntries(remark).flatMap((entry) => entry.values)
+  );
+}
+
+function orderCustomsDeclarationNosFromRecord(record = {}) {
+  const storedValues = orderCustomsDeclarationNosFromColumn(
+    record.customs_declaration_nos ?? record.customsDeclarationNos
+  );
+  return storedValues.length ? storedValues : orderCustomsDeclarationNosFromRemark(record.remark || "");
 }
 
 function stripOrderCustomsDeclarationNosRemark(remark = "") {
-  return String(remark || "")
-    .split(/\r?\n/)
-    .filter((line) => !line.startsWith(ORDER_CUSTOMS_DECLARATION_NOS_REMARK_PREFIX))
-    .join("\n")
-    .trim();
+  const text = String(remark || "");
+  const entries = orderCustomsDeclarationRemarkEntries(text);
+  const lines = text.split(/\r?\n/);
+  const result = [];
+  let lineStart = 0;
+  lines.forEach((line) => {
+    const lineEnd = lineStart + line.length;
+    const lineEntries = entries
+      .filter((entry) => entry.start >= lineStart && entry.start < lineEnd)
+      .sort((left, right) => right.start - left.start);
+    let cleanLine = line;
+    lineEntries.forEach(({ start, end }) => {
+      cleanLine = `${cleanLine.slice(0, start - lineStart)}${cleanLine.slice(end - lineStart)}`;
+    });
+    if (!lineEntries.length || cleanLine.trim()) result.push(cleanLine);
+    lineStart = lineEnd + (text.startsWith("\r\n", lineEnd) ? 2 : (text[lineEnd] === "\n" ? 1 : 0));
+  });
+  return result.join("\n").trim();
 }
 
-function mergeOrderCustomsDeclarationNosRemark(remark = "", declarationNos = []) {
-  const base = stripOrderCustomsDeclarationNosRemark(remark);
+function orderRemarkForStorage(remark = "", declarationNos = [], hasStructuredColumn = false) {
+  const cleanRemark = stripOrderCustomsDeclarationNosRemark(remark);
+  if (hasStructuredColumn) return cleanRemark;
   const values = normalizeOrderCustomsDeclarationNos(declarationNos);
-  return [base, values.length ? `${ORDER_CUSTOMS_DECLARATION_NOS_REMARK_PREFIX}${JSON.stringify(values)}` : ""]
-    .filter(Boolean)
-    .join("\n");
+  if (!values.length) return cleanRemark;
+  const legacyValue = `运输客户报关单号：${JSON.stringify(values)}`;
+  return [cleanRemark, legacyValue].filter(Boolean).join("\n");
 }
 
 function transportCustomsDeclarationNoEnabled(customFields = []) {
@@ -780,6 +861,7 @@ async function orderWriteColumnSupport() {
     dispatchGroupId: await orderColumnExists("dispatch_group_id"),
     linkedCustomsBusinessId: await orderColumnExists("linked_customs_business_id"),
     linkedCustomsBusinessIds: await orderColumnExists("linked_customs_business_ids"),
+    customsDeclarationNos: await orderColumnExists("customs_declaration_nos"),
     loadingLocations: await orderColumnExists("loading_locations"),
     unloadingLocations: await orderColumnExists("unloading_locations"),
     operatingUnit: await orderColumnExists("operating_unit"),
@@ -1014,7 +1096,7 @@ function mapOrder(row) {
       const single = String(row.linked_customs_business_id || "").trim();
       return single ? [single] : [];
     })(),
-    customsDeclarationNos: orderCustomsDeclarationNosFromRemark(row.remark),
+    customsDeclarationNos: orderCustomsDeclarationNosFromRecord(row),
     customerId: row.customer_id,
     customer: userTextValue(row.customer),
     businessType: userTextValue(row.business_type),
@@ -6920,6 +7002,88 @@ function normalizePeriodMonthKey(value = "") {
   return `${matched[1]}-${String(monthNumber).padStart(2, "0")}`;
 }
 
+function statementCustomerExchangeRateCustomer(payload = {}) {
+  const customerId = userTextValue(payload.customerId ?? payload.customer_id);
+  const customerName = userTextValue(payload.customerName ?? payload.customer_name).replace(/\s+/g, " ");
+  const normalizedName = customerName.toLowerCase();
+  const customerKey = customerId ? `id:${customerId}` : (normalizedName ? `name:${normalizedName}` : "");
+  return { customerKey, customerId, customerName };
+}
+
+const STATEMENT_CUSTOMER_EXCHANGE_RATE_SETTING_PREFIX = "statement_customer_exchange_rate:";
+
+function statementCustomerExchangeRateSettingKey(periodMonth = "", customerKey = "") {
+  const month = normalizePeriodMonthKey(periodMonth);
+  const key = userTextValue(customerKey);
+  return month && key ? `${STATEMENT_CUSTOMER_EXCHANGE_RATE_SETTING_PREFIX}${month}:${key}` : "";
+}
+
+function parseStatementCustomerExchangeRateSetting(row = {}) {
+  let value;
+  try {
+    value = JSON.parse(String(row.value || ""));
+  } catch {
+    return null;
+  }
+  const periodMonth = normalizePeriodMonthKey(value.periodMonth ?? value.period_month);
+  const customer = statementCustomerExchangeRateCustomer(value);
+  const customerKey = userTextValue(value.customerKey ?? value.customer_key) || customer.customerKey;
+  const rate = Number(value.rate);
+  if (!periodMonth || !customerKey || !Number.isFinite(rate) || rate <= 0) return null;
+  return {
+    period_month: periodMonth,
+    customer_key: customerKey,
+    customer_id: customer.customerId,
+    customer_name: customer.customerName,
+    rate,
+    created_at: String(value.createdAt ?? value.created_at ?? ""),
+    updated_at: String(value.updatedAt ?? value.updated_at ?? value.createdAt ?? value.created_at ?? "")
+  };
+}
+
+function statementCustomerExchangeRateRecordKey(row = {}) {
+  return `${row.period_month || ""}\u0000${row.customer_key || ""}`;
+}
+
+async function loadStatementCustomerExchangeRateRows() {
+  const prefix = STATEMENT_CUSTOMER_EXCHANGE_RATE_SETTING_PREFIX;
+  const settings = await db.prepare(`
+    SELECT key, value FROM app_settings
+    WHERE LEFT(key, LENGTH(?)) = ?
+  `).all(prefix, prefix);
+  const rowsByKey = new Map();
+
+  const relation = await db.prepare("SELECT to_regclass('statement_customer_exchange_rates') AS name").get();
+  if (relation?.name) {
+    const legacyRows = await db.prepare(`
+      SELECT period_month, customer_key, customer_id, customer_name, rate, created_at, updated_at
+      FROM statement_customer_exchange_rates
+    `).all();
+    legacyRows.forEach((row) => rowsByKey.set(statementCustomerExchangeRateRecordKey(row), row));
+  }
+
+  settings
+    .map(parseStatementCustomerExchangeRateSetting)
+    .filter(Boolean)
+    .forEach((row) => rowsByKey.set(statementCustomerExchangeRateRecordKey(row), row));
+
+  return Array.from(rowsByKey.values()).sort((left, right) =>
+    right.period_month.localeCompare(left.period_month)
+      || left.customer_name.localeCompare(right.customer_name, "zh-CN")
+  );
+}
+
+function mapStatementCustomerExchangeRate(row = {}) {
+  return {
+    periodMonth: row.period_month || row.periodMonth || "",
+    customerKey: row.customer_key || row.customerKey || "",
+    customerId: row.customer_id || row.customerId || "",
+    customerName: row.customer_name || row.customerName || "",
+    rate: Number(row.rate || 0),
+    updatedAt: row.updated_at || row.updatedAt || row.created_at || row.createdAt || ""
+  };
+}
+
 function monthStartInputValue(value = "") {
   const monthKey = normalizePeriodMonthKey(value);
   return monthKey ? `${monthKey}-01` : "";
@@ -7675,12 +7839,25 @@ function customsStatementExportRows(rows = [], columns = CUSTOMS_STATEMENT_EXPOR
 }
 
 function customsStatementTotalRow(rows = [], columns = CUSTOMS_STATEMENT_EXPORT_COLUMNS) {
-  const total = rows.reduce((sum, row) => sum + Number(row.total || 0), 0);
   return columns.map((column, index) => {
     if (index === 0) return "合计";
-    if (column.key === "total") return total || "";
     return "";
   });
+}
+
+function customsStatementAmountColumnIndexes(columns = []) {
+  return columns.reduce((indexes, column, index) => {
+    const key = String(column?.key || "");
+    if (column.amount && key !== "total" && key !== "itemCount" && key !== "pageCount") {
+      indexes.push(index + 1);
+    }
+    return indexes;
+  }, []);
+}
+
+function customsStatementSumFormula(columnIndexes = [], rowNumber = 1) {
+  const references = columnIndexes.map((columnNumber) => `${excelColumnLetter(columnNumber)}${rowNumber}`);
+  return `SUM(${references.length ? references.join(",") : "0"})`;
 }
 
 async function loadCustomsStatementExportRows(company = "", period = "") {
@@ -7748,6 +7925,9 @@ async function renderCustomsStatementXlsxBuffer(rows = [], context = {}) {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "汉业管理系统";
   workbook.created = new Date();
+  workbook.calcProperties.fullCalcOnLoad = true;
+  workbook.calcProperties.forceFullCalc = true;
+  workbook.calcProperties.calcMode = "auto";
   const worksheet = workbook.addWorksheet("报关对账");
   worksheet.pageSetup = {
     paperSize: 9,
@@ -7786,6 +7966,9 @@ async function renderCustomsStatementXlsxBuffer(rows = [], context = {}) {
   const tableStartRow = 4;
   const bodyRows = [...customsStatementExportRows(rows, columns), customsStatementTotalRow(rows, columns)];
   const tableEndRow = tableStartRow + bodyRows.length;
+  const totalColumnNumber = columns.findIndex((column) => column.key === "total") + 1;
+  const amountColumnIndexes = customsStatementAmountColumnIndexes(columns);
+  const detailTotalResults = [];
   const headerRow = worksheet.getRow(tableStartRow);
   headerRow.values = columns.map((column) => column.label);
   headerRow.height = 36;
@@ -7803,6 +7986,29 @@ async function renderCustomsStatementXlsxBuffer(rows = [], context = {}) {
     const row = worksheet.getRow(rowNumber);
     row.values = values.map(excelSingleLineValue);
     row.height = isTotalRow ? 26 : 24;
+    if (totalColumnNumber > 0) {
+      const totalCell = row.getCell(totalColumnNumber);
+      const totalColumnLetter = excelColumnLetter(totalColumnNumber);
+      if (isTotalRow) {
+        const formula = rows.length
+          ? `SUM(${totalColumnLetter}${tableStartRow + 1}:${totalColumnLetter}${rowNumber - 1})`
+          : "SUM(0)";
+        totalCell.value = {
+          formula,
+          result: detailTotalResults.reduce((sum, value) => sum + value, 0)
+        };
+      } else {
+        const result = amountColumnIndexes.reduce(
+          (sum, columnNumber) => sum + (Number(row.getCell(columnNumber).value) || 0),
+          0
+        );
+        detailTotalResults.push(result);
+        totalCell.value = {
+          formula: customsStatementSumFormula(amountColumnIndexes, rowNumber),
+          result
+        };
+      }
+    }
     for (let columnNumber = 1; columnNumber <= mergeEndColumn; columnNumber += 1) {
       const cell = row.getCell(columnNumber);
       const column = columns[columnNumber - 1] || {};
@@ -8548,6 +8754,7 @@ function requiredModuleForRequest(req) {
   if (path.startsWith("/driver-route-adjust-rules")) return "financeWages";
   if (path.startsWith("/cost-center-rates")) return "financeCostCenter";
   if (path.startsWith("/vehicle-profit-exchange-rates")) return "bossVehicleProfit";
+  if (path.startsWith("/statement-customer-exchange-rates")) return "financeCosts";
   if (path.startsWith("/company-expenses")) return "bossCompanyExpenses";
   if (path.startsWith("/statement-downloads")) return "financeCosts";
   if (path.startsWith("/rules")) return "rules";
@@ -8562,6 +8769,19 @@ function canReadBossCenterData(account = null) {
 }
 
 function authorizeApiRequest(req, res, next) {
+  if (req.path.startsWith("/statement-customer-exchange-rates")) {
+    const canReadRates = canAccessModule(req.account, "financeCosts")
+      || canAccessModule(req.account, "orders")
+      || canAccessModule(req.account, "dispatchBoard")
+      || canReadBossCenterData(req.account);
+    const canWriteRates = canAccessModule(req.account, "financeCosts");
+    if (!(req.method === "GET" ? canReadRates : canWriteRates)) {
+      res.status(403).json({ message: "当前账号无权访问该功能" });
+      return;
+    }
+    next();
+    return;
+  }
   if (req.path.startsWith("/customers")) {
     const canAccessCustomers = req.method === "GET"
       ? canAccessModule(req.account, "customers") || canReadBossCenterData(req.account)
@@ -12371,7 +12591,7 @@ async function readOrderPayload(body, existing = null) {
     || Object.prototype.hasOwnProperty.call(body || {}, "customs_declaration_nos");
   const customsDeclarationNos = hasCustomsDeclarationNos
     ? normalizeOrderCustomsDeclarationNos(body.customsDeclarationNos ?? body.customs_declaration_nos)
-    : orderCustomsDeclarationNosFromRemark(existing?.remark || submittedRemark || "");
+    : orderCustomsDeclarationNosFromRecord(existing || { remark: submittedRemark });
   return {
     no,
     dispatchNo: resolvedDispatchNo,
@@ -12410,7 +12630,7 @@ async function readOrderPayload(body, existing = null) {
     operatingUnit: userTextValue(pickBody(body, "operatingUnit", "operating_unit", existing?.operating_unit || "")),
     newOld: normalizeOrderNewOld(pickBody(body, "newOld", "new_old", existing?.new_old || "")),
     specialCar: booleanFlag(pickBody(body, "specialCar", "special_car", existing?.special_car || false), false),
-    remark: mergeOrderCustomsDeclarationNosRemark(submittedRemark, customsDeclarationNos),
+    remark: stripOrderCustomsDeclarationNosRemark(submittedRemark),
     tripNoEnabled: booleanFlag(pickBody(body, "tripNoEnabled", "trip_no_enabled", existing?.trip_no_enabled || 0), false) ? 1 : 0,
     tripNo: userTextValue(pickBody(body, "tripNo", "trip_no", existing?.trip_no || "")),
     sixSheetEnabled: booleanFlag(pickBody(body, "sixSheetEnabled", "six_sheet_enabled", existing?.six_sheet_enabled || 0), false) ? 1 : 0,
@@ -12428,10 +12648,10 @@ function orderWriteEntries(item = {}, support = {}, existing = {}) {
   const loadingLocationsJson = item.loadingLocationsJson || locationEntriesJson(item.loadingLocations || item.loading_locations || []);
   const unloadingLocationsJson = item.unloadingLocationsJson || locationEntriesJson(item.unloadingLocations || item.unloading_locations || []);
   const remark = item.remark ?? existing.remark ?? existing.remarks ?? "";
-  const customsDeclarationNos = item.customsDeclarationNos
-    ?? existing.customsDeclarationNos
-    ?? existing.customs_declaration_nos
-    ?? orderCustomsDeclarationNosFromRemark(remark);
+  const submittedDeclarationNos = item.customsDeclarationNos ?? item.customs_declaration_nos;
+  const customsDeclarationNos = submittedDeclarationNos !== undefined && submittedDeclarationNos !== null
+    ? orderCustomsDeclarationNosFromColumn(submittedDeclarationNos)
+    : orderCustomsDeclarationNosFromRecord({ ...existing, remark });
   const entries = [
     ["customer_id", item.customerId ?? null],
     ["customer", userTextValue(item.customer)],
@@ -12456,11 +12676,18 @@ function orderWriteEntries(item = {}, support = {}, existing = {}) {
     ["receivable_hkd", Number(item.receivableHKD || 0)],
     ["receivable_rmb", Number(item.receivableRMB || 0)],
     ["status", normalizeOrderStatus(item.status, "待确认")],
-    ["remark", mergeOrderCustomsDeclarationNosRemark(userMultilineTextValue(remark), customsDeclarationNos)]
+    ["remark", orderRemarkForStorage(
+      userMultilineTextValue(remark),
+      customsDeclarationNos,
+      Boolean(support.customsDeclarationNos)
+    )]
   ];
 
   if (support.dispatchNo) entries.splice(1, 0, ["dispatch_no", userTextValue(item.dispatchNo ?? existing.dispatchNo ?? existing.dispatch_no)]);
   if (support.dispatchGroupId) entries.splice(2, 0, ["dispatch_group_id", userTextValue(item.dispatchGroupId ?? existing.dispatchGroupId ?? existing.dispatch_group_id)]);
+  if (support.customsDeclarationNos) {
+    entries.push(["customs_declaration_nos", JSON.stringify(normalizeOrderCustomsDeclarationNos(customsDeclarationNos))]);
+  }
   if (support.linkedCustomsBusinessId) entries.splice(entries.findIndex(([column]) => column === "vehicle_source") + 1, 0, ["linked_customs_business_id", item.linkedCustomsBusinessId]);
   if (support.linkedCustomsBusinessIds) {
     const idsJson = item.linkedCustomsBusinessIdsJson
@@ -14197,6 +14424,71 @@ app.post("/api/vehicle-profit-exchange-rates", async (req, res) => {
     ], { entityLabel: "车辆利润汇率" })
   );
   res.json(mapVehicleProfitExchangeRate(row));
+});
+
+app.get("/api/statement-customer-exchange-rates", async (_req, res) => {
+  const rows = await loadStatementCustomerExchangeRateRows();
+  res.json(rows.map(mapStatementCustomerExchangeRate));
+});
+
+app.post("/api/statement-customer-exchange-rates", async (req, res) => {
+  const periodMonth = normalizePeriodMonthKey(req.body?.periodMonth ?? req.body?.period_month ?? req.body?.month);
+  const rateValue = req.body?.rate ?? req.body?.exchangeRate;
+  const rate = Number(rateValue);
+  const customer = statementCustomerExchangeRateCustomer(req.body);
+  if (!periodMonth) {
+    res.status(400).json({ message: "请选择有效月份" });
+    return;
+  }
+  if (!customer.customerKey) {
+    res.status(400).json({ message: "客户信息不能为空" });
+    return;
+  }
+  if (!Number.isFinite(rate) || rate <= 0) {
+    res.status(400).json({ message: "请填写大于 0 的有效汇率" });
+    return;
+  }
+
+  const records = await loadStatementCustomerExchangeRateRows();
+  const current = records.find((row) =>
+    row.period_month === periodMonth && row.customer_key === customer.customerKey
+  );
+  const now = new Date().toISOString();
+  const saved = {
+    period_month: periodMonth,
+    customer_key: customer.customerKey,
+    customer_id: customer.customerId,
+    customer_name: customer.customerName,
+    rate,
+    created_at: current?.created_at || now,
+    updated_at: now
+  };
+  const settingKey = statementCustomerExchangeRateSettingKey(periodMonth, customer.customerKey);
+  await setAppSetting(settingKey, JSON.stringify({
+    periodMonth: saved.period_month,
+    customerKey: saved.customer_key,
+    customerId: saved.customer_id,
+    customerName: saved.customer_name,
+    rate: saved.rate,
+    createdAt: saved.created_at,
+    updatedAt: saved.updated_at
+  }));
+  await writeAudit(
+    current ? "update" : "create",
+    "statement_customer_exchange_rate",
+    `${periodMonth}/${customer.customerKey}`,
+    auditChangeSummary(
+      { periodMonth: current?.period_month, customerName: current?.customer_name, rate: current?.rate },
+      { periodMonth, customerName: customer.customerName, rate },
+      [
+        { key: "periodMonth", label: "月份" },
+        { key: "customerName", label: "客户" },
+        { key: "rate", label: "汇率" }
+      ],
+      { entityLabel: "客户月度汇率" }
+    )
+  );
+  res.json(mapStatementCustomerExchangeRate(saved));
 });
 
 app.get("/api/company-expenses", async (_req, res) => {
@@ -15980,9 +16272,52 @@ async function backfillDispatchPlanLocationRows() {
   return changed;
 }
 
+async function backfillOrderCustomsDeclarationNos() {
+  if (!(await orderColumnExists("customs_declaration_nos"))) return 0;
+  const rows = await db.prepare(`
+    SELECT no, customs_declaration_nos, remark
+    FROM orders
+    WHERE COALESCE(remark, '') ~ ?
+  `).all(ORDER_CUSTOMS_DECLARATION_NOS_REMARK_PATTERN);
+  if (!rows.length) return 0;
+
+  const update = await db.prepare(`
+    UPDATE orders
+    SET customs_declaration_nos = @customsDeclarationNos,
+        remark = @nextRemark
+    WHERE no = @no
+      AND remark = @remark
+      AND customs_declaration_nos = @storedDeclarationNos
+  `);
+  let changed = 0;
+  const transaction = db.transaction(async (items) => {
+    for (const row of items) {
+      const storedNos = orderCustomsDeclarationNosFromColumn(row.customs_declaration_nos);
+      const legacyNos = orderCustomsDeclarationNosFromRemark(row.remark);
+      const customsDeclarationNos = normalizeOrderCustomsDeclarationNos([...storedNos, ...legacyNos]);
+      const nextRemark = stripOrderCustomsDeclarationNosRemark(row.remark);
+      if (nextRemark === row.remark && JSON.stringify(customsDeclarationNos) === JSON.stringify(storedNos)) continue;
+      const result = await update.run({
+        no: row.no,
+        storedDeclarationNos: row.customs_declaration_nos,
+        customsDeclarationNos: JSON.stringify(customsDeclarationNos),
+        remark: row.remark,
+        nextRemark
+      });
+      changed += Number(result.changes || 0);
+    }
+  });
+  await transaction(rows);
+  return changed;
+}
+
 async function backfillStructuredLocationData() {
+  const declarationNoCount = await backfillOrderCustomsDeclarationNos();
   const orderCount = await backfillOrderLocationColumns();
   const planCount = await backfillDispatchPlanLocationRows();
+  if (declarationNoCount) {
+    console.log(`Moved legacy order customs declaration numbers out of remarks: ${declarationNoCount}`);
+  }
   if (orderCount || planCount) {
     console.log(`Backfilled structured loading/unloading locations: orders=${orderCount}, dispatch_plans=${planCount}`);
   }

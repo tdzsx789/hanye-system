@@ -65,6 +65,9 @@ function modulesForEntity(entityType = "", action = "") {
   if (type === "vehicle_profit_exchange_rate") {
     return ["bossVehicleProfit", "bossSupplierProfit", "bossDashboard", "bossCompanyProfit"];
   }
+  if (type === "statement_customer_exchange_rate") {
+    return ["financeCosts", "orders", "dispatchBoard", "bossDashboard", "bossUnreceived", "bossCompanyProfit", "bossSupplierProfit"];
+  }
   if (type === "company_expense") {
     return ["bossCompanyExpenses", "bossDashboard", "bossCompanyProfit"];
   }
