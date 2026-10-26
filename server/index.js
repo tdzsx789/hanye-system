@@ -19,7 +19,7 @@ import {
   verifyPassword
 } from "./auth.js";
 import PDFDocument from "pdfkit";
-import { afterCommit, db, databaseInfo, listenRealtimeEvents, publishRealtimeEvent, startupDatabaseMaintenanceEnabled, withAdvisoryLock, writeAudit as writeAuditRecord } from "./db.js";
+import { afterCommit, db, databaseInfo, listenRealtimeEvents, publishRealtimeEvent, setAppSetting, startupDatabaseMaintenanceEnabled, withAdvisoryLock, writeAudit as writeAuditRecord } from "./db.js";
 import { createRealtimeHub, realtimeEventFromAudit } from "./realtime.js";
 
 const app = express();

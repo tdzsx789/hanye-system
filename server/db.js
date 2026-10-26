@@ -559,7 +559,7 @@ async function getAppSetting(key = "") {
   return String(row?.value || "").trim();
 }
 
-async function setAppSetting(key = "", value = "") {
+export async function setAppSetting(key = "", value = "") {
   const settingKey = String(key || "").trim();
   if (!settingKey) return;
   await db.prepare(`
