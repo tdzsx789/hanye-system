@@ -81,7 +81,7 @@ function modulesForEntity(entityType = "", action = "") {
     return ["freight", "dispatchBoard", "orders"];
   }
   if (type === "template") {
-    return ["templates"];
+    return ["templates", "orders", "dispatchBoard", "customers", "financeCosts", "financeSupplierStatements"];
   }
   if (type === "rule") {
     return ["rules"];

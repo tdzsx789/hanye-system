@@ -1,5 +1,17 @@
 import { apiFetch, apiFetchList } from "./client.js";
 
+let templateMutationVersion = 0;
+
+export function getTemplateMutationVersion() {
+  return templateMutationVersion;
+}
+
+async function mutateTemplate(path, options) {
+  const result = await apiFetch(path, options);
+  templateMutationVersion += 1;
+  return result;
+}
+
 export function listTemplates(query = "?includeContent=0&scope=export") {
   return apiFetchList(`/templates${query}`);
 }
@@ -9,14 +21,14 @@ export function getTemplate(id) {
 }
 
 export function createTemplate(payload) {
-  return apiFetch("/templates", {
+  return mutateTemplate("/templates", {
     method: "POST",
     body: JSON.stringify(payload)
   });
 }
 
 export function updateTemplate(id, payload) {
-  return apiFetch(`/templates/${id}`, {
+  return mutateTemplate(`/templates/${id}`, {
     method: "PATCH",
     body: JSON.stringify(payload)
   });
@@ -27,5 +39,5 @@ export function saveTemplate(id, payload) {
 }
 
 export function deleteTemplate(id) {
-  return apiFetch(`/templates/${id}`, { method: "DELETE" });
+  return mutateTemplate(`/templates/${id}`, { method: "DELETE" });
 }

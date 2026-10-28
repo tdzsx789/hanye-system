@@ -2060,6 +2060,7 @@ const feeItemRowsByName = computed(() => {
 const freightRateRows = ref([]);
 const templateRows = ref([]);
 const templateRowsLoaded = ref(false);
+let templateRowsRequestSerial = 0;
 const ruleRows = ref([]);
 const masterRows = ref([]);
 const accountRows = ref([]);
@@ -2615,6 +2616,7 @@ const orderForm = reactive({
   customsPageCount: ""
 });
 const orderFees = ref([]);
+const orderFeeAssigneeDrafts = reactive(new WeakMap());
 const ORDER_FEE_FX_FIELDS = ["unitPrice", "amount", "cost"];
 const ORDER_FEE_FX_FIELD_LABELS = {
   unitPrice: "单价",
@@ -8920,7 +8922,9 @@ function orderFeeAutoDriverRole(fee = {}, order = orderForm) {
     const roles = crossBorderFreightDriverRoles(order, fee);
     return roles.length === 1 ? roles[0] : (roles.length > 1 ? "跟随订单司机" : "");
   }
-  return String(feeItemForFee(fee)?.defaultDriverRole || fee.driverRole || "").trim();
+  return [feeItemForFee(fee)?.defaultDriverRole, fee.driverRole ?? fee.driver_role]
+    .map((role) => String(role || "").trim())
+    .find((role) => role && role !== "手动指定") || "";
 }
 
 function normalizeOrderFeeAssigneeText(value = "") {
@@ -8928,7 +8932,7 @@ function normalizeOrderFeeAssigneeText(value = "") {
 }
 
 function orderFeeLegacyAssigneeNames(fee = {}, order = orderForm) {
-  const manualName = normalizeOrderFeeAssigneeText(fee.driverName || fee.driver_name);
+  const manualName = normalizeOrderFeeAssigneeText(fee.driverName ?? fee.driver_name);
   if (!manualName || !orderIsDoubleDriverMode(order)) return [];
   const compact = manualName.replace(/\s+/g, "");
   const parts = manualName
@@ -8949,9 +8953,7 @@ function orderFeeLegacyAssigneeNames(fee = {}, order = orderForm) {
 }
 
 function orderFeeHasManualAssignee(fee = {}) {
-  return Boolean(fee._manualAssignee)
-    || String(fee.driverRole || fee.driver_role || "").trim() === "手动指定"
-    || Boolean(normalizeOrderFeeAssigneeText(fee.driverName || fee.driver_name));
+  return Boolean(normalizeOrderFeeAssigneeText(fee.driverName ?? fee.driver_name));
 }
 
 function normalizeOrderFeeManualAssigneeFlag(fee = {}) {
@@ -8999,17 +9001,15 @@ function orderFeeDefaultAssigneeNames(fee = {}, order = orderForm) {
   const hkDriver = relayDrivers ? relayDrivers.hk : normalizeOrderFeeAssigneeText(order.hkDriver || driver);
   const mainlandDriver = relayDrivers ? relayDrivers.mainland : normalizeOrderFeeAssigneeText(order.mainlandDriver);
   const role = orderFeeAutoDriverRole(fee, order);
-  if (mode === "双司机" && !isCrossBorderFreightFee(fee)) {
-    if (role === "大陆骑师") return uniqueOrderCostNames([mainlandDriver]);
-    if (role === "香港司机") return uniqueOrderCostNames([hkDriver]);
-    return orderFeeCostSourceAssigneeNames(fee, order);
-  }
   if (role === "香港司机") return relayDrivers ? uniqueOrderCostNames([hkDriver]) : uniqueOrderCostNames([hkDriver, driver]);
   if (role === "大陆骑师") return mode === "双司机" ? uniqueOrderCostNames([mainlandDriver]) : [];
   if (role === "跟随订单司机") {
     return mode === "双司机"
       ? uniqueOrderCostNames([hkDriver, mainlandDriver])
       : uniqueOrderCostNames([driver, hkDriver, ...driver.split("/")]);
+  }
+  if (mode === "双司机" && !isCrossBorderFreightFee(fee)) {
+    return orderFeeCostSourceAssigneeNames(fee, order);
   }
   if (mode === "双司机" && isCrossBorderFreightFee(fee)) {
     return uniqueOrderCostNames([hkDriver, mainlandDriver]);
@@ -9021,7 +9021,7 @@ function orderFeeAssigneeNames(fee = {}, order = orderForm) {
   if (isCompanyCoveredFee(fee)) return ["公司承担"];
   const legacyNames = orderFeeLegacyAssigneeNames(fee, order);
   if (legacyNames.length) return legacyNames;
-  const manualName = normalizeOrderFeeAssigneeText(fee.driverName || fee.driver_name);
+  const manualName = normalizeOrderFeeAssigneeText(fee.driverName ?? fee.driver_name);
   if (orderFeeHasManualAssignee(fee)) return manualName ? uniqueOrderCostNames([manualName]) : [];
   return orderFeeDefaultAssigneeNames(fee, order);
 }
@@ -9037,13 +9037,15 @@ function orderFeeAssigneeDisplay(fee = {}, order = orderForm) {
 }
 
 function orderFeeAssigneeInputValue(fee = {}, order = orderForm) {
+  if (isCompanyCoveredFee(fee)) return "公司承担";
+  if (orderFeeAssigneeDrafts.has(fee)) return orderFeeAssigneeDrafts.get(fee);
   const legacyNames = orderFeeLegacyAssigneeNames(fee, order);
   if (legacyNames.length) return legacyNames.join("\n");
-  const manualName = normalizeOrderFeeAssigneeText(fee.driverName || fee.driver_name);
+  const manualName = normalizeOrderFeeAssigneeText(fee.driverName ?? fee.driver_name);
   if (orderFeeHasManualAssignee(fee)) return manualName;
   const names = orderFeeAssigneeDisplayNames(fee, order);
   if (names.length > 1) return names.join("\n");
-  return names[0] || "-";
+  return names[0] || "";
 }
 
 function orderFeeAssigneeLineCount(fee = {}, order = orderForm) {
@@ -9055,25 +9057,42 @@ function orderFeeAssigneeTitle(fee = {}, order = orderForm) {
   if (isCompanyCoveredFee(fee)) return names.length ? names.join("、") : "公司承担";
   if (orderFeeLegacyAssigneeNames(fee, order).length) return names.length ? `归属：${names.join("、")}` : "未选择香港司机";
   if (orderFeeHasManualAssignee(fee)) return names.length ? `手动归属：${names.join("、")}` : "手动归属";
-  if (normalizeVehicleSource(orderForm.vehicleSource) === "外派车辆") return names.length ? `外派供应商：${names.join("、")}` : "未选择外派供应商";
-  if (normalizeVehicleSource(orderForm.vehicleSource) === OWN_VEHICLE_SOURCE) return names.length ? `归属：${names.join("、")}` : "未选择香港司机";
-  return "";
+  if (normalizeVehicleSource(order.vehicleSource) === "外派车辆") return names.length ? `外派供应商：${names.join("、")}` : "未选择外派供应商，可手动填写成本归属";
+  return names.length ? `归属：${names.join("、")}` : "未匹配到成本归属，请检查收费项目默认归属和订单司机，或手动填写";
 }
 
 function resetOrderFeeAssignee(fee = {}) {
   if (!fee || isCompanyCoveredFee(fee)) return;
+  orderFeeAssigneeDrafts.delete(fee);
   fee._manualAssignee = false;
   fee.driverName = "";
+  fee.driver_name = "";
+  fee.driverRole = "";
+  fee.driver_role = "";
   fee.driverRole = orderFeeAutoDriverRole(fee);
   scheduleOrderFeeCostSync();
 }
 
 function handleOrderFeeAssigneeInput(fee = {}, event = null) {
   if (!fee || orderReadOnlyMode.value || isCompanyCoveredFee(fee)) return;
-  const value = normalizeOrderFeeAssigneeText(event?.target?.value ?? "");
-  fee._manualAssignee = true;
-  fee.driverRole = "手动指定";
+  const draft = String(event?.target?.value ?? "");
+  const value = normalizeOrderFeeAssigneeText(draft);
+  orderFeeAssigneeDrafts.set(fee, draft);
+  fee._manualAssignee = Boolean(value);
+  fee.driverRole = value ? "手动指定" : "";
+  fee.driver_role = fee.driverRole;
   fee.driverName = value;
+  fee.driver_name = value;
+  scheduleOrderFeeCostSync();
+}
+
+function commitOrderFeeAssigneeInput(fee = {}) {
+  if (orderReadOnlyMode.value || isCompanyCoveredFee(fee)) return;
+  orderFeeAssigneeDrafts.delete(fee);
+  if (!orderFeeHasManualAssignee(fee)) {
+    resetOrderFeeAssignee(fee);
+    return;
+  }
   scheduleOrderFeeCostSync();
 }
 
@@ -19138,8 +19157,9 @@ function normalizeOrderFeeRow(fee = {}) {
   row.advanceAddress = feeCategoryLabel(row) === "代垫"
     ? String(row.advanceAddress || row.advance_address || "").trim()
     : "";
-  row.driverRole = normalizeOrderFeeAssigneeText(row.driverRole || row.driver_role || "");
-  row.driverName = normalizeOrderFeeAssigneeText(row.driverName || row.driver_name || "");
+  row.driverRole = normalizeOrderFeeAssigneeText(row.driverRole ?? row.driver_role ?? "");
+  row.driverName = normalizeOrderFeeAssigneeText(row.driverName ?? row.driver_name ?? "");
+  if (!row.driverName && row.driverRole === "手动指定") row.driverRole = orderFeeAutoDriverRole(row);
   row._manualAssignee = normalizeOrderFeeManualAssigneeFlag(row);
   syncCrossBorderFreightDriverRole(row);
   return row;
@@ -21644,23 +21664,28 @@ watch(exportTemplateRows, (rows) => {
 });
 
 function currentOrderTemplateCustomer() {
+  const customer = transportCustomerByReference(orderForm.customer, orderForm.customerId);
   return {
-    id: orderForm.customerId || selectedCustomer.value?.id || "",
-    name: orderForm.customer || selectedCustomer.value?.name || ""
+    id: String(customer?.id || orderForm.customerId || "").trim(),
+    name: String(customer?.name || orderForm.customer || "").trim()
   };
 }
 
 function orderTemplateCustomerFromContent(content = {}) {
   const order = content.order || {};
+  const id = String(content.customerId || content.customer_id || order.customerId || order.customer_id || "").trim();
+  const name = String(content.customer || order.customer || "").trim();
+  const customer = transportCustomerByReference(name, id);
   return {
-    id: content.customerId || content.customer_id || order.customerId || order.customer_id || "",
-    name: content.customer || order.customer || ""
+    id: id || String(customer?.id || "").trim(),
+    name: String(customer?.name || name).trim()
   };
 }
 
 function orderTemplateMatchesCurrentCustomer(content = {}) {
   const current = currentOrderTemplateCustomer();
   const owner = orderTemplateCustomerFromContent(content);
+  if (!current.id && !current.name) return false;
   if (current.id && owner.id) return current.id === owner.id;
   if (current.name && owner.name) return current.name === owner.name;
   // Legacy templates created before customer binding have no owner metadata.
@@ -22392,6 +22417,9 @@ function shouldRefreshRemindersForRealtime(event = {}) {
 }
 
 function realtimeEventTouchesActiveModule(event = {}) {
+  // Templates are shared reference data, including inside order modals opened
+  // from pages other than the template center.
+  if (event.entityType === "template") return true;
   const modules = realtimeAffectedModules(event);
   if (!modules.size) return true;
   const active = normalizeRoute(activeModule.value);
@@ -22554,6 +22582,7 @@ async function flushRealtimeRefresh() {
 
 function scheduleRealtimeRefresh(event = {}) {
   if (!loggedIn.value) return;
+  if (event.entityType === "template") templateRowsLoaded.value = false;
   if (document.visibilityState === "hidden") return;
   if (!realtimeEventTouchesActiveModule(event)) return;
   const buckets = realtimeRefreshBucketsForEvent(event);
@@ -24787,7 +24816,7 @@ function buildNormalizedOrderPayload() {
 
 function removeDispatchLocationEntry(target, index) {
   const entries = dispatchLocationEntries(target);
-  if (entries.length <= 1 || index <= 0) {
+  if (entries.length <= 1 || index < 0 || index >= entries.length) {
     return;
   }
   const targetLabel = target === "loading" ? "装货地" : "卸货地";
@@ -25783,17 +25812,39 @@ async function migrateLegacyClientStorageToPostgres(options = {}) {
 }
 
 async function reloadTemplateRows(options = {}) {
-  // Order freight templates are shared database records too. They must be
-  // loaded with content so the order editor can filter them by customer after
-  // another user refreshes or logs in.
-  templateRows.value = await apiFetchListFrom(() => templatesApi.listTemplates("?includeContent=1"), "模板中心", options);
-  templateRowsLoaded.value = true;
+  const requestSerial = ++templateRowsRequestSerial;
+  const mutationVersion = templatesApi.getTemplateMutationVersion();
+  try {
+    const rows = await templatesApi.listTemplates("?includeContent=1");
+    if (requestSerial !== templateRowsRequestSerial) return templateRows.value;
+    // A list requested before a save must not erase the just-saved template.
+    if (mutationVersion !== templatesApi.getTemplateMutationVersion()) {
+      templateRowsLoaded.value = false;
+      return templateRows.value;
+    }
+    templateRows.value = rows;
+    templateRowsLoaded.value = true;
+  } catch (error) {
+    if (requestSerial !== templateRowsRequestSerial) return templateRows.value;
+    templateRowsLoaded.value = false;
+    console.warn("模板中心加载失败", error);
+    if (!options.silent) notify(`模板加载失败：${error.message}`);
+  }
+  return templateRows.value;
 }
 
 async function ensureTemplateRowsLoaded(options = {}) {
   if (templateRowsLoaded.value && !options.force) return templateRows.value;
   await reloadTemplateRows(options);
   return templateRows.value;
+}
+
+async function toggleLoadFeeTemplateMenu() {
+  loadFeeTemplateMenuOpen.value = !loadFeeTemplateMenuOpen.value;
+  if (loadFeeTemplateMenuOpen.value) {
+    // Refresh on every open to catch changes made while offline or in another tab.
+    await reloadTemplateRows();
+  }
 }
 
 function fileEndpoint(file, action) {
@@ -26754,6 +26805,9 @@ async function login() {
 
 function logout(options = {}) {
   closeRealtimeConnection();
+  templateRowsRequestSerial += 1;
+  templateRows.value = [];
+  templateRowsLoaded.value = false;
   window.clearTimeout(deferredAppFontsTimer);
   deferredAppFontsTimer = null;
   window.clearTimeout(accountTablePreferencesSaveTimer);
@@ -28747,6 +28801,34 @@ function exportFilenamePart(value, fallback = "未填写") {
     .trim() || fallback;
 }
 
+function statementFilenamePeriodLabel(start = "", end = "") {
+  const startMonth = String(start || "").match(/^(\d{4})-(\d{2})(?:-|$)/);
+  const endMonth = String(end || "").match(/^(\d{4})-(\d{2})(?:-|$)/);
+  const monthLabel = (match) => `${match[1]}年${Number(match[2])}月`;
+  if (!start && !end) return "全部";
+  if (startMonth && endMonth) {
+    if (startMonth[1] === endMonth[1] && startMonth[2] === endMonth[2]) return monthLabel(startMonth);
+    if (startMonth[1] === endMonth[1] && startMonth[2] === "01" && endMonth[2] === "12"
+      && start === `${startMonth[1]}-01-01` && end === `${endMonth[1]}-12-31`) {
+      return `${startMonth[1]}年`;
+    }
+    return `${monthLabel(startMonth)}至${monthLabel(endMonth)}`;
+  }
+  if (startMonth && !end) return `${monthLabel(startMonth)}起`;
+  if (endMonth && !start) return `截至${monthLabel(endMonth)}`;
+  return exportFilenamePart(`${start || "全部"}至${end || "全部"}`);
+}
+
+function monthlyStatementExportFilename(entityName = "对账对象", start = "", end = "", extension = "xlsx", type = "customer") {
+  const name = type === "customs"
+    ? customsCustomerLabelByReference(entityName)
+    : type === "supplier"
+      ? supplierDisplayLabel(entityName)
+      : transportCustomerLabelByReference(entityName);
+  const typeLabel = type === "customs" ? "报关" : type === "supplier" ? "供应商" : "运输";
+  return `${exportFilenamePart(name || entityName)}${statementFilenamePeriodLabel(start, end)}${typeLabel}对账单.${extension}`;
+}
+
 function exportOrderDailySequence(order) {
   const no = String(order?.no || "");
   const match = no.match(/(\d+)$/);
@@ -29194,8 +29276,9 @@ function exportSupplierCustomerOrdersCsv() {
       order.status || ""
     ];
   });
+  const dates = orders.map((order) => String(order.date || "").slice(0, 10)).filter(Boolean).sort();
   exportCsv(
-    `${exportFilenamePart(selectedCustomer.value?.name || "供应商")}_供应商对账_${todayInputValue()}.csv`,
+    monthlyStatementExportFilename(selectedCustomer.value?.name || "供应商", dates[0], dates.at(-1), "csv", "supplier"),
     ["序号", "排车单号", "订单号", "日期", "客户", "口岸", "进出口", "吨位", "件数/板数", "重量", "装货地", "卸货地", "供应商", "车牌", "运输模式", "币种", "应付港币", "应付人民币", "成本匹配", "成本明细", "状态"],
     rows
   );
@@ -30450,7 +30533,7 @@ function customsStatementTotalRow(rows = []) {
 }
 
 function customsStatementExportFilename(company = "客户", start = "", end = "", extension = "xlsx") {
-  return `${exportFilenamePart(company)}_报关对账_${start || "全部"}_${end || "全部"}.${extension}`;
+  return monthlyStatementExportFilename(company, start, end, extension, "customs");
 }
 
 async function exportCustomsStatementByFormat(format = "excel", row = activeStatementExportRow.value) {
@@ -31143,7 +31226,7 @@ async function exportStatementCsv() {
       const totalRMB = rows.reduce((sum, row) => sum + Number(row[16] || 0), 0);
       const payableOrders = orders.filter((order) => !isChargedOrder(order));
       await exportXlsx(
-        `${exportFilenamePart(entityName)}_供应商对账_${start || "全部"}_${end || "全部"}.xlsx`,
+        statementExportFilename(entityName, start, end, "xlsx"),
         ["序号", "排车单号", "订单号", "日期", "客户", "口岸", "进出口", "吨位", "件数/板数", "重量", "装货地", "卸货地", "车牌", "运输模式", "币种", "应付HKD", "应付RMB", "成本匹配", "成本明细", "状态"],
         [...rows, ["合计", "", "", "", "", "", "", "", "", "", "", "", "", "", "", money(totalHKD), money(totalRMB), "", "", ""]],
         "供应商对账"
@@ -31271,7 +31354,7 @@ async function exportStatementCsv() {
     totalRow[headers.indexOf("应收RMB")] = money(total.rmb);
     totalRow[headers.indexOf("杂费明细")] = `${total.label}${statementSettlementCurrency.value} ${money(total.total)}；汇率 ${statementExchangeRate.value}`;
     await exportXlsx(
-      `${exportFilenamePart(entityName)}_客户对账_${start || "全部"}_${end || "全部"}.xlsx`,
+      statementExportFilename(entityName, start, end, "xlsx"),
       headers,
       [...rows, totalRow],
       "客户对账"
@@ -31307,8 +31390,10 @@ function statementExportTypeLabel() {
 }
 
 function statementExportFilename(entityName = "对账对象", start = "", end = "", extension = "xlsx") {
-  const typeLabel = statementExportTypeLabel().replace("对账单", "对账");
-  return `${exportFilenamePart(entityName)}_${typeLabel}_${start || "全部"}_${end || "全部"}.${extension}`;
+  if (statementExportType.value === "driver") {
+    return `${exportFilenamePart(entityName)}_司机对账_${start || "全部"}_${end || "全部"}.${extension}`;
+  }
+  return monthlyStatementExportFilename(entityName, start, end, extension, statementExportType.value);
 }
 
 async function toggleStatementExportMenu() {
@@ -32385,12 +32470,15 @@ function applyFeeTemplateRows(fees, options = {}) {
     const savedCost = normalizeFeeCost(fee);
     const hasUnitPriceManualFlag = fee.unitPriceManual !== undefined || fee.unit_price_manual !== undefined || fee.manualUnitPrice !== undefined || fee._manualUnitPrice !== undefined;
     const hasAmountManualFlag = fee.amountManual !== undefined || fee.amount_manual !== undefined || fee.manualAmount !== undefined || fee._manualAmount !== undefined;
+    const hasCurrencyManualFlag = fee.currencyManual !== undefined || fee.currency_manual !== undefined || fee.manualCurrency !== undefined || fee._manualCurrency !== undefined;
     const manualUnitPrice = hasUnitPriceManualFlag
       ? booleanFlag(fee.unitPriceManual ?? fee.unit_price_manual ?? fee.manualUnitPrice ?? fee._manualUnitPrice, false)
       : false;
     const manualAmount = hasAmountManualFlag
       ? booleanFlag(fee.amountManual ?? fee.amount_manual ?? fee.manualAmount ?? fee._manualAmount, false)
       : false;
+    const manualCurrency = Boolean(String(fee.currency || "").trim())
+      || (hasCurrencyManualFlag && booleanFlag(fee.currencyManual ?? fee.currency_manual ?? fee.manualCurrency ?? fee._manualCurrency, false));
     const hasManualCost = Boolean(fee.costManual || fee.manualCost || fee._manualCost);
     const hasManualCostFlag = fee.costManual !== undefined || fee.cost_manual !== undefined || fee.manualCost !== undefined || fee._manualCost !== undefined;
     const feeName = String(fee.name || "").trim();
@@ -32401,6 +32489,7 @@ function applyFeeTemplateRows(fees, options = {}) {
       quantity: fee.quantity,
       unitPrice: fee.unitPrice ?? fee.unit_price,
       _manualUnitPrice: manualUnitPrice,
+      _manualCurrency: manualCurrency,
       currency: fee.currency || orderForm.currency || "",
       amount: fee.amount,
       _manualAmount: manualAmount,
@@ -32421,6 +32510,7 @@ function applyFeeTemplateRows(fees, options = {}) {
     return {
       ...row,
       _manualFreightAmount: isFreightFeeRow(row) && Boolean(row._manualAmount),
+      _manualCurrency: Boolean(row.fxLinks?.unitPrice || row.fxLinks?.amount) || manualCurrency,
       _manualCost: Boolean(row.fxLinks?.cost) || (hasManualCostFlag ? booleanFlag(fee.costManual ?? fee.cost_manual ?? fee.manualCost ?? fee._manualCost, false) : false)
     };
   });
@@ -32655,8 +32745,8 @@ async function saveCurrentFeesAsTemplate() {
       content: JSON.stringify(content)
     };
     const existing = templateRows.value.find((item) => {
-      const content = parseOrderFreightTemplate(item) || {};
-      if (!orderTemplateMatchesCurrentCustomer(content)) return false;
+      const content = parseOrderFreightTemplate(item);
+      if (!content || !orderTemplateMatchesCurrentCustomer(content)) return false;
       const existingName = String(item.name || "").trim();
       return existingName === name || freightTemplateNameForCustomer(existingName, customerName) === name;
     });
@@ -41805,7 +41895,7 @@ function orderDetailFeeRows(order = {}) {
 	                          @blur="commitDispatchLocationDraftPart('loading', index, 'detail')"
                         ></textarea>
                         <button
-                          v-if="dispatchLocationEntries('loading').length > 1 && index > 0"
+                          v-if="dispatchLocationEntries('loading').length > 1"
                           class="dispatch-address-remove icon-only"
                           type="button"
                           title="删除此地址"
@@ -41905,7 +41995,7 @@ function orderDetailFeeRows(order = {}) {
 	                          @blur="commitDispatchLocationDraftPart('unloading', index, 'detail')"
                         ></textarea>
                         <button
-                          v-if="dispatchLocationEntries('unloading').length > 1 && index > 0"
+                          v-if="dispatchLocationEntries('unloading').length > 1"
                           class="dispatch-address-remove icon-only"
                           type="button"
                           title="删除此地址"
@@ -42443,7 +42533,7 @@ function orderDetailFeeRows(order = {}) {
                     <button class="ghost-btn" type="button" @click="loadLatestOrderTemplate">
                       <IconSvg name="refresh" />载入模板
                     </button>
-                    <button class="ghost-btn template-load-arrow" type="button" title="选择模板" aria-label="选择模板" @click="loadFeeTemplateMenuOpen = !loadFeeTemplateMenuOpen">
+                    <button class="ghost-btn template-load-arrow" type="button" title="选择模板" aria-label="选择模板" @click="toggleLoadFeeTemplateMenu">
                       <IconSvg name="chevronDown" />
                     </button>
                   </span>
@@ -42609,9 +42699,10 @@ function orderDetailFeeRows(order = {}) {
                                 v-else
 								                          :value="orderFeeAssigneeInputValue(fee)"
 								                          :rows="orderFeeAssigneeLineCount(fee)"
-								                          placeholder="自动归属"
+								                          placeholder="未匹配归属"
 								                          :disabled="orderReadOnlyMode"
 								                          @input="handleOrderFeeAssigneeInput(fee, $event)"
+								                          @blur="commitOrderFeeAssigneeInput(fee)"
 			                        ></textarea>
 			                        <button
 			                          v-if="!orderReadOnlyMode && orderFeeHasManualAssignee(fee) && !isCompanyCoveredFee(fee)"

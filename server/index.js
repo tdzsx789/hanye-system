@@ -6191,6 +6191,22 @@ async function renderOrdersPdf(res, orders, title = "订单导出", templatePayl
   doc.end();
 }
 
+function normalizeOrderFeeAssigneeFields(fee = {}) {
+  const driverName = userTextValue(fee.driverName ?? fee.driver_name);
+  const role = userTextValue(fee.driverRole ?? fee.driver_role);
+  const driverRole = [
+    "香港司机",
+    "大陆骑师",
+    "跟随订单司机",
+    "手动指定",
+    "香港司机/大陆骑师",
+    "香港司机 / 大陆骑师",
+    "香港司机 + 大陆骑师接驳"
+  ].includes(role)
+    && (role !== "手动指定" || driverName) ? role : "";
+  return { driverRole, driverName };
+}
+
 function mapOrderFee(row) {
   const quantity = Number(row.quantity || 0) > 0 ? Number(row.quantity) : 1;
   const costParts = normalizeOrderFeeCostParts(row.cost_parts_json);
@@ -6219,8 +6235,7 @@ function mapOrderFee(row) {
     fxLinks: parseJsonObjectText(row.fx_links_json, {}),
     advanceAddress: userTextValue(row.advance_address),
     remark: userTextValue(row.remark),
-    driverRole: userTextValue(row.driver_role),
-    driverName: userTextValue(row.driver_name)
+    ...normalizeOrderFeeAssigneeFields(row)
   };
 }
 
@@ -7786,8 +7801,28 @@ function customsStatementSafeCompany(value = "") {
   return String(value || "").trim() || "未填写客户";
 }
 
-function customsStatementFilename(company = "客户", start = "", end = "", extension = "xlsx") {
-  return `${exportFilenamePart(company)}_报关对账_${start || "全部"}_${end || "全部"}.${extension}`;
+function statementFilenamePeriodLabel(start = "", end = "") {
+  const startMonth = String(start || "").match(/^(\d{4})-(\d{2})(?:-|$)/);
+  const endMonth = String(end || "").match(/^(\d{4})-(\d{2})(?:-|$)/);
+  const monthLabel = (match) => `${match[1]}年${Number(match[2])}月`;
+  if (!start && !end) return "全部";
+  if (startMonth && endMonth) {
+    if (startMonth[1] === endMonth[1] && startMonth[2] === endMonth[2]) return monthLabel(startMonth);
+    if (startMonth[1] === endMonth[1] && startMonth[2] === "01" && endMonth[2] === "12"
+      && start === `${startMonth[1]}-01-01` && end === `${endMonth[1]}-12-31`) {
+      return `${startMonth[1]}年`;
+    }
+    return `${monthLabel(startMonth)}至${monthLabel(endMonth)}`;
+  }
+  if (startMonth && !end) return `${monthLabel(startMonth)}起`;
+  if (endMonth && !start) return `截至${monthLabel(endMonth)}`;
+  return exportFilenamePart(`${start || "全部"}至${end || "全部"}`);
+}
+
+async function customsStatementFilename(company = "客户", start = "", end = "", extension = "xlsx") {
+  const shortNames = await loadCustomerShortNameMap({ category: "报关客户" });
+  const name = shortNameFromMap(company, shortNames) || company;
+  return `${exportFilenamePart(name)}${statementFilenamePeriodLabel(start, end)}报关对账单.${extension}`;
 }
 
 function normalizeCustomsStatementExportColumns(columns = []) {
@@ -9065,7 +9100,7 @@ app.post("/api/customs-businesses/export/excel", async (req, res) => {
     return;
   }
   try {
-    const filename = customsStatementFilename(context.company, context.start, context.end, "xlsx");
+    const filename = await customsStatementFilename(context.company, context.start, context.end, "xlsx");
     const body = await renderCustomsStatementXlsxBuffer(rows, context);
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", contentDispositionHeader("attachment", filename));
@@ -9085,7 +9120,7 @@ app.post("/api/customs-businesses/export/pdf", async (req, res) => {
     return;
   }
   try {
-    const filename = customsStatementFilename(context.company, context.start, context.end, "pdf");
+    const filename = await customsStatementFilename(context.company, context.start, context.end, "pdf");
     await writeAudit("export", "customs_business", context.company, `PDF ${rows.length} 条`);
     renderCustomsStatementPdf(res, rows, context, filename);
   } catch (error) {
@@ -13058,7 +13093,7 @@ app.post("/api/orders", async (req, res) => {
 });
 
 function normalizeOrderFee(fee, fallbackCurrency) {
-  const driverRole = userTextValue(fee.driverRole || fee.driver_role);
+  const assignee = normalizeOrderFeeAssigneeFields(fee);
   const clientKey = userTextValue(fee.clientKey || fee.client_key || fee._clientKey);
   const rawQuantity = Number(fee.quantity);
   const quantity = Number.isFinite(rawQuantity) && rawQuantity > 0 ? rawQuantity : 1;
@@ -13135,8 +13170,7 @@ function normalizeOrderFee(fee, fallbackCurrency) {
     fxLinksJson: JSON.stringify(normalizeOrderFeeFxLinks(fee)),
     advanceAddress: userTextValue(fee.advanceAddress || fee.advance_address),
     remark: userTextValue(fee.remark),
-    driverRole: ["香港司机", "大陆骑师", "跟随订单司机", "手动指定"].includes(driverRole) ? driverRole : "",
-    driverName: userTextValue(fee.driverName || fee.driver_name)
+    ...assignee
   };
 }
 
