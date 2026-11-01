@@ -360,6 +360,8 @@ const COMPANY_EXPENSE_SALARY_STATUS_OPTIONS = [COMPANY_EXPENSE_SALARY_PENDING_ST
 const DRIVER_WAGE_SETTLEMENT_PENDING_STATUS = "未结算";
 const DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS = "已结算";
 const DRIVER_WAGE_SETTLEMENT_STATUS_OPTIONS = [DRIVER_WAGE_SETTLEMENT_PENDING_STATUS, DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS];
+const DRIVER_WAGE_FEE_CURRENCY_OPTIONS = ["HKD", "RMB"];
+const DRIVER_WAGE_DEFAULT_FEE_CURRENCY = DRIVER_WAGE_FEE_CURRENCY_OPTIONS[0];
 const OWN_VEHICLE_SOURCE = "汉业物流";
 const LEGACY_OWN_VEHICLE_SOURCE = "本公司车辆";
 const COMPANY_ENTRY_TYPE_OPTIONS = [
@@ -1806,6 +1808,13 @@ const financeWageSettlementEditForm = reactive({
   settledAt: "",
   adjustmentsHKD: "",
   adjustmentsRMB: "",
+  adjustmentsCurrency: DRIVER_WAGE_DEFAULT_FEE_CURRENCY,
+  plateFeeHKD: "",
+  plateFeeCurrency: DRIVER_WAGE_DEFAULT_FEE_CURRENCY,
+  socialSecurityFeeHKD: "",
+  socialSecurityFeeCurrency: DRIVER_WAGE_DEFAULT_FEE_CURRENCY,
+  parkingFeeHKD: "",
+  parkingFeeCurrency: DRIVER_WAGE_DEFAULT_FEE_CURRENCY,
   note: ""
 });
 const selectedFinanceWageDetailOrderNo = ref("");
@@ -11117,6 +11126,24 @@ watch(financePeriodFilter, () => {
 });
 
 function normalizeFinanceWageSettlementRow(item = {}) {
+  const feeCurrency = (value, legacyUnit = "") => {
+    const source = String(value || legacyUnit || "").trim().toUpperCase();
+    return source === "RMB" || source === "人民币" ? "RMB" : "HKD";
+  };
+  const rawAdjustmentsHKD = item.adjustmentsHKD ?? item.adjustments_hkd ?? null;
+  const rawAdjustmentsRMB = item.adjustmentsRMB ?? item.adjustments_rmb ?? null;
+  const adjustmentsCurrencySource = item.adjustmentsCurrency
+    ?? item.adjustments_currency
+    ?? item.adjustmentsUnit
+    ?? item.adjustments_unit;
+  const adjustmentsCurrency = rawAdjustmentsHKD == null
+    && rawAdjustmentsRMB != null
+    && !String(adjustmentsCurrencySource || "").trim()
+    ? "RMB"
+    : feeCurrency(adjustmentsCurrencySource, item.adjustmentsUnit ?? item.adjustments_unit);
+  const legacyRmbOnly = rawAdjustmentsHKD == null
+    && rawAdjustmentsRMB != null
+    && adjustmentsCurrency === "RMB";
   return {
     id: item.id,
     periodKey: String(item.periodKey || item.period_key || "").trim(),
@@ -11125,8 +11152,18 @@ function normalizeFinanceWageSettlementRow(item = {}) {
       ? DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS
       : DRIVER_WAGE_SETTLEMENT_PENDING_STATUS,
     settledAt: String(item.settledAt || item.settled_at || "").trim(),
-    adjustmentsHKD: item.adjustmentsHKD ?? item.adjustments_hkd ?? null,
-    adjustmentsRMB: item.adjustmentsRMB ?? item.adjustments_rmb ?? null,
+    // Historical rows used adjustments_rmb without a currency column. Treat
+    // that single value as the canonical amount so editing does not duplicate
+    // it into both the legacy and new fields.
+    adjustmentsHKD: legacyRmbOnly ? rawAdjustmentsRMB : rawAdjustmentsHKD,
+    adjustmentsRMB: legacyRmbOnly ? null : rawAdjustmentsRMB,
+    adjustmentsCurrency,
+    plateFeeHKD: item.plateFeeHKD ?? item.plate_fee_hkd ?? null,
+    plateFeeCurrency: feeCurrency(item.plateFeeCurrency ?? item.plate_fee_currency, item.plateFeeUnit ?? item.plate_fee_unit),
+    socialSecurityFeeHKD: item.socialSecurityFeeHKD ?? item.social_security_fee_hkd ?? null,
+    socialSecurityFeeCurrency: feeCurrency(item.socialSecurityFeeCurrency ?? item.social_security_fee_currency, item.socialSecurityFeeUnit ?? item.social_security_fee_unit),
+    parkingFeeHKD: item.parkingFeeHKD ?? item.parking_fee_hkd ?? null,
+    parkingFeeCurrency: feeCurrency(item.parkingFeeCurrency ?? item.parking_fee_currency, item.parkingFeeUnit ?? item.parking_fee_unit),
     advanceAt: String(item.advanceAt || item.advance_at || "").trim(),
     note: String(item.note || "").trim(),
     createdAt: String(item.createdAt || item.created_at || "").trim(),
@@ -11244,8 +11281,32 @@ async function saveFinanceWageSettlement(row = {}, status = financeWageSettlemen
   const nextAdjustmentsRMB = Object.prototype.hasOwnProperty.call(patch, "adjustmentsRMB")
     ? patch.adjustmentsRMB
     : (currentSettlement?.adjustmentsRMB ?? null);
+  const nextAdjustmentsCurrency = Object.prototype.hasOwnProperty.call(patch, "adjustmentsCurrency")
+    ? (String(patch.adjustmentsCurrency || "HKD").toUpperCase() === "RMB" ? "RMB" : "HKD")
+    : (currentSettlement?.adjustmentsCurrency || "HKD");
+  const nextPlateFeeHKD = Object.prototype.hasOwnProperty.call(patch, "plateFeeHKD")
+    ? patch.plateFeeHKD
+    : (currentSettlement?.plateFeeHKD ?? null);
+  const nextPlateFeeCurrency = Object.prototype.hasOwnProperty.call(patch, "plateFeeCurrency")
+    ? (String(patch.plateFeeCurrency || "HKD").toUpperCase() === "RMB" ? "RMB" : "HKD")
+    : (currentSettlement?.plateFeeCurrency || "HKD");
+  const nextSocialSecurityFeeHKD = Object.prototype.hasOwnProperty.call(patch, "socialSecurityFeeHKD")
+    ? patch.socialSecurityFeeHKD
+    : (currentSettlement?.socialSecurityFeeHKD ?? null);
+  const nextSocialSecurityFeeCurrency = Object.prototype.hasOwnProperty.call(patch, "socialSecurityFeeCurrency")
+    ? (String(patch.socialSecurityFeeCurrency || "HKD").toUpperCase() === "RMB" ? "RMB" : "HKD")
+    : (currentSettlement?.socialSecurityFeeCurrency || "HKD");
+  const nextParkingFeeHKD = Object.prototype.hasOwnProperty.call(patch, "parkingFeeHKD")
+    ? patch.parkingFeeHKD
+    : (currentSettlement?.parkingFeeHKD ?? null);
+  const nextParkingFeeCurrency = Object.prototype.hasOwnProperty.call(patch, "parkingFeeCurrency")
+    ? (String(patch.parkingFeeCurrency || "HKD").toUpperCase() === "RMB" ? "RMB" : "HKD")
+    : (currentSettlement?.parkingFeeCurrency || "HKD");
   const adjustmentsChanged = Object.prototype.hasOwnProperty.call(patch, "adjustmentsHKD")
-    || Object.prototype.hasOwnProperty.call(patch, "adjustmentsRMB");
+    || Object.prototype.hasOwnProperty.call(patch, "adjustmentsRMB")
+    || Object.prototype.hasOwnProperty.call(patch, "plateFeeHKD")
+    || Object.prototype.hasOwnProperty.call(patch, "socialSecurityFeeHKD")
+    || Object.prototype.hasOwnProperty.call(patch, "parkingFeeHKD");
   const nextAdvanceAt = Object.prototype.hasOwnProperty.call(patch, "advanceAt")
     ? String(patch.advanceAt || "").trim()
     : (
@@ -11261,6 +11322,13 @@ async function saveFinanceWageSettlement(row = {}, status = financeWageSettlemen
     note: nextNote,
     adjustmentsHKD: nextAdjustmentsHKD,
     adjustmentsRMB: nextAdjustmentsRMB,
+    adjustmentsCurrency: nextAdjustmentsCurrency,
+    plateFeeHKD: nextPlateFeeHKD,
+    plateFeeCurrency: nextPlateFeeCurrency,
+    socialSecurityFeeHKD: nextSocialSecurityFeeHKD,
+    socialSecurityFeeCurrency: nextSocialSecurityFeeCurrency,
+    parkingFeeHKD: nextParkingFeeHKD,
+    parkingFeeCurrency: nextParkingFeeCurrency,
     advanceAt: nextAdvanceAt
   };
   try {
@@ -11288,8 +11356,17 @@ function openFinanceWageSettlementEditModal(row = null) {
   financeWageSettlementEditForm.settledAt = financeWageSettlementDateText(row) || (
     financeWageSettlementStatusText(row) === DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS ? todayInputValue() : ""
   );
-  financeWageSettlementEditForm.adjustmentsHKD = settlement?.adjustmentsHKD ?? financeWageSettlementBaseAmountValue(row, "HKD");
+  financeWageSettlementEditForm.adjustmentsHKD = settlement?.adjustmentsHKD
+    ?? settlement?.adjustmentsRMB
+    ?? financeWageSettlementBaseAmountValue(row, "HKD");
   financeWageSettlementEditForm.adjustmentsRMB = settlement?.adjustmentsRMB ?? financeWageSettlementBaseAmountValue(row, "RMB");
+  financeWageSettlementEditForm.adjustmentsCurrency = settlement?.adjustmentsCurrency || DRIVER_WAGE_DEFAULT_FEE_CURRENCY;
+  financeWageSettlementEditForm.plateFeeHKD = settlement?.plateFeeHKD ?? "";
+  financeWageSettlementEditForm.plateFeeCurrency = settlement?.plateFeeCurrency || DRIVER_WAGE_DEFAULT_FEE_CURRENCY;
+  financeWageSettlementEditForm.socialSecurityFeeHKD = settlement?.socialSecurityFeeHKD ?? "";
+  financeWageSettlementEditForm.socialSecurityFeeCurrency = settlement?.socialSecurityFeeCurrency || DRIVER_WAGE_DEFAULT_FEE_CURRENCY;
+  financeWageSettlementEditForm.parkingFeeHKD = settlement?.parkingFeeHKD ?? "";
+  financeWageSettlementEditForm.parkingFeeCurrency = settlement?.parkingFeeCurrency || DRIVER_WAGE_DEFAULT_FEE_CURRENCY;
   financeWageSettlementEditForm.advanceAt = String(settlement?.advanceAt || settlement?.advance_at || "").trim();
   financeWageSettlementEditForm.note = String(settlement?.note || "").trim();
   financeWageSettlementEditModalOpen.value = true;
@@ -11307,15 +11384,39 @@ async function saveFinanceWageSettlementFromEditor() {
   financeWageSettlementEditSaving.value = true;
   try {
     const settledAt = String(financeWageSettlementEditForm.settledAt || "").trim();
-    const nextAdjustmentsHKD = normalizeFinanceWageSettlementManualAmount(financeWageSettlementEditForm.adjustmentsHKD, financeWageSettlementBaseAmountValue(row, "HKD"));
-    const nextAdjustmentsRMB = normalizeFinanceWageSettlementManualAmount(financeWageSettlementEditForm.adjustmentsRMB, financeWageSettlementBaseAmountValue(row, "RMB"));
     const currentSettlement = financeWageSettlementRowFor(row);
+    const normalizeEditorAmount = (value, baseValue, previousCurrency, nextCurrency) => {
+      if (financeWageCurrencyCode(previousCurrency) !== financeWageCurrencyCode(nextCurrency) && String(value ?? "").trim()) {
+        const amount = Number(value);
+        return Number.isFinite(amount) ? Number(amount.toFixed(2)) : null;
+      }
+      return normalizeFinanceWageSettlementManualAmount(value, baseValue);
+    };
+    const nextAdjustmentsHKD = normalizeEditorAmount(financeWageSettlementEditForm.adjustmentsHKD, financeWageSettlementBaseAmountValue(row, "HKD"), currentSettlement?.adjustmentsCurrency, financeWageSettlementEditForm.adjustmentsCurrency);
+    const nextAdjustmentsRMB = normalizeFinanceWageSettlementManualAmount(financeWageSettlementEditForm.adjustmentsRMB, financeWageSettlementBaseAmountValue(row, "RMB"));
+    const nextPlateFeeHKD = normalizeEditorAmount(financeWageSettlementEditForm.plateFeeHKD, 0, currentSettlement?.plateFeeCurrency, financeWageSettlementEditForm.plateFeeCurrency);
+    const nextSocialSecurityFeeHKD = normalizeEditorAmount(financeWageSettlementEditForm.socialSecurityFeeHKD, 0, currentSettlement?.socialSecurityFeeCurrency, financeWageSettlementEditForm.socialSecurityFeeCurrency);
+    const nextParkingFeeHKD = normalizeEditorAmount(financeWageSettlementEditForm.parkingFeeHKD, 0, currentSettlement?.parkingFeeCurrency, financeWageSettlementEditForm.parkingFeeCurrency);
     const adjustmentsChanged = Number(currentSettlement?.adjustmentsHKD ?? NaN) !== Number(nextAdjustmentsHKD ?? NaN)
-      || Number(currentSettlement?.adjustmentsRMB ?? NaN) !== Number(nextAdjustmentsRMB ?? NaN);
+      || Number(currentSettlement?.adjustmentsRMB ?? NaN) !== Number(nextAdjustmentsRMB ?? NaN)
+      || financeWageCurrencyCode(currentSettlement?.adjustmentsCurrency) !== financeWageCurrencyCode(financeWageSettlementEditForm.adjustmentsCurrency)
+      || Number(currentSettlement?.plateFeeHKD ?? NaN) !== Number(nextPlateFeeHKD ?? NaN)
+      || financeWageCurrencyCode(currentSettlement?.plateFeeCurrency) !== financeWageCurrencyCode(financeWageSettlementEditForm.plateFeeCurrency)
+      || Number(currentSettlement?.socialSecurityFeeHKD ?? NaN) !== Number(nextSocialSecurityFeeHKD ?? NaN)
+      || financeWageCurrencyCode(currentSettlement?.socialSecurityFeeCurrency) !== financeWageCurrencyCode(financeWageSettlementEditForm.socialSecurityFeeCurrency)
+      || Number(currentSettlement?.parkingFeeHKD ?? NaN) !== Number(nextParkingFeeHKD ?? NaN)
+      || financeWageCurrencyCode(currentSettlement?.parkingFeeCurrency) !== financeWageCurrencyCode(financeWageSettlementEditForm.parkingFeeCurrency);
     const item = await saveFinanceWageSettlement(row, financeWageSettlementEditForm.status, settledAt, {
       note: financeWageSettlementEditForm.note,
       adjustmentsHKD: nextAdjustmentsHKD,
       adjustmentsRMB: nextAdjustmentsRMB,
+      adjustmentsCurrency: financeWageSettlementEditForm.adjustmentsCurrency,
+      plateFeeHKD: nextPlateFeeHKD,
+      plateFeeCurrency: financeWageSettlementEditForm.plateFeeCurrency,
+      socialSecurityFeeHKD: nextSocialSecurityFeeHKD,
+      socialSecurityFeeCurrency: financeWageSettlementEditForm.socialSecurityFeeCurrency,
+      parkingFeeHKD: nextParkingFeeHKD,
+      parkingFeeCurrency: financeWageSettlementEditForm.parkingFeeCurrency,
       advanceAt: String(financeWageSettlementEditForm.advanceAt || "").trim()
         || (adjustmentsChanged ? todayInputValue() : String(currentSettlement?.advanceAt || "").trim())
     });
@@ -11738,6 +11839,19 @@ function resetFinanceWageDetailColumnOrder() {
   notify("已恢复默认列顺序");
 }
 
+function financeWageCurrencyCode(value = "HKD") {
+  const code = String(value || "").trim().toUpperCase();
+  return code === "RMB" || code === "人民币" ? "RMB" : "HKD";
+}
+
+function financeWageAmountToHKD(amount = 0, currency = "HKD", exchangeRate = 0) {
+  const value = Number(amount || 0);
+  if (!Number.isFinite(value)) return 0;
+  return financeWageCurrencyCode(currency) === "RMB"
+    ? (exchangeRate > 0 ? value / exchangeRate : 0)
+    : value;
+}
+
 function buildFinanceWageRows(sourceOrders, sourceAdjustments, sourceSettlements = [], options = {}) {
   const includeAllDrivers = Boolean(options.includeAllDrivers);
   const sourceDrivers = Array.isArray(options.drivers) ? options.drivers : driverRows.value;
@@ -11779,25 +11893,58 @@ function buildFinanceWageRows(sourceOrders, sourceAdjustments, sourceSettlements
       costCenterMissingCount: 0
     });
     const autoAdjustmentBreakdown = sourceAdjustments
-      .filter((item) => item.driverId === driver.id)
+      .filter((item) => Number(item.driverId ?? item.driver_id ?? 0) === Number(driver.id))
       .reduce((sum, item) => {
         const currency = currencyCodeDisplay(item.currency || "港币");
+        const amount = Number(item.amount || 0);
         return {
-          hkd: sum.hkd + (currency === "RMB" ? 0 : Number(item.amount || 0)),
-          rmb: sum.rmb + (currency === "RMB" ? Number(item.amount || 0) : 0)
+          hkd: sum.hkd + (currency === "RMB" ? 0 : amount),
+          rmb: sum.rmb + (currency === "RMB" ? amount : 0)
         };
       }, { hkd: 0, rmb: 0 });
     const settlement = settlementMap.get(String(driver.id)) || null;
-    const effectiveAdjustmentBreakdown = {
-      hkd: settlement?.adjustmentsHKD !== null && settlement?.adjustmentsHKD !== undefined
-        ? Number(settlement.adjustmentsHKD || 0)
-        : autoAdjustmentBreakdown.hkd,
-      rmb: settlement?.adjustmentsRMB !== null && settlement?.adjustmentsRMB !== undefined
-        ? Number(settlement.adjustmentsRMB || 0)
-        : autoAdjustmentBreakdown.rmb
-    };
-    const totalHKD = Math.max(0, Number((wageBreakdown.hkd - effectiveAdjustmentBreakdown.hkd).toFixed(2)));
-    const totalRMB = Math.max(0, Number((wageBreakdown.rmb - effectiveAdjustmentBreakdown.rmb).toFixed(2)));
+    const exchangeRate = Number(monthlyExchangeRateInputValue(monthlyExchangeRatePeriodMonth("finance")) || 0);
+    const legacyRmbAdjustmentHKD = settlement?.adjustmentsRMB !== null && settlement?.adjustmentsRMB !== undefined
+      ? (exchangeRate > 0 ? Number(settlement.adjustmentsRMB || 0) / exchangeRate : 0)
+      : 0;
+    const hasManualHKDMisc = settlement?.adjustmentsHKD !== null && settlement?.adjustmentsHKD !== undefined;
+    const hasLegacyRmbMisc = settlement?.adjustmentsRMB !== null && settlement?.adjustmentsRMB !== undefined;
+    const hasManualMisc = hasManualHKDMisc || hasLegacyRmbMisc;
+    const adjustmentsCurrency = hasManualHKDMisc
+      ? financeWageCurrencyCode(settlement?.adjustmentsCurrency || "HKD")
+      : "RMB";
+    const adjustments = hasManualHKDMisc
+      ? Number(settlement.adjustmentsHKD || 0)
+      : (hasLegacyRmbMisc ? Number(settlement.adjustmentsRMB || 0) : autoAdjustmentBreakdown.hkd);
+    const adjustmentsRMB = hasManualMisc
+      ? (adjustmentsCurrency === "RMB" ? adjustments : 0)
+      : autoAdjustmentBreakdown.rmb;
+    const miscAdjustmentHKD = hasManualMisc
+      ? financeWageAmountToHKD(adjustments, adjustmentsCurrency, exchangeRate) + (hasManualHKDMisc ? legacyRmbAdjustmentHKD : 0)
+      : autoAdjustmentBreakdown.hkd + financeWageAmountToHKD(autoAdjustmentBreakdown.rmb, "RMB", exchangeRate);
+    const plateFeeCurrency = financeWageCurrencyCode(settlement?.plateFeeCurrency || "HKD");
+    const socialSecurityFeeCurrency = financeWageCurrencyCode(settlement?.socialSecurityFeeCurrency || "HKD");
+    const parkingFeeCurrency = financeWageCurrencyCode(settlement?.parkingFeeCurrency || "HKD");
+    const plateFeeAmount = Number(settlement?.plateFeeHKD || 0);
+    const socialSecurityFeeAmount = Number(settlement?.socialSecurityFeeHKD || 0);
+    const parkingFeeAmount = Number(settlement?.parkingFeeHKD || 0);
+    const plateFeeHKD = financeWageAmountToHKD(plateFeeAmount, plateFeeCurrency, exchangeRate);
+    const socialSecurityFeeHKD = financeWageAmountToHKD(socialSecurityFeeAmount, socialSecurityFeeCurrency, exchangeRate);
+    const parkingFeeHKD = financeWageAmountToHKD(parkingFeeAmount, parkingFeeCurrency, exchangeRate);
+    const totalDeductionHKD = Number((miscAdjustmentHKD + plateFeeHKD + socialSecurityFeeHKD + parkingFeeHKD).toFixed(2));
+    const totalHKD = Math.max(0, Number((wageBreakdown.hkd - totalDeductionHKD).toFixed(2)));
+    const totalRMB = Math.max(0, Number(wageBreakdown.rmb.toFixed(2)));
+    const adjustmentsDisplay = hasManualMisc
+      ? [
+        adjustmentsCurrency === "RMB" ? financeWageFeeText(adjustments, "RMB") : financeWageFeeText(adjustments, "HKD"),
+        hasManualHKDMisc && settlement?.adjustmentsRMB !== null && settlement?.adjustmentsRMB !== undefined
+          ? financeWageFeeText(settlement.adjustmentsRMB, "RMB")
+          : ""
+      ].filter((value, index, values) => value !== "-" && values.indexOf(value) === index).join(" / ") || "-"
+      : [
+        autoAdjustmentBreakdown.hkd ? financeWageFeeText(autoAdjustmentBreakdown.hkd, "HKD") : "",
+        autoAdjustmentBreakdown.rmb ? financeWageFeeText(autoAdjustmentBreakdown.rmb, "RMB") : ""
+      ].filter(Boolean).join(" / ") || "-";
     return {
       driver,
       orders,
@@ -11808,8 +11955,17 @@ function buildFinanceWageRows(sourceOrders, sourceAdjustments, sourceSettlements
       advanceFeeRMB: wageBreakdown.advanceRMB,
       adjustmentsAuto: autoAdjustmentBreakdown.hkd,
       adjustmentsAutoRMB: autoAdjustmentBreakdown.rmb,
-      adjustments: effectiveAdjustmentBreakdown.hkd,
-      adjustmentsRMB: effectiveAdjustmentBreakdown.rmb,
+      adjustments,
+      adjustmentsRMB,
+      adjustmentsCurrency: hasManualMisc ? adjustmentsCurrency : (autoAdjustmentBreakdown.hkd ? "HKD" : "RMB"),
+      adjustmentsDisplay,
+      plateFee: plateFeeAmount,
+      plateFeeCurrency,
+      socialSecurityFee: socialSecurityFeeAmount,
+      socialSecurityFeeCurrency,
+      parkingFee: parkingFeeAmount,
+      parkingFeeCurrency,
+      totalDeductionHKD,
       routeAdjustments: wageBreakdown.routeAdjustmentsHKD,
       routeAdjustmentsRMB: wageBreakdown.routeAdjustmentsRMB,
       total: totalHKD,
@@ -11827,7 +11983,7 @@ function buildFinanceWageRows(sourceOrders, sourceAdjustments, sourceSettlements
   });
   const filteredRows = includeAllDrivers
     ? rows
-    : rows.filter((row) => row.orderCount || row.payable || row.payableRMB || row.advanceFee || row.advanceFeeRMB || row.adjustments || row.adjustmentsRMB || row.settlementExists);
+    : rows.filter((row) => row.orderCount || row.payable || row.payableRMB || row.advanceFee || row.advanceFeeRMB || row.adjustments || row.adjustmentsRMB || row.plateFee || row.socialSecurityFee || row.parkingFee || row.settlementExists);
   return sortRowsByTable(filteredRows, "financeWages");
 }
 
@@ -25238,6 +25394,23 @@ function moneyPairSuffix(hkd = 0, rmb = 0) {
   return parts.join(" / ") || "-";
 }
 
+function financeWageFeeText(amount = 0, currency = DRIVER_WAGE_DEFAULT_FEE_CURRENCY) {
+  const value = Number(amount || 0);
+  if (!Number.isFinite(value) || value === 0) return "-";
+  return `${financeWageCurrencyCode(currency)} ${money(value)}`;
+}
+
+function financeWageAdjustmentsSummaryText(rows = []) {
+  const totals = rows.reduce((sum, row) => {
+    const text = row?.adjustmentsDisplay || financeWageFeeText(row?.adjustments, row?.adjustmentsCurrency);
+    return {
+      hkd: sum.hkd + amountTotalFromFinanceText(text, "HKD"),
+      rmb: sum.rmb + amountTotalFromFinanceText(text, "RMB")
+    };
+  }, { hkd: 0, rmb: 0 });
+  return moneyPair(totals.hkd, totals.rmb);
+}
+
 function driverWagePayableText(hkd = 0, rmb = 0) {
   const payableHKD = Math.max(0, Number(hkd || 0));
   const payableRMB = Math.max(0, Number(rmb || 0));
@@ -25444,31 +25617,32 @@ function closeCustomsBusinessModal() {
 }
 
 async function saveCustomsBusiness() {
-  const company = String(customsBusinessForm.company || "").trim();
-  if (!company) {
-    notify("请选择报关客户");
-    return;
-  }
-  if (!customsBusinessCompanySelectedFromCustomers(company)) {
-    notify("请从报关客户列表中选择客户");
-    return;
-  }
-  if (!customsBusinessForm.declarationNo.trim() && !customsBusinessForm.sixSheetNo.trim()) {
-    notify("请填写报关单号或六联单号");
-    return;
-  }
-  if (customBusinessHasIncompleteCustomField()) {
-    notify("请填写自定义类目名称，或删除空白类目");
-    return;
-  }
-  normalizeCustomsBusinessFormIntegers();
-  const isProductionCertificateBusiness = customsBusinessDirectionFeeType() === "production";
-  const inspectionFee = customsBusinessUsesInspectionFee() ? customsBusinessForm.fajian3cFee : 0;
-  const customFields = isProductionCertificateBusiness
-    ? []
-    : customsBusinessCustomFieldsForSave(customsBusinessForm.customFields, inspectionFee);
+  if (customsBusinessSaving.value) return;
+  customsBusinessSaving.value = true;
   try {
-    customsBusinessSaving.value = true;
+    const company = String(customsBusinessForm.company || "").trim();
+    if (!company) {
+      notify("请选择报关客户");
+      return;
+    }
+    if (!customsBusinessCompanySelectedFromCustomers(company)) {
+      notify("请从报关客户列表中选择客户");
+      return;
+    }
+    if (!customsBusinessForm.declarationNo.trim() && !customsBusinessForm.sixSheetNo.trim()) {
+      notify("请填写报关单号或六联单号");
+      return;
+    }
+    if (customBusinessHasIncompleteCustomField()) {
+      notify("请填写自定义类目名称，或删除空白类目");
+      return;
+    }
+    normalizeCustomsBusinessFormIntegers();
+    const isProductionCertificateBusiness = customsBusinessDirectionFeeType() === "production";
+    const inspectionFee = customsBusinessUsesInspectionFee() ? customsBusinessForm.fajian3cFee : 0;
+    const customFields = isProductionCertificateBusiness
+      ? []
+      : customsBusinessCustomFieldsForSave(customsBusinessForm.customFields, inspectionFee);
     const isCopying = Boolean(copyingCustomsBusinessId.value);
     const isEditing = Boolean(editingCustomsBusinessId.value) && !isCopying;
     const payload = {
@@ -30586,9 +30760,11 @@ function financeWageExportValue(row, key) {
     type: row.driver.type || "香港司机",
     orderCount: row.orderCount,
     tripFee: moneyPair(row.payable, row.payableRMB),
-    advanceFee: moneyPair(row.advanceFee, row.advanceFeeRMB),
-    adjustments: moneyPair(row.adjustments, row.adjustmentsRMB),
+    adjustments: row.adjustmentsDisplay || financeWageFeeText(row.adjustments, row.adjustmentsCurrency),
     advanceAt: row.advanceAt ? inputDateLabel(row.advanceAt) : "-",
+    plateFee: financeWageFeeText(row.plateFee, row.plateFeeCurrency),
+    socialSecurityFee: financeWageFeeText(row.socialSecurityFee, row.socialSecurityFeeCurrency),
+    parkingFee: financeWageFeeText(row.parkingFee, row.parkingFeeCurrency),
     note: row.note || "-",
     total: driverWagePayableText(row.total, row.totalRMB),
     status: row.settlementStatus || DRIVER_WAGE_SETTLEMENT_PENDING_STATUS,
@@ -31133,7 +31309,9 @@ function buildFinanceWageStatementExportPayload(row = {}) {
   const convertedRMB = exchangeRate
     ? Number(((miscRMBTotal + freightRMBTotal) / exchangeRate).toFixed(2))
     : 0;
-  const payableTotal = Number((freightHKDTotal + miscHKDTotal + convertedRMB).toFixed(2));
+  const grossPayableTotal = Number((freightHKDTotal + miscHKDTotal + convertedRMB).toFixed(2));
+  const deductionsHKD = Number(row.totalDeductionHKD || 0);
+  const payableTotal = Math.max(0, Number((grossPayableTotal - deductionsHKD).toFixed(2)));
   const payableWithoutAdvance = payableTotal;
   const paymentDate = financeWageSettlementDateText(row);
   const paymentLabel = paymentDate ? `${inputDateLabel(paymentDate)}已付款` : "";
@@ -31148,7 +31326,7 @@ function buildFinanceWageStatementExportPayload(row = {}) {
     noteLines: [
       `人民币司机代垫${formatDriverWageNumber(advanceRMB)}`,
       `预支HKD${formatDriverWageNumber(advanceHKD)}，司机代垫${formatDriverWageNumber(advanceHKD)}`,
-      `${financeWageStatementPeriodLabel()}预支杂费${formatDriverWageNumber(Number(row.adjustmentsRMB || 0))}`,
+      `${financeWageStatementPeriodLabel()}工资扣减HKD${formatDriverWageNumber(deductionsHKD)}（预支杂费${row.adjustmentsDisplay || financeWageFeeText(row.adjustments, row.adjustmentsCurrency)}、牌头费${financeWageFeeText(row.plateFee, row.plateFeeCurrency)}、社保费${financeWageFeeText(row.socialSecurityFee, row.socialSecurityFeeCurrency)}、停车费${financeWageFeeText(row.parkingFee, row.parkingFeeCurrency)}）`,
       exchangeRate ? `${formatDriverWageNumber(miscRMBTotal + freightRMBTotal)}/${formatDriverWageNumber(exchangeRate)}=港币${formatDriverWageNumber(convertedRMB)}` : "",
       `运费${formatDriverWageNumber(freightHKDTotal)}+杂费HKD${formatDriverWageNumber(miscHKDTotal)}（含司机代垫）+杂费/运费RMB折算${formatDriverWageNumber(convertedRMB)}=应付HKD${formatDriverWageNumber(payableTotal)}`
     ],
@@ -31157,6 +31335,7 @@ function buildFinanceWageStatementExportPayload(row = {}) {
     advanceHKD,
     advanceRMB,
     adjustmentsHKD: advanceHKD,
+    deductionsHKD,
     advanceIncludedInMisc: true,
     filename
   };
@@ -32457,6 +32636,12 @@ function normalizeLoadedOrderFreightFee(fee = {}) {
   const feeItem = row.feeItemId
     ? feeItemRowsById.value.get(String(row.feeItemId || "").trim())
     : (row.name ? feeItemRowsByName.value.get(String(row.name || "").trim()) : null);
+  const fxLinks = orderFeeFxLinks(row);
+  delete fxLinks.unitPrice;
+  delete fxLinks.amount;
+  setOrderFeeFxLinks(row, fxLinks);
+  row.currency = row.currency ? normalizeCostCenterCurrency(row.currency) : "";
+  row._manualCurrency = Boolean(row.currency);
   row.manualAssignee = false;
   row._manualAssignee = false;
   row.driverName = "";
@@ -32490,7 +32675,7 @@ function applyFeeTemplateRows(fees, options = {}) {
       unitPrice: fee.unitPrice ?? fee.unit_price,
       _manualUnitPrice: manualUnitPrice,
       _manualCurrency: manualCurrency,
-      currency: fee.currency || orderForm.currency || "",
+      currency: normalizeCostCenterCurrency(fee.currency || orderForm.currency || "港币"),
       amount: fee.amount,
       _manualAmount: manualAmount,
       cost: savedCost ?? 0,
@@ -37310,7 +37495,7 @@ function orderDetailFeeRows(order = {}) {
           <div class="finance-summary-card"><span>关联订单</span><strong>{{ financeSummary.orderCount }}</strong></div>
           <div class="finance-summary-card"><span>司机成本</span><strong>{{ driverWagePayableText(financeSummary.driverPayableHKD, financeSummary.driverPayableRMB) }}</strong></div>
           <div class="finance-summary-card"><span>司机代垫</span><strong>{{ moneyPair(financeSummary.driverAdvanceHKD, financeSummary.driverAdvanceRMB) }}</strong></div>
-          <div class="finance-summary-card"><span>预支杂费</span><strong>{{ moneyPair(financeWageRows.reduce((sum, row) => sum + row.adjustments, 0), financeWageRows.reduce((sum, row) => sum + row.adjustmentsRMB, 0)) }}</strong></div>
+          <div class="finance-summary-card"><span>预支杂费</span><strong>{{ financeWageAdjustmentsSummaryText(financeWageRows) }}</strong></div>
           <div class="finance-summary-card"><span>供应商代垫</span><strong>{{ moneyPair(financeSummary.supplierAdvanceHKD, financeSummary.supplierAdvanceRMB) }}</strong></div>
           <div class="finance-summary-card"><span>外派应付</span><strong>{{ moneyPair(financeSummary.supplierPayableHKD, financeSummary.supplierPayableRMB) }}</strong></div>
         </div>
@@ -37376,9 +37561,11 @@ function orderDetailFeeRows(order = {}) {
 	                    <template v-if="column.key === 'driver'">{{ row.driver.name }}</template>
 	                    <template v-else-if="column.key === 'type'">{{ row.driver.type || '香港司机' }}</template>
 	                    <template v-else-if="column.key === 'orderCount'">{{ row.orderCount }}</template>
-	                    <template v-else-if="column.key === 'advanceFee'">{{ moneyPair(row.advanceFee, row.advanceFeeRMB) }}</template>
-	                    <template v-else-if="column.key === 'adjustments'">{{ moneyPair(row.adjustments, row.adjustmentsRMB) }}</template>
+	                    <template v-else-if="column.key === 'adjustments'">{{ row.adjustmentsDisplay || financeWageFeeText(row.adjustments, row.adjustmentsCurrency) }}</template>
 	                    <template v-else-if="column.key === 'advanceAt'">{{ row.advanceAt ? inputDateLabel(row.advanceAt) : '-' }}</template>
+	                    <template v-else-if="column.key === 'plateFee'">{{ financeWageFeeText(row.plateFee, row.plateFeeCurrency) }}</template>
+	                    <template v-else-if="column.key === 'socialSecurityFee'">{{ financeWageFeeText(row.socialSecurityFee, row.socialSecurityFeeCurrency) }}</template>
+	                    <template v-else-if="column.key === 'parkingFee'">{{ financeWageFeeText(row.parkingFee, row.parkingFeeCurrency) }}</template>
 	                    <template v-else-if="column.key === 'note'">{{ row.note || '-' }}</template>
 	                    <template v-else-if="column.key === 'total'"><strong>{{ driverWagePayableText(row.total, row.totalRMB) }}</strong></template>
 	                    <template v-else-if="column.key === 'status'">
@@ -37452,28 +37639,40 @@ function orderDetailFeeRows(order = {}) {
               </div>
 
               <div class="finance-wage-settlement-editor">
-                <label class="finance-wage-settlement-field">预支港币
-                  <input
-                    v-model.number="financeWageSettlementEditForm.adjustmentsHKD"
-                    class="finance-wage-settlement-number"
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    inputmode="decimal"
-                  />
-                </label>
-                <label class="finance-wage-settlement-field">预支人民币
-                  <input
-                    v-model.number="financeWageSettlementEditForm.adjustmentsRMB"
-                    class="finance-wage-settlement-number"
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    inputmode="decimal"
-                  />
+                <label class="finance-wage-settlement-field">预支杂费
+                  <span class="finance-wage-money-editor">
+                    <input v-model.number="financeWageSettlementEditForm.adjustmentsHKD" class="finance-wage-settlement-number" type="number" min="0" step="0.01" inputmode="decimal" />
+                    <select v-model="financeWageSettlementEditForm.adjustmentsCurrency" aria-label="预支杂费币种">
+                      <option v-for="currency in DRIVER_WAGE_FEE_CURRENCY_OPTIONS" :key="currency" :value="currency">{{ currency }}</option>
+                    </select>
+                  </span>
                 </label>
                 <label class="finance-wage-settlement-field">预支日期
                   <input v-model="financeWageSettlementEditForm.advanceAt" type="date" />
+                </label>
+                <label class="finance-wage-settlement-field">牌头费
+                  <span class="finance-wage-money-editor">
+                    <input v-model.number="financeWageSettlementEditForm.plateFeeHKD" class="finance-wage-settlement-number" type="number" min="0" step="0.01" inputmode="decimal" />
+                    <select v-model="financeWageSettlementEditForm.plateFeeCurrency" aria-label="牌头费币种">
+                      <option v-for="currency in DRIVER_WAGE_FEE_CURRENCY_OPTIONS" :key="currency" :value="currency">{{ currency }}</option>
+                    </select>
+                  </span>
+                </label>
+                <label class="finance-wage-settlement-field">社保费
+                  <span class="finance-wage-money-editor">
+                    <input v-model.number="financeWageSettlementEditForm.socialSecurityFeeHKD" class="finance-wage-settlement-number" type="number" min="0" step="0.01" inputmode="decimal" />
+                    <select v-model="financeWageSettlementEditForm.socialSecurityFeeCurrency" aria-label="社保费币种">
+                      <option v-for="currency in DRIVER_WAGE_FEE_CURRENCY_OPTIONS" :key="currency" :value="currency">{{ currency }}</option>
+                    </select>
+                  </span>
+                </label>
+                <label class="finance-wage-settlement-field">停车费
+                  <span class="finance-wage-money-editor">
+                    <input v-model.number="financeWageSettlementEditForm.parkingFeeHKD" class="finance-wage-settlement-number" type="number" min="0" step="0.01" inputmode="decimal" />
+                    <select v-model="financeWageSettlementEditForm.parkingFeeCurrency" aria-label="停车费币种">
+                      <option v-for="currency in DRIVER_WAGE_FEE_CURRENCY_OPTIONS" :key="currency" :value="currency">{{ currency }}</option>
+                    </select>
+                  </span>
                 </label>
                 <label class="finance-wage-settlement-field">结算状态
                   <select v-model="financeWageSettlementEditForm.status">
@@ -37487,6 +37686,7 @@ function orderDetailFeeRows(order = {}) {
                   <textarea v-model.trim="financeWageSettlementEditForm.note" rows="3" placeholder="可填写说明"></textarea>
                 </label>
               </div>
+              <p class="hint finance-wage-currency-hint">RMB 项目按统计期间的当月汇率折算为 HKD 后扣减工资；列表保留原币种显示。</p>
               <div class="modal-actions finance-wage-settlement-actions">
                 <button class="ghost-btn" type="button" @click="closeFinanceWageSettlementEditModal">取消</button>
                 <button class="primary-btn" type="submit" :disabled="financeWageSettlementEditSaving">

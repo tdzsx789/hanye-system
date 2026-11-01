@@ -67,6 +67,8 @@ const BOSS_CENTER_READ_MODULES = ["bossDashboard", "bossUnreceived", "bossCompan
 const ORDER_CREATE_LOCK_ID = 524460;
 const ORDER_DISPATCH_SYNC_LOCK_ID = 524462;
 const VEHICLE_EXPENSE_CREATE_LOCK_NAMESPACE = 524461;
+const CUSTOMS_BUSINESS_CREATE_LOCK_NAMESPACE = 524463;
+const CUSTOMS_BUSINESS_DUPLICATE_WINDOW_SECONDS = 60;
 const AUTH_SECRET = process.env.HANYE_AUTH_SECRET || process.env.AUTH_SECRET || "hanye-system-local-dev-secret";
 const VEHICLE_EXPENSE_TYPES = new Set(["fuel", "repair", "annual", "other"]);
 const VEHICLE_ANNUAL_EXPENSE_NAMES = new Set(["大陆保险", "香港保险", "中检年审(行驶证)", "香港年审", "牌头费"]);
@@ -922,6 +924,17 @@ async function driverWageSettlementWriteColumnSupport() {
   driverWageSettlementWriteColumnSupportCache = {
     adjustmentsHKD: await tableColumnExists("driver_wage_settlements", "adjustments_hkd"),
     adjustmentsRMB: await tableColumnExists("driver_wage_settlements", "adjustments_rmb"),
+    adjustmentsUnit: await tableColumnExists("driver_wage_settlements", "adjustments_unit"),
+    adjustmentsCurrency: await tableColumnExists("driver_wage_settlements", "adjustments_currency"),
+    plateFeeHKD: await tableColumnExists("driver_wage_settlements", "plate_fee_hkd"),
+    plateFeeUnit: await tableColumnExists("driver_wage_settlements", "plate_fee_unit"),
+    plateFeeCurrency: await tableColumnExists("driver_wage_settlements", "plate_fee_currency"),
+    socialSecurityFeeHKD: await tableColumnExists("driver_wage_settlements", "social_security_fee_hkd"),
+    socialSecurityFeeUnit: await tableColumnExists("driver_wage_settlements", "social_security_fee_unit"),
+    socialSecurityFeeCurrency: await tableColumnExists("driver_wage_settlements", "social_security_fee_currency"),
+    parkingFeeHKD: await tableColumnExists("driver_wage_settlements", "parking_fee_hkd"),
+    parkingFeeUnit: await tableColumnExists("driver_wage_settlements", "parking_fee_unit"),
+    parkingFeeCurrency: await tableColumnExists("driver_wage_settlements", "parking_fee_currency"),
     advanceAt: await tableColumnExists("driver_wage_settlements", "advance_at"),
     note: await tableColumnExists("driver_wage_settlements", "note"),
     updatedAt: await tableColumnExists("driver_wage_settlements", "updated_at")
@@ -5532,15 +5545,18 @@ async function renderDynamicDriverWageSettlementXlsxBuffer(payload = {}, templat
     : numericValue(payload.advanceHKD ?? payload.adjustmentsHKD);
   const advanceRMB = advanceIncludedInMisc ? 0 : numericValue(payload.advanceRMB);
   const exchangeRate = numericValue(payload.exchangeRate);
+  const deductionsHKD = numericValue(payload.deductionsHKD);
+  const rmbProjectTotal = Number((miscRMBTotal + freightRMBTotal + advanceRMB).toFixed(2));
   const convertedRMB = exchangeRate
-    ? Number(((miscRMBTotal + freightRMBTotal + advanceRMB) / exchangeRate).toFixed(2))
+    ? Number((rmbProjectTotal / exchangeRate).toFixed(2))
     : 0;
-  const payableTotal = Number((freightHKDTotal + miscHKDTotal + advanceHKD + convertedRMB).toFixed(2));
-  const payableWithoutAdvance = Number((
+  const payableTotal = Math.max(0, Number((freightHKDTotal + miscHKDTotal + advanceHKD + convertedRMB - deductionsHKD).toFixed(2)));
+  const payableWithoutAdvance = Math.max(0, Number((
     freightHKDTotal
     + miscHKDTotal
     + (exchangeRate ? (miscRMBTotal + freightRMBTotal) / exchangeRate : 0)
-  ).toFixed(2));
+    - deductionsHKD
+  ).toFixed(2)));
 
   const clearFooterCell = (cell) => {
     cell.value = null;
@@ -5554,7 +5570,7 @@ async function renderDynamicDriverWageSettlementXlsxBuffer(payload = {}, templat
   };
   for (let rowNumber = footerRow1; rowNumber <= footerRow3; rowNumber += 1) {
     const footerRow = worksheet.getRow(rowNumber);
-    footerRow.height = rowNumber === footerRow2 ? 30 : 24;
+    footerRow.height = rowNumber === footerRow2 ? 42 : 24;
     for (let columnIndex = 1; columnIndex <= lastColumn; columnIndex += 1) {
       clearFooterCell(footerRow.getCell(columnIndex));
     }
@@ -5591,7 +5607,8 @@ async function renderDynamicDriverWageSettlementXlsxBuffer(payload = {}, templat
     !exchangeRate || summaryValueReference("freightTotal", "RMB") === "0" ? "" : `${summaryValueReference("freightTotal", "RMB")}/${exchangeRate}`,
     !exchangeRate || summaryValueReference("miscTotal", "RMB") === "0" ? "" : `${summaryValueReference("miscTotal", "RMB")}/${exchangeRate}`,
     String(advanceHKD),
-    advanceRMB && exchangeRate ? `${advanceRMB}/${exchangeRate}` : ""
+    advanceRMB && exchangeRate ? `${advanceRMB}/${exchangeRate}` : "",
+    deductionsHKD ? `-${deductionsHKD}` : ""
   ].filter(Boolean).join("+") || "0";
   const payableCell = worksheet.getCell(`B${footerRow2}`);
   worksheet.mergeCells(`B${footerRow2}:${lastColumn >= 3 ? "C" : "B"}${footerRow2}`);
@@ -5603,9 +5620,12 @@ async function renderDynamicDriverWageSettlementXlsxBuffer(payload = {}, templat
   payableCell.alignment = { horizontal: "center", vertical: "middle", wrapText: false };
   if (lastColumn >= 4) {
     worksheet.mergeCells(`D${footerRow2}:${lastColumnLetter}${footerRow2}`);
+    const rmbCalculation = exchangeRate
+      ? `人民币项目RMB ${formatDriverWageNoteNumber(rmbProjectTotal)} ÷ 汇率${formatDriverWageNoteNumber(exchangeRate)} = HKD ${formatDriverWageNoteNumber(convertedRMB)}`
+      : `人民币项目RMB ${formatDriverWageNoteNumber(rmbProjectTotal)}（汇率无效，未折算）`;
     worksheet.getCell(`D${footerRow2}`).value = advanceIncludedInMisc
-      ? `运费合计HKD + 杂费合计HKD（含司机代垫） + 人民币项目÷汇率${formatDriverWageNoteNumber(exchangeRate)} = 应付HKD${formatDriverWageNoteNumber(payableTotal)}`
-      : `运费合计HKD + 杂费合计HKD + 人民币项目÷汇率${formatDriverWageNoteNumber(exchangeRate)} + 司机代垫 = 应付HKD${formatDriverWageNoteNumber(payableTotal)}；去除司机代垫后HKD${formatDriverWageNoteNumber(payableWithoutAdvance)}`;
+      ? `运费合计HKD ${formatDriverWageNoteNumber(freightHKDTotal)} + 杂费合计HKD ${formatDriverWageNoteNumber(miscHKDTotal)} + ${rmbCalculation} - 工资扣减HKD ${formatDriverWageNoteNumber(deductionsHKD)} = 应付HKD ${formatDriverWageNoteNumber(payableTotal)}`
+      : `运费合计HKD ${formatDriverWageNoteNumber(freightHKDTotal)} + 杂费合计HKD ${formatDriverWageNoteNumber(miscHKDTotal)} + ${rmbCalculation} + 司机代垫HKD ${formatDriverWageNoteNumber(advanceHKD)} - 工资扣减HKD ${formatDriverWageNoteNumber(deductionsHKD)} = 应付HKD ${formatDriverWageNoteNumber(payableTotal)}；去除司机代垫后HKD ${formatDriverWageNoteNumber(payableWithoutAdvance)}`;
     worksheet.getCell(`D${footerRow2}`).alignment = { horizontal: "left", vertical: "middle", wrapText: true };
     setDriverWageTextFormat(worksheet.getCell(`D${footerRow2}`));
   }
@@ -5741,13 +5761,14 @@ async function renderDriverWageSettlementXlsxBuffer(payload = {}) {
   const totalR = sumNumericRowColumn(rows, 17);
   const totalT = sumNumericRowColumn(rows, 19);
   const advanceHKD = Number(payload.advanceHKD ?? payload.adjustmentsHKD ?? 0);
+  const deductionsHKD = Number(payload.deductionsHKD || 0);
   const exchangeRate = Number(payload.exchangeRate ?? 0);
   const convertedRMB = exchangeRate ? Number((totalQ / exchangeRate).toFixed(2)) : 0;
-  const payableTotal = Number((totalR + totalT + advanceHKD + convertedRMB).toFixed(2));
-  const payableWithoutAdvance = Number((totalR + totalT + convertedRMB).toFixed(2));
+  const payableTotal = Math.max(0, Number((totalR + totalT + advanceHKD + convertedRMB - deductionsHKD).toFixed(2)));
+  const payableWithoutAdvance = Math.max(0, Number((totalR + totalT + convertedRMB - deductionsHKD).toFixed(2)));
   const summaryNote = String(payload.summaryNote || `${rows.length}车骑师/口岸过车`).trim();
   const paymentLabel = String(payload.paymentLabel || "").trim();
-  const payableFormulaText = `运费${formatDriverWageNoteNumber(totalR)} + 装卸过海加点${formatDriverWageNoteNumber(totalT)} + 司机代垫${formatDriverWageNoteNumber(advanceHKD)} + 杂费${formatDriverWageNoteNumber(convertedRMB)} = 应付HKD${formatDriverWageNoteNumber(payableTotal)}；去除系统代垫后HKD${formatDriverWageNoteNumber(payableWithoutAdvance)}`;
+  const payableFormulaText = `运费${formatDriverWageNoteNumber(totalR)} + 装卸过海加点${formatDriverWageNoteNumber(totalT)} + 司机代垫${formatDriverWageNoteNumber(advanceHKD)} + 杂费${formatDriverWageNoteNumber(convertedRMB)} - 工资扣减HKD${formatDriverWageNoteNumber(deductionsHKD)} = 应付HKD${formatDriverWageNoteNumber(payableTotal)}；去除系统代垫后HKD${formatDriverWageNoteNumber(payableWithoutAdvance)}`;
 
   worksheet.getCell(`P${summaryRowNumber}`).value = totalP;
   worksheet.getCell(`Q${summaryRowNumber}`).value = totalQ;
@@ -7278,7 +7299,45 @@ function normalizeOptionalDriverWageAmount(value = null) {
   return Number(amount.toFixed(2));
 }
 
+function normalizeDriverWageFeeUnit(value = "") {
+  const unit = String(value ?? "").trim();
+  return unit.slice(0, 20) || "项";
+}
+
+function normalizeDriverWageFeeCurrency(value = "", legacyUnit = "") {
+  const source = String(value || legacyUnit || "").trim().toUpperCase();
+  if (source === "RMB" || source === "人民币") return "RMB";
+  return "HKD";
+}
+
+function normalizeDriverWageSettlementWriteItem(item = {}, support = {}) {
+  const currency = normalizeDriverWageFeeCurrency(item.adjustmentsCurrency, item.adjustmentsUnit);
+  const amount = item.adjustmentsHKD ?? item.adjustmentsRMB ?? null;
+  const canonical = {
+    ...item,
+    // The new model stores the amount in adjustments_hkd and uses the currency
+    // column to describe it. Keep the legacy RMB column empty for a canonical
+    // RMB row so old and new fields cannot be counted together.
+    adjustmentsHKD: item.adjustmentsHKD ?? (currency === "RMB" ? item.adjustmentsRMB : null),
+    adjustmentsRMB: item.adjustmentsHKD == null && currency === "RMB" ? null : item.adjustmentsRMB
+  };
+  if (support.adjustmentsCurrency) return canonical;
+
+  // Older production schemas only understand the two legacy amount columns.
+  // Project the canonical value back to those columns without changing the
+  // meaning of historical rows that intentionally contain both amounts.
+  return {
+    ...canonical,
+    adjustmentsHKD: currency === "RMB" ? null : canonical.adjustmentsHKD,
+    adjustmentsRMB: currency === "RMB" ? amount : canonical.adjustmentsRMB
+  };
+}
+
 function mapDriverWageSettlement(row) {
+  const legacyAdjustmentsCurrency = row.adjustments_hkd == null && row.adjustments_rmb != null
+    && normalizeDriverWageFeeCurrency(row.adjustments_currency, row.adjustments_unit) === "HKD"
+    ? "RMB"
+    : (row.adjustments_currency || row.adjustments_unit || "HKD");
   return {
     id: row.id,
     periodKey: row.period_key || "",
@@ -7287,6 +7346,17 @@ function mapDriverWageSettlement(row) {
     settledAt: row.settled_at || "",
     adjustmentsHKD: row.adjustments_hkd ?? null,
     adjustmentsRMB: row.adjustments_rmb ?? null,
+    adjustmentsUnit: normalizeDriverWageFeeUnit(row.adjustments_unit),
+    adjustmentsCurrency: normalizeDriverWageFeeCurrency(legacyAdjustmentsCurrency, row.adjustments_unit),
+    plateFeeHKD: row.plate_fee_hkd ?? null,
+    plateFeeUnit: normalizeDriverWageFeeUnit(row.plate_fee_unit),
+    plateFeeCurrency: normalizeDriverWageFeeCurrency(row.plate_fee_currency, row.plate_fee_unit),
+    socialSecurityFeeHKD: row.social_security_fee_hkd ?? null,
+    socialSecurityFeeUnit: normalizeDriverWageFeeUnit(row.social_security_fee_unit),
+    socialSecurityFeeCurrency: normalizeDriverWageFeeCurrency(row.social_security_fee_currency, row.social_security_fee_unit),
+    parkingFeeHKD: row.parking_fee_hkd ?? null,
+    parkingFeeUnit: normalizeDriverWageFeeUnit(row.parking_fee_unit),
+    parkingFeeCurrency: normalizeDriverWageFeeCurrency(row.parking_fee_currency, row.parking_fee_unit),
     advanceAt: row.advance_at || "",
     note: row.note || "",
     createdAt: row.created_at || "",
@@ -7296,6 +7366,10 @@ function mapDriverWageSettlement(row) {
 
 function readDriverWageSettlementPayload(body = {}, current = null) {
   const noteValue = pickBody(body, "note", "remark", current?.note ?? "");
+  const currentAdjustmentsCurrency = current?.adjustments_hkd == null && current?.adjustments_rmb != null
+    && normalizeDriverWageFeeCurrency(current?.adjustments_currency, current?.adjustments_unit) === "HKD"
+    ? "RMB"
+    : current?.adjustments_currency;
   return {
     periodKey: String(body.periodKey ?? body.period_key ?? current?.period_key ?? "").trim(),
     driverId: Number(body.driverId ?? body.driver_id ?? current?.driver_id ?? 0),
@@ -7303,6 +7377,17 @@ function readDriverWageSettlementPayload(body = {}, current = null) {
     settledAt: String(body.settledAt ?? body.settled_at ?? current?.settled_at ?? "").trim(),
     adjustmentsHKD: normalizeOptionalDriverWageAmount(pickBody(body, "adjustmentsHKD", "adjustments_hkd", current?.adjustments_hkd)),
     adjustmentsRMB: normalizeOptionalDriverWageAmount(pickBody(body, "adjustmentsRMB", "adjustments_rmb", current?.adjustments_rmb)),
+    adjustmentsUnit: normalizeDriverWageFeeUnit(pickBody(body, "adjustmentsUnit", "adjustments_unit", current?.adjustments_unit)),
+    adjustmentsCurrency: normalizeDriverWageFeeCurrency(pickBody(body, "adjustmentsCurrency", "adjustments_currency", currentAdjustmentsCurrency), pickBody(body, "adjustmentsUnit", "adjustments_unit", current?.adjustments_unit)),
+    plateFeeHKD: normalizeOptionalDriverWageAmount(pickBody(body, "plateFeeHKD", "plate_fee_hkd", current?.plate_fee_hkd)),
+    plateFeeUnit: normalizeDriverWageFeeUnit(pickBody(body, "plateFeeUnit", "plate_fee_unit", current?.plate_fee_unit)),
+    plateFeeCurrency: normalizeDriverWageFeeCurrency(pickBody(body, "plateFeeCurrency", "plate_fee_currency", current?.plate_fee_currency), pickBody(body, "plateFeeUnit", "plate_fee_unit", current?.plate_fee_unit)),
+    socialSecurityFeeHKD: normalizeOptionalDriverWageAmount(pickBody(body, "socialSecurityFeeHKD", "social_security_fee_hkd", current?.social_security_fee_hkd)),
+    socialSecurityFeeUnit: normalizeDriverWageFeeUnit(pickBody(body, "socialSecurityFeeUnit", "social_security_fee_unit", current?.social_security_fee_unit)),
+    socialSecurityFeeCurrency: normalizeDriverWageFeeCurrency(pickBody(body, "socialSecurityFeeCurrency", "social_security_fee_currency", current?.social_security_fee_currency), pickBody(body, "socialSecurityFeeUnit", "social_security_fee_unit", current?.social_security_fee_unit)),
+    parkingFeeHKD: normalizeOptionalDriverWageAmount(pickBody(body, "parkingFeeHKD", "parking_fee_hkd", current?.parking_fee_hkd)),
+    parkingFeeUnit: normalizeDriverWageFeeUnit(pickBody(body, "parkingFeeUnit", "parking_fee_unit", current?.parking_fee_unit)),
+    parkingFeeCurrency: normalizeDriverWageFeeCurrency(pickBody(body, "parkingFeeCurrency", "parking_fee_currency", current?.parking_fee_currency), pickBody(body, "parkingFeeUnit", "parking_fee_unit", current?.parking_fee_unit)),
     advanceAt: String(body.advanceAt ?? body.advance_at ?? current?.advance_at ?? "").trim(),
     note: noteValue === null || noteValue === undefined ? "" : String(noteValue).trim()
   };
@@ -8322,6 +8407,56 @@ function normalizeCustomsBusinessPayload(body = {}) {
   };
 }
 
+function customsBusinessDuplicateIdentifier(item = {}) {
+  const declarationNo = userTextValue(item.declarationNo);
+  const sixSheetNo = userTextValue(item.sixSheetNo);
+  return declarationNo || sixSheetNo;
+}
+
+async function lockCustomsBusinessCreation(item = {}) {
+  // Serialize creates for the same customer so two concurrent requests cannot
+  // both pass the recent-duplicate check before either insert commits.
+  await db.prepare("SELECT pg_advisory_xact_lock(?, hashtext(?))")
+    .get(CUSTOMS_BUSINESS_CREATE_LOCK_NAMESPACE, userTextValue(item.company));
+}
+
+async function findRecentCustomsBusinessDuplicate(item = {}) {
+  const declarationNo = userTextValue(item.declarationNo);
+  const sixSheetNo = userTextValue(item.sixSheetNo);
+  if (!declarationNo && !sixSheetNo) return null;
+  return db.prepare(`
+    SELECT *
+    FROM customs_businesses
+    WHERE deleted_at IS NULL
+      AND company = @company
+      AND created_at::timestamptz >= CURRENT_TIMESTAMP - INTERVAL '${CUSTOMS_BUSINESS_DUPLICATE_WINDOW_SECONDS} seconds'
+      AND (
+        (@declarationNo <> '' AND declaration_no = @declarationNo)
+        OR (@sixSheetNo <> '' AND six_sheet_no = @sixSheetNo)
+      )
+    ORDER BY id DESC
+    LIMIT 1
+  `).get({ company: userTextValue(item.company), declarationNo, sixSheetNo });
+}
+
+async function createCustomsBusinessWithDuplicateProtection(item, hasHomeFee) {
+  return db.transaction(async () => {
+    await lockCustomsBusinessCreation(item);
+    const duplicate = await findRecentCustomsBusinessDuplicate(item);
+    if (duplicate) return { duplicate, row: duplicate };
+    const inserted = await db.prepare(`
+      INSERT INTO customs_businesses
+        (business_date, declaration_no, six_sheet_no, company, direction, item_count, page_count,
+         ${hasHomeFee ? "home_fee, " : ""}customs_fee, page_fee, manifest_fee, inspection_fee, check_fee, verification_fee, other_fee, custom_fields, total, remark)
+      VALUES
+        (@date, @declarationNo, @sixSheetNo, @company, @direction, @itemCount, @pageCount,
+         ${hasHomeFee ? "@homeFee, " : ""}@customsFee, @pageFee, @manifestFee, @inspectionFee, @checkFee, @verificationFee, @otherFee, @customFieldsJson, @total, @remark)
+    `).run(item);
+    const row = await db.prepare("SELECT * FROM customs_businesses WHERE id = ?").get(inserted.lastInsertId);
+    return { inserted, row };
+  });
+}
+
 function normalizeOtherBusinessPayload(body = {}) {
   const cost = moneyNumberField(body.cost ?? body.baseCost ?? body.base_cost);
   const income = moneyNumberField(body.income ?? body.revenue);
@@ -9140,17 +9275,20 @@ app.post("/api/customs-businesses", async (req, res) => {
     return;
   }
   const hasHomeFee = await customsBusinessColumnExists("home_fee");
-  const result = await db.prepare(`
-    INSERT INTO customs_businesses
-      (business_date, declaration_no, six_sheet_no, company, direction, item_count, page_count,
-       ${hasHomeFee ? "home_fee, " : ""}customs_fee, page_fee, manifest_fee, inspection_fee, check_fee, verification_fee, other_fee, custom_fields, total, remark)
-    VALUES
-      (@date, @declarationNo, @sixSheetNo, @company, @direction, @itemCount, @pageCount,
-       ${hasHomeFee ? "@homeFee, " : ""}@customsFee, @pageFee, @manifestFee, @inspectionFee, @checkFee, @verificationFee, @otherFee, @customFieldsJson, @total, @remark)
-  `).run(item);
-  await writeAudit("create", "customs_business", String(result.lastInsertId), `${item.date}/${item.company}/${item.declarationNo || item.sixSheetNo}`);
-  const row = await db.prepare("SELECT * FROM customs_businesses WHERE id = ?").get(result.lastInsertId);
-  res.status(201).json(mapCustomsBusiness(row));
+  const result = await createCustomsBusinessWithDuplicateProtection(item, hasHomeFee);
+  if (result.duplicate) {
+    const identifier = customsBusinessDuplicateIdentifier(item);
+    const identifierLabel = item.declarationNo ? "报关单号" : "六联单号";
+    res.status(409).json({
+      message: `${identifierLabel}${identifier ? `“${identifier}”` : ""}刚刚已新增，请勿重复提交；如需修改请编辑已有记录`,
+      duplicate: true,
+      existingId: result.row.id
+    });
+    return;
+  }
+  const { inserted } = result;
+  await writeAudit("create", "customs_business", String(inserted.lastInsertId), `${item.date}/${item.company}/${item.declarationNo || item.sixSheetNo}`);
+  res.status(201).json(mapCustomsBusiness(result.row));
 });
 
 app.put("/api/customs-businesses/:id", async (req, res) => {
@@ -12257,7 +12395,8 @@ app.post("/api/driver-wage-settlements/export/xlsx", async (req, res) => {
       advanceHKD: req.body?.advanceHKD,
       advanceRMB: req.body?.advanceRMB,
       advanceIncludedInMisc: req.body?.advanceIncludedInMisc,
-      adjustmentsHKD: req.body?.adjustmentsHKD
+      adjustmentsHKD: req.body?.adjustmentsHKD,
+      deductionsHKD: req.body?.deductionsHKD
     });
     const filename = String(req.body?.filename || "").trim() || `司机工资单_${exportFilenamePart(req.body?.driverName || "司机")}.xlsx`;
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
@@ -14826,12 +14965,15 @@ app.post("/api/driver-wage-settlements", async (req, res) => {
   const incoming = readDriverWageSettlementPayload(req.body || {}, current);
   const adjustmentsChanged = !current
     || Number(current.adjustments_hkd ?? NaN) !== Number(incoming.adjustmentsHKD ?? NaN)
-    || Number(current.adjustments_rmb ?? NaN) !== Number(incoming.adjustmentsRMB ?? NaN);
+    || Number(current.adjustments_rmb ?? NaN) !== Number(incoming.adjustmentsRMB ?? NaN)
+    || Number(current.plate_fee_hkd ?? NaN) !== Number(incoming.plateFeeHKD ?? NaN)
+    || Number(current.social_security_fee_hkd ?? NaN) !== Number(incoming.socialSecurityFeeHKD ?? NaN)
+    || Number(current.parking_fee_hkd ?? NaN) !== Number(incoming.parkingFeeHKD ?? NaN);
   const item = {
     ...incoming,
     // 结算时间永久展示；状态不影响已填日期保留。
     settledAt: incoming.settledAt || "",
-    // 编辑预支港币/人民币后更新预支日期；未改金额则保留原预支日期。
+    // 编辑预支杂费或其他工资扣减后更新预支日期；未改金额则保留原预支日期。
     advanceAt: adjustmentsChanged
       ? (incoming.advanceAt || todayInputValue())
       : (incoming.advanceAt || current?.advance_at || "")
@@ -14854,10 +14996,22 @@ app.post("/api/driver-wage-settlements", async (req, res) => {
     ["settled_at", "settledAt"],
     ...(support.adjustmentsHKD ? [["adjustments_hkd", "adjustmentsHKD"]] : []),
     ...(support.adjustmentsRMB ? [["adjustments_rmb", "adjustmentsRMB"]] : []),
+    ...(support.adjustmentsUnit ? [["adjustments_unit", "adjustmentsUnit"]] : []),
+    ...(support.adjustmentsCurrency ? [["adjustments_currency", "adjustmentsCurrency"]] : []),
+    ...(support.plateFeeHKD ? [["plate_fee_hkd", "plateFeeHKD"]] : []),
+    ...(support.plateFeeUnit ? [["plate_fee_unit", "plateFeeUnit"]] : []),
+    ...(support.plateFeeCurrency ? [["plate_fee_currency", "plateFeeCurrency"]] : []),
+    ...(support.socialSecurityFeeHKD ? [["social_security_fee_hkd", "socialSecurityFeeHKD"]] : []),
+    ...(support.socialSecurityFeeUnit ? [["social_security_fee_unit", "socialSecurityFeeUnit"]] : []),
+    ...(support.socialSecurityFeeCurrency ? [["social_security_fee_currency", "socialSecurityFeeCurrency"]] : []),
+    ...(support.parkingFeeHKD ? [["parking_fee_hkd", "parkingFeeHKD"]] : []),
+    ...(support.parkingFeeUnit ? [["parking_fee_unit", "parkingFeeUnit"]] : []),
+    ...(support.parkingFeeCurrency ? [["parking_fee_currency", "parkingFeeCurrency"]] : []),
     ...(support.advanceAt ? [["advance_at", "advanceAt"]] : []),
     ...(support.note ? [["note", "note"]] : [])
   ];
   const { columnSql, valueSql, updateSql } = buildNamedColumns(entries);
+  const writeItem = normalizeDriverWageSettlementWriteItem(item, support);
   const updateParts = [updateSql];
   if (support.updatedAt) updateParts.push("updated_at = CURRENT_TIMESTAMP");
   await db.prepare(`
@@ -14867,7 +15021,7 @@ app.post("/api/driver-wage-settlements", async (req, res) => {
     DO UPDATE SET
       ${updateParts.join(",\n      ")}
     RETURNING *
-  `).run(item);
+  `).run(writeItem);
   const row = await db.prepare(`
     SELECT * FROM driver_wage_settlements
     WHERE period_key = ? AND driver_id = ?
@@ -14876,7 +15030,7 @@ app.post("/api/driver-wage-settlements", async (req, res) => {
     current ? "update" : "create",
     "driver_wage_settlement",
     `${item.periodKey}/${driver.id}`,
-    `${item.periodKey}/${driver.name}/${item.status}${item.settledAt ? `/${item.settledAt}` : ""}${item.note ? `/备注:${item.note}` : ""}${item.adjustmentsHKD !== null || item.adjustmentsRMB !== null ? `/预支:${formatDriverWageNoteNumber(item.adjustmentsHKD ?? 0)}/${formatDriverWageNoteNumber(item.adjustmentsRMB ?? 0)}` : ""}`
+    `${item.periodKey}/${driver.name}/${item.status}${item.settledAt ? `/${item.settledAt}` : ""}${item.note ? `/备注:${item.note}` : ""}${item.adjustmentsHKD !== null || item.adjustmentsRMB !== null || item.plateFeeHKD !== null || item.socialSecurityFeeHKD !== null || item.parkingFeeHKD !== null ? `/扣减HKD:${formatDriverWageNoteNumber(item.adjustmentsHKD ?? 0)}/${formatDriverWageNoteNumber(item.plateFeeHKD ?? 0)}/${formatDriverWageNoteNumber(item.socialSecurityFeeHKD ?? 0)}/${formatDriverWageNoteNumber(item.parkingFeeHKD ?? 0)}` : ""}`
   );
   res.json(mapDriverWageSettlement(row));
 });
