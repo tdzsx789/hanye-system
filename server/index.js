@@ -7310,6 +7310,31 @@ function normalizeDriverWageFeeCurrency(value = "", legacyUnit = "") {
   return "HKD";
 }
 
+const DRIVER_WAGE_SETTLEMENT_NOTE_META_MARKER = "\n[[hanye-driver-wage-meta:v1]]";
+
+function unpackDriverWageSettlementNote(value = "") {
+  const source = String(value ?? "");
+  const markerIndex = source.lastIndexOf(DRIVER_WAGE_SETTLEMENT_NOTE_META_MARKER);
+  if (markerIndex < 0) return { note: source, metadata: {} };
+  try {
+    const metadata = JSON.parse(source.slice(markerIndex + DRIVER_WAGE_SETTLEMENT_NOTE_META_MARKER.length));
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+      return { note: source, metadata: {} };
+    }
+    return { note: source.slice(0, markerIndex), metadata };
+  } catch {
+    return { note: source, metadata: {} };
+  }
+}
+
+function packDriverWageSettlementNote(note = "", metadata = {}) {
+  const userNote = unpackDriverWageSettlementNote(note).note;
+  const entries = Object.entries(metadata).filter(([, value]) => value !== undefined);
+  return entries.length
+    ? `${userNote}${DRIVER_WAGE_SETTLEMENT_NOTE_META_MARKER}${JSON.stringify(Object.fromEntries(entries))}`
+    : userNote;
+}
+
 function normalizeDriverWageSettlementWriteItem(item = {}, support = {}) {
   const currency = normalizeDriverWageFeeCurrency(item.adjustmentsCurrency, item.adjustmentsUnit);
   const amount = item.adjustmentsHKD ?? item.adjustmentsRMB ?? null;
@@ -7321,23 +7346,41 @@ function normalizeDriverWageSettlementWriteItem(item = {}, support = {}) {
     adjustmentsHKD: item.adjustmentsHKD ?? (currency === "RMB" ? item.adjustmentsRMB : null),
     adjustmentsRMB: item.adjustmentsHKD == null && currency === "RMB" ? null : item.adjustmentsRMB
   };
-  if (support.adjustmentsCurrency) return canonical;
+  const metadata = {};
+  const compatibilityColumns = [
+    ["adjustmentsUnit", "adjustmentsUnit"],
+    ["adjustmentsCurrency", "adjustmentsCurrency"],
+    ["plateFeeHKD", "plateFeeHKD"],
+    ["plateFeeUnit", "plateFeeUnit"],
+    ["plateFeeCurrency", "plateFeeCurrency"],
+    ["socialSecurityFeeHKD", "socialSecurityFeeHKD"],
+    ["socialSecurityFeeUnit", "socialSecurityFeeUnit"],
+    ["socialSecurityFeeCurrency", "socialSecurityFeeCurrency"],
+    ["parkingFeeHKD", "parkingFeeHKD"],
+    ["parkingFeeUnit", "parkingFeeUnit"],
+    ["parkingFeeCurrency", "parkingFeeCurrency"]
+  ];
+  compatibilityColumns.forEach(([supportKey, itemKey]) => {
+    if (!support[supportKey] && canonical[itemKey] !== undefined) metadata[itemKey] = canonical[itemKey];
+  });
 
   // Older production schemas only understand the two legacy amount columns.
-  // Project the canonical value back to those columns without changing the
-  // meaning of historical rows that intentionally contain both amounts.
-  return {
+  // Project RMB values back to that shape and store fields with no legacy
+  // column in the existing note field instead of silently dropping them.
+  const legacyAmounts = support.adjustmentsCurrency ? canonical : {
     ...canonical,
     adjustmentsHKD: currency === "RMB" ? null : canonical.adjustmentsHKD,
     adjustmentsRMB: currency === "RMB" ? amount : canonical.adjustmentsRMB
   };
+  return { ...legacyAmounts, note: packDriverWageSettlementNote(item.note, metadata) };
 }
 
 function mapDriverWageSettlement(row) {
+  const { note, metadata } = unpackDriverWageSettlementNote(row.note);
   const legacyAdjustmentsCurrency = row.adjustments_hkd == null && row.adjustments_rmb != null
-    && normalizeDriverWageFeeCurrency(row.adjustments_currency, row.adjustments_unit) === "HKD"
+    && normalizeDriverWageFeeCurrency(row.adjustments_currency ?? metadata.adjustmentsCurrency, row.adjustments_unit ?? metadata.adjustmentsUnit) === "HKD"
     ? "RMB"
-    : (row.adjustments_currency || row.adjustments_unit || "HKD");
+    : (row.adjustments_currency ?? metadata.adjustmentsCurrency ?? row.adjustments_unit ?? metadata.adjustmentsUnit ?? "HKD");
   return {
     id: row.id,
     periodKey: row.period_key || "",
@@ -7346,19 +7389,19 @@ function mapDriverWageSettlement(row) {
     settledAt: row.settled_at || "",
     adjustmentsHKD: row.adjustments_hkd ?? null,
     adjustmentsRMB: row.adjustments_rmb ?? null,
-    adjustmentsUnit: normalizeDriverWageFeeUnit(row.adjustments_unit),
-    adjustmentsCurrency: normalizeDriverWageFeeCurrency(legacyAdjustmentsCurrency, row.adjustments_unit),
-    plateFeeHKD: row.plate_fee_hkd ?? null,
-    plateFeeUnit: normalizeDriverWageFeeUnit(row.plate_fee_unit),
-    plateFeeCurrency: normalizeDriverWageFeeCurrency(row.plate_fee_currency, row.plate_fee_unit),
-    socialSecurityFeeHKD: row.social_security_fee_hkd ?? null,
-    socialSecurityFeeUnit: normalizeDriverWageFeeUnit(row.social_security_fee_unit),
-    socialSecurityFeeCurrency: normalizeDriverWageFeeCurrency(row.social_security_fee_currency, row.social_security_fee_unit),
-    parkingFeeHKD: row.parking_fee_hkd ?? null,
-    parkingFeeUnit: normalizeDriverWageFeeUnit(row.parking_fee_unit),
-    parkingFeeCurrency: normalizeDriverWageFeeCurrency(row.parking_fee_currency, row.parking_fee_unit),
+    adjustmentsUnit: normalizeDriverWageFeeUnit(row.adjustments_unit ?? metadata.adjustmentsUnit),
+    adjustmentsCurrency: normalizeDriverWageFeeCurrency(legacyAdjustmentsCurrency, row.adjustments_unit ?? metadata.adjustmentsUnit),
+    plateFeeHKD: row.plate_fee_hkd ?? metadata.plateFeeHKD ?? null,
+    plateFeeUnit: normalizeDriverWageFeeUnit(row.plate_fee_unit ?? metadata.plateFeeUnit),
+    plateFeeCurrency: normalizeDriverWageFeeCurrency(row.plate_fee_currency ?? metadata.plateFeeCurrency, row.plate_fee_unit ?? metadata.plateFeeUnit),
+    socialSecurityFeeHKD: row.social_security_fee_hkd ?? metadata.socialSecurityFeeHKD ?? null,
+    socialSecurityFeeUnit: normalizeDriverWageFeeUnit(row.social_security_fee_unit ?? metadata.socialSecurityFeeUnit),
+    socialSecurityFeeCurrency: normalizeDriverWageFeeCurrency(row.social_security_fee_currency ?? metadata.socialSecurityFeeCurrency, row.social_security_fee_unit ?? metadata.socialSecurityFeeUnit),
+    parkingFeeHKD: row.parking_fee_hkd ?? metadata.parkingFeeHKD ?? null,
+    parkingFeeUnit: normalizeDriverWageFeeUnit(row.parking_fee_unit ?? metadata.parkingFeeUnit),
+    parkingFeeCurrency: normalizeDriverWageFeeCurrency(row.parking_fee_currency ?? metadata.parkingFeeCurrency, row.parking_fee_unit ?? metadata.parkingFeeUnit),
     advanceAt: row.advance_at || "",
-    note: row.note || "",
+    note: note || "",
     createdAt: row.created_at || "",
     updatedAt: row.updated_at || row.created_at || ""
   };
@@ -7366,10 +7409,11 @@ function mapDriverWageSettlement(row) {
 
 function readDriverWageSettlementPayload(body = {}, current = null) {
   const noteValue = pickBody(body, "note", "remark", current?.note ?? "");
+  const currentMetadata = unpackDriverWageSettlementNote(current?.note).metadata;
   const currentAdjustmentsCurrency = current?.adjustments_hkd == null && current?.adjustments_rmb != null
-    && normalizeDriverWageFeeCurrency(current?.adjustments_currency, current?.adjustments_unit) === "HKD"
+    && normalizeDriverWageFeeCurrency(current?.adjustments_currency ?? currentMetadata.adjustmentsCurrency, current?.adjustments_unit ?? currentMetadata.adjustmentsUnit) === "HKD"
     ? "RMB"
-    : current?.adjustments_currency;
+    : (current?.adjustments_currency ?? currentMetadata.adjustmentsCurrency);
   return {
     periodKey: String(body.periodKey ?? body.period_key ?? current?.period_key ?? "").trim(),
     driverId: Number(body.driverId ?? body.driver_id ?? current?.driver_id ?? 0),
@@ -7377,17 +7421,17 @@ function readDriverWageSettlementPayload(body = {}, current = null) {
     settledAt: String(body.settledAt ?? body.settled_at ?? current?.settled_at ?? "").trim(),
     adjustmentsHKD: normalizeOptionalDriverWageAmount(pickBody(body, "adjustmentsHKD", "adjustments_hkd", current?.adjustments_hkd)),
     adjustmentsRMB: normalizeOptionalDriverWageAmount(pickBody(body, "adjustmentsRMB", "adjustments_rmb", current?.adjustments_rmb)),
-    adjustmentsUnit: normalizeDriverWageFeeUnit(pickBody(body, "adjustmentsUnit", "adjustments_unit", current?.adjustments_unit)),
-    adjustmentsCurrency: normalizeDriverWageFeeCurrency(pickBody(body, "adjustmentsCurrency", "adjustments_currency", currentAdjustmentsCurrency), pickBody(body, "adjustmentsUnit", "adjustments_unit", current?.adjustments_unit)),
-    plateFeeHKD: normalizeOptionalDriverWageAmount(pickBody(body, "plateFeeHKD", "plate_fee_hkd", current?.plate_fee_hkd)),
-    plateFeeUnit: normalizeDriverWageFeeUnit(pickBody(body, "plateFeeUnit", "plate_fee_unit", current?.plate_fee_unit)),
-    plateFeeCurrency: normalizeDriverWageFeeCurrency(pickBody(body, "plateFeeCurrency", "plate_fee_currency", current?.plate_fee_currency), pickBody(body, "plateFeeUnit", "plate_fee_unit", current?.plate_fee_unit)),
-    socialSecurityFeeHKD: normalizeOptionalDriverWageAmount(pickBody(body, "socialSecurityFeeHKD", "social_security_fee_hkd", current?.social_security_fee_hkd)),
-    socialSecurityFeeUnit: normalizeDriverWageFeeUnit(pickBody(body, "socialSecurityFeeUnit", "social_security_fee_unit", current?.social_security_fee_unit)),
-    socialSecurityFeeCurrency: normalizeDriverWageFeeCurrency(pickBody(body, "socialSecurityFeeCurrency", "social_security_fee_currency", current?.social_security_fee_currency), pickBody(body, "socialSecurityFeeUnit", "social_security_fee_unit", current?.social_security_fee_unit)),
-    parkingFeeHKD: normalizeOptionalDriverWageAmount(pickBody(body, "parkingFeeHKD", "parking_fee_hkd", current?.parking_fee_hkd)),
-    parkingFeeUnit: normalizeDriverWageFeeUnit(pickBody(body, "parkingFeeUnit", "parking_fee_unit", current?.parking_fee_unit)),
-    parkingFeeCurrency: normalizeDriverWageFeeCurrency(pickBody(body, "parkingFeeCurrency", "parking_fee_currency", current?.parking_fee_currency), pickBody(body, "parkingFeeUnit", "parking_fee_unit", current?.parking_fee_unit)),
+    adjustmentsUnit: normalizeDriverWageFeeUnit(pickBody(body, "adjustmentsUnit", "adjustments_unit", current?.adjustments_unit ?? currentMetadata.adjustmentsUnit)),
+    adjustmentsCurrency: normalizeDriverWageFeeCurrency(pickBody(body, "adjustmentsCurrency", "adjustments_currency", currentAdjustmentsCurrency), pickBody(body, "adjustmentsUnit", "adjustments_unit", current?.adjustments_unit ?? currentMetadata.adjustmentsUnit)),
+    plateFeeHKD: normalizeOptionalDriverWageAmount(pickBody(body, "plateFeeHKD", "plate_fee_hkd", current?.plate_fee_hkd ?? currentMetadata.plateFeeHKD)),
+    plateFeeUnit: normalizeDriverWageFeeUnit(pickBody(body, "plateFeeUnit", "plate_fee_unit", current?.plate_fee_unit ?? currentMetadata.plateFeeUnit)),
+    plateFeeCurrency: normalizeDriverWageFeeCurrency(pickBody(body, "plateFeeCurrency", "plate_fee_currency", current?.plate_fee_currency ?? currentMetadata.plateFeeCurrency), pickBody(body, "plateFeeUnit", "plate_fee_unit", current?.plate_fee_unit ?? currentMetadata.plateFeeUnit)),
+    socialSecurityFeeHKD: normalizeOptionalDriverWageAmount(pickBody(body, "socialSecurityFeeHKD", "social_security_fee_hkd", current?.social_security_fee_hkd ?? currentMetadata.socialSecurityFeeHKD)),
+    socialSecurityFeeUnit: normalizeDriverWageFeeUnit(pickBody(body, "socialSecurityFeeUnit", "social_security_fee_unit", current?.social_security_fee_unit ?? currentMetadata.socialSecurityFeeUnit)),
+    socialSecurityFeeCurrency: normalizeDriverWageFeeCurrency(pickBody(body, "socialSecurityFeeCurrency", "social_security_fee_currency", current?.social_security_fee_currency ?? currentMetadata.socialSecurityFeeCurrency), pickBody(body, "socialSecurityFeeUnit", "social_security_fee_unit", current?.social_security_fee_unit ?? currentMetadata.socialSecurityFeeUnit)),
+    parkingFeeHKD: normalizeOptionalDriverWageAmount(pickBody(body, "parkingFeeHKD", "parking_fee_hkd", current?.parking_fee_hkd ?? currentMetadata.parkingFeeHKD)),
+    parkingFeeUnit: normalizeDriverWageFeeUnit(pickBody(body, "parkingFeeUnit", "parking_fee_unit", current?.parking_fee_unit ?? currentMetadata.parkingFeeUnit)),
+    parkingFeeCurrency: normalizeDriverWageFeeCurrency(pickBody(body, "parkingFeeCurrency", "parking_fee_currency", current?.parking_fee_currency ?? currentMetadata.parkingFeeCurrency), pickBody(body, "parkingFeeUnit", "parking_fee_unit", current?.parking_fee_unit ?? currentMetadata.parkingFeeUnit)),
     advanceAt: String(body.advanceAt ?? body.advance_at ?? current?.advance_at ?? "").trim(),
     note: noteValue === null || noteValue === undefined ? "" : String(noteValue).trim()
   };

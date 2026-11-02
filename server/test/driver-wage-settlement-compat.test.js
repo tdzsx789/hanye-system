@@ -4,12 +4,20 @@ import test from "node:test";
 import vm from "node:vm";
 
 const source = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
-const start = source.indexOf("function normalizeOptionalDriverWageAmount");
-const end = source.indexOf("function mapDriverWageSettlement", start);
+const start = source.indexOf("function normalizeDriverWageSettlementStatus");
+const end = source.indexOf("function parseJsonArrayText", start);
 assert.notEqual(start, -1);
 assert.notEqual(end, -1);
 
-const context = vm.createContext({ String, Number, Object });
+const context = vm.createContext({
+  String,
+  Number,
+  Object,
+  JSON,
+  DRIVER_WAGE_SETTLEMENT_PENDING_STATUS: "未结算",
+  DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS: "已结算",
+  pickBody: (body, camelKey, snakeKey, fallback) => body[camelKey] ?? body[snakeKey] ?? fallback
+});
 vm.runInContext(source.slice(start, end), context);
 
 test("legacy RMB-only settlement maps to the new canonical amount on a new schema", () => {
@@ -43,4 +51,58 @@ test("historical rows with both currencies keep both amounts", () => {
 
   assert.equal(item.adjustmentsHKD, 80);
   assert.equal(item.adjustmentsRMB, 30);
+});
+
+test("old schemas persist added deductions in note metadata and expose them as fields", () => {
+  const item = context.normalizeDriverWageSettlementWriteItem({
+    periodKey: "2026-11",
+    driverId: 7,
+    status: "未结算",
+    adjustmentsHKD: 120,
+    adjustmentsRMB: null,
+    adjustmentsCurrency: "RMB",
+    adjustmentsUnit: "项",
+    plateFeeHKD: 50,
+    plateFeeUnit: "项",
+    plateFeeCurrency: "HKD",
+    socialSecurityFeeHKD: 30,
+    socialSecurityFeeUnit: "项",
+    socialSecurityFeeCurrency: "RMB",
+    parkingFeeHKD: null,
+    parkingFeeUnit: "项",
+    parkingFeeCurrency: "HKD",
+    note: "历史备注"
+  }, { adjustmentsHKD: true, adjustmentsRMB: true, note: true });
+
+  assert.equal(item.adjustmentsHKD, null);
+  assert.equal(item.adjustmentsRMB, 120);
+  const stored = context.unpackDriverWageSettlementNote(item.note);
+  assert.equal(stored.note, "历史备注");
+  assert.equal(stored.metadata.plateFeeHKD, 50);
+  assert.equal(stored.metadata.socialSecurityFeeCurrency, "RMB");
+
+  const mapped = context.mapDriverWageSettlement({
+    period_key: "2026-11",
+    driver_id: 7,
+    status: "未结算",
+    adjustments_hkd: item.adjustmentsHKD,
+    adjustments_rmb: item.adjustmentsRMB,
+    note: item.note
+  });
+  assert.equal(mapped.adjustmentsCurrency, "RMB");
+  assert.equal(mapped.plateFeeHKD, 50);
+  assert.equal(mapped.socialSecurityFeeHKD, 30);
+  assert.equal(mapped.socialSecurityFeeCurrency, "RMB");
+  assert.equal(mapped.note, "历史备注");
+
+  const next = context.readDriverWageSettlementPayload({ note: "历史备注更新" }, {
+    period_key: "2026-11",
+    driver_id: 7,
+    adjustments_hkd: item.adjustmentsHKD,
+    adjustments_rmb: item.adjustmentsRMB,
+    note: item.note
+  });
+  assert.equal(next.adjustmentsCurrency, "RMB");
+  assert.equal(next.plateFeeHKD, 50);
+  assert.equal(next.socialSecurityFeeHKD, 30);
 });
