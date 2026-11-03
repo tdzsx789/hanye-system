@@ -14651,6 +14651,7 @@ function buildCustomsStatementRows(sourceRows = []) {
     const company = String(item.company || "").trim() || "未填写客户";
     const row = groups.get(company) || {
       company,
+      customsCustomerType: String(item.customsCustomerType || item.customs_customer_type || "").trim(),
       count: 0,
       declarationCount: 0,
       customsFee: 0,
@@ -14662,6 +14663,9 @@ function buildCustomsStatementRows(sourceRows = []) {
       otherFee: 0,
       total: 0
     };
+    if (!row.customsCustomerType) {
+      row.customsCustomerType = String(item.customsCustomerType || item.customs_customer_type || "").trim();
+    }
     row.count += 1;
     if (item.declarationNo || item.sixSheetNo) row.declarationCount += 1;
     row.customsFee += Number(item.customsFee || 0);
@@ -14718,6 +14722,28 @@ function customsStatementRowsForCompany(company = "") {
     .filter((row) => (String(row.company || "").trim() || "未填写客户") === target)
     .sort((left, right) =>
       String(left.date || "").localeCompare(String(right.date || ""))
+      || String(left.declarationNo || "").localeCompare(String(right.declarationNo || ""))
+      || String(left.sixSheetNo || "").localeCompare(String(right.sixSheetNo || ""))
+    );
+}
+
+function customsStatementCustomerTypeForRow(row = {}) {
+  const rowType = String(row.customsCustomerType || row.customs_customer_type || "").trim();
+  if (rowType) return rowType;
+  const customer = customsCustomerByReference(row.company || "", row.customerId || "")
+    || findCustomsBusinessCustomerByName(row.company || "");
+  return String(customer?.customsCustomerType || customer?.customs_customer_type || "").trim();
+}
+
+function customsStatementRowsForCustomerType(customerType = "") {
+  const targetType = String(customerType || "").trim();
+  if (!targetType) return [];
+  const sourceRows = customsBusinessRowsForStatement(customsBusinessRows.value);
+  return sourceRows
+    .filter((row) => customsStatementCustomerTypeForRow(row) === targetType)
+    .sort((left, right) =>
+      String(left.date || "").localeCompare(String(right.date || ""))
+      || String(left.company || "").localeCompare(String(right.company || ""), "zh-Hans-CN", { numeric: true })
       || String(left.declarationNo || "").localeCompare(String(right.declarationNo || ""))
       || String(left.sixSheetNo || "").localeCompare(String(right.sixSheetNo || ""))
     );
@@ -16248,6 +16274,13 @@ function compareStatementOrderDates(left = {}, right = {}) {
   );
 }
 
+function sortStatementOrdersByDate(orders = []) {
+  return orders
+    .map((order, index) => ({ order, index }))
+    .sort((left, right) => compareStatementOrderDates(left.order, right.order) || left.index - right.index)
+    .map(({ order }) => order);
+}
+
 function selectedStatementOrders() {
   const entity = ensureStatementEntity();
   const { start, end } = statementDateRange();
@@ -16268,11 +16301,9 @@ function selectedStatementOrders() {
     }
     return order.customer === entity || Boolean(statementCustomer && statementCustomer.id === order.customerId);
   });
+  if (statementExportType.value === "supplier") return sortStatementOrdersByDate(orders);
   if (statementExportType.value !== "customer") return orders;
-  return orders
-    .map((order, index) => ({ order, index }))
-    .sort((left, right) => compareStatementOrderDates(left.order, right.order) || left.index - right.index)
-    .map(({ order }) => customerStatementOrderSnapshot(order));
+  return sortStatementOrdersByDate(orders).map((order) => customerStatementOrderSnapshot(order));
 }
 
 function statementConvertedTotal(orders, currency, rateValue) {
@@ -30710,7 +30741,7 @@ function customsStatementExportFilename(company = "客户", start = "", end = ""
   return monthlyStatementExportFilename(company, start, end, extension, "customs");
 }
 
-async function exportCustomsStatementByFormat(format = "excel", row = activeStatementExportRow.value) {
+async function exportCustomsStatementByFormat(format = "excel", row = activeStatementExportRow.value, scope = "customer") {
   const exportRow = row || {};
   closeStatementExportMenu();
   const company = String(exportRow.company || "").trim();
@@ -30718,7 +30749,15 @@ async function exportCustomsStatementByFormat(format = "excel", row = activeStat
     notify("当前客户信息不完整，无法导出报关对账单");
     return;
   }
-  const rows = customsStatementRowsForCompany(company);
+  const normalizedScope = scope === "customerType" ? "customerType" : "customer";
+  const customerType = customsStatementCustomerTypeForRow(exportRow);
+  if (normalizedScope === "customerType" && !customerType) {
+    notify("当前客户没有客户类型，无法导出同客户类型对账单");
+    return;
+  }
+  const rows = normalizedScope === "customerType"
+    ? customsStatementRowsForCustomerType(customerType)
+    : customsStatementRowsForCompany(company);
   if (!rows.length) {
     notify("当前条件没有可导出的报关业务");
     return;
@@ -30732,17 +30771,23 @@ async function exportCustomsStatementByFormat(format = "excel", row = activeStat
       period: periodFilterValue("customsStatement"),
       start,
       end,
-      title: `报关对账单-${company}`,
+      scope: normalizedScope,
+      title: `${normalizedScope === "customerType" ? "同客户类型对账单" : "报关对账单"}-${company}`,
       columns: customsBusinessExportColumns.value
     });
-    downloadBlob(blob, customsStatementExportFilename(company, start, end, normalizedFormat === "pdf" ? "pdf" : "xlsx"));
-    await markStatementDownloaded("customs", company, start, end, {
+    downloadBlob(blob, customsStatementExportFilename(
+      normalizedScope === "customerType" ? `同客户类型-${customerType}` : company,
+      start,
+      end,
+      normalizedFormat === "pdf" ? "pdf" : "xlsx"
+    ));
+    await markStatementDownloaded("customs", normalizedScope === "customerType" ? `同客户类型-${customerType}` : company, start, end, {
       amountHKD: 0,
-      amountRMB: Number(exportRow.total || 0),
+      amountRMB: rows.reduce((sum, item) => sum + Number(item.total || 0), 0),
       recordCount: Number(rows.length || 0),
       snapshotReady: true
     });
-    notify(`已导出报关对账单 ${normalizedFormat === "pdf" ? "PDF" : "Excel"}`);
+    notify(`已导出${normalizedScope === "customerType" ? "同客户类型对账单" : "报关对账单"} ${normalizedFormat === "pdf" ? "PDF" : "Excel"}`);
   } catch (error) {
     notify(error.message || "报关对账单导出失败");
   } finally {
@@ -38417,6 +38462,11 @@ function orderDetailFeeRows(order = {}) {
                   <span>报关对账单</span>
                   <button type="button" title="导出 Excel" aria-label="导出 Excel" @click="exportCustomsStatementByFormat('excel')">Excel</button>
                   <button type="button" title="导出 PDF" aria-label="导出 PDF" @click="exportCustomsStatementByFormat('pdf')">PDF</button>
+                </div>
+                <div v-if="customsStatementCustomerTypeForRow(activeStatementExportRow)" class="statement-export-template-row">
+                  <span>同客户类型对账单</span>
+                  <button type="button" title="导出 Excel" aria-label="导出 Excel" @click="exportCustomsStatementByFormat('excel', activeStatementExportRow, 'customerType')">Excel</button>
+                  <button type="button" title="导出 PDF" aria-label="导出 PDF" @click="exportCustomsStatementByFormat('pdf', activeStatementExportRow, 'customerType')">PDF</button>
                 </div>
               </div>
             </section>

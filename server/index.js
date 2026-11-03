@@ -7551,6 +7551,7 @@ function mapCustomsBusiness(row) {
     declarationNo: userTextValue(row.declaration_no),
     sixSheetNo: userTextValue(row.six_sheet_no),
     company: userTextValue(row.company),
+    customsCustomerType: userTextValue(row.customs_customer_type),
     direction: userTextValue(row.direction),
     itemCount: Number(row.item_count || 0),
     pageCount: Number(row.page_count || 0),
@@ -8024,11 +8025,42 @@ function customsStatementSumFormula(columnIndexes = [], rowNumber = 1) {
   return `SUM(${references.length ? references.join(",") : "0"})`;
 }
 
-async function loadCustomsStatementExportRows(company = "", period = "") {
+async function loadCustomsStatementExportRows(company = "", period = "", options = {}) {
   const targetCompany = customsStatementSafeCompany(company);
+  const scope = String(options.scope || "customer").trim() === "customerType" ? "customerType" : "customer";
   const { start, end } = customsBusinessPeriodBounds({ period });
   const dateWhere = start && end ? "AND business_date >= ? AND business_date < ?" : "";
   const params = start && end ? [start, end] : [];
+  let customerTypeCompanies = null;
+  if (scope === "customerType") {
+    // This field was added after the original customer table schema.  Keep
+    // legacy databases usable: the regular customer export still works, and
+    // the optional customer-type export simply has no rows until the column
+    // exists.
+    if (!(await customerColumnExists("customs_customer_type"))) return [];
+    const customers = await db.prepare(`
+      SELECT name, short_name, customs_customer_type
+      FROM customers
+      WHERE deleted_at IS NULL
+        AND type = '客户'
+        AND customer_category = '报关客户'
+    `).all();
+    const currentCustomer = customers.find((customer) =>
+      [customer.name, customer.short_name]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+        .includes(targetCompany)
+    );
+    const customerType = String(currentCustomer?.customs_customer_type || "").trim();
+    if (!customerType) return [];
+    customerTypeCompanies = new Set(
+      customers
+        .filter((customer) => String(customer.customs_customer_type || "").trim() === customerType)
+        .flatMap((customer) => [customer.name, customer.short_name])
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+    );
+  }
   const linkedIds = await loadLinkedCustomsBusinessIdSet();
   const rows = await db.prepare(`
     SELECT * FROM customs_businesses
@@ -8038,19 +8070,22 @@ async function loadCustomsStatementExportRows(company = "", period = "") {
   `).all(...params);
   return rows
     .map(mapCustomsBusiness)
-    .filter((row) => customsStatementSafeCompany(row.company) === targetCompany)
+    .filter((row) => scope === "customerType"
+      ? customerTypeCompanies.has(customsStatementSafeCompany(row.company))
+      : customsStatementSafeCompany(row.company) === targetCompany)
     .filter((row) => !linkedIds.has(String(row.id || "").trim()));
 }
 
 function customsStatementExportContext(body = {}) {
   const company = customsStatementSafeCompany(body.company);
   const period = String(body.period || "").trim() || "all";
+  const scope = String(body.scope || "").trim() === "customerType" ? "customerType" : "customer";
   const start = String(body.start || "").trim();
   const end = String(body.end || "").trim();
   const rangeLabel = start || end ? `${start || "全部"} 至 ${end || "全部"}` : "全部";
   const title = String(body.title || `${company}报关对账单`).trim() || `${company}报关对账单`;
   const columns = normalizeCustomsStatementExportColumns(body.columns);
-  return { company, period, start, end, rangeLabel, title, columns };
+  return { company, period, scope, start, end, rangeLabel, title, columns };
 }
 
 const CUSTOMS_STATEMENT_OUTER_BORDER = { style: "medium", color: { argb: "FF000000" } };
@@ -9247,11 +9282,26 @@ app.get("/api/customs-businesses", async (req, res) => {
   const { start, end } = customsBusinessPeriodBounds(req.query);
   const dateWhere = start && end ? "AND business_date >= ? AND business_date < ?" : "";
   const params = start && end ? [start, end] : [];
+  const hasCustomsCustomerTypeColumn = await customerColumnExists("customs_customer_type");
+  const customsCustomerTypeSelect = hasCustomsCustomerTypeColumn
+    ? `COALESCE((
+        SELECT c.customs_customer_type
+        FROM customers c
+        WHERE c.deleted_at IS NULL
+          AND c.type = '客户'
+          AND c.customer_category = '报关客户'
+          AND (c.name = customs_businesses.company OR c.short_name = customs_businesses.company)
+        ORDER BY CASE WHEN c.name = customs_businesses.company THEN 0 ELSE 1 END, c.id DESC
+        LIMIT 1
+      ), '') AS customs_customer_type`
+    : "'' AS customs_customer_type";
   const rows = await db.prepare(`
-    SELECT * FROM customs_businesses
-    WHERE deleted_at IS NULL
+    SELECT customs_businesses.*,
+      ${customsCustomerTypeSelect}
+    FROM customs_businesses
+    WHERE customs_businesses.deleted_at IS NULL
       ${dateWhere}
-    ORDER BY business_date DESC, id DESC
+    ORDER BY customs_businesses.business_date DESC, customs_businesses.id DESC
   `).all(...params);
   res.json(rows.map(mapCustomsBusiness));
 });
@@ -9273,7 +9323,7 @@ app.get("/api/customs-businesses/recycle", async (_req, res) => {
 
 app.post("/api/customs-businesses/export/excel", async (req, res) => {
   const context = customsStatementExportContext(req.body || {});
-  const rows = await loadCustomsStatementExportRows(context.company, context.period);
+  const rows = await loadCustomsStatementExportRows(context.company, context.period, context);
   if (!rows.length) {
     res.status(400).type("text/plain").send("当前条件没有可导出的报关业务");
     return;
@@ -9293,7 +9343,7 @@ app.post("/api/customs-businesses/export/excel", async (req, res) => {
 
 app.post("/api/customs-businesses/export/pdf", async (req, res) => {
   const context = customsStatementExportContext(req.body || {});
-  const rows = await loadCustomsStatementExportRows(context.company, context.period);
+  const rows = await loadCustomsStatementExportRows(context.company, context.period, context);
   if (!rows.length) {
     res.status(400).type("text/plain").send("当前条件没有可导出的报关业务");
     return;
