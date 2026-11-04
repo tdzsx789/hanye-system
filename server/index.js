@@ -8519,7 +8519,7 @@ async function findRecentCustomsBusinessDuplicate(item = {}) {
 }
 
 async function createCustomsBusinessWithDuplicateProtection(item, hasHomeFee) {
-  return db.transaction(async () => {
+  const create = db.transaction(async () => {
     await lockCustomsBusinessCreation(item);
     const duplicate = await findRecentCustomsBusinessDuplicate(item);
     if (duplicate) return { duplicate, row: duplicate };
@@ -8534,6 +8534,7 @@ async function createCustomsBusinessWithDuplicateProtection(item, hasHomeFee) {
     const row = await db.prepare("SELECT * FROM customs_businesses WHERE id = ?").get(inserted.lastInsertId);
     return { inserted, row };
   });
+  return create();
 }
 
 function normalizeOtherBusinessPayload(body = {}) {

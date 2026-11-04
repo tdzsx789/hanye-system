@@ -13,8 +13,14 @@ function createContext() {
   const queries = [];
   let duplicate = null;
   let insertCount = 0;
+  let transactionCount = 0;
   const db = {
-    transaction: async (callback) => callback(),
+    transaction(callback) {
+      return async (...args) => {
+        transactionCount += 1;
+        return callback(...args);
+      };
+    },
     prepare(sql) {
       return {
         async get(...args) {
@@ -53,6 +59,9 @@ function createContext() {
     },
     get insertCount() {
       return insertCount;
+    },
+    get transactionCount() {
+      return transactionCount;
     }
   };
 }
@@ -83,6 +92,7 @@ test("recent same-customer declaration is rejected before a second insert", asyn
   const result = await fixture.context.createCustomsBusinessWithDuplicateProtection(payload, true);
   assert.equal(result.duplicate.id, 41);
   assert.equal(fixture.insertCount, 0);
+  assert.equal(fixture.transactionCount, 1);
   const duplicateQuery = fixture.queries.find((query) => query.sql.includes("created_at::timestamptz"));
   assert.equal(JSON.stringify(duplicateQuery.args), JSON.stringify([
     { company: "测试客户", declarationNo: "DEC-1", sixSheetNo: "" }
@@ -96,6 +106,7 @@ test("a new declaration is inserted inside the transaction when no recent duplic
   assert.equal(result.inserted.lastInsertId, 42);
   assert.equal(result.row.id, 42);
   assert.equal(fixture.insertCount, 1);
+  assert.equal(fixture.transactionCount, 1);
   assert(fixture.queries.some((query) => query.sql.includes("pg_advisory_xact_lock")));
 });
 
