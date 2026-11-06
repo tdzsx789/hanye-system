@@ -2805,6 +2805,26 @@ function exportSettlementTotalRow(orders, columns, exchangeInput = null, options
   };
 }
 
+function exportNativeVatTotalRow(orders = [], columns = [], vatRate = 0, options = {}) {
+  const totalOrders = Array.isArray(options.totalOrders) ? options.totalOrders : orders;
+  const values = columns.map(() => "");
+  const labelIndex = 0;
+  values[labelIndex] = exportVatRateLabel(vatRate);
+  ["__hkdTotal", "receivableHKD", "__rmbTotal", "receivableRMB"].forEach((key) => {
+    const index = columns.findIndex((column) => textValue(column?.key) === key);
+    if (index < 0 || values[index]) return;
+    const amount = totalOrders.reduce((sum, order) => sum + exportOrderColumnAmount(order, columns[index]), 0);
+    values[index] = formatExportAmount(Number((amount * (1 + vatRate / 100)).toFixed(2)), false);
+  });
+  return {
+    kind: "vatTotal",
+    values,
+    summary: { vatRate },
+    labelIndex,
+    targetIndex: -1
+  };
+}
+
 function isCustomerStatementExportTitle(title = "") {
   return textValue(title).trim().startsWith("客户对账单");
 }
@@ -2846,26 +2866,28 @@ function exportTableRowData(orders, columns, exchange = null, options = {}) {
       totalOrders
     })
   });
-  if (includeSettlementTotal) {
-    const settlementRow = exportSettlementTotalRow(sortedOrders, columns, exchange, { totalOrders });
+  const settlementRow = includeSettlementTotal
+    ? exportSettlementTotalRow(sortedOrders, columns, exchange, { totalOrders })
+    : null;
+  if (settlementRow) rows.push(settlementRow);
+  const vatRate = options.includeVatRow ? exportStatementVatRate(totalOrders) : 0;
+  if (vatRate > 0) {
     if (settlementRow) {
-      rows.push(settlementRow);
-      const vatRate = options.includeVatRow ? exportStatementVatRate(sortedOrders) : 0;
-      if (vatRate > 0) {
-        const vatValues = columns.map(() => "");
-        vatValues[settlementRow.labelIndex] = exportVatRateLabel(vatRate);
-        vatValues[settlementRow.targetIndex] = formatExportAmount(
-          Number((settlementRow.summary.amount * (1 + vatRate / 100)).toFixed(2)),
-          false
-        );
-        rows.push({
-          kind: "vatTotal",
-          values: vatValues,
-          summary: { ...settlementRow.summary, vatRate },
-          labelIndex: settlementRow.labelIndex,
-          targetIndex: settlementRow.targetIndex
-        });
-      }
+      const vatValues = columns.map(() => "");
+      vatValues[settlementRow.labelIndex] = exportVatRateLabel(vatRate);
+      vatValues[settlementRow.targetIndex] = formatExportAmount(
+        Number((settlementRow.summary.amount * (1 + vatRate / 100)).toFixed(2)),
+        false
+      );
+      rows.push({
+        kind: "vatTotal",
+        values: vatValues,
+        summary: { ...settlementRow.summary, vatRate },
+        labelIndex: settlementRow.labelIndex,
+        targetIndex: settlementRow.targetIndex
+      });
+    } else {
+      rows.push(exportNativeVatTotalRow(sortedOrders, columns, vatRate, { totalOrders }));
     }
   }
   return { sortedOrders, totalOrders, rows };
@@ -3033,6 +3055,69 @@ function exportColumnHeaderBold(column = {}, template = null) {
   if (column.headerBold === true) return true;
   if (column.headerBold === false) return false;
   return template?.tableHeaderBold !== false;
+}
+
+const CUSTOMER_STATEMENT_GROUPED_FEE_CUSTOMERS = new Set(["恒泰通", "恒泰通慧华"]);
+
+function normalizedStatementCustomerName(value = "") {
+  return textValue(value).replace(/\s+/g, "").trim();
+}
+
+function shouldGroupCustomerStatementFeeColumns(customerName = "", orders = []) {
+  const candidates = [
+    customerName,
+    ...orders.flatMap((order) => [
+      order?.customer,
+      order?.customerName,
+      order?.customer_name,
+      order?.customerShortName,
+      order?.customer_short_name,
+      order?.shortName,
+      order?.short_name
+    ])
+  ];
+  return candidates.some((value) => CUSTOMER_STATEMENT_GROUPED_FEE_CUSTOMERS.has(normalizedStatementCustomerName(value)));
+}
+
+// The two customers use a fixed currency layout in their customer statements:
+// RMB fee columns first, followed by HKD fee columns, with RMB/HKD totals at
+// the end in the same order. Keep the original order for every other customer
+// and preserve all non-fee columns.
+function groupCustomerStatementFeeColumns(bodyColumns = [], totalColumns = [], customerName = "", orders = [], enabled = false) {
+  if (!enabled || !shouldGroupCustomerStatementFeeColumns(customerName, orders)) {
+    return { bodyColumns, totalColumns };
+  }
+  const feeColumns = bodyColumns.filter(isExportFeeItemColumn);
+  if (!feeColumns.length) return { bodyColumns, totalColumns };
+  const firstFeeIndex = bodyColumns.findIndex(isExportFeeItemColumn);
+  const nonFeeColumns = bodyColumns.filter((column) => !isExportFeeItemColumn(column));
+  const nonFeeColumnsBeforeFirstFee = bodyColumns
+    .slice(0, firstFeeIndex)
+    .filter((column) => !isExportFeeItemColumn(column)).length;
+  const rmbColumns = feeColumns.filter((column) => exportColumnCurrencyLabel(column) === "RMB");
+  const hkdColumns = feeColumns.filter((column) => exportColumnCurrencyLabel(column) === "HKD");
+  const unknownColumns = feeColumns.filter((column) => !["RMB", "HKD"].includes(exportColumnCurrencyLabel(column)));
+  const groupedFeeBlock = [
+    ...rmbColumns,
+    ...hkdColumns,
+    ...unknownColumns
+  ];
+  const nextBodyColumns = [
+    ...nonFeeColumns.slice(0, nonFeeColumnsBeforeFirstFee),
+    ...groupedFeeBlock,
+    ...nonFeeColumns.slice(nonFeeColumnsBeforeFirstFee)
+  ];
+  const rmbTotal = totalColumns.find((column) => textValue(column?.key) === "__rmbTotal");
+  const hkdTotal = totalColumns.find((column) => textValue(column?.key) === "__hkdTotal");
+  const orderedTotals = [
+    ...(rmbTotal ? [rmbTotal] : []),
+    ...(hkdTotal ? [hkdTotal] : []),
+    ...totalColumns.filter((column) => column !== rmbTotal && column !== hkdTotal)
+  ];
+  return {
+    bodyColumns: nextBodyColumns,
+    totalColumns: orderedTotals
+  };
 }
 
 function pdfTextWithWeight(doc, text, x, y, options = {}, bold = false) {
@@ -3305,9 +3390,18 @@ function exportColumnsForOrders(templatePayload = null, orders = [], options = {
     dynamicColumns,
     exportTemplateFeePositionLookup(templatePayload)
   );
+  const groupedStatementColumns = groupCustomerStatementFeeColumns(
+    mergedBodyColumns,
+    totalColumns,
+    options.statementCustomerName,
+    orders,
+    Boolean(options.groupCustomerStatementFeeColumns)
+  );
+  const statementBodyColumns = groupedStatementColumns.bodyColumns;
+  const statementTotalColumns = groupedStatementColumns.totalColumns;
   let exportBodyColumns = options.includeOperatingUnitColumn && ordersHaveOperatingUnit(orders)
-    ? insertOperatingUnitExportColumn(mergedBodyColumns)
-    : mergedBodyColumns;
+    ? insertOperatingUnitExportColumn(statementBodyColumns)
+    : statementBodyColumns;
   if (options.includeCustomerOrderAttributeColumns && ordersHaveNewOld(orders)) {
     exportBodyColumns = insertOrderAttributeExportColumn(exportBodyColumns, ORDER_EXPORT_NEW_OLD_COLUMN, ["operatingUnit", "customer"]);
   }
@@ -3322,7 +3416,7 @@ function exportColumnsForOrders(templatePayload = null, orders = [], options = {
     sequenceColumn || { ...ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN },
     ...exportBodyColumns,
     ...linkedCustomsColumns,
-    ...totalColumns,
+    ...statementTotalColumns,
     ...chargeNoteColumns
   ].map((column) => ({
     ...column,
@@ -3566,7 +3660,8 @@ async function renderOrdersCsv(orders, title = "订单导出", templatePayload =
     includeSixSheetNoColumn: isCustomerStatement,
     includeLinkedCustomsColumns: isCustomerStatement,
     hideEmptyTemplateColumns: isCustomerStatement || isSupplierStatement,
-    includeStatementRequiredColumns: isCustomerStatement || isSupplierStatement
+    includeStatementRequiredColumns: isCustomerStatement || isSupplierStatement,
+    groupCustomerStatementFeeColumns: isCustomerStatement
   });
   const headers = columns.map(exportColumnHeaderText);
   const rows = exportTableRows(exportOrders, columns, exchange, {
@@ -3955,6 +4050,14 @@ function statementReceiptCategoryClientKey(category = "") {
   return text.replace(/^收费项目行-/, "").trim();
 }
 
+function statementReceiptFileIsFeeAttachment(file = {}) {
+  const category = String(file.category || "").trim();
+  return Boolean(
+    statementReceiptCategoryClientKey(category)
+    || statementReceiptCategoryFeeName(category)
+  );
+}
+
 function truncateDisplayText(value = "", maxWidth = 28) {
   const text = userTextValue(value);
   if (!text || stringDisplayWidth(text) <= maxWidth) return text;
@@ -4102,7 +4205,10 @@ async function loadOrderReceiptImageRows(orders = []) {
         fee
       };
     })
-    .filter((row) => row.extension && row.order);
+    // The receipt sheet is for fee receipts only. Generic order attachments
+    // (category "订单附件") must not be mixed into a statement just because
+    // they happen to be image files.
+    .filter((row) => row.extension && row.order && row.fee && statementReceiptFileIsFeeAttachment(row));
 }
 
 async function fetchReceiptImageBuffer(file = {}) {
@@ -4357,7 +4463,9 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
     includeSixSheetNoColumn: isCustomerStatement,
     includeLinkedCustomsColumns: isCustomerStatement,
     hideEmptyTemplateColumns: isCustomerStatement || isSupplierStatement,
-    includeStatementRequiredColumns: isCustomerStatement || isSupplierStatement
+    includeStatementRequiredColumns: isCustomerStatement || isSupplierStatement,
+    statementCustomerName: options.statementCustomerName,
+    groupCustomerStatementFeeColumns: isCustomerStatement
   });
   const headers = columns.map(exportColumnHeaderText);
   const includeSettlementTotal = shouldIncludeSettlementTotal(title, exchange);
@@ -5072,7 +5180,8 @@ async function renderOrdersExcelHtml(orders, title = "订单导出", templatePay
     includeSixSheetNoColumn: isCustomerStatement,
     includeLinkedCustomsColumns: isCustomerStatement,
     hideEmptyTemplateColumns: isCustomerStatement || isSupplierStatement,
-    includeStatementRequiredColumns: isCustomerStatement || isSupplierStatement
+    includeStatementRequiredColumns: isCustomerStatement || isSupplierStatement,
+    groupCustomerStatementFeeColumns: isCustomerStatement
   });
   const context = {
     title,
@@ -5977,11 +6086,16 @@ async function loadExportOrdersFromRequest(body = {}, orderNos = [], account = n
     : [];
   const specialLookup = await loadSpecialCustomerOrderLookup();
   const visibleSnapshotOrders = await filterVisibleOrdersForAccount(snapshotOrders, account, specialLookup);
-  if (snapshotOrders.length > 0) return visibleSnapshotOrders;
+  if (snapshotOrders.length > 0) {
+    // Snapshots from older web clients may not contain the customer's VAT
+    // rate. Refresh customer feature flags from the database before export so
+    // a saved customer tax point is still reflected in the statement.
+    return attachTransportCustomerFeatureFlagsToOrders(visibleSnapshotOrders);
+  }
   return loadExportOrders(orderNos, account);
 }
 
-async function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = null, filename = "", exchange = null) {
+async function renderOrdersPdf(res, orders, title = "订单导出", templatePayload = null, filename = "", exchange = null, options = {}) {
   const template = normalizeExportTemplate(templatePayload);
   const isCustomerStatement = isCustomerStatementExportTitle(title);
   const isSupplierStatement = isSupplierStatementExportTitle(title);
@@ -5993,7 +6107,9 @@ async function renderOrdersPdf(res, orders, title = "订单导出", templatePayl
     includeSixSheetNoColumn: isCustomerStatement,
     includeLinkedCustomsColumns: isCustomerStatement,
     hideEmptyTemplateColumns: isCustomerStatement || isSupplierStatement,
-    includeStatementRequiredColumns: isCustomerStatement || isSupplierStatement
+    includeStatementRequiredColumns: isCustomerStatement || isSupplierStatement,
+    statementCustomerName: options.statementCustomerName,
+    groupCustomerStatementFeeColumns: isCustomerStatement
   });
   const tableWidth = sourceColumns.reduce((sum, column) => sum + Number(column.width || 76), 0);
   const fluidPageWidth = Math.max(842, Math.ceil(tableWidth + 48));
@@ -7337,17 +7453,25 @@ function packDriverWageSettlementNote(note = "", metadata = {}) {
 
 function normalizeDriverWageSettlementWriteItem(item = {}, support = {}) {
   const currency = normalizeDriverWageFeeCurrency(item.adjustmentsCurrency, item.adjustmentsUnit);
-  const amount = item.adjustmentsHKD ?? item.adjustmentsRMB ?? null;
+  const hasExplicitRmb = item.adjustmentsRMB !== undefined && item.adjustmentsRMB !== null;
+  const hasExplicitHkd = item.adjustmentsHKD !== undefined && item.adjustmentsHKD !== null;
+  const legacyRmbOnly = currency === "RMB" && hasExplicitHkd && !hasExplicitRmb;
   const canonical = {
     ...item,
-    // The new model stores the amount in adjustments_hkd and uses the currency
-    // column to describe it. Keep the legacy RMB column empty for a canonical
-    // RMB row so old and new fields cannot be counted together.
-    adjustmentsHKD: item.adjustmentsHKD ?? (currency === "RMB" ? item.adjustmentsRMB : null),
-    adjustmentsRMB: item.adjustmentsHKD == null && currency === "RMB" ? null : item.adjustmentsRMB
+    // Keep the two currencies in their own columns. Older clients sent one
+    // amount in adjustmentsHKD with adjustmentsCurrency=RMB; migrate that
+    // shape to the dedicated RMB column while retaining both new fields.
+    adjustmentsHKD: legacyRmbOnly
+      ? item.adjustmentsHKD
+      : item.adjustmentsHKD ?? (currency === "RMB" ? item.adjustmentsRMB : null),
+    adjustmentsRMB: legacyRmbOnly
+      ? item.adjustmentsHKD
+      : (item.adjustmentsHKD == null && currency === "RMB" ? null : item.adjustmentsRMB ?? null)
   };
   const metadata = {};
   const compatibilityColumns = [
+    ["adjustmentsHKD", "adjustmentsHKD"],
+    ["adjustmentsRMB", "adjustmentsRMB"],
     ["adjustmentsUnit", "adjustmentsUnit"],
     ["adjustmentsCurrency", "adjustmentsCurrency"],
     ["plateFeeHKD", "plateFeeHKD"],
@@ -7367,30 +7491,40 @@ function normalizeDriverWageSettlementWriteItem(item = {}, support = {}) {
   // Older production schemas only understand the two legacy amount columns.
   // Project RMB values back to that shape and store fields with no legacy
   // column in the existing note field instead of silently dropping them.
-  const legacyAmounts = support.adjustmentsCurrency ? canonical : {
+  const hasDualAdjustmentAmounts = hasExplicitHkd && hasExplicitRmb;
+  const legacyAmounts = support.adjustmentsCurrency || hasDualAdjustmentAmounts ? canonical : {
     ...canonical,
     adjustmentsHKD: currency === "RMB" ? null : canonical.adjustmentsHKD,
-    adjustmentsRMB: currency === "RMB" ? amount : canonical.adjustmentsRMB
+    adjustmentsRMB: currency === "RMB" ? (item.adjustmentsHKD ?? item.adjustmentsRMB) : canonical.adjustmentsRMB
   };
   return { ...legacyAmounts, note: packDriverWageSettlementNote(item.note, metadata) };
 }
 
 function mapDriverWageSettlement(row) {
   const { note, metadata } = unpackDriverWageSettlementNote(row.note);
-  const legacyAdjustmentsCurrency = row.adjustments_hkd == null && row.adjustments_rmb != null
-    && normalizeDriverWageFeeCurrency(row.adjustments_currency ?? metadata.adjustmentsCurrency, row.adjustments_unit ?? metadata.adjustmentsUnit) === "HKD"
-    ? "RMB"
-    : (row.adjustments_currency ?? metadata.adjustmentsCurrency ?? row.adjustments_unit ?? metadata.adjustmentsUnit ?? "HKD");
+  const storedAdjustmentsHKD = row.adjustments_hkd ?? metadata.adjustmentsHKD ?? null;
+  const storedAdjustmentsRMB = row.adjustments_rmb ?? metadata.adjustmentsRMB ?? null;
+  const hasStoredCurrency = row.adjustments_currency != null || metadata.adjustmentsCurrency != null;
+  const storedCurrency = normalizeDriverWageFeeCurrency(
+    row.adjustments_currency ?? metadata.adjustmentsCurrency,
+    row.adjustments_unit ?? metadata.adjustmentsUnit
+  );
+  const legacyRmbInHkdColumn = (storedAdjustmentsHKD != null
+    && storedAdjustmentsRMB == null
+    && storedCurrency === "RMB")
+    || (!hasStoredCurrency && storedAdjustmentsHKD == null && storedAdjustmentsRMB != null);
+  const legacyRmbWasUnlabelled = !hasStoredCurrency && storedAdjustmentsHKD == null && storedAdjustmentsRMB != null;
+  const mappedAdjustmentsCurrency = legacyRmbInHkdColumn || legacyRmbWasUnlabelled ? "RMB" : storedCurrency;
   return {
     id: row.id,
     periodKey: row.period_key || "",
     driverId: row.driver_id,
     status: normalizeDriverWageSettlementStatus(row.status),
     settledAt: row.settled_at || "",
-    adjustmentsHKD: row.adjustments_hkd ?? null,
-    adjustmentsRMB: row.adjustments_rmb ?? null,
+    adjustmentsHKD: legacyRmbWasUnlabelled ? storedAdjustmentsRMB : legacyRmbInHkdColumn ? null : storedAdjustmentsHKD,
+    adjustmentsRMB: legacyRmbWasUnlabelled ? null : legacyRmbInHkdColumn ? storedAdjustmentsHKD : storedAdjustmentsRMB,
     adjustmentsUnit: normalizeDriverWageFeeUnit(row.adjustments_unit ?? metadata.adjustmentsUnit),
-    adjustmentsCurrency: normalizeDriverWageFeeCurrency(legacyAdjustmentsCurrency, row.adjustments_unit ?? metadata.adjustmentsUnit),
+    adjustmentsCurrency: mappedAdjustmentsCurrency,
     plateFeeHKD: row.plate_fee_hkd ?? metadata.plateFeeHKD ?? null,
     plateFeeUnit: normalizeDriverWageFeeUnit(row.plate_fee_unit ?? metadata.plateFeeUnit),
     plateFeeCurrency: normalizeDriverWageFeeCurrency(row.plate_fee_currency ?? metadata.plateFeeCurrency, row.plate_fee_unit ?? metadata.plateFeeUnit),
@@ -7410,19 +7544,28 @@ function mapDriverWageSettlement(row) {
 function readDriverWageSettlementPayload(body = {}, current = null) {
   const noteValue = pickBody(body, "note", "remark", current?.note ?? "");
   const currentMetadata = unpackDriverWageSettlementNote(current?.note).metadata;
-  const currentAdjustmentsCurrency = current?.adjustments_hkd == null && current?.adjustments_rmb != null
-    && normalizeDriverWageFeeCurrency(current?.adjustments_currency ?? currentMetadata.adjustmentsCurrency, current?.adjustments_unit ?? currentMetadata.adjustmentsUnit) === "HKD"
-    ? "RMB"
-    : (current?.adjustments_currency ?? currentMetadata.adjustmentsCurrency);
+  const currentStoredCurrency = normalizeDriverWageFeeCurrency(
+    current?.adjustments_currency ?? currentMetadata.adjustmentsCurrency,
+    current?.adjustments_unit ?? currentMetadata.adjustmentsUnit
+  );
+  const currentHasStoredCurrency = current?.adjustments_currency != null || currentMetadata.adjustmentsCurrency != null;
+  const currentAdjustmentsHKD = current?.adjustments_hkd ?? currentMetadata.adjustmentsHKD ?? null;
+  const currentAdjustmentsRMB = current?.adjustments_rmb ?? currentMetadata.adjustmentsRMB ?? null;
+  const currentLegacyRmbInHkdColumn = currentAdjustmentsHKD != null
+    && currentAdjustmentsRMB == null
+    && currentStoredCurrency === "RMB";
+  const currentLegacyUnlabelledRmb = !currentHasStoredCurrency
+    && currentAdjustmentsHKD == null
+    && currentAdjustmentsRMB != null;
   return {
     periodKey: String(body.periodKey ?? body.period_key ?? current?.period_key ?? "").trim(),
     driverId: Number(body.driverId ?? body.driver_id ?? current?.driver_id ?? 0),
     status: normalizeDriverWageSettlementStatus(body.status ?? body.settlementStatus ?? body.settlement_status ?? current?.status ?? ""),
     settledAt: String(body.settledAt ?? body.settled_at ?? current?.settled_at ?? "").trim(),
-    adjustmentsHKD: normalizeOptionalDriverWageAmount(pickBody(body, "adjustmentsHKD", "adjustments_hkd", current?.adjustments_hkd)),
-    adjustmentsRMB: normalizeOptionalDriverWageAmount(pickBody(body, "adjustmentsRMB", "adjustments_rmb", current?.adjustments_rmb)),
+    adjustmentsHKD: normalizeOptionalDriverWageAmount(pickBody(body, "adjustmentsHKD", "adjustments_hkd", currentLegacyUnlabelledRmb ? currentAdjustmentsRMB : currentLegacyRmbInHkdColumn ? null : currentAdjustmentsHKD)),
+    adjustmentsRMB: normalizeOptionalDriverWageAmount(pickBody(body, "adjustmentsRMB", "adjustments_rmb", currentLegacyUnlabelledRmb ? null : currentLegacyRmbInHkdColumn ? currentAdjustmentsHKD : currentAdjustmentsRMB)),
     adjustmentsUnit: normalizeDriverWageFeeUnit(pickBody(body, "adjustmentsUnit", "adjustments_unit", current?.adjustments_unit ?? currentMetadata.adjustmentsUnit)),
-    adjustmentsCurrency: normalizeDriverWageFeeCurrency(pickBody(body, "adjustmentsCurrency", "adjustments_currency", currentAdjustmentsCurrency), pickBody(body, "adjustmentsUnit", "adjustments_unit", current?.adjustments_unit ?? currentMetadata.adjustmentsUnit)),
+    adjustmentsCurrency: normalizeDriverWageFeeCurrency(pickBody(body, "adjustmentsCurrency", "adjustments_currency", currentStoredCurrency), pickBody(body, "adjustmentsUnit", "adjustments_unit", current?.adjustments_unit ?? currentMetadata.adjustmentsUnit)),
     plateFeeHKD: normalizeOptionalDriverWageAmount(pickBody(body, "plateFeeHKD", "plate_fee_hkd", current?.plate_fee_hkd ?? currentMetadata.plateFeeHKD)),
     plateFeeUnit: normalizeDriverWageFeeUnit(pickBody(body, "plateFeeUnit", "plate_fee_unit", current?.plate_fee_unit ?? currentMetadata.plateFeeUnit)),
     plateFeeCurrency: normalizeDriverWageFeeCurrency(pickBody(body, "plateFeeCurrency", "plate_fee_currency", current?.plate_fee_currency ?? currentMetadata.plateFeeCurrency), pickBody(body, "plateFeeUnit", "plate_fee_unit", current?.plate_fee_unit ?? currentMetadata.plateFeeUnit)),
@@ -8818,13 +8961,24 @@ async function attachTransportCustomerFeatureFlagsToOrders(orders = []) {
       || customerFeatureMap.get(String(order.customer || "").trim())
       || customerFeatureMap.get(String(order.customerShortName || "").trim())
       || {};
+    const hasFeature = Object.keys(feature).length > 0;
     return {
       ...order,
-      customerOperatingUnitEnabled: Boolean(feature.operatingUnitEnabled),
-      customerNewOldEnabled: Boolean(feature.newOldEnabled),
-      customerSpecialCarEnabled: Boolean(feature.specialCarEnabled),
-      customerCustomsDeclarationNoEnabled: Boolean(feature.customsDeclarationNoEnabled),
-      customerVatRate: normalizeCustomerVatRate(feature.vatRate)
+      customerOperatingUnitEnabled: hasFeature
+        ? Boolean(feature.operatingUnitEnabled)
+        : Boolean(order.customerOperatingUnitEnabled ?? order.customer_operating_unit_enabled),
+      customerNewOldEnabled: hasFeature
+        ? Boolean(feature.newOldEnabled)
+        : Boolean(order.customerNewOldEnabled ?? order.customer_new_old_enabled),
+      customerSpecialCarEnabled: hasFeature
+        ? Boolean(feature.specialCarEnabled)
+        : Boolean(order.customerSpecialCarEnabled ?? order.customer_special_car_enabled),
+      customerCustomsDeclarationNoEnabled: hasFeature
+        ? Boolean(feature.customsDeclarationNoEnabled)
+        : Boolean(order.customerCustomsDeclarationNoEnabled ?? order.customer_customs_declaration_no_enabled),
+      customerVatRate: hasFeature
+        ? normalizeCustomerVatRate(feature.vatRate)
+        : normalizeCustomerVatRate(order.customerVatRate ?? order.customer_vat_rate)
     };
   });
 }
@@ -12726,7 +12880,8 @@ app.post("/api/orders/export/excel", async (req, res) => {
     const body = useKenfaTemplate
       ? await renderKenfaStatementXlsxBuffer(orders, title, exchange)
       : await renderOrdersXlsxBuffer(orders, title, visualTemplate, exchange, {
-        includeReceiptSheet: Boolean(req.body.includeReceiptSheet)
+        includeReceiptSheet: Boolean(req.body.includeReceiptSheet),
+        statementCustomerName: req.body.statementCustomerName || ""
       });
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(orderExportFilename(orders, "xlsx"))}`);
@@ -12757,7 +12912,9 @@ app.post("/api/orders/export/pdf", async (req, res) => {
     return;
   }
   await writeAudit("export", "order", orderNos.join(",") || "all", `PDF ${orders.length} 条`);
-  await renderOrdersPdf(res, orders, title, template, orderExportFilename(orders, "pdf"), exchange);
+  await renderOrdersPdf(res, orders, title, template, orderExportFilename(orders, "pdf"), exchange, {
+    statementCustomerName: req.body.statementCustomerName || ""
+  });
 });
 
 app.post("/api/orders/audit", async (req, res) => {

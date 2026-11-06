@@ -8822,7 +8822,7 @@ function customerStatementOrderSnapshot(order = {}) {
     customerOperatingUnitEnabled: booleanFlag(order.customerOperatingUnitEnabled ?? customer?.operatingUnitEnabled, false),
     customerNewOldEnabled: booleanFlag(order.customerNewOldEnabled ?? customer?.newOldEnabled, false),
     customerSpecialCarEnabled: booleanFlag(order.customerSpecialCarEnabled ?? customer?.specialCarEnabled, false),
-    customerVatRate: normalizeCustomerVatRate(order.customerVatRate ?? customer?.vatRate),
+    customerVatRate: normalizeCustomerVatRate(customer?.vatRate ?? order.customerVatRate ?? order.customer_vat_rate),
     chargedAt: order.chargedAt || "",
     fees
   };
@@ -11136,13 +11136,17 @@ function normalizeFinanceWageSettlementRow(item = {}) {
     ?? item.adjustments_currency
     ?? item.adjustmentsUnit
     ?? item.adjustments_unit;
+  const hasAdjustmentsCurrencySource = Boolean(String(adjustmentsCurrencySource || "").trim());
   const adjustmentsCurrency = rawAdjustmentsHKD == null
     && rawAdjustmentsRMB != null
-    && !String(adjustmentsCurrencySource || "").trim()
+    && !hasAdjustmentsCurrencySource
     ? "RMB"
     : feeCurrency(adjustmentsCurrencySource, item.adjustmentsUnit ?? item.adjustments_unit);
-  const legacyRmbOnly = rawAdjustmentsHKD == null
+  const legacyUnlabelledRmb = !hasAdjustmentsCurrencySource
     && rawAdjustmentsRMB != null
+    && rawAdjustmentsHKD == null;
+  const legacyRmbInHKDColumn = rawAdjustmentsHKD != null
+    && rawAdjustmentsRMB == null
     && adjustmentsCurrency === "RMB";
   return {
     id: item.id,
@@ -11152,11 +11156,8 @@ function normalizeFinanceWageSettlementRow(item = {}) {
       ? DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS
       : DRIVER_WAGE_SETTLEMENT_PENDING_STATUS,
     settledAt: String(item.settledAt || item.settled_at || "").trim(),
-    // Historical rows used adjustments_rmb without a currency column. Treat
-    // that single value as the canonical amount so editing does not duplicate
-    // it into both the legacy and new fields.
-    adjustmentsHKD: legacyRmbOnly ? rawAdjustmentsRMB : rawAdjustmentsHKD,
-    adjustmentsRMB: legacyRmbOnly ? null : rawAdjustmentsRMB,
+    adjustmentsHKD: legacyUnlabelledRmb ? rawAdjustmentsRMB : legacyRmbInHKDColumn ? null : rawAdjustmentsHKD,
+    adjustmentsRMB: legacyUnlabelledRmb ? null : legacyRmbInHKDColumn ? rawAdjustmentsHKD : rawAdjustmentsRMB,
     adjustmentsCurrency,
     plateFeeHKD: item.plateFeeHKD ?? item.plate_fee_hkd ?? null,
     plateFeeCurrency: feeCurrency(item.plateFeeCurrency ?? item.plate_fee_currency, item.plateFeeUnit ?? item.plate_fee_unit),
@@ -11357,10 +11358,8 @@ function openFinanceWageSettlementEditModal(row = null) {
     financeWageSettlementStatusText(row) === DRIVER_WAGE_SETTLEMENT_SETTLED_STATUS ? todayInputValue() : ""
   );
   financeWageSettlementEditForm.adjustmentsHKD = settlement?.adjustmentsHKD
-    ?? settlement?.adjustmentsRMB
     ?? financeWageSettlementBaseAmountValue(row, "HKD");
   financeWageSettlementEditForm.adjustmentsRMB = settlement?.adjustmentsRMB ?? financeWageSettlementBaseAmountValue(row, "RMB");
-  financeWageSettlementEditForm.adjustmentsCurrency = settlement?.adjustmentsCurrency || DRIVER_WAGE_DEFAULT_FEE_CURRENCY;
   financeWageSettlementEditForm.plateFeeHKD = settlement?.plateFeeHKD ?? "";
   financeWageSettlementEditForm.plateFeeCurrency = settlement?.plateFeeCurrency || DRIVER_WAGE_DEFAULT_FEE_CURRENCY;
   financeWageSettlementEditForm.socialSecurityFeeHKD = settlement?.socialSecurityFeeHKD ?? "";
@@ -11392,14 +11391,13 @@ async function saveFinanceWageSettlementFromEditor() {
       }
       return normalizeFinanceWageSettlementManualAmount(value, baseValue);
     };
-    const nextAdjustmentsHKD = normalizeEditorAmount(financeWageSettlementEditForm.adjustmentsHKD, financeWageSettlementBaseAmountValue(row, "HKD"), currentSettlement?.adjustmentsCurrency, financeWageSettlementEditForm.adjustmentsCurrency);
+    const nextAdjustmentsHKD = normalizeFinanceWageSettlementManualAmount(financeWageSettlementEditForm.adjustmentsHKD, financeWageSettlementBaseAmountValue(row, "HKD"));
     const nextAdjustmentsRMB = normalizeFinanceWageSettlementManualAmount(financeWageSettlementEditForm.adjustmentsRMB, financeWageSettlementBaseAmountValue(row, "RMB"));
     const nextPlateFeeHKD = normalizeEditorAmount(financeWageSettlementEditForm.plateFeeHKD, 0, currentSettlement?.plateFeeCurrency, financeWageSettlementEditForm.plateFeeCurrency);
     const nextSocialSecurityFeeHKD = normalizeEditorAmount(financeWageSettlementEditForm.socialSecurityFeeHKD, 0, currentSettlement?.socialSecurityFeeCurrency, financeWageSettlementEditForm.socialSecurityFeeCurrency);
     const nextParkingFeeHKD = normalizeEditorAmount(financeWageSettlementEditForm.parkingFeeHKD, 0, currentSettlement?.parkingFeeCurrency, financeWageSettlementEditForm.parkingFeeCurrency);
     const adjustmentsChanged = Number(currentSettlement?.adjustmentsHKD ?? NaN) !== Number(nextAdjustmentsHKD ?? NaN)
       || Number(currentSettlement?.adjustmentsRMB ?? NaN) !== Number(nextAdjustmentsRMB ?? NaN)
-      || financeWageCurrencyCode(currentSettlement?.adjustmentsCurrency) !== financeWageCurrencyCode(financeWageSettlementEditForm.adjustmentsCurrency)
       || Number(currentSettlement?.plateFeeHKD ?? NaN) !== Number(nextPlateFeeHKD ?? NaN)
       || financeWageCurrencyCode(currentSettlement?.plateFeeCurrency) !== financeWageCurrencyCode(financeWageSettlementEditForm.plateFeeCurrency)
       || Number(currentSettlement?.socialSecurityFeeHKD ?? NaN) !== Number(nextSocialSecurityFeeHKD ?? NaN)
@@ -11410,7 +11408,7 @@ async function saveFinanceWageSettlementFromEditor() {
       note: financeWageSettlementEditForm.note,
       adjustmentsHKD: nextAdjustmentsHKD,
       adjustmentsRMB: nextAdjustmentsRMB,
-      adjustmentsCurrency: financeWageSettlementEditForm.adjustmentsCurrency,
+      adjustmentsCurrency: currentSettlement?.adjustmentsCurrency || "HKD",
       plateFeeHKD: nextPlateFeeHKD,
       plateFeeCurrency: financeWageSettlementEditForm.plateFeeCurrency,
       socialSecurityFeeHKD: nextSocialSecurityFeeHKD,
@@ -11852,6 +11850,10 @@ function financeWageAmountToHKD(amount = 0, currency = "HKD", exchangeRate = 0) 
     : value;
 }
 
+function financeWageMiscDeductionHKD(hkd = 0, rmb = 0, exchangeRate = 0) {
+  return Number((Number(hkd || 0) + financeWageAmountToHKD(rmb, "RMB", exchangeRate)).toFixed(2));
+}
+
 function buildFinanceWageRows(sourceOrders, sourceAdjustments, sourceSettlements = [], options = {}) {
   const includeAllDrivers = Boolean(options.includeAllDrivers);
   const sourceDrivers = Array.isArray(options.drivers) ? options.drivers : driverRows.value;
@@ -11904,24 +11906,16 @@ function buildFinanceWageRows(sourceOrders, sourceAdjustments, sourceSettlements
       }, { hkd: 0, rmb: 0 });
     const settlement = settlementMap.get(String(driver.id)) || null;
     const exchangeRate = Number(monthlyExchangeRateInputValue(monthlyExchangeRatePeriodMonth("finance")) || 0);
-    const legacyRmbAdjustmentHKD = settlement?.adjustmentsRMB !== null && settlement?.adjustmentsRMB !== undefined
-      ? (exchangeRate > 0 ? Number(settlement.adjustmentsRMB || 0) / exchangeRate : 0)
-      : 0;
     const hasManualHKDMisc = settlement?.adjustmentsHKD !== null && settlement?.adjustmentsHKD !== undefined;
-    const hasLegacyRmbMisc = settlement?.adjustmentsRMB !== null && settlement?.adjustmentsRMB !== undefined;
-    const hasManualMisc = hasManualHKDMisc || hasLegacyRmbMisc;
-    const adjustmentsCurrency = hasManualHKDMisc
-      ? financeWageCurrencyCode(settlement?.adjustmentsCurrency || "HKD")
-      : "RMB";
-    const adjustments = hasManualHKDMisc
-      ? Number(settlement.adjustmentsHKD || 0)
-      : (hasLegacyRmbMisc ? Number(settlement.adjustmentsRMB || 0) : autoAdjustmentBreakdown.hkd);
-    const adjustmentsRMB = hasManualMisc
-      ? (adjustmentsCurrency === "RMB" ? adjustments : 0)
-      : autoAdjustmentBreakdown.rmb;
+    const hasManualRMBMisc = settlement?.adjustmentsRMB !== null && settlement?.adjustmentsRMB !== undefined;
+    const hasManualMisc = hasManualHKDMisc || hasManualRMBMisc;
+    const manualAdjustmentsHKD = hasManualHKDMisc ? Number(settlement.adjustmentsHKD || 0) : 0;
+    const manualAdjustmentsRMB = hasManualRMBMisc ? Number(settlement.adjustmentsRMB || 0) : 0;
+    const adjustments = hasManualMisc ? manualAdjustmentsHKD : autoAdjustmentBreakdown.hkd;
+    const adjustmentsRMB = hasManualMisc ? manualAdjustmentsRMB : autoAdjustmentBreakdown.rmb;
     const miscAdjustmentHKD = hasManualMisc
-      ? financeWageAmountToHKD(adjustments, adjustmentsCurrency, exchangeRate) + (hasManualHKDMisc ? legacyRmbAdjustmentHKD : 0)
-      : autoAdjustmentBreakdown.hkd + financeWageAmountToHKD(autoAdjustmentBreakdown.rmb, "RMB", exchangeRate);
+      ? financeWageMiscDeductionHKD(manualAdjustmentsHKD, manualAdjustmentsRMB, exchangeRate)
+      : financeWageMiscDeductionHKD(autoAdjustmentBreakdown.hkd, autoAdjustmentBreakdown.rmb, exchangeRate);
     const plateFeeCurrency = financeWageCurrencyCode(settlement?.plateFeeCurrency || "HKD");
     const socialSecurityFeeCurrency = financeWageCurrencyCode(settlement?.socialSecurityFeeCurrency || "HKD");
     const parkingFeeCurrency = financeWageCurrencyCode(settlement?.parkingFeeCurrency || "HKD");
@@ -11935,16 +11929,8 @@ function buildFinanceWageRows(sourceOrders, sourceAdjustments, sourceSettlements
     const totalHKD = Math.max(0, Number((wageBreakdown.hkd - totalDeductionHKD).toFixed(2)));
     const totalRMB = Math.max(0, Number(wageBreakdown.rmb.toFixed(2)));
     const adjustmentsDisplay = hasManualMisc
-      ? [
-        adjustmentsCurrency === "RMB" ? financeWageFeeText(adjustments, "RMB") : financeWageFeeText(adjustments, "HKD"),
-        hasManualHKDMisc && settlement?.adjustmentsRMB !== null && settlement?.adjustmentsRMB !== undefined
-          ? financeWageFeeText(settlement.adjustmentsRMB, "RMB")
-          : ""
-      ].filter((value, index, values) => value !== "-" && values.indexOf(value) === index).join(" / ") || "-"
-      : [
-        autoAdjustmentBreakdown.hkd ? financeWageFeeText(autoAdjustmentBreakdown.hkd, "HKD") : "",
-        autoAdjustmentBreakdown.rmb ? financeWageFeeText(autoAdjustmentBreakdown.rmb, "RMB") : ""
-      ].filter(Boolean).join(" / ") || "-";
+      ? financeWageMiscDisplay(manualAdjustmentsHKD, manualAdjustmentsRMB)
+      : financeWageMiscDisplay(autoAdjustmentBreakdown.hkd, autoAdjustmentBreakdown.rmb);
     return {
       driver,
       orders,
@@ -11957,7 +11943,7 @@ function buildFinanceWageRows(sourceOrders, sourceAdjustments, sourceSettlements
       adjustmentsAutoRMB: autoAdjustmentBreakdown.rmb,
       adjustments,
       adjustmentsRMB,
-      adjustmentsCurrency: hasManualMisc ? adjustmentsCurrency : (autoAdjustmentBreakdown.hkd ? "HKD" : "RMB"),
+      adjustmentsCurrency: hasManualMisc ? (hasManualHKDMisc ? "HKD" : "RMB") : (autoAdjustmentBreakdown.hkd ? "HKD" : "RMB"),
       adjustmentsDisplay,
       plateFee: plateFeeAmount,
       plateFeeCurrency,
@@ -14108,7 +14094,7 @@ function statementCustomerOrderMatchesEntity(order = {}, entityName = "", custom
 
 function statementSupplierOrderMatchesEntity(order = {}, entityName = "") {
   return normalizeVehicleSource(order.vehicleSource) === "外派车辆"
-    && String(order.supplier || "").trim() === String(entityName || "").trim();
+    && supplierOrderCostFeeRows(order, entityName).length > 0;
 }
 
 function statementCustomsRowMatchesEntity(row = {}, entityName = "") {
@@ -14318,7 +14304,7 @@ function buildBossUnreceivedSupplierRows(filterKey = bossPeriodFilter.value) {
         );
         const payableOrders = sourceOrders.filter((order) => !isChargedOrder(order));
         const liveAmount = payableOrders.reduce((sum, order) => {
-          const payable = supplierOrderPayableBreakdown(order);
+          const payable = supplierOrderPayableBreakdown(order, entityName);
           return {
             hkd: sum.hkd + Number(payable.payableHKD || 0),
             rmb: sum.rmb + Number(payable.payableRMB || 0)
@@ -14619,16 +14605,19 @@ function buildStatementSupplierRows(sourceOrders) {
   sourceOrders
     .filter((order) => order.vehicleSource === "外派车辆" && order.supplier)
     .forEach((order) => {
-      const key = order.supplier || "未填写供应商";
-      const payable = supplierOrderPayableBreakdown(order);
-      if (!payable.feeRows.length) return;
-      const row = groups.get(key) || { supplier: key, count: 0, hkd: 0, rmb: 0, missingCostCount: 0, matchedCostCount: 0 };
-      row.count += 1;
-      row.hkd += Number(payable.payableHKD || 0);
-      row.rmb += Number(payable.payableRMB || 0);
-      row.matchedCostCount += Number(payable.matchedCostCount || 0);
-      row.missingCostCount += Number(payable.missingCostCount || 0);
-      groups.set(key, row);
+      supplierOrderFeeSupplierNames(order).forEach((supplierName) => {
+        const existingKey = Array.from(groups.keys()).find((key) => supplierEntityNamesMatch(key, supplierName));
+        const key = existingKey || supplierName;
+        const payable = supplierOrderPayableBreakdown(order, supplierName);
+        if (!payable.feeRows.length) return;
+        const row = groups.get(key) || { supplier: key, count: 0, hkd: 0, rmb: 0, missingCostCount: 0, matchedCostCount: 0 };
+        row.count += 1;
+        row.hkd += Number(payable.payableHKD || 0);
+        row.rmb += Number(payable.payableRMB || 0);
+        row.matchedCostCount += Number(payable.matchedCostCount || 0);
+        row.missingCostCount += Number(payable.missingCostCount || 0);
+        groups.set(key, row);
+      });
     });
   return Array.from(groups.values()).sort((a, b) =>
     b.count - a.count || b.hkd - a.hkd || b.rmb - a.rmb || a.supplier.localeCompare(b.supplier, "zh-Hans-CN")
@@ -15479,7 +15468,7 @@ function statementDownloadSnapshotForRecord(record = {}) {
     );
     const payableOrders = sourceOrders.filter((order) => !isChargedOrder(order));
     const amount = payableOrders.reduce((sum, order) => {
-      const payable = supplierOrderPayableBreakdown(order);
+      const payable = supplierOrderPayableBreakdown(order, entityName);
       return {
         hkd: sum.hkd + Number(payable.payableHKD || 0),
         rmb: sum.rmb + Number(payable.payableRMB || 0)
@@ -16221,13 +16210,7 @@ const statementEntityOptions = computed(() => {
       .filter((item) => item.name);
   }
   if (statementExportType.value === "supplier") {
-    const names = new Set(statementBillableOrderRows.value
-      .filter((order) =>
-        order.vehicleSource === "外派车辆"
-        && supplierOrderPayableBreakdown(order).feeRows.length
-      )
-      .map((order) => order.supplier)
-      .filter(Boolean));
+    const names = new Set(statementSupplierRows.value.map((row) => row.supplier).filter(Boolean));
     return Array.from(names).map((name) => ({ id: name, name }));
   }
   return statementCustomerRows.value
@@ -16294,7 +16277,7 @@ function selectedStatementOrders() {
     if (!isFinanceStatVisibleOrder(order)) return false;
     if (!orderInDateRange(order, start, end)) return false;
     if (statementExportType.value === "supplier") {
-      return order.vehicleSource === "外派车辆" && order.supplier === entity;
+      return statementSupplierOrderMatchesEntity(order, entity);
     }
     if (statementExportType.value === "driver") {
       return Boolean(statementDriver && orderMatchesDriverForWage(order, statementDriver));
@@ -16323,6 +16306,15 @@ function statementConvertedTotal(orders, currency, rateValue) {
   return { hkd, rmb, total: rmb + hkd * rate, label: "总计人民币合计：" };
 }
 
+function statementCustomerVatRate(orders = []) {
+  for (const order of orders) {
+    const customer = transportCustomerByReference(order.customer || "", order.customerId || "");
+    const rate = normalizeCustomerVatRate(customer?.vatRate ?? order.customerVatRate ?? order.customer_vat_rate);
+    if (rate > 0) return rate;
+  }
+  return 0;
+}
+
 function statementFeeText(order) {
   return orderFeesWithCurrentFx(order)
     .filter((fee) => Number(fee.amount || 0) || fee.name)
@@ -16338,7 +16330,14 @@ function statementChargeNoteText(order = {}) {
 async function statementAttachmentText(order) {
   try {
     const files = await loadFiles("order", order.no);
-    return files.map((file) => file.filename || file.name).filter(Boolean).join("；");
+    return files
+      .filter((file) => {
+        const category = String(file?.category || "").trim();
+        return category.startsWith("收费项目-") || category.startsWith("收费项目行-");
+      })
+      .map((file) => file.filename || file.name)
+      .filter(Boolean)
+      .join("；");
   } catch {
     return "";
   }
@@ -25431,6 +25430,13 @@ function financeWageFeeText(amount = 0, currency = DRIVER_WAGE_DEFAULT_FEE_CURRE
   return `${financeWageCurrencyCode(currency)} ${money(value)}`;
 }
 
+function financeWageMiscDisplay(hkd = 0, rmb = 0) {
+  const hkdValue = Number(hkd || 0);
+  const rmbValue = Number(rmb || 0);
+  if (!Number.isFinite(hkdValue) || !Number.isFinite(rmbValue) || (hkdValue === 0 && rmbValue === 0)) return "-";
+  return `HKD ${money(hkdValue)} / RMB ${money(rmbValue)}`;
+}
+
 function financeWageAdjustmentsSummaryText(rows = []) {
   const totals = rows.reduce((sum, row) => {
     const text = row?.adjustmentsDisplay || financeWageFeeText(row?.adjustments, row?.adjustmentsCurrency);
@@ -29221,7 +29227,8 @@ async function exportOrderSnapshotsAsExcel(orders, title = "订单导出", templ
         template,
         templateKind: isKenfaTemplateRow(fullTemplateRow) ? "kenfa" : "",
         exchange: exchangeOverride || null,
-        includeReceiptSheet: Boolean(options.includeReceiptSheet)
+        includeReceiptSheet: Boolean(options.includeReceiptSheet),
+        statementCustomerName: options.statementCustomerName || ""
       })
     });
     if (!response.ok) {
@@ -29248,7 +29255,7 @@ async function exportOrderSnapshotsAsExcel(orders, title = "订单导出", templ
   }
 }
 
-async function exportOrderSnapshotsAsPdf(orders, title = "订单导出", templateRow = selectedTemplate.value, exchangeOverride = null, filename = "") {
+async function exportOrderSnapshotsAsPdf(orders, title = "订单导出", templateRow = selectedTemplate.value, exchangeOverride = null, filename = "", options = {}) {
   if (orders.length === 0) {
     notify("没有可导出的订单");
     return false;
@@ -29264,7 +29271,8 @@ async function exportOrderSnapshotsAsPdf(orders, title = "订单导出", templat
         orders,
         title,
         template,
-        exchange: exchangeOverride || null
+        exchange: exchangeOverride || null,
+        statementCustomerName: options.statementCustomerName || ""
       })
     });
     if (!response.ok) {
@@ -29350,10 +29358,69 @@ function companyCoveredOrderCostBreakdown(order = {}) {
     }, { hkd: 0, rmb: 0 });
 }
 
-function supplierOrderCostFeeRows(order = {}) {
+function supplierEntityAliases(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return [];
+  const partner = findPartnerByTypedLabel(text, "供应商");
+  return uniqueOrderCostNames([
+    text,
+    supplierDisplayLabel(text),
+    partner?.id,
+    partner?.name,
+    partner?.shortName,
+    partner?.short_name
+  ]).map((item) => item.replace(/[\s\u3000]+/g, ""));
+}
+
+function supplierEntityNamesMatch(left = "", right = "") {
+  const leftAliases = supplierEntityAliases(left);
+  const rightAliases = supplierEntityAliases(right);
+  if (!leftAliases.length || !rightAliases.length) return false;
+  return leftAliases.some((name) => rightAliases.includes(name));
+}
+
+function supplierOrderFeeAssigneeNames(fee = {}, order = {}) {
+  if (isCompanyCoveredFee(fee)) return [];
+  const explicitRole = String(fee.driverRole || fee.driver_role || "").trim();
+  const hasManualAssignment = orderFeeHasManualAssignee(fee) || explicitRole === "手动指定";
+  // Keep the stored order supplier as the automatic assignment. This keeps
+  // existing statement keys/status records stable while alias matching still
+  // allows a short-name manual assignment to match the same supplier.
+  if (!hasManualAssignment && normalizeVehicleSource(order.vehicleSource) === "外派车辆") {
+    return uniqueOrderCostNames([order.supplier]);
+  }
+  const names = orderFeeAssigneeNames(fee, order);
+  if (names.length) return names;
+  // A deliberately blank manual assignment means the fee has no supplier
+  // destination. Do not silently send it back to the order supplier.
+  if (hasManualAssignment) return [];
+  return uniqueOrderCostNames([supplierDisplayLabel(order.supplier) || order.supplier]);
+}
+
+function supplierOrderFeeBelongsToSupplier(fee = {}, order = {}, supplierName = "") {
+  const target = String(supplierName || "").trim();
+  if (!target) return true;
+  return supplierOrderFeeAssigneeNames(fee, order)
+    .some((assignee) => supplierEntityNamesMatch(assignee, target));
+}
+
+function supplierOrderFeeSupplierNames(order = {}) {
+  return Array.from(new Set(
+    (Array.isArray(order.fees) ? order.fees : [])
+      .filter((fee) => String(fee?.name || "").trim() && !isCompanyCoveredFee(fee))
+      .flatMap((fee) => supplierOrderFeeAssigneeNames(fee, order))
+      .filter(Boolean)
+  ));
+}
+
+function supplierOrderCostFeeRows(order = {}, supplierName = "") {
   if (order.vehicleSource !== "外派车辆" || !String(order.supplier || "").trim()) return [];
   return (Array.isArray(order.fees) ? order.fees : [])
-    .filter((fee) => String(fee?.name || "").trim() && !isCompanyCoveredFee(fee))
+    .filter((fee) =>
+      String(fee?.name || "").trim()
+      && !isCompanyCoveredFee(fee)
+      && supplierOrderFeeBelongsToSupplier(fee, order, supplierName)
+    )
     .map((fee) => {
       const item = feeItemForFee(fee);
       const cost = supplierOrderFeeCostSnapshot(fee, order);
@@ -29369,8 +29436,8 @@ function supplierOrderCostFeeRows(order = {}) {
     });
 }
 
-function supplierOrderPayableBreakdown(order = {}) {
-  const feeRows = supplierOrderCostFeeRows(order);
+function supplierOrderPayableBreakdown(order = {}, supplierName = "") {
+  const feeRows = supplierOrderCostFeeRows(order, supplierName);
   const currencies = Array.from(new Set(feeRows.map((fee) => currencyCodeDisplay(fee.currency)).filter(Boolean)));
   const currency = currencies.length === 1
     ? (currencies[0] === "RMB" ? "人民币" : "港币")
@@ -29417,9 +29484,9 @@ function supplierStatementFeeRows(order, payable = supplierOrderPayableBreakdown
     }));
 }
 
-function supplierStatementTemplateOrder(order) {
-  const payable = supplierOrderPayableBreakdown(order);
-  const detail = supplierOrderPayableDetailText(order);
+function supplierStatementTemplateOrder(order, supplierName = "") {
+  const payable = supplierOrderPayableBreakdown(order, supplierName);
+  const detail = supplierOrderPayableDetailText(order, payable);
   return {
     ...order,
     orderNo: order.orderNo || order.no || order.order_no || "",
@@ -29444,8 +29511,8 @@ function supplierStatementTemplateOrder(order) {
   };
 }
 
-function supplierStatementTemplateOrders(orders = []) {
-  return orders.map((order) => supplierStatementTemplateOrder(order));
+function supplierStatementTemplateOrders(orders = [], supplierName = "") {
+  return orders.map((order) => supplierStatementTemplateOrder(order, supplierName));
 }
 
 function exportSupplierCustomerOrdersCsv() {
@@ -30979,6 +31046,22 @@ function financeWageStatementOrderInPeriod(order = {}) {
   return dateMatchesPeriodFilter(order?.date, financePeriodFilter.value);
 }
 
+function compareFinanceWageStatementOrders(left = {}, right = {}) {
+  const leftDate = inputDateUtcValue(orderDispatchLoadDate(left) || left?.date) ?? Number.MAX_SAFE_INTEGER;
+  const rightDate = inputDateUtcValue(orderDispatchLoadDate(right) || right?.date) ?? Number.MAX_SAFE_INTEGER;
+  if (leftDate !== rightDate) return leftDate - rightDate;
+
+  const leftTime = dispatchPlanTimeRank(orderDispatchLoadTime(left));
+  const rightTime = dispatchPlanTimeRank(orderDispatchLoadTime(right));
+  if (leftTime !== rightTime) return leftTime - rightTime;
+
+  return String(left?.no || "").localeCompare(
+    String(right?.no || ""),
+    "zh-Hans-CN",
+    { numeric: true, sensitivity: "base" }
+  );
+}
+
 function financeWageStatementPeriodLabel() {
   const { start, end } = financeDateRangeBounds();
   if (start && end) return `${inputDateLabel(start)}至${inputDateLabel(end)}`;
@@ -31011,12 +31094,9 @@ function financeWageStatementRemarkText(order = {}) {
 function financeWageStatementOrders(row = {}) {
   return [...(row?.orders || [])]
     .filter(financeWageStatementOrderInPeriod)
-    .sort((left, right) => {
-      const leftDate = inputDateUtcValue(left?.date) ?? 0;
-      const rightDate = inputDateUtcValue(right?.date) ?? 0;
-      if (leftDate !== rightDate) return leftDate - rightDate;
-      return String(left?.no || "").localeCompare(String(right?.no || ""), "zh-Hans-CN", { numeric: true, sensitivity: "base" });
-    });
+    .map((order, index) => ({ order, index }))
+    .sort((left, right) => compareFinanceWageStatementOrders(left.order, right.order) || left.index - right.index)
+    .map(({ order }) => order);
 }
 
 function financeWageStatementFeeLineKey(name = "", currency = "HKD") {
@@ -31422,7 +31502,7 @@ async function exportStatementCsv() {
     loading.value = true;
     if (statementExportType.value === "supplier") {
       const rows = orders.map((order, index) => {
-        const payable = supplierOrderPayableBreakdown(order);
+        const payable = supplierOrderPayableBreakdown(order, entityName);
         return [
           index + 1,
           order.dispatchNo || "",
@@ -31442,7 +31522,7 @@ async function exportStatementCsv() {
           payable.payableHKD,
           payable.payableRMB,
           supplierOrderCostStatus(payable),
-          supplierOrderPayableDetailText(order),
+          supplierOrderPayableDetailText(order, payable),
           order.status || ""
         ];
       });
@@ -31577,10 +31657,20 @@ async function exportStatementCsv() {
     totalRow[headers.indexOf("应收HKD")] = money(total.hkd);
     totalRow[headers.indexOf("应收RMB")] = money(total.rmb);
     totalRow[headers.indexOf("杂费明细")] = `${total.label}${statementSettlementCurrency.value} ${money(total.total)}；汇率 ${statementExchangeRate.value}`;
+    const vatRate = statementCustomerVatRate(totalOrders);
+    const exportRows = [...rows, totalRow];
+    if (vatRate > 0) {
+      const vatTotalRow = headers.map(() => "");
+      vatTotalRow[0] = `含${vatRate}%增值税价格`;
+      vatTotalRow[headers.indexOf("应收HKD")] = money(Number((total.hkd * (1 + vatRate / 100)).toFixed(2)));
+      vatTotalRow[headers.indexOf("应收RMB")] = money(Number((total.rmb * (1 + vatRate / 100)).toFixed(2)));
+      vatTotalRow[headers.indexOf("杂费明细")] = `${total.label}${statementSettlementCurrency.value} ${money(Number((total.total * (1 + vatRate / 100)).toFixed(2)))}；汇率 ${statementExchangeRate.value}`;
+      exportRows.push(vatTotalRow);
+    }
     await exportXlsx(
       statementExportFilename(entityName, start, end, "xlsx"),
       headers,
-      [...rows, totalRow],
+      exportRows,
       "客户对账"
     );
     await markStatementDownloaded("customer", entityName, start, end, {
@@ -31649,7 +31739,7 @@ async function exportStatementByFormat(format, templateRow = selectedTemplate.va
   const title = `${statementExportTypeLabel()}-${entityName}`;
   const exchange = statementExportExchangePayload();
   if (statementExportType.value === "supplier") {
-    const exportOrders = supplierStatementTemplateOrders(orders);
+    const exportOrders = supplierStatementTemplateOrders(orders, entityName);
     const snapshot = {
       amountHKD: Number(exportRow.hkd || 0),
       amountRMB: Number(exportRow.rmb || 0),
@@ -31670,14 +31760,14 @@ async function exportStatementByFormat(format, templateRow = selectedTemplate.va
       snapshotReady: true
     };
     const ok = format === "pdf"
-      ? await exportOrderSnapshotsAsPdf(orders, title, templateRow, exchange, statementExportFilename(entityName, start, end, "pdf"))
+      ? await exportOrderSnapshotsAsPdf(orders, title, templateRow, exchange, statementExportFilename(entityName, start, end, "pdf"), { statementCustomerName: entityName })
       : await exportOrderSnapshotsAsExcel(
         orders,
         title,
         templateRow,
         exchange,
         statementExportFilename(entityName, start, end, "xlsx"),
-        { includeReceiptSheet: true, statementProgress: true }
+        { includeReceiptSheet: true, statementProgress: true, statementCustomerName: entityName }
       );
     if (ok) await markStatementDownloaded(statementExportType.value, entityName, start, end, snapshot);
     return;
@@ -37684,13 +37774,11 @@ function orderDetailFeeRows(order = {}) {
               </div>
 
               <div class="finance-wage-settlement-editor">
-                <label class="finance-wage-settlement-field">预支杂费
-                  <span class="finance-wage-money-editor">
-                    <input v-model.number="financeWageSettlementEditForm.adjustmentsHKD" class="finance-wage-settlement-number" type="number" min="0" step="0.01" inputmode="decimal" />
-                    <select v-model="financeWageSettlementEditForm.adjustmentsCurrency" aria-label="预支杂费币种">
-                      <option v-for="currency in DRIVER_WAGE_FEE_CURRENCY_OPTIONS" :key="currency" :value="currency">{{ currency }}</option>
-                    </select>
-                  </span>
+                <label class="finance-wage-settlement-field">预支杂费HKD
+                  <input v-model.number="financeWageSettlementEditForm.adjustmentsHKD" class="finance-wage-settlement-number" type="number" min="0" step="0.01" inputmode="decimal" />
+                </label>
+                <label class="finance-wage-settlement-field">预支杂费RMB
+                  <input v-model.number="financeWageSettlementEditForm.adjustmentsRMB" class="finance-wage-settlement-number" type="number" min="0" step="0.01" inputmode="decimal" />
                 </label>
                 <label class="finance-wage-settlement-field">预支日期
                   <input v-model="financeWageSettlementEditForm.advanceAt" type="date" />

@@ -53,6 +53,17 @@ test("historical rows with both currencies keep both amounts", () => {
   assert.equal(item.adjustmentsRMB, 30);
 });
 
+test("old schemas keep both explicit currency amounts instead of projecting one over the other", () => {
+  const item = context.normalizeDriverWageSettlementWriteItem({
+    adjustmentsHKD: 100,
+    adjustmentsRMB: 88,
+    adjustmentsCurrency: "HKD"
+  }, { adjustmentsCurrency: false });
+
+  assert.equal(item.adjustmentsHKD, 100);
+  assert.equal(item.adjustmentsRMB, 88);
+});
+
 test("old schemas persist added deductions in note metadata and expose them as fields", () => {
   const item = context.normalizeDriverWageSettlementWriteItem({
     periodKey: "2026-11",
