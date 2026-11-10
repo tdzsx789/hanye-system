@@ -3097,32 +3097,9 @@ function exportColumnHeaderBold(column = {}, template = null) {
   return template?.tableHeaderBold !== false;
 }
 
-const CUSTOMER_STATEMENT_GROUPED_FEE_CUSTOMERS = new Set(["恒泰通", "恒泰通慧华"]);
-
-function normalizedStatementCustomerName(value = "") {
-  return textValue(value).replace(/\s+/g, "").trim();
-}
-
-function shouldGroupCustomerStatementFeeColumns(customerName = "", orders = []) {
-  const candidates = [
-    customerName,
-    ...orders.flatMap((order) => [
-      order?.customer,
-      order?.customerName,
-      order?.customer_name,
-      order?.customerShortName,
-      order?.customer_short_name,
-      order?.shortName,
-      order?.short_name
-    ])
-  ];
-  return candidates.some((value) => CUSTOMER_STATEMENT_GROUPED_FEE_CUSTOMERS.has(normalizedStatementCustomerName(value)));
-}
-
-// The two customers use a fixed currency layout; all other statements retain
-// their configured column order.
+// Keep every customer statement's fee columns in a stable RMB-then-HKD order.
 function groupCustomerStatementFeeColumns(bodyColumns = [], totalColumns = [], customerName = "", orders = [], enabled = false) {
-  if (!enabled || !shouldGroupCustomerStatementFeeColumns(customerName, orders)) {
+  if (!enabled) {
     return { bodyColumns, totalColumns };
   }
   const feeColumns = bodyColumns.filter(isExportFeeItemColumn);

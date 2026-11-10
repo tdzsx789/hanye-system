@@ -4,7 +4,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 const source = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
-const start = source.indexOf("const CUSTOMER_STATEMENT_GROUPED_FEE_CUSTOMERS");
+const start = source.indexOf("function groupCustomerStatementFeeColumns");
 const end = source.indexOf("function pdfTextWithWeight", start);
 assert.notEqual(start, -1);
 assert.notEqual(end, -1);
@@ -42,14 +42,14 @@ test("恒泰通客户对账单按人民币、港币分组并放置对应合计",
   assert.deepEqual(Array.from(result.totalColumns, ({ key }) => key), ["__rmbTotal", "__hkdTotal"]);
 });
 
-test("恒泰通慧华通过订单客户名识别，普通客户保持原顺序", () => {
+test("所有客户对账单都按人民币、港币分组", () => {
   const columns = [column("date"), column("fee-hkd", "HKD"), column("fee-rmb", "RMB")];
   const totals = [column("__hkdTotal"), column("__rmbTotal")];
   const grouped = context.groupCustomerStatementFeeColumns(columns, totals, "", [{ customer: "恒泰通慧华" }], true);
   assert.deepEqual(Array.from(grouped.bodyColumns, ({ key }) => key), ["date", "fee-rmb", "fee-hkd"]);
   assert.deepEqual(Array.from(grouped.totalColumns, ({ key }) => key), ["__rmbTotal", "__hkdTotal"]);
 
-  const unchanged = context.groupCustomerStatementFeeColumns(columns, totals, "其他客户", [{ customer: "其他客户" }], true);
-  assert.deepEqual(Array.from(unchanged.bodyColumns, ({ key }) => key), ["date", "fee-hkd", "fee-rmb"]);
-  assert.deepEqual(Array.from(unchanged.totalColumns, ({ key }) => key), ["__hkdTotal", "__rmbTotal"]);
+  const ordinaryCustomer = context.groupCustomerStatementFeeColumns(columns, totals, "其他客户", [{ customer: "其他客户" }], true);
+  assert.deepEqual(Array.from(ordinaryCustomer.bodyColumns, ({ key }) => key), ["date", "fee-rmb", "fee-hkd"]);
+  assert.deepEqual(Array.from(ordinaryCustomer.totalColumns, ({ key }) => key), ["__rmbTotal", "__hkdTotal"]);
 });
