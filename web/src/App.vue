@@ -27052,10 +27052,21 @@ function currentAuditDataSnapshot() {
 }
 
 function orderListQueryForCurrentView() {
-  if (normalizeRoute(activeModule.value) !== "orders") return "";
-  const bounds = orderDateFilterMode.value === DATE_FILTER_MODE_PERIOD
-    ? periodFilterBounds(periodFilterValue("orders"))
-    : orderDateFilterBounds(orderDateFilter.value);
+  const activeRoute = normalizeRoute(activeModule.value);
+  let bounds;
+  if (activeRoute === "orders") {
+    bounds = orderDateFilterMode.value === DATE_FILTER_MODE_PERIOD
+      ? periodFilterBounds(periodFilterValue("orders"))
+      : orderDateFilterBounds(orderDateFilter.value);
+  } else if (activeRoute === "dispatchBoard") {
+    // The dispatch board only needs orders in its selected dispatch range.
+    // Loading the unbounded order list makes every refresh increasingly slow.
+    const usePeriodRange = dispatchDateFilterMode.value === DATE_FILTER_MODE_PERIOD;
+    const filter = usePeriodRange ? periodFilterValue("dispatchRange") : dispatchPeriodFilter.value;
+    bounds = usePeriodRange ? periodFilterBounds(filter) : dispatchDateFilterBounds(filter);
+  } else {
+    return "";
+  }
   if (!bounds.start || !bounds.end) return "";
   const first = bounds.start <= bounds.end ? bounds.start : bounds.end;
   const last = bounds.start <= bounds.end ? bounds.end : bounds.start;
