@@ -10536,6 +10536,7 @@ app.delete("/api/customer-contacts/:id", async (req, res) => {
 
 app.get("/api/orders", async (req, res) => {
   const { start, end } = orderListDateBounds(req.query);
+  const dispatchView = String(req.query.view || "").trim() === "dispatch";
   const dateCte = start && end
     ? `WITH dispatch_refs AS MATERIALIZED (
       SELECT DISTINCT
@@ -10580,7 +10581,7 @@ app.get("/api/orders", async (req, res) => {
     ${ORDER_DEFAULT_SORT_SQL}
   `).all(...params);
   const visibleRows = await filterVisibleOrdersForAccount(rows.map(mapOrder), req.account, specialLookup);
-  res.json(await hydrateOrderRowsForApi(visibleRows, { start, end }));
+  res.json(await hydrateOrderRowsForApi(visibleRows, { start, end, view: dispatchView ? "dispatch" : "" }));
 });
 
 function parseDispatchPlanRowsJson(rowsJson = "[]") {
@@ -10971,6 +10972,9 @@ async function hydrateOrderDispatchLoadInfo(orders = [], options = {}) {
 
 async function hydrateOrderRowsForApi(orders = [], options = {}) {
   if (!orders.length) return orders;
+  if (options.view === "dispatch") {
+    return hydrateOrderDispatchLoadInfo(orders, options);
+  }
   const [dispatchRows, feeRows, customerShortNames, specialCustomerMap, customerFeatureMap] = await Promise.all([
     hydrateOrderDispatchLoadInfo(orders, options),
     hydrateOrderFees(orders),

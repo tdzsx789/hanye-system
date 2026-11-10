@@ -6685,7 +6685,7 @@ function resetDispatchForm() {
 }
 
 async function openDispatchModal() {
-  await ensureReferenceDataLoaded();
+  await ensureDispatchReferenceDataLoaded();
   resetDispatchForm();
   dispatchModalOpen.value = true;
 }
@@ -6732,7 +6732,7 @@ function fillDispatchFormFromPlanRow(row, fallbackDate = dispatchDate.value || o
 
 async function openEditDispatchPlanRow(row) {
   if (!row?.id) return;
-  await ensureReferenceDataLoaded();
+  await ensureDispatchReferenceDataLoaded();
   closeDispatchDetail();
   closeDispatchLoadMinutePicker();
   fillDispatchFormFromPlanRow(row);
@@ -6743,7 +6743,7 @@ async function openEditDispatchPlanRow(row) {
 
 async function openCopyDispatchPlanRow(row) {
   if (!row?.id) return;
-  await ensureReferenceDataLoaded();
+  await ensureDispatchReferenceDataLoaded();
   closeDispatchLoadMinutePicker();
   fillDispatchFormFromPlanRow(row);
   editingDispatchRowId.value = "";
@@ -20291,6 +20291,33 @@ function syncAutoFreightFee() {
   refreshOrderFeeCost(targetFee);
 }
 
+async function ensureDispatchReferenceDataLoaded() {
+  const [customerData, customerContactData, addressBookData, vehicleData, driverData] = await Promise.all([
+    customerRows.value.length
+      ? Promise.resolve(customerRows.value)
+      : apiFetchListFrom(customersApi.listCustomers, "客户/供应商", { silent: true }),
+    customerContactRows.value.length
+      ? Promise.resolve(customerContactRows.value)
+      : apiFetchListFrom(customersApi.listCustomerContacts, "联系人", { silent: true }),
+    addressBookRows.value.length
+      ? Promise.resolve(addressBookRows.value)
+      : apiFetchListFrom(customersApi.listAddressBook, "地址本", { silent: true }),
+    vehicleRows.value.length
+      ? Promise.resolve(vehicleRows.value)
+      : apiFetchListFrom(vehiclesApi.listVehicles, "车辆", { silent: true }),
+    driverRows.value.length
+      ? Promise.resolve(driverRows.value)
+      : apiFetchListFrom(vehiclesApi.listDrivers, "司机", { silent: true })
+  ]);
+  if (!customerRows.value.length && customerData.length) {
+    customerRows.value = customerData.map(normalizeCustomerRecord);
+  }
+  if (!customerContactRows.value.length && customerContactData.length) customerContactRows.value = customerContactData;
+  if (!addressBookRows.value.length && addressBookData.length) addressBookRows.value = addressBookData;
+  if (!vehicleRows.value.length && vehicleData.length) vehicleRows.value = vehicleData;
+  if (!driverRows.value.length && driverData.length) driverRows.value = driverData.map(normalizeDriverRecord);
+}
+
 async function ensureReferenceDataLoaded() {
   if (!customerRows.value.length || !feeItemRows.value.length || !freightRateRows.value.length) {
     await loadDatabaseData({ preserveSelection: true });
@@ -27089,6 +27116,7 @@ function orderListQueryForCurrentView() {
     start: first,
     end: last
   });
+  if (activeRoute === "dispatchBoard") params.set("view", "dispatch");
   return `?${params.toString()}`;
 }
 
@@ -27286,7 +27314,7 @@ async function loadDatabaseData(options = {}) {
   const shouldLoadOrders = dataLoadScopeMatches(moduleScope, ["home", "customers", "orders", "dispatchBoard", "financeCosts", "financeSupplierStatements", "financeWages", "vehicleDriver", ...BOSS_CENTER_MODULES]);
   const shouldLoadVehicleDriver = dataLoadScopeMatches(moduleScope, ["home", "orders", "dispatchBoard", "vehicleDriver", "financeWages", ...VEHICLE_EXPENSE_MODULES, ...BOSS_CENTER_MODULES]);
   const shouldLoadVehicleExpenses = dataLoadScopeMatches(moduleScope, ["vehicleDriver", ...VEHICLE_EXPENSE_MODULES, "financeWages", ...BOSS_CENTER_MODULES]);
-  const shouldLoadFreightConfig = dataLoadScopeMatches(moduleScope, ["orders", "dispatchBoard", "freight", "templates"]);
+  const shouldLoadFreightConfig = dataLoadScopeMatches(moduleScope, ["orders", "freight", "templates"]);
   const shouldLoadAddressBook = dataLoadScopeMatches(moduleScope, ["customers", "orders", "dispatchBoard"]);
   const shouldLoadCustomsBusiness = dataLoadScopeMatches(moduleScope, ["customsBusiness", "financeCustomsStatements", ...BOSS_CENTER_MODULES]);
   const shouldLoadOtherBusiness = dataLoadScopeMatches(moduleScope, ["otherBusiness", ...BOSS_CENTER_MODULES]);
