@@ -27101,7 +27101,7 @@ async function loadOrdersForCurrentFilter(options = {}) {
     "financeWages"
   ];
   const canReadOrders = canAccessModule("orders")
-    || ["financeCosts", "financeSupplierStatements", "financeWages"].some((moduleId) => canAccessModule(moduleId));
+    || ["dispatchBoard", "financeCosts", "financeSupplierStatements", "financeWages"].some((moduleId) => canAccessModule(moduleId));
   if (!loggedIn.value || !canReadOrders || !orderLoadingRoutes.includes(normalizeRoute(activeModule.value))) return;
   const { silent = true } = options;
   const requestSerial = ++orderListRequestSerial;
@@ -27293,7 +27293,7 @@ async function loadDatabaseData(options = {}) {
   const shouldLoadFinanceCenter = dataLoadScopeMatches(moduleScope, ["orders", "financeWages", "financeCostCenter", "bossSupplierProfit", "bossVehicleProfit", ...BOSS_CENTER_MODULES]);
   const canReadCustomers = canAccessModule("customers") || canLoadBossCenterData;
   const canReadOrders = canAccessModule("orders")
-    || ["financeCosts", "financeSupplierStatements", "financeWages"].some((moduleId) => canAccessModule(moduleId))
+    || ["dispatchBoard", "financeCosts", "financeSupplierStatements", "financeWages"].some((moduleId) => canAccessModule(moduleId))
     || canLoadBossCenterData;
   const canReadCustomsBusiness = canAccessModule("customsBusiness") || canAccessModule("financeCustomsStatements") || canLoadBossCenterData;
   const canReadOtherBusiness = canAccessModule("otherBusiness") || BOSS_CENTER_MODULES.some((moduleId) => canAccessModule(moduleId));
