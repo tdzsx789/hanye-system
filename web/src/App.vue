@@ -5905,6 +5905,13 @@ async function loadDispatchPlansForCurrentFilter() {
   }
 }
 
+async function reloadDispatchBoardData() {
+  // Keep the order cache in the same date range as the dispatch rows. Without
+  // this, changing the dispatch period can label valid linked orders as deleted.
+  await loadOrdersForCurrentFilter({ silent: true });
+  await loadDispatchPlansForCurrentFilter();
+}
+
 function activeModuleNeedsDispatchPlans() {
   return ["home", "dispatchBoard"].includes(normalizeRoute(activeModule.value));
 }
@@ -10540,7 +10547,7 @@ function setDispatchDateFilter(filterKey) {
   localStorage.setItem("hanye_dispatch_period_filter", dispatchPeriodFilter.value);
   localStorage.setItem("hanye_dispatch_date", dispatchDate.value);
   if (previousMode !== DATE_FILTER_MODE_QUICK && previousFilter === dispatchPeriodFilter.value) {
-    loadDispatchPlansForCurrentFilter();
+    reloadDispatchBoardData();
   }
 }
 
@@ -10549,14 +10556,12 @@ function setDispatchCustomDateStart(value) {
   if (!dispatchCustomDateEnd.value) dispatchCustomDateEnd.value = dispatchCustomDateStart.value;
   setDispatchDateFilter("custom");
   localStorage.setItem("hanye_dispatch_custom_date_start", dispatchCustomDateStart.value);
-  loadDispatchPlansForCurrentFilter();
 }
 
 function setDispatchCustomDateEnd(value) {
   dispatchCustomDateEnd.value = String(value || "").trim() || dispatchCustomDateStart.value || todayInputValue();
   setDispatchDateFilter("custom");
   localStorage.setItem("hanye_dispatch_custom_date_end", dispatchCustomDateEnd.value);
-  loadDispatchPlansForCurrentFilter();
 }
 
 function periodFilterParts(filterKey = currentPeriodMonthKey()) {
@@ -11021,7 +11026,7 @@ function setDispatchRangePeriodMode(mode) {
   setDispatchDateFilterMode(DATE_FILTER_MODE_PERIOD);
   setPeriodFilterMode("dispatchRange", mode);
   if (previousMode !== DATE_FILTER_MODE_PERIOD && previousValue === dispatchRangePeriodFilter.value) {
-    loadDispatchPlansForCurrentFilter();
+    reloadDispatchBoardData();
   }
 }
 
@@ -11031,7 +11036,7 @@ function setDispatchRangePeriodYear(year) {
   setDispatchDateFilterMode(DATE_FILTER_MODE_PERIOD);
   setPeriodFilterYear("dispatchRange", year);
   if (previousMode !== DATE_FILTER_MODE_PERIOD && previousValue === dispatchRangePeriodFilter.value) {
-    loadDispatchPlansForCurrentFilter();
+    reloadDispatchBoardData();
   }
 }
 
@@ -11041,7 +11046,7 @@ function setDispatchRangePeriodMonth(month) {
   setDispatchDateFilterMode(DATE_FILTER_MODE_PERIOD);
   setPeriodFilterMonth("dispatchRange", month);
   if (previousMode !== DATE_FILTER_MODE_PERIOD && previousValue === dispatchRangePeriodFilter.value) {
-    loadDispatchPlansForCurrentFilter();
+    reloadDispatchBoardData();
   }
 }
 
@@ -11180,6 +11185,9 @@ function statementMonthRangeLabel() {
 
 watch(activeStatementMonthFilter, (filterKey) => {
   syncStatementExportRange(filterKey);
+  if (loggedIn.value && ["financeCosts", "financeSupplierStatements"].includes(normalizeRoute(activeModule.value))) {
+    loadOrdersForCurrentFilter({ silent: true }).catch((error) => notify(error.message || "对账订单加载失败"));
+  }
 }, { immediate: true });
 
 function financeDateRangeLabel() {
@@ -11188,6 +11196,7 @@ function financeDateRangeLabel() {
 
 watch(financePeriodFilter, () => {
   if (loggedIn.value && activeModule.value === "financeWages") {
+    loadOrdersForCurrentFilter({ silent: true }).catch((error) => notify(error.message || "工资订单加载失败"));
     loadFinanceWageSettlements({ silent: true }).catch((error) => notify(error.message || "司机工资结算加载失败"));
   }
 });
@@ -27064,6 +27073,12 @@ function orderListQueryForCurrentView() {
     const usePeriodRange = dispatchDateFilterMode.value === DATE_FILTER_MODE_PERIOD;
     const filter = usePeriodRange ? periodFilterValue("dispatchRange") : dispatchPeriodFilter.value;
     bounds = usePeriodRange ? periodFilterBounds(filter) : dispatchDateFilterBounds(filter);
+  } else if (["financeCosts", "financeSupplierStatements"].includes(activeRoute)) {
+    // Customer and supplier statements only need orders in the selected
+    // statement period. Avoid loading the complete historical order set.
+    bounds = periodFilterBounds(periodFilterValue("statement"));
+  } else if (activeRoute === "financeWages") {
+    bounds = periodFilterBounds(periodFilterValue("finance"));
   } else {
     return "";
   }
@@ -27078,7 +27093,14 @@ function orderListQueryForCurrentView() {
 }
 
 async function loadOrdersForCurrentFilter(options = {}) {
-  if (!loggedIn.value || !canAccessModule("orders")) return;
+  const orderLoadingRoutes = [
+    "orders",
+    "dispatchBoard",
+    "financeCosts",
+    "financeSupplierStatements",
+    "financeWages"
+  ];
+  if (!loggedIn.value || !canAccessModule("orders") || !orderLoadingRoutes.includes(normalizeRoute(activeModule.value))) return;
   const { silent = true } = options;
   const requestSerial = ++orderListRequestSerial;
   const query = orderListQueryForCurrentView();
@@ -27134,6 +27156,7 @@ async function loadDatabaseDataRefreshBuckets(refreshBuckets = new Set(), option
     }
 
     if (buckets.has("dispatch")) {
+      if (active === "dispatchBoard") await loadOrdersForCurrentFilter({ silent: true });
       await loadDispatchPlansForCurrentFilter();
     }
 
@@ -35506,13 +35529,13 @@ watch(dispatchDate, () => {
 
 watch(dispatchPeriodFilter, () => {
   localStorage.setItem("hanye_dispatch_period_filter", dispatchPeriodFilter.value);
-  if (dispatchDateFilterMode.value === DATE_FILTER_MODE_QUICK && activeModule.value === "dispatchBoard") loadDispatchPlansForCurrentFilter();
+  if (dispatchDateFilterMode.value === DATE_FILTER_MODE_QUICK && activeModule.value === "dispatchBoard") reloadDispatchBoardData();
 });
 
 watch(dispatchRangePeriodFilter, () => {
   localStorage.setItem("hanye_dispatch_range_period_filter", dispatchRangePeriodFilter.value);
   if (dispatchDateFilterMode.value === DATE_FILTER_MODE_PERIOD && activeModule.value === "dispatchBoard") {
-    loadDispatchPlansForCurrentFilter();
+    reloadDispatchBoardData();
   }
 });
 
