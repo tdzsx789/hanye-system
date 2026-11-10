@@ -526,6 +526,8 @@ function customsBusinessCustomFieldName(field = {}) {
 }
 
 const TRANSPORT_CUSTOMS_DECLARATION_NO_FLAG_FIELD = "__transport_customs_declaration_no_enabled__";
+// 旧生产库可能还没有 customers.vat_rate。将税点放入已有 JSON 字段，避免保存后丢失。
+const TRANSPORT_CUSTOMER_VAT_RATE_FIELD = "__transport_customer_vat_rate__";
 const ORDER_CUSTOMS_DECLARATION_NOS_REMARK_PATTERN = "运输(客户)?报关单号[：:]";
 
 function normalizeOrderCustomsDeclarationNos(value = []) {
@@ -648,6 +650,20 @@ function transportCustomsDeclarationNoEnabled(customFields = []) {
       && integerField(field.value) > 0);
 }
 
+function transportCustomerVatRateFromCustomFields(customFields = []) {
+  const source = Array.isArray(customFields) ? customFields : parseJsonArrayText(customFields);
+  const field = source.find((item) => customsBusinessCustomFieldName(item) === TRANSPORT_CUSTOMER_VAT_RATE_FIELD);
+  return normalizeCustomerVatRate(field?.value ?? field?.amount ?? field?.fee);
+}
+
+function withTransportCustomerVatRateFallback(customFields = [], vatRate = 0) {
+  const source = Array.isArray(customFields) ? customFields : [];
+  const fields = source.filter((field) => customsBusinessCustomFieldName(field) !== TRANSPORT_CUSTOMER_VAT_RATE_FIELD);
+  const normalizedRate = normalizeCustomerVatRate(vatRate);
+  if (normalizedRate > 0) fields.push({ name: TRANSPORT_CUSTOMER_VAT_RATE_FIELD, value: normalizedRate });
+  return fields;
+}
+
 function mapCustomer(row) {
   const customerCategory = row.type === "客户" && row.customer_category === "报关客户" ? "报关客户" : row.type === "客户" ? "运输客户" : "";
   const customsDefaults = {
@@ -662,10 +678,17 @@ function mapCustomer(row) {
     customsManifestFee: 0,
     customsVerificationFee: 0
   };
-  const customsCustomFields = normalizeCustomsBusinessCustomFields(row.customs_custom_fields);
+  const rawCustomsCustomFields = Array.isArray(row.customs_custom_fields)
+    ? row.customs_custom_fields
+    : parseJsonArrayText(row.customs_custom_fields);
+  const customsCustomFields = normalizeCustomsBusinessCustomFields(rawCustomsCustomFields);
   const customsCustomFieldMap = new Map(
     customsCustomFields.map((field) => [customsBusinessCustomFieldName(field), integerField(field.value)])
   );
+  const storedVatRate = normalizeCustomerVatRate(row.vat_rate);
+  const fallbackVatRate = customerCategory === "运输客户"
+    ? transportCustomerVatRateFromCustomFields(rawCustomsCustomFields)
+    : 0;
   return {
     id: row.id,
     type: row.type,
@@ -703,9 +726,9 @@ function mapCustomer(row) {
     newOldEnabled: booleanFlag(row.new_old_enabled, false),
     specialCarEnabled: booleanFlag(row.special_car_enabled, false),
     customsDeclarationNoEnabled: transportCustomsDeclarationNoEnabled(customsCustomFields),
-    vatRate: normalizeCustomerVatRate(row.vat_rate),
+    vatRate: storedVatRate || fallbackVatRate,
     customsCustomFields: customsCustomFields.filter((field) =>
-      !["产证地", "报检费", "商检费", TRANSPORT_CUSTOMS_DECLARATION_NO_FLAG_FIELD].includes(customsBusinessCustomFieldName(field))
+      !["产证地", "报检费", "商检费", TRANSPORT_CUSTOMS_DECLARATION_NO_FLAG_FIELD, TRANSPORT_CUSTOMER_VAT_RATE_FIELD].includes(customsBusinessCustomFieldName(field))
     ),
     createdAt: row.created_at,
     invoice: {
@@ -717,6 +740,20 @@ function mapCustomer(row) {
       addressPhone: row.invoice_address_phone || row.address || ""
     }
   };
+}
+
+function customerPayloadForUpdate(body = {}, existing = {}) {
+  const payload = body && typeof body === "object" && !Array.isArray(body) ? { ...body } : {};
+  const existingCustomer = mapCustomer(existing);
+  if (!Object.prototype.hasOwnProperty.call(payload, "vatRate")
+    && !Object.prototype.hasOwnProperty.call(payload, "vat_rate")) {
+    payload.vatRate = existingCustomer.vatRate;
+  }
+  if (!Object.prototype.hasOwnProperty.call(payload, "customsCustomFields")
+    && !Object.prototype.hasOwnProperty.call(payload, "customs_custom_fields")) {
+    payload.customsCustomFields = existingCustomer.customsCustomFields;
+  }
+  return payload;
 }
 
 async function loadCustomerSpecialCustomerMap(options = {}) {
@@ -782,7 +819,7 @@ async function loadTransportCustomerFeatureMap() {
         newOldEnabled: booleanFlag(row.new_old_enabled, false),
         specialCarEnabled: booleanFlag(row.special_car_enabled, false),
         customsDeclarationNoEnabled: transportCustomsDeclarationNoEnabled(row.customs_custom_fields),
-        vatRate: normalizeCustomerVatRate(row.vat_rate)
+        vatRate: normalizeCustomerVatRate(row.vat_rate) || transportCustomerVatRateFromCustomFields(row.customs_custom_fields)
       };
       [row.id, row.name, row.short_name]
         .map((value) => String(value || "").trim())
@@ -1035,7 +1072,10 @@ function normalizeCustomerPayload(body, id = "") {
       : transportCustomsDeclarationNoEnabled(customsCustomFields))
     : false;
   const persistedCustomsCustomFields = customsCustomFields
-    .filter((field) => customsBusinessCustomFieldName(field) !== TRANSPORT_CUSTOMS_DECLARATION_NO_FLAG_FIELD);
+    .filter((field) => ![
+      TRANSPORT_CUSTOMS_DECLARATION_NO_FLAG_FIELD,
+      TRANSPORT_CUSTOMER_VAT_RATE_FIELD
+    ].includes(customsBusinessCustomFieldName(field)));
   if (customsDeclarationNoEnabled) {
     persistedCustomsCustomFields.unshift({ name: TRANSPORT_CUSTOMS_DECLARATION_NO_FLAG_FIELD, value: 1 });
   }
@@ -3079,10 +3119,8 @@ function shouldGroupCustomerStatementFeeColumns(customerName = "", orders = []) 
   return candidates.some((value) => CUSTOMER_STATEMENT_GROUPED_FEE_CUSTOMERS.has(normalizedStatementCustomerName(value)));
 }
 
-// The two customers use a fixed currency layout in their customer statements:
-// RMB fee columns first, followed by HKD fee columns, with RMB/HKD totals at
-// the end in the same order. Keep the original order for every other customer
-// and preserve all non-fee columns.
+// The two customers use a fixed currency layout; all other statements retain
+// their configured column order.
 function groupCustomerStatementFeeColumns(bodyColumns = [], totalColumns = [], customerName = "", orders = [], enabled = false) {
   if (!enabled || !shouldGroupCustomerStatementFeeColumns(customerName, orders)) {
     return { bodyColumns, totalColumns };
@@ -5655,15 +5693,17 @@ async function renderDynamicDriverWageSettlementXlsxBuffer(payload = {}, templat
   const advanceRMB = advanceIncludedInMisc ? 0 : numericValue(payload.advanceRMB);
   const exchangeRate = numericValue(payload.exchangeRate);
   const deductionsHKD = numericValue(payload.deductionsHKD);
+  const parkingReimbursementHKD = numericValue(payload.parkingReimbursementHKD);
   const rmbProjectTotal = Number((miscRMBTotal + freightRMBTotal + advanceRMB).toFixed(2));
   const convertedRMB = exchangeRate
     ? Number((rmbProjectTotal / exchangeRate).toFixed(2))
     : 0;
-  const payableTotal = Math.max(0, Number((freightHKDTotal + miscHKDTotal + advanceHKD + convertedRMB - deductionsHKD).toFixed(2)));
+  const payableTotal = Math.max(0, Number((freightHKDTotal + miscHKDTotal + advanceHKD + convertedRMB + parkingReimbursementHKD - deductionsHKD).toFixed(2)));
   const payableWithoutAdvance = Math.max(0, Number((
     freightHKDTotal
     + miscHKDTotal
     + (exchangeRate ? (miscRMBTotal + freightRMBTotal) / exchangeRate : 0)
+    + parkingReimbursementHKD
     - deductionsHKD
   ).toFixed(2)));
 
@@ -5717,6 +5757,7 @@ async function renderDynamicDriverWageSettlementXlsxBuffer(payload = {}, templat
     !exchangeRate || summaryValueReference("miscTotal", "RMB") === "0" ? "" : `${summaryValueReference("miscTotal", "RMB")}/${exchangeRate}`,
     String(advanceHKD),
     advanceRMB && exchangeRate ? `${advanceRMB}/${exchangeRate}` : "",
+    parkingReimbursementHKD ? `+${parkingReimbursementHKD}` : "",
     deductionsHKD ? `-${deductionsHKD}` : ""
   ].filter(Boolean).join("+") || "0";
   const payableCell = worksheet.getCell(`B${footerRow2}`);
@@ -5733,8 +5774,8 @@ async function renderDynamicDriverWageSettlementXlsxBuffer(payload = {}, templat
       ? `人民币项目RMB ${formatDriverWageNoteNumber(rmbProjectTotal)} ÷ 汇率${formatDriverWageNoteNumber(exchangeRate)} = HKD ${formatDriverWageNoteNumber(convertedRMB)}`
       : `人民币项目RMB ${formatDriverWageNoteNumber(rmbProjectTotal)}（汇率无效，未折算）`;
     worksheet.getCell(`D${footerRow2}`).value = advanceIncludedInMisc
-      ? `运费合计HKD ${formatDriverWageNoteNumber(freightHKDTotal)} + 杂费合计HKD ${formatDriverWageNoteNumber(miscHKDTotal)} + ${rmbCalculation} - 工资扣减HKD ${formatDriverWageNoteNumber(deductionsHKD)} = 应付HKD ${formatDriverWageNoteNumber(payableTotal)}`
-      : `运费合计HKD ${formatDriverWageNoteNumber(freightHKDTotal)} + 杂费合计HKD ${formatDriverWageNoteNumber(miscHKDTotal)} + ${rmbCalculation} + 司机代垫HKD ${formatDriverWageNoteNumber(advanceHKD)} - 工资扣减HKD ${formatDriverWageNoteNumber(deductionsHKD)} = 应付HKD ${formatDriverWageNoteNumber(payableTotal)}；去除司机代垫后HKD ${formatDriverWageNoteNumber(payableWithoutAdvance)}`;
+      ? `运费合计HKD ${formatDriverWageNoteNumber(freightHKDTotal)} + 杂费合计HKD ${formatDriverWageNoteNumber(miscHKDTotal)} + ${rmbCalculation}${parkingReimbursementHKD ? ` + 停车费报销HKD ${formatDriverWageNoteNumber(parkingReimbursementHKD)}` : ""} - 工资扣减HKD ${formatDriverWageNoteNumber(deductionsHKD)} = 应付HKD ${formatDriverWageNoteNumber(payableTotal)}`
+      : `运费合计HKD ${formatDriverWageNoteNumber(freightHKDTotal)} + 杂费合计HKD ${formatDriverWageNoteNumber(miscHKDTotal)} + ${rmbCalculation} + 司机代垫HKD ${formatDriverWageNoteNumber(advanceHKD)}${parkingReimbursementHKD ? ` + 停车费报销HKD ${formatDriverWageNoteNumber(parkingReimbursementHKD)}` : ""} - 工资扣减HKD ${formatDriverWageNoteNumber(deductionsHKD)} = 应付HKD ${formatDriverWageNoteNumber(payableTotal)}；去除司机代垫后HKD ${formatDriverWageNoteNumber(payableWithoutAdvance)}`;
     worksheet.getCell(`D${footerRow2}`).alignment = { horizontal: "left", vertical: "middle", wrapText: true };
     setDriverWageTextFormat(worksheet.getCell(`D${footerRow2}`));
   }
@@ -5871,13 +5912,14 @@ async function renderDriverWageSettlementXlsxBuffer(payload = {}) {
   const totalT = sumNumericRowColumn(rows, 19);
   const advanceHKD = Number(payload.advanceHKD ?? payload.adjustmentsHKD ?? 0);
   const deductionsHKD = Number(payload.deductionsHKD || 0);
+  const parkingReimbursementHKD = Number(payload.parkingReimbursementHKD || 0);
   const exchangeRate = Number(payload.exchangeRate ?? 0);
   const convertedRMB = exchangeRate ? Number((totalQ / exchangeRate).toFixed(2)) : 0;
-  const payableTotal = Math.max(0, Number((totalR + totalT + advanceHKD + convertedRMB - deductionsHKD).toFixed(2)));
-  const payableWithoutAdvance = Math.max(0, Number((totalR + totalT + convertedRMB - deductionsHKD).toFixed(2)));
+  const payableTotal = Math.max(0, Number((totalR + totalT + advanceHKD + convertedRMB + parkingReimbursementHKD - deductionsHKD).toFixed(2)));
+  const payableWithoutAdvance = Math.max(0, Number((totalR + totalT + convertedRMB + parkingReimbursementHKD - deductionsHKD).toFixed(2)));
   const summaryNote = String(payload.summaryNote || `${rows.length}车骑师/口岸过车`).trim();
   const paymentLabel = String(payload.paymentLabel || "").trim();
-  const payableFormulaText = `运费${formatDriverWageNoteNumber(totalR)} + 装卸过海加点${formatDriverWageNoteNumber(totalT)} + 司机代垫${formatDriverWageNoteNumber(advanceHKD)} + 杂费${formatDriverWageNoteNumber(convertedRMB)} - 工资扣减HKD${formatDriverWageNoteNumber(deductionsHKD)} = 应付HKD${formatDriverWageNoteNumber(payableTotal)}；去除系统代垫后HKD${formatDriverWageNoteNumber(payableWithoutAdvance)}`;
+  const payableFormulaText = `运费${formatDriverWageNoteNumber(totalR)} + 装卸过海加点${formatDriverWageNoteNumber(totalT)} + 司机代垫${formatDriverWageNoteNumber(advanceHKD)} + 杂费${formatDriverWageNoteNumber(convertedRMB)}${parkingReimbursementHKD ? ` + 停车费报销${formatDriverWageNoteNumber(parkingReimbursementHKD)}` : ""} - 工资扣减HKD${formatDriverWageNoteNumber(deductionsHKD)} = 应付HKD${formatDriverWageNoteNumber(payableTotal)}；去除系统代垫后HKD${formatDriverWageNoteNumber(payableWithoutAdvance)}`;
 
   worksheet.getCell(`P${summaryRowNumber}`).value = totalP;
   worksheet.getCell(`Q${summaryRowNumber}`).value = totalQ;
@@ -7426,6 +7468,15 @@ function normalizeDriverWageFeeCurrency(value = "", legacyUnit = "") {
   return "HKD";
 }
 
+function normalizeDriverWageParkingFeeTreatment(value = "", fallback = "deduction") {
+  const text = String(value || "").trim().toLowerCase();
+  if (["reimbursement", "报销"].includes(text)) return "reimbursement";
+  if (["deduction", "扣减", "扣除"].includes(text)) return "deduction";
+  return String(fallback || "deduction").trim().toLowerCase() === "reimbursement"
+    ? "reimbursement"
+    : "deduction";
+}
+
 const DRIVER_WAGE_SETTLEMENT_NOTE_META_MARKER = "\n[[hanye-driver-wage-meta:v1]]";
 
 function unpackDriverWageSettlementNote(value = "") {
@@ -7466,9 +7517,10 @@ function normalizeDriverWageSettlementWriteItem(item = {}, support = {}) {
       : item.adjustmentsHKD ?? (currency === "RMB" ? item.adjustmentsRMB : null),
     adjustmentsRMB: legacyRmbOnly
       ? item.adjustmentsHKD
-      : (item.adjustmentsHKD == null && currency === "RMB" ? null : item.adjustmentsRMB ?? null)
+      : (item.adjustmentsHKD == null && currency === "RMB" ? null : item.adjustmentsRMB ?? null),
+    parkingFeeTreatment: normalizeDriverWageParkingFeeTreatment(item.parkingFeeTreatment, "reimbursement")
   };
-  const metadata = {};
+  const metadata = { parkingFeeTreatment: canonical.parkingFeeTreatment };
   const compatibilityColumns = [
     ["adjustmentsHKD", "adjustmentsHKD"],
     ["adjustmentsRMB", "adjustmentsRMB"],
@@ -7534,6 +7586,7 @@ function mapDriverWageSettlement(row) {
     parkingFeeHKD: row.parking_fee_hkd ?? metadata.parkingFeeHKD ?? null,
     parkingFeeUnit: normalizeDriverWageFeeUnit(row.parking_fee_unit ?? metadata.parkingFeeUnit),
     parkingFeeCurrency: normalizeDriverWageFeeCurrency(row.parking_fee_currency ?? metadata.parkingFeeCurrency, row.parking_fee_unit ?? metadata.parkingFeeUnit),
+    parkingFeeTreatment: normalizeDriverWageParkingFeeTreatment(metadata.parkingFeeTreatment, "deduction"),
     advanceAt: row.advance_at || "",
     note: note || "",
     createdAt: row.created_at || "",
@@ -7575,6 +7628,10 @@ function readDriverWageSettlementPayload(body = {}, current = null) {
     parkingFeeHKD: normalizeOptionalDriverWageAmount(pickBody(body, "parkingFeeHKD", "parking_fee_hkd", current?.parking_fee_hkd ?? currentMetadata.parkingFeeHKD)),
     parkingFeeUnit: normalizeDriverWageFeeUnit(pickBody(body, "parkingFeeUnit", "parking_fee_unit", current?.parking_fee_unit ?? currentMetadata.parkingFeeUnit)),
     parkingFeeCurrency: normalizeDriverWageFeeCurrency(pickBody(body, "parkingFeeCurrency", "parking_fee_currency", current?.parking_fee_currency ?? currentMetadata.parkingFeeCurrency), pickBody(body, "parkingFeeUnit", "parking_fee_unit", current?.parking_fee_unit ?? currentMetadata.parkingFeeUnit)),
+    parkingFeeTreatment: normalizeDriverWageParkingFeeTreatment(
+      pickBody(body, "parkingFeeTreatment", "parking_fee_treatment", currentMetadata.parkingFeeTreatment ?? (current ? "deduction" : "reimbursement")),
+      current ? "deduction" : "reimbursement"
+    ),
     advanceAt: String(body.advanceAt ?? body.advance_at ?? current?.advance_at ?? "").trim(),
     note: noteValue === null || noteValue === undefined ? "" : String(noteValue).trim()
   };
@@ -10088,13 +10145,14 @@ app.patch("/api/customers/:id", async (req, res) => {
     res.status(404).json({ message: "客户不存在或已删除" });
     return;
   }
-  const hasCustomsDeclarationNoFlag = Object.prototype.hasOwnProperty.call(req.body || {}, "customsDeclarationNoEnabled")
-    || Object.prototype.hasOwnProperty.call(req.body || {}, "customs_declaration_no_enabled");
+  const requestBody = customerPayloadForUpdate(req.body || {}, existing);
+  const hasCustomsDeclarationNoFlag = Object.prototype.hasOwnProperty.call(requestBody, "customsDeclarationNoEnabled")
+    || Object.prototype.hasOwnProperty.call(requestBody, "customs_declaration_no_enabled");
   const item = normalizeCustomerPayload(
     hasCustomsDeclarationNoFlag
-      ? req.body
+      ? requestBody
       : {
-          ...req.body,
+          ...requestBody,
           customsDeclarationNoEnabled: transportCustomsDeclarationNoEnabled(existing.customs_custom_fields)
         },
     id
@@ -10121,6 +10179,13 @@ app.patch("/api/customers/:id", async (req, res) => {
   const hasCustomsProductionCertificateFee = await customerColumnExists("customs_production_certificate_fee");
   const hasCustomsInspectionFee = await customerColumnExists("customs_inspection_fee");
   const hasCustomsCustomFields = await customerColumnExists("customs_custom_fields");
+  if (hasCustomsCustomFields) {
+    item.customsCustomFields = withTransportCustomerVatRateFallback(
+      item.customsCustomFields,
+      requirementSupport.vatRate ? 0 : item.vatRate
+    );
+    item.customsCustomFieldsJson = JSON.stringify(item.customsCustomFields);
+  }
   const updateSets = [
     "type = @type",
     "customer_category = @customerCategory",
@@ -10222,6 +10287,13 @@ app.post("/api/customers", async (req, res) => {
   const hasCustomsProductionCertificateFee = await customerColumnExists("customs_production_certificate_fee");
   const hasCustomsInspectionFee = await customerColumnExists("customs_inspection_fee");
   const hasCustomsCustomFields = await customerColumnExists("customs_custom_fields");
+  if (hasCustomsCustomFields) {
+    item.customsCustomFields = withTransportCustomerVatRateFallback(
+      item.customsCustomFields,
+      requirementSupport.vatRate ? 0 : item.vatRate
+    );
+    item.customsCustomFieldsJson = JSON.stringify(item.customsCustomFields);
+  }
   const insertColumns = [
     "id",
     "type",
@@ -12645,7 +12717,8 @@ app.post("/api/driver-wage-settlements/export/xlsx", async (req, res) => {
       advanceRMB: req.body?.advanceRMB,
       advanceIncludedInMisc: req.body?.advanceIncludedInMisc,
       adjustmentsHKD: req.body?.adjustmentsHKD,
-      deductionsHKD: req.body?.deductionsHKD
+      deductionsHKD: req.body?.deductionsHKD,
+      parkingReimbursementHKD: req.body?.parkingReimbursementHKD
     });
     const filename = String(req.body?.filename || "").trim() || `司机工资单_${exportFilenamePart(req.body?.driverName || "司机")}.xlsx`;
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
@@ -15282,7 +15355,7 @@ app.post("/api/driver-wage-settlements", async (req, res) => {
     current ? "update" : "create",
     "driver_wage_settlement",
     `${item.periodKey}/${driver.id}`,
-    `${item.periodKey}/${driver.name}/${item.status}${item.settledAt ? `/${item.settledAt}` : ""}${item.note ? `/备注:${item.note}` : ""}${item.adjustmentsHKD !== null || item.adjustmentsRMB !== null || item.plateFeeHKD !== null || item.socialSecurityFeeHKD !== null || item.parkingFeeHKD !== null ? `/扣减HKD:${formatDriverWageNoteNumber(item.adjustmentsHKD ?? 0)}/${formatDriverWageNoteNumber(item.plateFeeHKD ?? 0)}/${formatDriverWageNoteNumber(item.socialSecurityFeeHKD ?? 0)}/${formatDriverWageNoteNumber(item.parkingFeeHKD ?? 0)}` : ""}`
+    `${item.periodKey}/${driver.name}/${item.status}${item.settledAt ? `/${item.settledAt}` : ""}${item.note ? `/备注:${item.note}` : ""}${item.adjustmentsHKD !== null || item.adjustmentsRMB !== null || item.plateFeeHKD !== null || item.socialSecurityFeeHKD !== null ? `/扣减HKD:${formatDriverWageNoteNumber(item.adjustmentsHKD ?? 0)}/${formatDriverWageNoteNumber(item.plateFeeHKD ?? 0)}/${formatDriverWageNoteNumber(item.socialSecurityFeeHKD ?? 0)}` : ""}${item.parkingFeeHKD !== null ? `/停车费${item.parkingFeeTreatment === "reimbursement" ? "报销" : "扣减"}${item.parkingFeeCurrency || "HKD"}:${formatDriverWageNoteNumber(item.parkingFeeHKD ?? 0)}` : ""}`
   );
   res.json(mapDriverWageSettlement(row));
 });

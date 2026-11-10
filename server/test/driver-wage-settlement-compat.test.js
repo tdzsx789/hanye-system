@@ -117,3 +117,32 @@ test("old schemas persist added deductions in note metadata and expose them as f
   assert.equal(next.plateFeeHKD, 50);
   assert.equal(next.socialSecurityFeeHKD, 30);
 });
+
+test("legacy parking fee remains a deduction while new settlements can opt into reimbursement", () => {
+  const legacyRow = {
+    period_key: "2026-10",
+    driver_id: 9,
+    status: "未结算",
+    parking_fee_hkd: 250,
+    parking_fee_currency: "HKD",
+    note: "旧备注"
+  };
+  const mappedLegacy = context.mapDriverWageSettlement(legacyRow);
+  assert.equal(mappedLegacy.parkingFeeTreatment, "deduction");
+
+  const legacyUpdate = context.readDriverWageSettlementPayload({ note: "更新备注" }, legacyRow);
+  assert.equal(legacyUpdate.parkingFeeTreatment, "deduction");
+  const savedLegacy = context.normalizeDriverWageSettlementWriteItem(legacyUpdate, {
+    parkingFeeHKD: true,
+    parkingFeeCurrency: true,
+    note: true
+  });
+  assert.equal(context.unpackDriverWageSettlementNote(savedLegacy.note).metadata.parkingFeeTreatment, "deduction");
+
+  const newSettlement = context.readDriverWageSettlementPayload({
+    periodKey: "2026-11",
+    driverId: 9,
+    parkingFeeHKD: 300
+  });
+  assert.equal(newSettlement.parkingFeeTreatment, "reimbursement");
+});

@@ -42,7 +42,7 @@ test("恒泰通客户对账单按人民币、港币分组并放置对应合计",
   assert.deepEqual(Array.from(result.totalColumns, ({ key }) => key), ["__rmbTotal", "__hkdTotal"]);
 });
 
-test("恒泰通慧华支持从订单客户名识别，普通客户保持原顺序", () => {
+test("恒泰通慧华通过订单客户名识别，普通客户保持原顺序", () => {
   const columns = [column("date"), column("fee-hkd", "HKD"), column("fee-rmb", "RMB")];
   const totals = [column("__hkdTotal"), column("__rmbTotal")];
   const grouped = context.groupCustomerStatementFeeColumns(columns, totals, "", [{ customer: "恒泰通慧华" }], true);

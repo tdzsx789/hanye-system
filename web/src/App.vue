@@ -122,6 +122,13 @@ import {
   TEMPLATE_VARIABLES
 } from "./constants/templateConstants.js";
 import { BOSS_COMPANY_PROFIT_ROWS } from "./constants/mockData.js";
+import {
+  calculateCompanyNetProfit,
+  calculateCustomerContributionProfit,
+  calculateTransportProfit,
+  sumCustomsRevenueRmb,
+  sumMoneyBreakdowns
+} from "./domain/bossProfit.js";
 
 const AttachmentPanel = defineAsyncComponent(() => import("./components/AttachmentPanel.vue"));
 const FilePreviewModal = defineAsyncComponent(() => import("./components/FilePreviewModal.vue"));
@@ -1788,6 +1795,7 @@ const customsBusinessPeriodFilter = ref(normalizePeriodFilter(localStorage.getIt
 const otherBusinessPeriodFilter = ref(normalizePeriodFilter(localStorage.getItem("hanye_other_business_period_filter") || currentPeriodMonthKey()));
 const customsStatementPeriodFilter = ref(normalizePeriodFilter(localStorage.getItem("hanye_customs_statement_period_filter") || currentPeriodMonthKey()));
 const customsStatementCompanySearch = ref("");
+const statementCustomerSearch = ref("");
 const vehicleExpensePeriodFilter = ref(normalizePeriodFilter(localStorage.getItem("hanye_vehicle_expense_period_filter") || currentPeriodMonthKey()));
 const vehicleExpenseVehicleClassFilter = ref(localStorage.getItem("hanye_vehicle_expense_vehicle_class_filter") || "全部");
 const vehicleExpenseAnnualPlateFilter = ref(localStorage.getItem("hanye_vehicle_expense_annual_plate_filter") || "全部");
@@ -1815,6 +1823,7 @@ const financeWageSettlementEditForm = reactive({
   socialSecurityFeeCurrency: DRIVER_WAGE_DEFAULT_FEE_CURRENCY,
   parkingFeeHKD: "",
   parkingFeeCurrency: DRIVER_WAGE_DEFAULT_FEE_CURRENCY,
+  parkingFeeTreatment: "reimbursement",
   note: ""
 });
 const selectedFinanceWageDetailOrderNo = ref("");
@@ -8274,6 +8283,26 @@ function driverCostCenterFeeBreakdown(order = {}, driver = null) {
       ) {
         return sum;
       }
+      const savedCost = financeWageStatementFeeSavedCostState(order, fee, driver);
+      if (savedCost.present) {
+        savedCost.lines.forEach((line) => {
+          const value = Number(line.amount || 0);
+          if (!Number.isFinite(value) || value === 0) return;
+          const isRmb = currencyCodeDisplay(line.currency || "港币") === "RMB";
+          sum.details.push({
+            ...detail,
+            amount: value,
+            currency: line.currency === "RMB" ? "人民币" : "港币",
+            matched: true,
+            fee,
+            name: detail.item.name || fee.name || "费用"
+          });
+          sum.matchedCount += 1;
+          if (isRmb) sum.rmb += value;
+          else sum.hkd += value;
+        });
+        return sum;
+      }
       const value = Number(detail.amount || 0);
       const isRmb = currencyCodeDisplay(detail.currency || "港币") === "RMB";
       sum.details.push({
@@ -8332,7 +8361,7 @@ const DRIVER_EXTRA_FEE_KEYWORDS = {
   unloadPerBoard: ["卸货"],
   crossSeaFee: ["过海"],
   addPointFee: ["加点"],
-  waitingPerHour: ["等候"]
+  waitingPerHour: ["等候", "等待"]
 };
 
 const DRIVER_EXTRA_FIELD_LABELS = {
@@ -8347,25 +8376,34 @@ const DRIVER_EXTRA_RULE_FIELDS = Object.keys(DRIVER_EXTRA_FIELD_LABELS);
 const DRIVER_QUANTITY_EXTRA_FIELDS = ["loadPerBoard", "unloadPerBoard"];
 const DRIVER_FIXED_EXTRA_FIELDS = ["crossSeaFee", "addPointFee", "waitingPerHour"];
 
-function orderHasActualDriverExtraFee(order, field) {
+function driverExtraFeeNameMatchesField(feeName, field) {
+  const name = String(feeName || "");
+  if (field === "loadPerBoard" && /等候|等待/.test(name)) return false;
   const keywords = DRIVER_EXTRA_FEE_KEYWORDS[field] || [];
-  if (!keywords.length) return false;
+  return keywords.some((keyword) => name.includes(keyword));
+}
+
+function orderHasActualDriverExtraFee(order, field, driver = null) {
+  if (!(DRIVER_EXTRA_FEE_KEYWORDS[field] || []).length) return false;
   const fees = Array.isArray(order?.fees) ? order.fees : [];
   return fees.some((fee) => {
     if (isAdvanceFee(fee)) return false;
     const name = String(fee?.name || "");
     const amount = Number(fee?.amount || 0);
-    return amount !== 0 && keywords.some((keyword) => name.includes(keyword));
+    return amount !== 0
+      && driverExtraFeeNameMatchesField(name, field)
+      && (!driver || feeCostAssigneeBelongsToDriver(order, fee, driver));
   });
 }
 
-function orderDriverExtraQuantity(order, field) {
-  const keywords = DRIVER_EXTRA_FEE_KEYWORDS[field] || [];
+function orderDriverExtraQuantity(order, field, driver = null) {
   const fees = Array.isArray(order?.fees) ? order.fees : [];
   const matchedFee = fees.find((fee) => {
     if (isAdvanceFee(fee)) return false;
     const name = String(fee?.name || "");
-    return Number(fee?.amount || 0) !== 0 && keywords.some((keyword) => name.includes(keyword));
+    return Number(fee?.amount || 0) !== 0
+      && driverExtraFeeNameMatchesField(name, field)
+      && (!driver || feeCostAssigneeBelongsToDriver(order, fee, driver));
   });
   const feeQuantity = quantityNumber(matchedFee?.quantity);
   if (feeQuantity > 0) return feeQuantity;
@@ -8380,9 +8418,9 @@ function driverRuleAmountForField(order, field, driver = selectedDriver.value) {
 function driverExtraTripFeeApplies(order, field, driver = selectedDriver.value) {
   const amount = driverRuleAmountForField(order, field, driver);
   if (!amount) return false;
-  if (!orderHasActualDriverExtraFee(order, field)) return false;
-  if (DRIVER_QUANTITY_EXTRA_FIELDS.includes(field)) return orderDriverExtraQuantity(order, field) > 0;
-  return DRIVER_FIXED_EXTRA_FIELDS.includes(field) || orderHasActualDriverExtraFee(order, field);
+  if (!orderHasActualDriverExtraFee(order, field, driver)) return false;
+  if (DRIVER_QUANTITY_EXTRA_FIELDS.includes(field)) return orderDriverExtraQuantity(order, field, driver) > 0;
+  return DRIVER_FIXED_EXTRA_FIELDS.includes(field) || orderHasActualDriverExtraFee(order, field, driver);
 }
 
 function driverExtraTripFee(order, field, driver = selectedDriver.value) {
@@ -8391,7 +8429,7 @@ function driverExtraTripFee(order, field, driver = selectedDriver.value) {
   const amount = Number(rule[field] || 0);
   if (!driverExtraTripFeeApplies(order, field, driver)) return 0;
   if (DRIVER_QUANTITY_EXTRA_FIELDS.includes(field)) {
-    return orderDriverExtraQuantity(order, field) * amount;
+    return orderDriverExtraQuantity(order, field, driver) * amount;
   }
   return amount;
 }
@@ -8609,10 +8647,37 @@ function isCompanyCoveredFeeItem(item = {}) {
   return feeItemCompanyCoveredCostSources(item).length > 0;
 }
 
+function feeHasCompanyCoveredAssignment(fee = {}) {
+  if (!fee) return false;
+  const explicitFields = [
+    fee.category,
+    fee.costAssignee,
+    fee.cost_assignee,
+    fee.costSource,
+    fee.cost_source,
+    fee.driverRole,
+    fee.driver_role,
+    fee.driverName,
+    fee.driver_name,
+    fee._costSourceText
+  ].map((value) => String(value || "").trim()).filter(Boolean);
+  if (explicitFields.some((value) =>
+    value === "公司承担"
+    || value === COMPANY_SELF_PAY_CATEGORY
+    || value === OTHER_EXPENSE_COST_SOURCE
+    || value.includes("公司承担")
+    || value.includes("公司自费")
+    || value.includes("其他支出")
+  )) return true;
+  const remark = String(fee.remark || "").trim();
+  return COMPANY_COVERED_DEFAULT_REMARKS.includes(remark)
+    || /公司承担|公司自费|其他支出/.test(remark);
+}
+
 function isCompanyCoveredFee(fee = {}) {
   if (!fee) return false;
   if (String(fee.category || "").trim() === COMPANY_SELF_PAY_CATEGORY) return true;
-  return isCompanyCoveredFeeItem(feeItemForFee(fee));
+  return isCompanyCoveredFeeItem(feeItemForFee(fee)) || feeHasCompanyCoveredAssignment(fee);
 }
 
 function isCompanySelfPayDefaultRemark(value = "") {
@@ -8868,7 +8933,8 @@ function orderLinkedCustomsBusinessRow(order = {}) {
 }
 
 function orderLinkedCustomsBusinessAmount(order = {}) {
-  return Number(orderLinkedCustomsBusinessRow(order)?.total || 0);
+  return orderLinkedCustomsBusinessIdsValue(order).reduce((sum, id) =>
+    sum + Number(customsBusinessRowsById.value.get(String(id || "").trim())?.total || 0), 0);
 }
 
 function customsBusinessRowsForStatement(sourceRows = []) {
@@ -9130,6 +9196,7 @@ function advanceFeesForOrder(order, driver = null) {
   if (driver && isMainlandRiderDriver(driver) && !orderHasMainlandRiderCostAndWage(order, driver)) return [];
   return (Array.isArray(order?.fees) ? order.fees : [])
     .filter(isAdvanceFee)
+    .filter((fee) => !isCompanyCoveredFee(fee))
     .filter((fee) => !driver || feeAssignedDriverName(order, fee) === driver.name);
 }
 
@@ -11165,6 +11232,9 @@ function normalizeFinanceWageSettlementRow(item = {}) {
     socialSecurityFeeCurrency: feeCurrency(item.socialSecurityFeeCurrency ?? item.social_security_fee_currency, item.socialSecurityFeeUnit ?? item.social_security_fee_unit),
     parkingFeeHKD: item.parkingFeeHKD ?? item.parking_fee_hkd ?? null,
     parkingFeeCurrency: feeCurrency(item.parkingFeeCurrency ?? item.parking_fee_currency, item.parkingFeeUnit ?? item.parking_fee_unit),
+    parkingFeeTreatment: ["reimbursement", "报销"].includes(String(item.parkingFeeTreatment ?? item.parking_fee_treatment ?? "").trim().toLowerCase())
+      ? "reimbursement"
+      : "deduction",
     advanceAt: String(item.advanceAt || item.advance_at || "").trim(),
     note: String(item.note || "").trim(),
     createdAt: String(item.createdAt || item.created_at || "").trim(),
@@ -11303,6 +11373,9 @@ async function saveFinanceWageSettlement(row = {}, status = financeWageSettlemen
   const nextParkingFeeCurrency = Object.prototype.hasOwnProperty.call(patch, "parkingFeeCurrency")
     ? (String(patch.parkingFeeCurrency || "HKD").toUpperCase() === "RMB" ? "RMB" : "HKD")
     : (currentSettlement?.parkingFeeCurrency || "HKD");
+  const nextParkingFeeTreatment = Object.prototype.hasOwnProperty.call(patch, "parkingFeeTreatment")
+    ? (String(patch.parkingFeeTreatment || "").toLowerCase() === "deduction" ? "deduction" : "reimbursement")
+    : (currentSettlement?.parkingFeeTreatment || "reimbursement");
   const adjustmentsChanged = Object.prototype.hasOwnProperty.call(patch, "adjustmentsHKD")
     || Object.prototype.hasOwnProperty.call(patch, "adjustmentsRMB")
     || Object.prototype.hasOwnProperty.call(patch, "plateFeeHKD")
@@ -11330,6 +11403,7 @@ async function saveFinanceWageSettlement(row = {}, status = financeWageSettlemen
     socialSecurityFeeCurrency: nextSocialSecurityFeeCurrency,
     parkingFeeHKD: nextParkingFeeHKD,
     parkingFeeCurrency: nextParkingFeeCurrency,
+    parkingFeeTreatment: nextParkingFeeTreatment,
     advanceAt: nextAdvanceAt
   };
   try {
@@ -11366,6 +11440,7 @@ function openFinanceWageSettlementEditModal(row = null) {
   financeWageSettlementEditForm.socialSecurityFeeCurrency = settlement?.socialSecurityFeeCurrency || DRIVER_WAGE_DEFAULT_FEE_CURRENCY;
   financeWageSettlementEditForm.parkingFeeHKD = settlement?.parkingFeeHKD ?? "";
   financeWageSettlementEditForm.parkingFeeCurrency = settlement?.parkingFeeCurrency || DRIVER_WAGE_DEFAULT_FEE_CURRENCY;
+  financeWageSettlementEditForm.parkingFeeTreatment = settlement?.parkingFeeTreatment || "reimbursement";
   financeWageSettlementEditForm.advanceAt = String(settlement?.advanceAt || settlement?.advance_at || "").trim();
   financeWageSettlementEditForm.note = String(settlement?.note || "").trim();
   financeWageSettlementEditModalOpen.value = true;
@@ -11415,6 +11490,7 @@ async function saveFinanceWageSettlementFromEditor() {
       socialSecurityFeeCurrency: financeWageSettlementEditForm.socialSecurityFeeCurrency,
       parkingFeeHKD: nextParkingFeeHKD,
       parkingFeeCurrency: financeWageSettlementEditForm.parkingFeeCurrency,
+      parkingFeeTreatment: financeWageSettlementEditForm.parkingFeeTreatment,
       advanceAt: String(financeWageSettlementEditForm.advanceAt || "").trim()
         || (adjustmentsChanged ? todayInputValue() : String(currentSettlement?.advanceAt || "").trim())
     });
@@ -11459,17 +11535,8 @@ function orderAdvanceFeeDetailText(order, driver = null) {
 function driverCostCenterFeeDetailText(order, feeName, driver) {
   const targetName = String(feeName || "").trim();
   if (!targetName || !driver) return "";
-  const rule = driverCostCenterRuleForOrder(order, driver);
-  const details = driverCostCenterOrderFeeRows(order)
-    .filter((fee) => String(fee?.name || "").trim() === targetName)
-    .filter((fee) => feeCostAssigneeBelongsToDriver(order, fee, driver))
-    .map((fee) => driverCostCenterFeeCostForRule(rule, fee, driver))
-    .filter((detail) =>
-      detail.item
-      && detail.item.category !== "代垫"
-      && !isCompanyCoveredFeeItem(detail.item)
-      && feeItemIncludesCostSource(detail.item, driverCostCenterSourceForDriver(driver))
-    );
+  const details = driverCostCenterFeeBreakdown(order, driver).details
+    .filter((detail) => String(detail?.fee?.name || detail?.name || "").trim() === targetName);
   if (!details.length) return "";
   return details
     .map((detail) => detail.matched
@@ -11522,7 +11589,7 @@ function orderFeeCellText(order, feeName) {
 function driverExtraFieldForFeeName(feeName = "") {
   const name = String(feeName || "");
   return Object.entries(DRIVER_EXTRA_FEE_KEYWORDS)
-    .find(([, keywords]) => keywords.some((keyword) => name.includes(keyword)))?.[0] || "";
+    .find(([field]) => driverExtraFeeNameMatchesField(name, field))?.[0] || "";
 }
 
 function financeWageFeeColumnLabel(feeName = "") {
@@ -11538,7 +11605,7 @@ function driverWageDetailForField(order, field, driver) {
   if (!driverExtraTripFeeApplies(order, field, driver)) return "";
   const amount = driverExtraTripFee(order, field, driver);
   if (DRIVER_QUANTITY_EXTRA_FIELDS.includes(field)) {
-    const quantity = orderDriverExtraQuantity(order, field);
+    const quantity = orderDriverExtraQuantity(order, field, driver);
     return `${money(amount)} HKD（${money(quantity)}板×${money(rate)}/板）`;
   }
   return `${money(amount)} HKD`;
@@ -11854,6 +11921,29 @@ function financeWageMiscDeductionHKD(hkd = 0, rmb = 0, exchangeRate = 0) {
   return Number((Number(hkd || 0) + financeWageAmountToHKD(rmb, "RMB", exchangeRate)).toFixed(2));
 }
 
+function financeWageSettlementTotals({
+  wageHKD = 0,
+  deductionsHKD = 0,
+  parkingFeeHKD = 0,
+  parkingFeeTreatment = "reimbursement"
+} = {}) {
+  const toFiniteNumber = (value) => {
+    const number = Number(value || 0);
+    return Number.isFinite(number) ? number : 0;
+  };
+  const wage = toFiniteNumber(wageHKD);
+  const deductions = toFiniteNumber(deductionsHKD);
+  const parkingFee = toFiniteNumber(parkingFeeHKD);
+  const reimbursement = parkingFeeTreatment === "deduction" ? 0 : parkingFee;
+  const parkingDeduction = parkingFeeTreatment === "deduction" ? parkingFee : 0;
+  return {
+    totalDeductionHKD: Number((deductions + parkingDeduction).toFixed(2)),
+    parkingFeeDeductionHKD: Number(parkingDeduction.toFixed(2)),
+    parkingReimbursementHKD: Number(reimbursement.toFixed(2)),
+    totalHKD: Math.max(0, Number((wage - deductions - parkingDeduction + reimbursement).toFixed(2)))
+  };
+}
+
 function buildFinanceWageRows(sourceOrders, sourceAdjustments, sourceSettlements = [], options = {}) {
   const includeAllDrivers = Boolean(options.includeAllDrivers);
   const sourceDrivers = Array.isArray(options.drivers) ? options.drivers : driverRows.value;
@@ -11922,11 +12012,16 @@ function buildFinanceWageRows(sourceOrders, sourceAdjustments, sourceSettlements
     const plateFeeAmount = Number(settlement?.plateFeeHKD || 0);
     const socialSecurityFeeAmount = Number(settlement?.socialSecurityFeeHKD || 0);
     const parkingFeeAmount = Number(settlement?.parkingFeeHKD || 0);
+    const parkingFeeTreatment = settlement?.parkingFeeTreatment || "deduction";
     const plateFeeHKD = financeWageAmountToHKD(plateFeeAmount, plateFeeCurrency, exchangeRate);
     const socialSecurityFeeHKD = financeWageAmountToHKD(socialSecurityFeeAmount, socialSecurityFeeCurrency, exchangeRate);
     const parkingFeeHKD = financeWageAmountToHKD(parkingFeeAmount, parkingFeeCurrency, exchangeRate);
-    const totalDeductionHKD = Number((miscAdjustmentHKD + plateFeeHKD + socialSecurityFeeHKD + parkingFeeHKD).toFixed(2));
-    const totalHKD = Math.max(0, Number((wageBreakdown.hkd - totalDeductionHKD).toFixed(2)));
+    const settlementTotals = financeWageSettlementTotals({
+      wageHKD: wageBreakdown.hkd,
+      deductionsHKD: miscAdjustmentHKD + plateFeeHKD + socialSecurityFeeHKD,
+      parkingFeeHKD,
+      parkingFeeTreatment
+    });
     const totalRMB = Math.max(0, Number(wageBreakdown.rmb.toFixed(2)));
     const adjustmentsDisplay = hasManualMisc
       ? financeWageMiscDisplay(manualAdjustmentsHKD, manualAdjustmentsRMB)
@@ -11951,10 +12046,13 @@ function buildFinanceWageRows(sourceOrders, sourceAdjustments, sourceSettlements
       socialSecurityFeeCurrency,
       parkingFee: parkingFeeAmount,
       parkingFeeCurrency,
-      totalDeductionHKD,
+      parkingFeeTreatment,
+      parkingFeeDeductionHKD: settlementTotals.parkingFeeDeductionHKD,
+      totalDeductionHKD: settlementTotals.totalDeductionHKD,
+      parkingReimbursementHKD: settlementTotals.parkingReimbursementHKD,
       routeAdjustments: wageBreakdown.routeAdjustmentsHKD,
       routeAdjustmentsRMB: wageBreakdown.routeAdjustmentsRMB,
-      total: totalHKD,
+      total: settlementTotals.totalHKD,
       totalRMB: totalRMB,
       costCenterMatchedCount: wageBreakdown.costCenterMatchedCount,
       costCenterMissingCount: wageBreakdown.costCenterMissingCount,
@@ -12040,7 +12138,7 @@ const bossOrderRows = computed(() =>
 );
 
 const bossCustomsBusinessRows = computed(() =>
-  customsBusinessRowsForStatement(customsBusinessAllRows.value).filter((row) =>
+  customsBusinessAllRows.value.filter((row) =>
     dateMatchesPeriodFilter(row.date, bossPeriodFilter.value)
   )
 );
@@ -12105,7 +12203,7 @@ const bossCompanyExpenseDisplayRows = computed(() =>
   sortBossCompanyExpenseRows(bossCompanyExpenseRows.value)
     .filter((row) => {
       const periodMonth = bossCompanyExpensePeriodMonth(row);
-      return periodMonth && dateMatchesPeriodFilter(`${periodMonth}-01`, bossPeriodFilter.value);
+      return periodMonth && periodMonthCoverageRatio(periodMonth, bossPeriodFilter.value) > 0;
     })
 );
 
@@ -12640,12 +12738,20 @@ function vehicleExpenseTotalText(total = {}) {
 
 function orderReceivableBreakdown(sourceOrders) {
   return sourceOrders.reduce((sum, order) => {
-    const amount = orderCustomerReceivableBreakdown(order);
+    const amount = orderTransportReceivableBreakdown(order);
     return {
       hkd: sum.hkd + amount.hkd,
       rmb: sum.rmb + amount.rmb
     };
   }, { hkd: 0, rmb: 0 });
+}
+
+function orderTransportReceivableBreakdown(order = {}) {
+  const receivable = orderCustomerReceivableBreakdown(order);
+  return {
+    hkd: receivable.hkd,
+    rmb: Math.max(0, receivable.rmb - orderLinkedCustomsBusinessAmount(order))
+  };
 }
 
 function customsBusinessRevenueBreakdown(sourceRows = []) {
@@ -12675,9 +12781,10 @@ function orderDriverPayBreakdown(order) {
     const amount = driverPayableTripFeeBreakdown(order, driver);
     return {
       hkd: sum.hkd + Number(amount.hkd || 0),
-      rmb: sum.rmb + Number(amount.rmb || 0)
+      rmb: sum.rmb + Number(amount.rmb || 0),
+      missingCostCount: sum.missingCostCount + Number(amount.costCenterMissingCount || 0)
     };
-  }, { hkd: 0, rmb: 0 });
+  }, { hkd: 0, rmb: 0, missingCostCount: 0 });
 }
 
 function periodMonthSpanForRows(filterKey, sourceRows) {
@@ -12688,10 +12795,41 @@ function periodMonthSpanForRows(filterKey, sourceRows) {
   return Math.max(1, months.size);
 }
 
-function vehicleFixedCostRMB(vehicle, sourceOrders, filterKey) {
+function periodMonthCoverageRatio(monthKey = "", filterKey = currentPeriodMonthKey()) {
+  const month = inputMonthKey(monthKey);
+  if (!month) return 0;
+  const { start, end } = periodFilterBounds(filterKey);
+  if (!start || !end) return 1;
+  const monthStart = `${month}-01`;
+  const nextMonth = new Date(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 1);
+  const monthEnd = dateInputFromDate(new Date(nextMonth.getTime() - 86400000));
+  const overlapDays = inputDateRangeOverlapDays(monthStart, monthEnd, start, end);
+  const monthDays = inputDateRangeDays(monthStart, monthEnd);
+  return monthDays ? overlapDays / monthDays : 0;
+}
+
+function vehicleFixedCostBreakdown(vehicle, sourceOrders, filterKey, allocationMonthKey = "") {
   const monthlyCost = Number(vehicle?.monthlyCost || 0);
-  if (!monthlyCost || !sourceOrders.length) return 0;
-  return monthlyCost * periodMonthSpanForRows(filterKey, sourceOrders);
+  if (!monthlyCost) return { hkd: 0, rmb: 0 };
+  if (allocationMonthKey) {
+    return { hkd: monthlyCost * periodMonthCoverageRatio(allocationMonthKey, filterKey), rmb: 0 };
+  }
+  if (["day", "range"].includes(periodFilterParts(filterKey).mode)) {
+    const months = new Set(sourceOrders.map((order) => inputMonthKey(order.date)).filter(Boolean));
+    if (!months.size) {
+      const { start, end } = periodFilterBounds(filterKey);
+      const cursor = new Date(Number(String(start || currentPeriodMonthKey()).slice(0, 4)), Number(String(start || currentPeriodMonthKey()).slice(5, 7)) - 1, 1);
+      const last = new Date(Number(String(end || start || currentPeriodMonthKey()).slice(0, 4)), Number(String(end || start || currentPeriodMonthKey()).slice(5, 7)) - 1, 1);
+      while (cursor <= last) {
+        months.add(`${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}`);
+        cursor.setMonth(cursor.getMonth() + 1);
+      }
+    }
+    const amount = Array.from(months).reduce((sum, month) => sum + periodMonthCoverageRatio(month, filterKey) * monthlyCost, 0);
+    return { hkd: amount, rmb: 0 };
+  }
+  const { mode } = periodFilterParts(filterKey);
+  return { hkd: monthlyCost * (mode === "year" ? 12 : Math.max(1, periodMonthSpanForRows(filterKey, sourceOrders))), rmb: 0 };
 }
 
 function vehicleExpenseAmountBreakdown(expense = {}, filterKey = currentPeriodMonthKey()) {
@@ -12768,6 +12906,34 @@ function vehicleExpenseBreakdownByTypeForPlate(plate, filterKey = currentPeriodM
         annualBucket.hkd += amount.hkd;
         annualBucket.rmb += amount.rmb;
       }
+    });
+  return breakdowns;
+}
+
+function bossVehicleExpenseHkdEquivalentByTypeForPlate(plate, filterKey = currentPeriodMonthKey()) {
+  const breakdowns = VEHICLE_EXPENSE_CONFIGS.reduce((result, config) => {
+    result[config.type] = 0;
+    return result;
+  }, {});
+  Object.assign(breakdowns, { insurance: 0, review: 0, plateHead: 0 });
+  vehicleExpenseRows.value
+    .filter((expense) => String(expense.plate || "").trim() === String(plate || "").trim())
+    .forEach((expense) => {
+      vehicleExpenseAffectedMonthKeys(expense).forEach((month) => {
+        const amount = vehicleExpenseAmountForMonth(expense, month, filterKey);
+        const equivalent = bossVehicleHkdEquivalent(amount.hkd, amount.rmb, month);
+        const typeKey = breakdowns[expense.type] !== undefined ? expense.type : "other";
+        breakdowns[typeKey] += equivalent;
+        if (expense.type === "annual") {
+          const annualName = String(expense.name || "").trim();
+          const annualKey = ["年审费", "大陆年审", "大陆年审费", "中检年审(行驶证)", "香港年审"].includes(annualName)
+            ? "review"
+            : annualName === "牌头费"
+              ? "plateHead"
+              : "insurance";
+          breakdowns[annualKey] += equivalent;
+        }
+      });
     });
   return breakdowns;
 }
@@ -12888,7 +13054,7 @@ function bossVehicleDriverCostCurrencyForFee(fee = {}) {
 
 function bossVehicleOrderFeeBreakdown(order) {
   if (!bossVehicleSingleDriverMode(order)) {
-    return { revenueHKD: 0, revenueRMB: 0, costHKD: 0, costRMB: 0, advanceHKD: 0, advanceRMB: 0, orderProfitHKD: 0, orderProfitRMB: 0, totalRevenueHKD: 0, totalRevenueRMB: 0 };
+    return { revenueHKD: 0, revenueRMB: 0, costHKD: 0, costRMB: 0, driverCostHKD: 0, driverCostRMB: 0, advanceHKD: 0, advanceRMB: 0, orderProfitHKD: 0, orderProfitRMB: 0, totalRevenueHKD: 0, totalRevenueRMB: 0 };
   }
   const driver = bossVehicleOrderDriver(order);
   const costRule = bossVehicleDriverCostRuleForOrder(order);
@@ -12900,6 +13066,7 @@ function bossVehicleOrderFeeBreakdown(order) {
         ? companyCoveredFeeCostSnapshot(fee, order)
         : driverCostCenterFeeCostForRule(costRule, fee, driver);
       const cost = amountBreakdownByCurrency(costDetail.amount, costDetail.currency || bossVehicleDriverCostCurrencyForFee(fee));
+      const driverCost = isCompanyCoveredFee(fee) ? { hkd: 0, rmb: 0 } : cost;
       const freightIncome = isBossVehicleFreightIncomeFee(fee)
         ? { hkd: incomeHKD, rmb: incomeRMB }
         : { hkd: 0, rmb: 0 };
@@ -12909,19 +13076,27 @@ function bossVehicleOrderFeeBreakdown(order) {
         revenueRMB: sum.revenueRMB + freightIncome.rmb,
         costHKD: sum.costHKD + cost.hkd,
         costRMB: sum.costRMB + cost.rmb,
+        driverCostHKD: sum.driverCostHKD + driverCost.hkd,
+        driverCostRMB: sum.driverCostRMB + driverCost.rmb,
         totalRevenueHKD: sum.totalRevenueHKD + incomeHKD,
         totalRevenueRMB: sum.totalRevenueRMB + incomeRMB,
         orderProfitHKD: sum.orderProfitHKD + incomeHKD - cost.hkd,
         orderProfitRMB: sum.orderProfitRMB + incomeRMB - cost.rmb
       };
-    }, { revenueHKD: 0, revenueRMB: 0, costHKD: 0, costRMB: 0, totalRevenueHKD: 0, totalRevenueRMB: 0, orderProfitHKD: 0, orderProfitRMB: 0 });
+    }, { revenueHKD: 0, revenueRMB: 0, costHKD: 0, costRMB: 0, driverCostHKD: 0, driverCostRMB: 0, totalRevenueHKD: 0, totalRevenueRMB: 0, orderProfitHKD: 0, orderProfitRMB: 0 });
   const advance = driverFinanceAdvanceBreakdown(order, driver);
   return {
     ...breakdown,
     advanceHKD: advance.hkd,
     advanceRMB: advance.rmb,
-    totalRevenueHKD: breakdown.totalRevenueHKD + advance.hkd,
-    totalRevenueRMB: breakdown.totalRevenueRMB + advance.rmb
+    costHKD: breakdown.costHKD + advance.hkd,
+    costRMB: breakdown.costRMB + advance.rmb,
+    driverCostHKD: breakdown.driverCostHKD + advance.hkd,
+    driverCostRMB: breakdown.driverCostRMB + advance.rmb,
+    orderProfitHKD: breakdown.orderProfitHKD - advance.hkd,
+    orderProfitRMB: breakdown.orderProfitRMB - advance.rmb,
+    totalRevenueHKD: breakdown.totalRevenueHKD,
+    totalRevenueRMB: breakdown.totalRevenueRMB
   };
 }
 
@@ -13018,9 +13193,13 @@ const bossVehicleProfitDisplayRows = computed(() => {
         totalRevenueHKD: 0,
         totalRevenueRMB: 0,
         orderProfitHKD: 0,
-        orderProfitRMB: 0
+        orderProfitRMB: 0,
+        driverCostHKDEquivalent: 0,
+        revenueHKDEquivalent: 0,
+        orderProfitHKDEquivalent: 0
       };
       const feeBreakdown = bossVehicleOrderFeeBreakdown(order);
+      const orderMonth = inputMonthKey(order.date) || bossVehicleExchangeRatePeriodMonth(bossPeriodFilter.value);
       row.orders.push(order);
       row.revenueHKD += feeBreakdown.revenueHKD;
       row.revenueRMB += feeBreakdown.revenueRMB;
@@ -13028,6 +13207,9 @@ const bossVehicleProfitDisplayRows = computed(() => {
       row.totalRevenueRMB += feeBreakdown.totalRevenueRMB;
       row.orderProfitHKD += feeBreakdown.orderProfitHKD;
       row.orderProfitRMB += feeBreakdown.orderProfitRMB;
+      row.revenueHKDEquivalent += bossVehicleHkdEquivalent(feeBreakdown.totalRevenueHKD, feeBreakdown.totalRevenueRMB, orderMonth);
+      row.orderProfitHKDEquivalent += bossVehicleHkdEquivalent(feeBreakdown.orderProfitHKD, feeBreakdown.orderProfitRMB, orderMonth);
+      row.driverCostHKDEquivalent += bossVehicleHkdEquivalent(feeBreakdown.driverCostHKD, feeBreakdown.driverCostRMB, orderMonth);
       const driverName = bossVehicleOrderDriverName(order);
       if (driverName) row.driverNames.add(driverName);
       groups.set(plate, row);
@@ -13049,38 +13231,71 @@ const bossVehicleProfitDisplayRows = computed(() => {
           totalRevenueHKD: 0,
           totalRevenueRMB: 0,
           orderProfitHKD: 0,
-          orderProfitRMB: 0
+          orderProfitRMB: 0,
+          driverCostHKDEquivalent: 0,
+          revenueHKDEquivalent: 0,
+          orderProfitHKDEquivalent: 0
         });
       }
     });
+  if (bossProfitPeriodMonthKeys(bossPeriodFilter.value).length) {
+    vehicleRows.value
+      .filter((vehicle) => Number(vehicle.monthlyCost || 0) > 0 && isBossCompanyVehiclePlate(vehicle.plate))
+      .forEach((vehicle) => {
+        const fixedCost = vehicleFixedCostForPeriod(vehicle, bossPeriodFilter.value);
+        if (!fixedCost.hkd && !fixedCost.rmb) return;
+        const plate = String(vehicle.plate || "").trim();
+        if (groups.has(plate)) return;
+        groups.set(plate, {
+          plate,
+          driverNames: new Set(),
+          orders: [],
+          revenueHKD: 0,
+          revenueRMB: 0,
+          totalRevenueHKD: 0,
+          totalRevenueRMB: 0,
+          orderProfitHKD: 0,
+          orderProfitRMB: 0,
+          driverCostHKDEquivalent: 0,
+          revenueHKDEquivalent: 0,
+          orderProfitHKDEquivalent: 0
+        });
+      });
+  }
   return Array.from(groups.values())
     .map((row) => {
       const vehicle = vehicleRowsByPlate.value.get(String(row.plate || "").trim()) || null;
       const vehicleExpenseByType = vehicleExpenseBreakdownByTypeForPlate(row.plate, bossPeriodFilter.value);
+      const vehicleExpenseEquivalentByType = bossVehicleExpenseHkdEquivalentByTypeForPlate(row.plate, bossPeriodFilter.value);
       const vehicleExpense = bossVehicleExpenseTotalFromBreakdown(vehicleExpenseByType);
-      const expenseHKD = vehicleExpense.hkd;
-      const expenseRMB = vehicleExpense.rmb;
+      const fixedCost = vehicleFixedCostForPeriod(vehicle, bossPeriodFilter.value, row.orders);
+      const expenseHKD = vehicleExpense.hkd + fixedCost.hkd;
+      const expenseRMB = vehicleExpense.rmb + fixedCost.rmb;
       const profitHKD = row.orderProfitHKD - expenseHKD;
       const profitRMB = row.orderProfitRMB - expenseRMB;
       const periodMonth = bossVehicleExchangeRatePeriodMonth(bossPeriodFilter.value);
-      const profitHKDEquivalent = bossVehicleHkdEquivalent(profitHKD, profitRMB, periodMonth);
-      const revenueHKDEquivalent = bossVehicleHkdEquivalent(row.totalRevenueHKD, row.totalRevenueRMB, periodMonth);
-      const orderProfitHKDEquivalent = bossVehicleHkdEquivalent(row.orderProfitHKD, row.orderProfitRMB, periodMonth);
-      const expenseHKDEquivalent = bossVehicleHkdEquivalent(expenseHKD, expenseRMB, periodMonth);
-      const fuelExpenseHKDEquivalent = bossVehicleHkdEquivalent(vehicleExpenseByType.fuel.hkd, vehicleExpenseByType.fuel.rmb, periodMonth);
-      const repairExpenseHKDEquivalent = bossVehicleHkdEquivalent(vehicleExpenseByType.repair.hkd, vehicleExpenseByType.repair.rmb, periodMonth);
-      const insuranceExpenseHKDEquivalent = bossVehicleHkdEquivalent(vehicleExpenseByType.insurance.hkd, vehicleExpenseByType.insurance.rmb, periodMonth);
-      const reviewExpenseHKDEquivalent = bossVehicleHkdEquivalent(vehicleExpenseByType.review.hkd, vehicleExpenseByType.review.rmb, periodMonth);
-      const plateHeadExpenseHKDEquivalent = bossVehicleHkdEquivalent(vehicleExpenseByType.plateHead.hkd, vehicleExpenseByType.plateHead.rmb, periodMonth);
-      const otherExpenseHKDEquivalent = bossVehicleHkdEquivalent(vehicleExpenseByType.other.hkd, vehicleExpenseByType.other.rmb, periodMonth);
-      const driverCostHKDEquivalent = Math.max(0, revenueHKDEquivalent - orderProfitHKDEquivalent);
+      const vehicleExpenseHKDEquivalent = ["fuel", "repair", "insurance", "review", "plateHead", "other"]
+        .reduce((sum, key) => sum + Number(vehicleExpenseEquivalentByType[key] || 0), 0);
+      const fixedCostHKDEquivalent = bossVehicleHkdEquivalent(fixedCost.hkd, fixedCost.rmb, periodMonth);
+      const profitHKDEquivalent = row.orderProfitHKDEquivalent - vehicleExpenseHKDEquivalent - fixedCostHKDEquivalent;
+      const revenueHKDEquivalent = row.revenueHKDEquivalent;
+      const orderProfitHKDEquivalent = row.orderProfitHKDEquivalent;
+      const expenseHKDEquivalent = vehicleExpenseHKDEquivalent + fixedCostHKDEquivalent;
+      const fuelExpenseHKDEquivalent = vehicleExpenseEquivalentByType.fuel;
+      const repairExpenseHKDEquivalent = vehicleExpenseEquivalentByType.repair;
+      const insuranceExpenseHKDEquivalent = vehicleExpenseEquivalentByType.insurance;
+      const reviewExpenseHKDEquivalent = vehicleExpenseEquivalentByType.review;
+      const plateHeadExpenseHKDEquivalent = vehicleExpenseEquivalentByType.plateHead;
+      const otherExpenseHKDEquivalent = vehicleExpenseEquivalentByType.other;
+      const driverCostHKDEquivalent = row.driverCostHKDEquivalent;
       const totalCostHKD = revenueHKDEquivalent - profitHKDEquivalent;
       const orderCount = row.orders.length;
       return {
         plate: row.plate,
         driver: Array.from(row.driverNames).join("、") || vehicle?.driver || "-",
         orderCount,
-        revenue: moneyPairDisplay(row.revenueHKD, row.revenueRMB),
+        revenue: moneyPairDisplay(row.totalRevenueHKD, row.totalRevenueRMB),
+        freightRevenue: moneyPairDisplay(row.revenueHKD, row.revenueRMB),
         orderProfit: moneyPairDisplay(row.orderProfitHKD, row.orderProfitRMB),
         fuelExpense: moneyPairDisplay(vehicleExpenseByType.fuel.hkd, vehicleExpenseByType.fuel.rmb),
         repairExpense: moneyPairDisplay(vehicleExpenseByType.repair.hkd, vehicleExpenseByType.repair.rmb),
@@ -13088,6 +13303,7 @@ const bossVehicleProfitDisplayRows = computed(() => {
         reviewExpense: moneyPairDisplay(vehicleExpenseByType.review.hkd, vehicleExpenseByType.review.rmb),
         plateHeadExpense: moneyPairDisplay(vehicleExpenseByType.plateHead.hkd, vehicleExpenseByType.plateHead.rmb),
         vehicleOtherExpense: moneyPairDisplay(vehicleExpenseByType.other.hkd, vehicleExpenseByType.other.rmb),
+        fixedCost: moneyPairDisplay(fixedCost.hkd, fixedCost.rmb),
         expense: moneyPairDisplay(expenseHKD, expenseRMB),
         profit: moneyPairDisplay(profitHKD, profitRMB),
         profitHKDEquivalent: moneyHkdDisplay(profitHKDEquivalent),
@@ -13386,14 +13602,23 @@ const bossVehicleProfitAnalysisCards = computed(() => {
 });
 
 function bossSupplierProfitOrderBreakdown(order = {}) {
-  const revenue = orderCustomerReceivableBreakdown(order);
+  const receivable = orderCustomerReceivableBreakdown(order);
+  const linkedCustomsRMB = orderLinkedCustomsBusinessAmount(order);
+  const revenue = {
+    hkd: receivable.hkd,
+    rmb: Math.max(0, receivable.rmb - linkedCustomsRMB)
+  };
   const payable = supplierOrderPayableBreakdown(order);
   const companyCoveredCost = companyCoveredOrderCostBreakdown(order);
-  const profitHKD = Number(revenue.hkd || 0) - Number(payable.payableHKD || 0);
-  const profitRMB = Number(revenue.rmb || 0) - Number(payable.payableRMB || 0);
+  const profitHKD = Number(revenue.hkd || 0) - Number(payable.payableHKD || 0) - Number(companyCoveredCost.hkd || 0);
+  const profitRMB = Number(revenue.rmb || 0) - Number(payable.payableRMB || 0) - Number(companyCoveredCost.rmb || 0);
   const periodMonth = inputMonthKey(order.date) || bossVehicleExchangeRatePeriodMonth(bossPeriodFilter.value);
   const revenueRMBEquivalent = bossCompanyRmbEquivalent(revenue.hkd, revenue.rmb, periodMonth);
-  const costRMBEquivalent = bossCompanyRmbEquivalent(payable.payableHKD, payable.payableRMB, periodMonth);
+  const costRMBEquivalent = bossCompanyRmbEquivalent(
+    payable.payableHKD + companyCoveredCost.hkd,
+    payable.payableRMB + companyCoveredCost.rmb,
+    periodMonth
+  );
   const profitRMBEquivalent = revenueRMBEquivalent - costRMBEquivalent;
   return {
     revenueHKD: revenue.hkd,
@@ -13407,9 +13632,11 @@ function bossSupplierProfitOrderBreakdown(order = {}) {
     revenueRMBEquivalent,
     costRMBEquivalent,
     profitRMBEquivalent,
-    missingCostCount: Number(payable.missingCostCount || 0),
+    missingCostCount: Number(payable.missingCostCount || 0) + Number(companyCoveredCost.missingCostCount || 0),
     matchedCostCount: Number(payable.matchedCostCount || 0),
-    costStatus: supplierOrderCostStatus(payable),
+    costStatus: Number(payable.missingCostCount || 0) + Number(companyCoveredCost.missingCostCount || 0)
+      ? `未匹配 ${Number(payable.missingCostCount || 0) + Number(companyCoveredCost.missingCostCount || 0)} 项`
+      : "已匹配成本",
     payable
   };
 }
@@ -13452,7 +13679,7 @@ function bossSupplierProfitFeeRows(order = {}) {
       name: bossVehicleFeeName(fee) || "费用",
       income: moneyPairDisplay(income.hkd, income.rmb),
       cost: isCompanyCovered ? "公司自费" : moneyPairDisplay(cost.hkd, cost.rmb),
-      profit: isCompanyCovered ? moneyPairDisplay(income.hkd, income.rmb) : moneyPairDisplay(income.hkd - cost.hkd, income.rmb - cost.rmb),
+      profit: moneyPairDisplay(income.hkd - cost.hkd, income.rmb - cost.rmb),
       costStatus: isCompanyCovered ? "公司自费" : (costFee.costMatched || costFee.matched ? "已匹配" : "未匹配"),
       remark: costFee.costLabel || costFee.label || fee.remark || ""
     };
@@ -13650,24 +13877,31 @@ function closeBossSupplierProfitDetail() {
   activeBossSupplierProfitDetailMonth.value = "";
 }
 
-function bossCompanyEntryTotalForMonth(monthKey, entryType = "expense") {
+function bossCompanyEntryTotalForMonth(monthKey, entryType = "expense", filterKey = bossPeriodFilter.value, predicate = null) {
   return bossCompanyExpenseRows.value
-    .filter((row) => bossCompanyExpenseEntryType(row) === entryType && bossCompanyExpensePeriodMonth(row) === monthKey)
-    .reduce((sum, row) => sum + bossCompanyExpenseAmount(row), 0);
+    .filter((row) =>
+      bossCompanyExpenseEntryType(row) === entryType
+      && bossCompanyExpensePeriodMonth(row) === monthKey
+      && (!predicate || predicate(row))
+    )
+    .reduce((sum, row) => sum + Math.max(0, bossCompanyExpenseAmount(row)) * periodMonthCoverageRatio(monthKey, filterKey), 0);
 }
 
 function bossExpenseTotalForMonth(monthKey) {
-  return bossCompanyEntryTotalForMonth(monthKey, "expense");
+  return bossCompanyEntryTotalForMonth(monthKey, "expense", bossPeriodFilter.value);
 }
 
 function bossOtherIncomeTotalForMonth(monthKey) {
-  return bossCompanyEntryTotalForMonth(monthKey, "income");
+  return bossCompanyEntryTotalForMonth(monthKey, "income", bossPeriodFilter.value);
 }
 
 function bossVehicleCostForOrders(sourceOrders, filterKey) {
   const wageRows = buildFinanceWageRows(
     sourceOrders,
-    driverAdjustmentRows.value.filter((item) => dateMatchesPeriodFilter(item.date, filterKey))
+    driverAdjustmentRows.value.filter((item) =>
+      dateMatchesPeriodFilter(item.date, inputMonthKey(filterKey))
+      && dateMatchesPeriodFilter(item.date, bossPeriodFilter.value)
+    )
   );
   const driverPayHKD = wageRows.reduce((sum, row) => sum + row.total, 0);
   const driverPayRMB = wageRows.reduce((sum, row) => sum + row.totalRMB, 0);
@@ -13684,21 +13918,162 @@ function bossVehicleCostForOrders(sourceOrders, filterKey) {
     const amount = companyCoveredOrderCostBreakdown(order);
     return {
       hkd: sum.hkd + amount.hkd,
-      rmb: sum.rmb + amount.rmb
+      rmb: sum.rmb + amount.rmb,
+      missingCostCount: sum.missingCostCount + Number(amount.missingCostCount || 0)
     };
-  }, { hkd: 0, rmb: 0 });
-  const fixedCostRMB = Array.from(new Set(sourceOrders
-    .filter((order) => normalizeVehicleSource(order.vehicleSource) === OWN_VEHICLE_SOURCE && order.plate)
-    .map((order) => order.plate)))
-    .reduce((sum, plate) => {
-      const vehicle = vehicleRowsByPlate.value.get(String(plate || "").trim()) || null;
-      const plateOrders = sourceOrders.filter((order) => order.plate === plate);
-      return sum + vehicleFixedCostRMB(vehicle, plateOrders, filterKey);
-    }, 0);
+  }, { hkd: 0, rmb: 0, missingCostCount: 0 });
+  const fixedCost = vehicleRows.value
+    .filter((vehicle) => isBossCompanyVehiclePlate(vehicle.plate) && Number(vehicle.monthlyCost || 0) > 0)
+    .reduce((sum, vehicle) =>
+      sumMoneyBreakdowns(sum, bossVehicleMonthlyCostForMonth(vehicle, filterKey)),
+    { hkd: 0, rmb: 0 });
+  const vehicleExpense = bossVehicleExpenseForMonth(inputMonthKey(filterKey), bossPeriodFilter.value);
+  const driverPay = { hkd: driverPayHKD, rmb: driverPayRMB };
+  const vehicleCosts = sumMoneyBreakdowns(fixedCost, vehicleExpense);
+  const totalCosts = sumMoneyBreakdowns(driverPay, supplierPay, companyCoveredCost, vehicleCosts);
   return {
-    hkd: driverPayHKD + supplierPay.hkd + companyCoveredCost.hkd,
-    rmb: driverPayRMB + supplierPay.rmb + companyCoveredCost.rmb + fixedCostRMB
+    driverPay,
+    supplierPay,
+    companyCoveredCost,
+    fixedCost,
+    vehicleExpense,
+    vehicleCosts,
+    hkd: totalCosts.hkd,
+    rmb: totalCosts.rmb
   };
+}
+
+function vehicleExpenseAmountForMonth(expense = {}, monthKey = "", filterKey = bossPeriodFilter.value) {
+  const zero = { hkd: 0, rmb: 0 };
+  const month = inputMonthKey(monthKey);
+  if (!month || !expense?.plate) return zero;
+  const currency = expense.currency === "港币" ? "港币" : "人民币";
+  const amount = Math.max(0, Number(expense.amount || 0));
+  if (!amount) return zero;
+  if (expense.type !== "annual") {
+    if (inputMonthKey(expense.date) !== month || !dateMatchesPeriodFilter(expense.date, filterKey)) return zero;
+    return amountBreakdownByCurrency(amount, currency);
+  }
+
+  const startDate = vehicleExpenseAnnualStartDate(expense);
+  const endDate = vehicleExpenseAnnualEndDate(expense);
+  if (!startDate || !endDate) {
+    const { year, mode } = periodFilterParts(filterKey);
+    const expenseYear = String(expense.year || String(expense.date || "").slice(0, 4));
+    if (expenseYear !== month.slice(0, 4) || (mode === "year" && expenseYear !== year)) return zero;
+    const { start, end } = periodFilterBounds(filterKey);
+    if (start && end && (end < `${month}-01` || start > `${month}-31`)) return zero;
+    return amountBreakdownByCurrency(amount / 12 * periodMonthCoverageRatio(month, filterKey), currency);
+  }
+  const monthStart = `${month}-01`;
+  const nextMonth = new Date(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 1);
+  const monthEnd = dateInputFromDate(new Date(nextMonth.getTime() - 86400000));
+  const { start: filterStart, end: filterEnd } = periodFilterBounds(filterKey);
+  const overlapStart = [startDate, monthStart, filterStart].filter(Boolean).sort().at(-1) || startDate;
+  const overlapEnd = [endDate, monthEnd, filterEnd].filter(Boolean).sort()[0] || endDate;
+  const overlapDays = inputDateRangeDays(overlapStart, overlapEnd);
+  const totalDays = inputDateRangeDays(startDate, endDate);
+  if (!overlapDays || !totalDays) return zero;
+  return amountBreakdownByCurrency(amount * overlapDays / totalDays, currency);
+}
+
+function bossVehicleExpenseForMonth(monthKey, filterKey = bossPeriodFilter.value) {
+  return vehicleExpenseRows.value.reduce((sum, expense) =>
+    sumMoneyBreakdowns(sum, vehicleExpenseAmountForMonth(expense, monthKey, filterKey)), { hkd: 0, rmb: 0 });
+}
+
+function vehicleExpenseAffectedMonthKeys(expense = {}) {
+  if (expense.type !== "annual") {
+    const month = inputMonthKey(expense.date);
+    return month ? [month] : [];
+  }
+  const startDate = vehicleExpenseAnnualStartDate(expense);
+  const endDate = vehicleExpenseAnnualEndDate(expense);
+  if (!startDate || !endDate) {
+    const year = String(expense.year || String(expense.date || "").slice(0, 4));
+    return /^\d{4}$/.test(year) ? Array.from({ length: 12 }, (_, index) => `${year}-${String(index + 1).padStart(2, "0")}`) : [];
+  }
+  const monthKeys = [];
+  const cursor = new Date(Number(startDate.slice(0, 4)), Number(startDate.slice(5, 7)) - 1, 1);
+  const last = new Date(Number(endDate.slice(0, 4)), Number(endDate.slice(5, 7)) - 1, 1);
+  while (cursor <= last) {
+    monthKeys.push(`${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}`);
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+  return monthKeys;
+}
+
+function bossProfitPeriodMonthKeys(filterKey = bossPeriodFilter.value) {
+  const { start, end } = periodFilterBounds(filterKey);
+  if (start && end) {
+    const monthKeys = [];
+    const cursor = new Date(Number(start.slice(0, 4)), Number(start.slice(5, 7)) - 1, 1);
+    const last = new Date(Number(end.slice(0, 4)), Number(end.slice(5, 7)) - 1, 1);
+    while (cursor <= last) {
+      monthKeys.push(`${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}`);
+      cursor.setMonth(cursor.getMonth() + 1);
+    }
+    return monthKeys;
+  }
+  if (periodFilterParts(filterKey).mode !== "all") {
+    const month = inputMonthKey(filterKey);
+    return month ? [month] : [];
+  }
+  const monthKeys = new Set();
+  bossOrderRows.value.forEach((row) => {
+    const month = inputMonthKey(row.date);
+    if (month) monthKeys.add(month);
+  });
+  bossCustomsBusinessRows.value.forEach((row) => {
+    const month = inputMonthKey(row.date);
+    if (month) monthKeys.add(month);
+  });
+  bossOtherBusinessRows.value.forEach((row) => {
+    const month = inputMonthKey(row.date);
+    if (month) monthKeys.add(month);
+  });
+  bossCompanyExpenseRows.value.forEach((row) => {
+    const month = bossCompanyExpensePeriodMonth(row);
+    if (month) monthKeys.add(month);
+  });
+  vehicleExpenseRows.value.forEach((row) => vehicleExpenseAffectedMonthKeys(row).forEach((month) => monthKeys.add(month)));
+  return Array.from(monthKeys).sort();
+}
+
+function vehicleFixedCostForPeriod(vehicle, filterKey, sourceOrders = []) {
+  const monthKeys = bossProfitPeriodMonthKeys(filterKey);
+  if (!monthKeys.length && periodFilterParts(filterKey).mode === "all") return { hkd: 0, rmb: 0 };
+  if (!monthKeys.length) return vehicleFixedCostBreakdown(vehicle, sourceOrders, filterKey);
+  return monthKeys.reduce((sum, monthKey) =>
+    sumMoneyBreakdowns(sum, bossVehicleMonthlyCostForMonth(vehicle, monthKey)), { hkd: 0, rmb: 0 });
+}
+
+function bossVehicleActivityMonthKeys(plate = "") {
+  const targetPlate = String(plate || "").trim();
+  if (!targetPlate) return [];
+  const months = new Set();
+  bossOrderRows.value
+    .filter((order) => String(order.plate || "").trim() === targetPlate)
+    .forEach((order) => {
+      const month = inputMonthKey(order.date);
+      if (month) months.add(month);
+    });
+  vehicleExpenseRows.value
+    .filter((expense) => String(expense.plate || "").trim() === targetPlate)
+    .forEach((expense) => vehicleExpenseAffectedMonthKeys(expense).forEach((month) => months.add(month)));
+  return Array.from(months).sort();
+}
+
+function bossVehicleMonthlyCostForMonth(vehicle = {}, monthKey = "") {
+  const month = inputMonthKey(monthKey);
+  if (!month) return { hkd: 0, rmb: 0 };
+  if (periodFilterParts(bossPeriodFilter.value).mode === "all") {
+    const activityMonths = bossVehicleActivityMonthKeys(vehicle.plate);
+    if (!activityMonths.length || month < activityMonths[0] || month > activityMonths.at(-1)) {
+      return { hkd: 0, rmb: 0 };
+    }
+  }
+  return vehicleFixedCostBreakdown(vehicle, [], bossPeriodFilter.value, month);
 }
 
 const bossCompanyProfitDisplayRows = computed(() => {
@@ -13726,10 +14101,20 @@ const bossCompanyProfitDisplayRows = computed(() => {
   });
   bossCompanyExpenseRows.value.forEach((row) => {
     const periodMonth = bossCompanyExpensePeriodMonth(row);
-    if (periodMonth && dateMatchesPeriodFilter(`${periodMonth}-01`, bossPeriodFilter.value)) {
+    if (periodMonth && periodMonthCoverageRatio(periodMonth, bossPeriodFilter.value) > 0) {
       ensureMonthGroup(periodMonth);
     }
   });
+  vehicleExpenseRows.value.forEach((expense) => {
+    vehicleExpenseAffectedMonthKeys(expense).forEach((monthKey) => {
+      const { start, end } = periodFilterBounds(bossPeriodFilter.value);
+      const monthStart = `${monthKey}-01`;
+      const nextMonth = new Date(Number(monthKey.slice(0, 4)), Number(monthKey.slice(5, 7)), 1);
+      const monthEnd = dateInputFromDate(new Date(nextMonth.getTime() - 86400000));
+      if ((!start || monthEnd >= start) && (!end || monthStart <= end)) ensureMonthGroup(monthKey);
+    });
+  });
+  bossProfitPeriodMonthKeys(bossPeriodFilter.value).forEach(ensureMonthGroup);
   return Array.from(monthGroups.entries())
     .sort(([left], [right]) => right.localeCompare(left))
     .map(([period, group]) => {
@@ -13745,20 +14130,56 @@ const bossCompanyProfitDisplayRows = computed(() => {
       };
       const vehicleCost = bossVehicleCostForOrders(transportOrders, period);
       const expenseRMB = bossExpenseTotalForMonth(period);
-      const transportRevenueRMBEquivalent = bossCompanyRmbEquivalent(transportRevenue.hkd, transportRevenue.rmb, period);
-      const customsRevenueRMBEquivalent = bossCompanyRmbEquivalent(customsRevenue.hkd, customsRevenue.rmb, period);
-      const revenueRMBEquivalent = bossCompanyRmbEquivalent(revenue.hkd, revenue.rmb, period);
+      const salaryExpensesRMB = bossCompanyEntryTotalForMonth(
+        period,
+        "expense",
+        bossPeriodFilter.value,
+        bossCompanyExpenseIsSalaryCategory
+      );
+      const otherCompanyExpensesRMB = Math.max(0, expenseRMB - salaryExpensesRMB);
+      const transportRevenueRMBEquivalent = transportOrders.reduce((sum, order) => {
+        const amount = orderTransportReceivableBreakdown(order);
+        const orderPeriod = inputMonthKey(order.date) || period;
+        return sum + bossCompanyRmbEquivalent(amount.hkd, amount.rmb, orderPeriod);
+      }, 0);
+      const customsRevenueRMBEquivalent = sumCustomsRevenueRmb(group.customsRows);
+      const revenueRMBEquivalent = transportRevenueRMBEquivalent + customsRevenueRMBEquivalent + otherBusinessRevenue.income;
       const vehicleCostRMBEquivalent = bossCompanyRmbEquivalent(vehicleCost.hkd, vehicleCost.rmb, period);
-      const transportProfitHKD = transportRevenue.hkd - vehicleCost.hkd;
-      const transportProfitRMB = transportRevenue.rmb - vehicleCost.rmb;
+      const transportProfit = calculateTransportProfit({
+        revenue: transportRevenue,
+        driverWages: vehicleCost.driverPay,
+        supplierCosts: vehicleCost.supplierPay,
+        companyCoveredCosts: vehicleCost.companyCoveredCost,
+        vehicleCosts: vehicleCost.vehicleCosts
+      });
+      const transportProfitHKD = transportProfit.hkd;
+      const transportProfitRMB = transportProfit.rmb;
       const transportProfitRMBEquivalent = transportRevenueRMBEquivalent - vehicleCostRMBEquivalent;
       const customsProfitHKD = customsRevenue.hkd;
       const customsProfitRMB = customsRevenue.rmb;
       const customsProfitRMBEquivalent = customsRevenueRMBEquivalent;
       const otherBusinessProfitRMB = otherBusinessRevenue.profit;
-      const netProfitHKD = transportProfitHKD + customsProfitHKD;
-      const netProfitRMB = transportProfitRMB + customsProfitRMB + otherBusinessProfitRMB + otherIncomeRMB - expenseRMB;
-      const netProfitRMBEquivalent = transportProfitRMBEquivalent + customsProfitRMBEquivalent + otherBusinessProfitRMB + otherIncomeRMB - expenseRMB;
+      const netProfit = calculateCompanyNetProfit({
+        transportProfit,
+        customsProfit: { hkd: customsProfitHKD, rmb: customsProfitRMB },
+        otherBusinessProfit: { rmb: otherBusinessProfitRMB },
+        otherIncome: { rmb: otherIncomeRMB },
+        companyExpenses: { rmb: expenseRMB }
+      });
+      const netProfitRMBEquivalent = calculateCompanyNetProfit({
+        transportProfit: { rmb: transportProfitRMBEquivalent },
+        customsProfit: { rmb: customsProfitRMBEquivalent },
+        otherBusinessProfit: { rmb: otherBusinessProfitRMB },
+        otherIncome: { rmb: otherIncomeRMB },
+        companyExpenses: { rmb: expenseRMB }
+      }).rmb;
+      const netProfitHKD = netProfit.hkd;
+      const netProfitRMB = netProfit.rmb;
+      const driverWageCostRMB = bossCompanyRmbEquivalent(vehicleCost.driverPay.hkd, vehicleCost.driverPay.rmb, period);
+      const supplierCostRMB = bossCompanyRmbEquivalent(vehicleCost.supplierPay.hkd, vehicleCost.supplierPay.rmb, period);
+      const companyCoveredCostRMB = bossCompanyRmbEquivalent(vehicleCost.companyCoveredCost.hkd, vehicleCost.companyCoveredCost.rmb, period);
+      const vehicleExpenseRMB = bossCompanyRmbEquivalent(vehicleCost.vehicleExpense.hkd, vehicleCost.vehicleExpense.rmb, period);
+      const vehicleFixedCostRMB = bossCompanyRmbEquivalent(vehicleCost.fixedCost.hkd, vehicleCost.fixedCost.rmb, period);
       return {
         period,
         transportRevenue: moneyPairDisplay(transportRevenue.hkd, transportRevenue.rmb),
@@ -13775,6 +14196,24 @@ const bossCompanyProfitDisplayRows = computed(() => {
         revenueRMBDisplay: moneyRmbDisplay(revenueRMBEquivalent),
         vehicleCost: moneyPairDisplay(vehicleCost.hkd, vehicleCost.rmb),
         vehicleCostRMB: moneyRmbDisplay(vehicleCostRMBEquivalent),
+        driverWageCost: moneyPairDisplay(vehicleCost.driverPay.hkd, vehicleCost.driverPay.rmb),
+        driverWageCostRMB: moneyRmbDisplay(driverWageCostRMB),
+        supplierCost: moneyPairDisplay(vehicleCost.supplierPay.hkd, vehicleCost.supplierPay.rmb),
+        supplierCostRMB: moneyRmbDisplay(supplierCostRMB),
+        companyCoveredCost: moneyPairDisplay(vehicleCost.companyCoveredCost.hkd, vehicleCost.companyCoveredCost.rmb),
+        companyCoveredCostRMB: moneyRmbDisplay(companyCoveredCostRMB),
+        vehicleExpense: moneyPairDisplay(vehicleCost.vehicleExpense.hkd, vehicleCost.vehicleExpense.rmb),
+        vehicleExpenseRMB: moneyRmbDisplay(vehicleExpenseRMB),
+        vehicleFixedCost: moneyPairDisplay(vehicleCost.fixedCost.hkd, vehicleCost.fixedCost.rmb),
+        vehicleFixedCostRMB: moneyRmbDisplay(vehicleFixedCostRMB),
+        salaryExpenses: salaryExpensesRMB ? moneyRmbDisplay(salaryExpensesRMB) : "-",
+        otherCompanyExpenses: otherCompanyExpensesRMB ? moneyRmbDisplay(otherCompanyExpensesRMB) : "-",
+        missingCostCount: vehicleCost.companyCoveredCost.missingCostCount + transportOrders.reduce((sum, order) => {
+          const supplier = order.vehicleSource === "外派车辆" ? supplierOrderPayableBreakdown(order) : { missingCostCount: 0 };
+          return sum + Number(supplier.missingCostCount || 0) + Number(orderDriverPayBreakdown(order).missingCostCount || 0);
+        }, 0),
+        uncostedCustomsCount: group.customsRows.length,
+        uncostedCustomsRevenue: customsRevenueRMBEquivalent,
         otherIncome: otherIncomeRMB ? moneyRmbDisplay(otherIncomeRMB) : "-",
         expenses: expenseRMB ? moneyRmbDisplay(expenseRMB) : "-",
         netProfit: moneyPairDisplay(netProfitHKD, netProfitRMB),
@@ -13801,6 +14240,13 @@ const bossCompanyProfitDisplayRows = computed(() => {
         vehicleCostHKD: vehicleCost.hkd,
         vehicleCostRMBRaw: vehicleCost.rmb,
         vehicleCostRMBEquivalent,
+        driverWageCostRMBEquivalent: driverWageCostRMB,
+        supplierCostRMBEquivalent: supplierCostRMB,
+        companyCoveredCostRMBEquivalent: companyCoveredCostRMB,
+        vehicleExpenseRMBEquivalent: vehicleExpenseRMB,
+        vehicleFixedCostRMBEquivalent: vehicleFixedCostRMB,
+        salaryExpensesRMB,
+        otherCompanyExpensesRMB,
         otherIncomeRMB,
         expenseRMB,
         netProfitHKD,
@@ -13834,8 +14280,18 @@ const bossCompanyProfitSummary = computed(() => {
     customsProfitRMBEquivalent: sum.customsProfitRMBEquivalent + row.customsProfitRMBEquivalent,
     revenueRMBEquivalent: sum.revenueRMBEquivalent + row.revenueRMBEquivalent,
     vehicleCostRMBEquivalent: sum.vehicleCostRMBEquivalent + row.vehicleCostRMBEquivalent,
+    driverWageCostRMBEquivalent: sum.driverWageCostRMBEquivalent + row.driverWageCostRMBEquivalent,
+    supplierCostRMBEquivalent: sum.supplierCostRMBEquivalent + row.supplierCostRMBEquivalent,
+    companyCoveredCostRMBEquivalent: sum.companyCoveredCostRMBEquivalent + row.companyCoveredCostRMBEquivalent,
+    vehicleExpenseRMBEquivalent: sum.vehicleExpenseRMBEquivalent + row.vehicleExpenseRMBEquivalent,
+    vehicleFixedCostRMBEquivalent: sum.vehicleFixedCostRMBEquivalent + row.vehicleFixedCostRMBEquivalent,
+    salaryExpensesRMB: sum.salaryExpensesRMB + row.salaryExpensesRMB,
+    otherCompanyExpensesRMB: sum.otherCompanyExpensesRMB + row.otherCompanyExpensesRMB,
     otherIncomeRMB: sum.otherIncomeRMB + row.otherIncomeRMB,
     expenseRMB: sum.expenseRMB + row.expenseRMB,
+    missingCostCount: sum.missingCostCount + row.missingCostCount,
+    uncostedCustomsCount: sum.uncostedCustomsCount + row.uncostedCustomsCount,
+    uncostedCustomsRevenueRMBEquivalent: sum.uncostedCustomsRevenueRMBEquivalent + row.uncostedCustomsRevenue,
     netProfitRMBEquivalent: sum.netProfitRMBEquivalent + row.netProfitRMBEquivalent
   }), {
     transportHKD: 0,
@@ -13859,10 +14315,28 @@ const bossCompanyProfitSummary = computed(() => {
     customsProfitRMBEquivalent: 0,
     revenueRMBEquivalent: 0,
     vehicleCostRMBEquivalent: 0,
+    driverWageCostRMBEquivalent: 0,
+    supplierCostRMBEquivalent: 0,
+    companyCoveredCostRMBEquivalent: 0,
+    vehicleExpenseRMBEquivalent: 0,
+    vehicleFixedCostRMBEquivalent: 0,
+    salaryExpensesRMB: 0,
+    otherCompanyExpensesRMB: 0,
     otherIncomeRMB: 0,
     expenseRMB: 0,
+    missingCostCount: 0,
+    uncostedCustomsCount: 0,
+    uncostedCustomsRevenueRMBEquivalent: 0,
     netProfitRMBEquivalent: 0
   });
+  const invalidNegativeCostCount = bossCompanyExpenseRows.value.filter((row) =>
+    bossCompanyExpenseEntryType(row) === "expense"
+    && bossCompanyExpenseAmount(row) < 0
+    && periodMonthCoverageRatio(bossCompanyExpensePeriodMonth(row), bossPeriodFilter.value) > 0
+  ).length + vehicleExpenseRows.value.filter((row) =>
+    Number(row.amount || 0) < 0
+    && vehicleExpenseAffectedMonthKeys(row).some((month) => periodMonthCoverageRatio(month, bossPeriodFilter.value) > 0)
+  ).length;
   return {
     transportRevenue: moneyPairDisplay(summary.transportHKD, summary.transportRMB),
     transportRevenueRMB: moneyRmbDisplay(summary.transportRevenueRMBEquivalent),
@@ -13878,6 +14352,13 @@ const bossCompanyProfitSummary = computed(() => {
     revenue: moneyPairDisplay(summary.revenueHKD, summary.revenueRMB),
     revenueRMB: moneyRmbDisplay(summary.revenueRMBEquivalent),
     vehicleCostRMB: moneyRmbDisplay(summary.vehicleCostRMBEquivalent),
+    driverWageCostRMB: moneyRmbDisplay(summary.driverWageCostRMBEquivalent),
+    supplierCostRMB: moneyRmbDisplay(summary.supplierCostRMBEquivalent),
+    companyCoveredCostRMB: moneyRmbDisplay(summary.companyCoveredCostRMBEquivalent),
+    vehicleExpenseRMB: moneyRmbDisplay(summary.vehicleExpenseRMBEquivalent),
+    vehicleFixedCostRMB: moneyRmbDisplay(summary.vehicleFixedCostRMBEquivalent),
+    salaryExpensesRMB: moneyRmbDisplay(summary.salaryExpensesRMB),
+    otherCompanyExpensesRMB: moneyRmbDisplay(summary.otherCompanyExpensesRMB),
     otherIncomeRMB: moneyRmbDisplay(summary.otherIncomeRMB),
     expensesRMB: moneyRmbDisplay(summary.expenseRMB),
     netProfit: moneyPairDisplay(summary.netProfitHKD, summary.netProfitRMB),
@@ -13888,6 +14369,10 @@ const bossCompanyProfitSummary = computed(() => {
     otherBusinessProfitRMBValue: summary.otherBusinessProfitRMB,
     otherIncomeRMBValue: summary.otherIncomeRMB,
     expenseRMB: summary.expenseRMB,
+    missingCostCount: summary.missingCostCount,
+    uncostedCustomsCount: summary.uncostedCustomsCount,
+    uncostedCustomsRevenueRMBEquivalent: summary.uncostedCustomsRevenueRMBEquivalent,
+    invalidNegativeCostCount,
     netProfitRMBEquivalent: summary.netProfitRMBEquivalent,
     margin: bossCompanyProfitMarginText(summary.netProfitRMBEquivalent, summary.revenueRMBEquivalent + summary.otherIncomeRMB)
   };
@@ -13895,52 +14380,105 @@ const bossCompanyProfitSummary = computed(() => {
 
 const bossCustomerProfitDisplayRows = computed(() => {
   const groups = new Map();
-  const ensureCustomerGroup = (customerName = "未填写客户") => {
+  const ensureCustomerGroup = (customerName = "未填写客户", customerId = "") => {
     const customer = String(customerName || "未填写客户").trim() || "未填写客户";
-    const row = groups.get(customer) || {
+    const key = String(customerId || customer).trim();
+    const row = groups.get(key) || {
+      key,
       customer,
+      customerId: String(customerId || "").trim(),
       orderCount: 0,
       otherBusinessCount: 0,
       revenueHKD: 0,
       revenueRMB: 0,
+      driverCostHKD: 0,
+      driverCostRMB: 0,
+      supplierCostHKD: 0,
+      supplierCostRMB: 0,
+      companyCoveredCostHKD: 0,
+      companyCoveredCostRMB: 0,
+      revenueRMBEquivalent: 0,
+      directCostRMBEquivalent: 0,
       otherBusinessIncomeRMB: 0,
-      otherBusinessProfitRMB: 0
+      otherBusinessProfitRMB: 0,
+      customsBusinessIds: new Set(),
+      missingCostCount: 0
     };
-    groups.set(customer, row);
+    groups.set(key, row);
     return row;
   };
   bossOrderRows.value.forEach((order) => {
-    const row = ensureCustomerGroup(order.customer);
+    const row = ensureCustomerGroup(order.customer, order.customerId || order.customer_id);
+    const revenue = orderCustomerReceivableBreakdown(order);
+    const driverCost = orderDriverPayBreakdown(order);
+    const supplierCost = order.vehicleSource === "外派车辆"
+      ? supplierOrderPayableBreakdown(order)
+      : { payableHKD: 0, payableRMB: 0, missingCostCount: 0 };
+    const companyCost = companyCoveredOrderCostBreakdown(order);
+    const periodMonth = inputMonthKey(order.date) || bossVehicleExchangeRatePeriodMonth(bossPeriodFilter.value);
+    orderLinkedCustomsBusinessIdsValue(order).forEach((id) => {
+      if (customsBusinessRowsById.value.has(String(id || "").trim())) row.customsBusinessIds.add(String(id || "").trim());
+    });
     row.orderCount += 1;
-    row.revenueHKD += Number(order.receivableHKD || 0);
-    row.revenueRMB += Number(order.receivableRMB || 0);
+    row.revenueHKD += revenue.hkd;
+    row.revenueRMB += revenue.rmb;
+    row.driverCostHKD += driverCost.hkd;
+    row.driverCostRMB += driverCost.rmb;
+    row.supplierCostHKD += supplierCost.payableHKD;
+    row.supplierCostRMB += supplierCost.payableRMB;
+    row.companyCoveredCostHKD += companyCost.hkd;
+    row.companyCoveredCostRMB += companyCost.rmb;
+    row.revenueRMBEquivalent += bossCompanyRmbEquivalent(revenue.hkd, revenue.rmb, periodMonth);
+    row.directCostRMBEquivalent += bossCompanyRmbEquivalent(
+      driverCost.hkd + supplierCost.payableHKD + companyCost.hkd,
+      driverCost.rmb + supplierCost.payableRMB + companyCost.rmb,
+      periodMonth
+    );
+    row.missingCostCount += Number(driverCost.missingCostCount || 0)
+      + Number(supplierCost.missingCostCount || 0)
+      + Number(companyCost.missingCostCount || 0);
   });
   bossOtherBusinessRows.value.forEach((item) => {
-    const row = ensureCustomerGroup(item.customer);
+    const row = ensureCustomerGroup(item.customer, item.customerId || item.customer_id);
     const totals = otherBusinessRowTotals(item);
     row.otherBusinessCount += 1;
     row.otherBusinessIncomeRMB += totals.totalIncome;
     row.otherBusinessProfitRMB += totals.profit;
   });
-  const costRatio = rmbEquivalent(
-    bossFinanceSummary.value.driverPayableHKD + bossFinanceSummary.value.supplierPayableHKD,
-    bossFinanceSummary.value.driverPayableRMB + bossFinanceSummary.value.supplierPayableRMB
-  ) / Math.max(1, rmbEquivalent(bossFinanceSummary.value.receivableHKD, bossFinanceSummary.value.receivableRMB));
   return Array.from(groups.values())
     .map((row) => {
-      const costHKD = row.revenueHKD * costRatio;
-      const costRMB = row.revenueRMB * costRatio;
-      const profitHKD = row.revenueHKD - costHKD;
-      const profitRMB = row.revenueRMB - costRMB + row.otherBusinessProfitRMB;
+      const profit = calculateCustomerContributionProfit({
+        revenue: { hkd: row.revenueHKD, rmb: row.revenueRMB },
+        driverWages: { hkd: row.driverCostHKD, rmb: row.driverCostRMB },
+        supplierCosts: { hkd: row.supplierCostHKD, rmb: row.supplierCostRMB },
+        companyCoveredCosts: { hkd: row.companyCoveredCostHKD, rmb: row.companyCoveredCostRMB },
+        otherBusinessProfit: { rmb: row.otherBusinessProfitRMB }
+      });
+      const profitHKD = profit.hkd;
+      const profitRMB = profit.rmb;
       const totalRevenueRMB = row.revenueRMB + row.otherBusinessIncomeRMB;
+      const profitEquivalent = row.revenueRMBEquivalent - row.directCostRMBEquivalent + row.otherBusinessProfitRMB;
+      const revenueEquivalent = row.revenueRMBEquivalent + row.otherBusinessIncomeRMB;
+      const uncostedCustomsCount = row.customsBusinessIds.size;
+      const costStatus = [
+        row.missingCostCount ? `未匹配成本 ${row.missingCostCount} 项` : "",
+        uncostedCustomsCount ? `报关未录成本 ${uncostedCustomsCount} 条` : ""
+      ].filter(Boolean).join(" / ") || "成本已匹配";
       return {
         customer: row.customer,
+        customerId: row.customerId,
         orderCount: row.orderCount,
         orderCountText: row.otherBusinessCount ? `${row.orderCount} 单 / 其他 ${row.otherBusinessCount} 条` : row.orderCount,
         revenue: moneyPairDisplay(row.revenueHKD, totalRevenueRMB),
         profit: moneyPairDisplay(profitHKD, profitRMB),
-        margin: marginText(profitHKD, profitRMB, row.revenueHKD, totalRevenueRMB),
-        profitEquivalent: rmbEquivalent(profitHKD, profitRMB)
+        cost: moneyPairDisplay(
+          row.driverCostHKD + row.supplierCostHKD + row.companyCoveredCostHKD,
+          row.driverCostRMB + row.supplierCostRMB + row.companyCoveredCostRMB
+        ),
+        missingCostCount: row.missingCostCount,
+        costStatus,
+        margin: bossCompanyProfitMarginText(profitEquivalent, revenueEquivalent),
+        profitEquivalent
       };
     })
     .sort((left, right) => right.profitEquivalent - left.profitEquivalent || right.orderCount - left.orderCount)
@@ -13951,7 +14489,7 @@ const bossDashboardTransportRevenueRows = computed(() =>
   bossOrderRows.value
     .filter((order) => String(order.businessType || "").includes("运输"))
     .map((order) => {
-      const amount = orderCustomerReceivableBreakdown(order);
+      const amount = orderTransportReceivableBreakdown(order);
       const period = inputMonthKey(order.date) || bossVehicleExchangeRatePeriodMonth(bossPeriodFilter.value);
       const rmbEquivalent = bossCompanyRmbEquivalent(amount.hkd, amount.rmb, period);
       return {
@@ -14526,11 +15064,11 @@ const bossDashboardDetailSummaryCards = computed(() => {
   }
   return [
     { label: "运输利润", value: bossCompanyProfitSummary.value.transportProfitRMB, note: `运输订单 ${bossDashboardTransportRevenueRows.value.length} 单` },
-    { label: "报关利润", value: bossCompanyProfitSummary.value.customsProfitRMB, note: `报关业务 ${bossDashboardCustomsRevenueRows.value.length} 条` },
+    { label: "报关收入（未扣成本）", value: bossCompanyProfitSummary.value.customsProfitRMB, note: `报关业务 ${bossDashboardCustomsRevenueRows.value.length} 条，暂无成本字段` },
     { label: "其他业务利润", value: bossCompanyProfitSummary.value.otherBusinessProfitRMB, note: `其他业务 ${bossDashboardOtherBusinessRows.value.length} 条` },
     { label: "其他收入", value: bossCompanyProfitSummary.value.otherIncomeRMB, note: `收入记录 ${bossDashboardOtherIncomeRows.value.length} 条` },
     { label: "公司级支出", value: bossCompanyProfitSummary.value.expensesRMB, note: `支出记录 ${bossDashboardExpenseRows.value.length} 条` },
-    { label: "净利润", value: bossCompanyProfitSummary.value.netProfitRMB, note: "运输利润 + 报关利润 + 其他业务利润 + 其他收入 - 公司级支出" }
+    { label: "净利润", value: bossCompanyProfitSummary.value.netProfitRMB, note: `未匹配成本 ${bossCompanyProfitSummary.value.missingCostCount} 项；报关收入尚未扣成本` }
   ];
 });
 
@@ -14597,8 +15135,31 @@ function buildFinanceCustomerRows(sourceOrders, limit = 0) {
   return limit ? rows.slice(0, limit) : rows;
 }
 
+function statementCustomerRowMatchesSearch(row = {}, keyword = "") {
+  const normalizedKeyword = String(keyword || "").trim().toLowerCase();
+  if (!normalizedKeyword) return true;
+  const customer = transportCustomerByReference(row.customer || "", row.customerId || "");
+  return [
+    row.customer,
+    row.customerId,
+    customer?.name,
+    customer?.shortName,
+    customer?.short_name,
+    customerShortDisplay(customer),
+    transportCustomerLabelByReference(row.customer || "", row.customerId || "")
+  ].some((value) => String(value || "").trim().toLowerCase().includes(normalizedKeyword));
+}
+
 const financeCustomerRanking = computed(() => buildFinanceCustomerRows(financeOrderRows.value, 12));
 const statementCustomerRows = computed(() => buildFinanceCustomerRows(statementBillableOrderRows.value));
+const filteredStatementCustomerRows = computed(() =>
+  statementCustomerRows.value.filter((row) => statementCustomerRowMatchesSearch(row, statementCustomerSearch.value))
+);
+function statementCustomerRank(row = {}) {
+  return statementCustomerRows.value.findIndex((item) =>
+    item.customer === row.customer && item.customerId === row.customerId
+  ) + 1;
+}
 
 function buildStatementSupplierRows(sourceOrders) {
   const groups = new Map();
@@ -25430,6 +25991,12 @@ function financeWageFeeText(amount = 0, currency = DRIVER_WAGE_DEFAULT_FEE_CURRE
   return `${financeWageCurrencyCode(currency)} ${money(value)}`;
 }
 
+function financeWageParkingFeeText(row = {}) {
+  const feeText = financeWageFeeText(row.parkingFee, row.parkingFeeCurrency);
+  if (feeText === "-") return feeText;
+  return `${row.parkingFeeTreatment === "reimbursement" ? "报销" : "扣减"} ${feeText}`;
+}
+
 function financeWageMiscDisplay(hkd = 0, rmb = 0) {
   const hkdValue = Number(hkd || 0);
   const rmbValue = Number(rmb || 0);
@@ -29349,13 +29916,14 @@ function companyCoveredOrderCostBreakdown(order = {}) {
     .reduce((sum, fee) => {
       const cost = companyCoveredFeeCostSnapshot(fee, order);
       const value = Number(cost.amount || 0);
+      if (!cost.matched) sum.missingCostCount += 1;
       if (currencyCodeDisplay(cost.currency || fee.currency || order.currency || "港币") === "RMB") {
         sum.rmb += value;
       } else {
         sum.hkd += value;
       }
       return sum;
-    }, { hkd: 0, rmb: 0 });
+    }, { hkd: 0, rmb: 0, missingCostCount: 0 });
 }
 
 function supplierEntityAliases(value = "") {
@@ -30989,9 +31557,7 @@ function financeWageStatementIsFreightName(value = "") {
 }
 
 function financeWageStatementProjectLineMatchesExtraField(lineName = "", field = "") {
-  const keywords = DRIVER_EXTRA_FEE_KEYWORDS[field] || [];
-  const name = financeWageStatementFeeName({ name: lineName });
-  return keywords.some((keyword) => name.includes(financeWageStatementFeeName({ name: keyword })));
+  return driverExtraFeeNameMatchesField(lineName, field);
 }
 
 function financeWageStatementFeeMatches(fee = {}, keywords = []) {
@@ -31125,13 +31691,104 @@ function financeWageStatementFeeShouldApplyToDriver(order = {}, fee = {}, driver
 }
 
 function financeWageStatementFeeHasStoredCost(order = {}, fee = {}) {
-  const splitParts = orderFeeCostSplitParts(fee, order);
-  if (Array.isArray(splitParts) && splitParts.length) return true;
+  const storedParts = normalizeOrderFeeCostSplitParts(
+    fee.costParts || fee.cost_parts || fee.costPartsJson || fee.cost_parts_json || []
+  );
+  if (storedParts.length) return true;
+  const splitEnabled = booleanFlag(
+    fee.costSplitManual
+      ?? fee.cost_split_manual
+      ?? fee._costSplitManual
+      ?? fee.costSplit
+      ?? fee.cost_split
+      ?? fee._costSplit,
+    false
+  );
+  if (normalizeFeeCost(fee) !== null && !splitEnabled) return true;
   const costHKD = normalizeOrderFeeCostComponent(fee.costHKD ?? fee.cost_hkd ?? fee._costHKD ?? fee._costHkd);
   const costRMB = normalizeOrderFeeCostComponent(fee.costRMB ?? fee.cost_rmb ?? fee._costRMB ?? fee._costRmb);
-  return costHKD !== null
-    || costRMB !== null
-    || normalizeFeeCost(fee) !== null;
+  if (splitEnabled && (costHKD !== null || costRMB !== null)) return true;
+  if (normalizeFeeCost(fee) !== null || costHKD !== null || costRMB !== null) return true;
+  // A generated split is still a wage line, so the later cost-center fallback
+  // must not append the same fee a second time.
+  const generatedParts = orderFeeCostSplitParts(fee, order);
+  return Array.isArray(generatedParts) && generatedParts.length > 0;
+}
+
+function financeWageStatementFeeSavedCostState(order = {}, fee = {}, driver = null) {
+  const item = feeItemForFee(fee);
+  const source = driverCostCenterSourceForDriver(driver || {});
+  const lines = [];
+  const pushLine = (amount, currency) => {
+    const value = Number(amount || 0);
+    if (!Number.isFinite(value) || value === 0) return;
+    const normalizedCurrency = financeWageStatementProjectCurrency(
+      currency || fee.costCurrency || fee.cost_currency || item?.currency || fee.currency || "港币"
+    );
+    const name = financeWageStatementProjectName(fee.name || item?.name);
+    if (!name) return;
+    lines.push({
+      name,
+      currency: normalizedCurrency,
+      key: financeWageStatementFeeLineKey(name, normalizedCurrency),
+      amount: value,
+      freight: financeWageStatementIsFreightName(name),
+      fee,
+      item,
+      advance: isAdvanceFee(fee),
+      savedCost: true
+    });
+  };
+  const filterParts = (parts = []) => parts.filter((part) => {
+    const partDriver = String(part.driverName || part.driver_name || "").trim();
+    if (partDriver && driver?.name) return partDriver === driver.name;
+    const role = normalizeCostCenterSourceLabel(part.role || "");
+    return !driver?.name || role === source;
+  });
+
+  const storedParts = normalizeOrderFeeCostSplitParts(
+    fee.costParts || fee.cost_parts || fee.costPartsJson || fee.cost_parts_json || []
+  );
+  if (storedParts.length) {
+    filterParts(storedParts).forEach((part) => pushLine(part.amount, part.currency));
+    return { present: true, lines };
+  }
+
+  const splitEnabled = booleanFlag(
+    fee.costSplitManual
+      ?? fee.cost_split_manual
+      ?? fee._costSplitManual
+      ?? fee.costSplit
+      ?? fee.cost_split
+      ?? fee._costSplit,
+    false
+  );
+  const savedCost = normalizeFeeCost(fee);
+  const costHKD = normalizeOrderFeeCostComponent(fee.costHKD ?? fee.cost_hkd ?? fee._costHKD ?? fee._costHkd);
+  const costRMB = normalizeOrderFeeCostComponent(fee.costRMB ?? fee.cost_rmb ?? fee._costRMB ?? fee._costRmb);
+
+  // cost is the value shown in the order's cost cell. Compatibility columns
+  // can contain an older cost-center result, so they cannot override it for a
+  // normal single-currency fee.
+  if (savedCost !== null && !splitEnabled) {
+    pushLine(savedCost, fee.costCurrency || fee.cost_currency || fee._costCurrency || item?.currency || fee.currency || "港币");
+    return { present: true, lines };
+  }
+  if (splitEnabled && (costHKD !== null || costRMB !== null)) {
+    if (costHKD !== null) pushLine(costHKD, "港币");
+    if (costRMB !== null) pushLine(costRMB, "人民币");
+    return { present: true, lines };
+  }
+  if (savedCost !== null) {
+    pushLine(savedCost, fee.costCurrency || fee.cost_currency || fee._costCurrency || item?.currency || fee.currency || "港币");
+    return { present: true, lines };
+  }
+  if (costHKD !== null || costRMB !== null) {
+    if (costHKD !== null) pushLine(costHKD, "港币");
+    if (costRMB !== null) pushLine(costRMB, "人民币");
+    return { present: true, lines };
+  }
+  return { present: false, lines };
 }
 
 function financeWageStatementSavedCostLines(order = {}, driver = null) {
@@ -31141,6 +31798,11 @@ function financeWageStatementSavedCostLines(order = {}, driver = null) {
     .filter((fee) => String(fee?.name || "").trim())
     .flatMap((fee) => {
       if (!financeWageStatementFeeShouldApplyToDriver(order, fee, driver)) return [];
+      const saved = financeWageStatementFeeSavedCostState(order, fee, driver);
+      if (saved.present) return saved.lines;
+
+      // If no saved cost exists, preserve the legacy per-driver split derived
+      // from the current cost-center rule.
       const item = feeItemForFee(fee);
       const name = financeWageStatementProjectName(fee.name || item?.name);
       if (!name) return [];
@@ -31158,40 +31820,19 @@ function financeWageStatementSavedCostLines(order = {}, driver = null) {
           fee,
           item,
           advance: isAdvanceFee(fee),
-          savedCost: true
+          savedCost: false
         });
       };
-
       const splitParts = orderFeeCostSplitParts(fee, order);
       if (Array.isArray(splitParts) && splitParts.length) {
         splitParts
           .filter((part) => {
             const partDriver = String(part.driverName || part.driver_name || "").trim();
             if (partDriver && driver?.name) return partDriver === driver.name;
-            // 拆分成本若未标明司机名，则按角色匹配；归属过滤已在上面完成。
             const role = normalizeCostCenterSourceLabel(part.role || "");
             return !driver?.name || role === source;
           })
           .forEach((part) => pushLine(part.amount, part.currency));
-        if (lines.length) return lines;
-      }
-
-      const costHKD = normalizeOrderFeeCostComponent(fee.costHKD ?? fee.cost_hkd ?? fee._costHKD ?? fee._costHkd);
-      const costRMB = normalizeOrderFeeCostComponent(fee.costRMB ?? fee.cost_rmb ?? fee._costRMB ?? fee._costRmb);
-      if (costHKD !== null || costRMB !== null) {
-        // 按费用实际结算/成本币种入账，不再按司机角色把 RMB 强行丢掉。
-        // 否则香港司机工资单里“大陆过磅费/停车费”等 RMB 项目会进不了杂费合计RMB。
-        if (costHKD !== null) pushLine(costHKD, "港币");
-        if (costRMB !== null) pushLine(costRMB, "人民币");
-        if (lines.length) return lines;
-      }
-
-      const savedCost = normalizeFeeCost(fee);
-      if (savedCost !== null) {
-        pushLine(
-          savedCost,
-          fee.costCurrency || fee.cost_currency || fee._costCurrency || item?.currency || fee.currency || "港币"
-        );
       }
       return lines;
     });
@@ -31221,7 +31862,14 @@ function financeWageStatementOrderProjectLines(order = {}, driver = null) {
     });
   });
 
-  const unloadingCount = financeWageStatementUnloadingCount(order);
+  const hasCompanyCoveredUnloadingFee =
+    (Array.isArray(order?.fees) ? order.fees : []).some((fee) =>
+      !isAdvanceFee(fee)
+      && financeWageStatementFeeMatches(fee, ["卸货"])
+      && Number(fee?.amount || 0) !== 0
+      && isCompanyCoveredFee(fee)
+    );
+  const unloadingCount = hasCompanyCoveredUnloadingFee ? 0 : financeWageStatementUnloadingCount(order);
   if (unloadingCount && driver) {
     const item = feeItemForFee({ name: "卸货费" });
     const rule = driverCostCenterRuleForOrder(order, driver);
@@ -31293,6 +31941,37 @@ function financeWageStatementOrderProjectMap(order = {}, driver = null) {
     }, new Map());
 }
 
+const FINANCE_WAGE_STATEMENT_PROJECT_ORDER = [
+  "香港停车费",
+  "香港登记费",
+  "香港过磅费",
+  "加油费",
+  "打车费",
+  "代垫装车费",
+  "卸货费",
+  "装货费",
+  "加点费",
+  "过海费",
+  "香港派送费",
+  "其它费用"
+];
+
+function financeWageStatementProjectDisplayName(name = "") {
+  const text = financeWageStatementProjectName(name);
+  if (text === "其他费用" || text === "其它") return "其它费用";
+  return text;
+}
+
+function financeWageStatementProjectOrderIndex(name = "") {
+  const normalized = financeWageStatementFeeName({
+    name: financeWageStatementProjectDisplayName(name)
+  });
+  const index = FINANCE_WAGE_STATEMENT_PROJECT_ORDER.findIndex((item) =>
+    normalized === financeWageStatementFeeName({ name: item })
+  );
+  return index >= 0 ? index : FINANCE_WAGE_STATEMENT_PROJECT_ORDER.length;
+}
+
 function financeWageStatementProjectColumns(orders = [], driver = null) {
   const columns = [];
   const seen = new Set();
@@ -31304,13 +31983,20 @@ function financeWageStatementProjectColumns(orders = [], driver = null) {
         key: line.key,
         name: line.name,
         currency: line.currency,
-        label: `${line.name}（${line.currency}）`
+        label: `${financeWageStatementProjectDisplayName(line.name)}（${line.currency}）`
       });
     });
   });
+  const sortColumns = (currency) => columns
+    .filter((column) => column.currency === currency)
+    .sort((left, right) =>
+      financeWageStatementProjectOrderIndex(left.name) - financeWageStatementProjectOrderIndex(right.name)
+      || String(left.name || "").localeCompare(String(right.name || ""), "zh-Hans-CN")
+      || String(left.key || "").localeCompare(String(right.key || ""), "zh-Hans-CN")
+    );
   return [
-    ...columns.filter((column) => column.currency === "HKD"),
-    ...columns.filter((column) => column.currency === "RMB")
+    ...sortColumns("HKD"),
+    ...sortColumns("RMB")
   ];
 }
 
@@ -31436,7 +32122,14 @@ function buildFinanceWageStatementExportPayload(row = {}) {
     : 0;
   const grossPayableTotal = Number((freightHKDTotal + miscHKDTotal + convertedRMB).toFixed(2));
   const deductionsHKD = Number(row.totalDeductionHKD || 0);
-  const payableTotal = Math.max(0, Number((grossPayableTotal - deductionsHKD).toFixed(2)));
+  const parkingReimbursementHKD = Number(row.parkingReimbursementHKD || 0);
+  const settlementTotals = financeWageSettlementTotals({
+    wageHKD: grossPayableTotal,
+    deductionsHKD,
+    parkingFeeHKD: parkingReimbursementHKD,
+    parkingFeeTreatment: "reimbursement"
+  });
+  const payableTotal = settlementTotals.totalHKD;
   const payableWithoutAdvance = payableTotal;
   const paymentDate = financeWageSettlementDateText(row);
   const paymentLabel = paymentDate ? `${inputDateLabel(paymentDate)}已付款` : "";
@@ -31451,9 +32144,11 @@ function buildFinanceWageStatementExportPayload(row = {}) {
     noteLines: [
       `人民币司机代垫${formatDriverWageNumber(advanceRMB)}`,
       `预支HKD${formatDriverWageNumber(advanceHKD)}，司机代垫${formatDriverWageNumber(advanceHKD)}`,
-      `${financeWageStatementPeriodLabel()}工资扣减HKD${formatDriverWageNumber(deductionsHKD)}（预支杂费${row.adjustmentsDisplay || financeWageFeeText(row.adjustments, row.adjustmentsCurrency)}、牌头费${financeWageFeeText(row.plateFee, row.plateFeeCurrency)}、社保费${financeWageFeeText(row.socialSecurityFee, row.socialSecurityFeeCurrency)}、停车费${financeWageFeeText(row.parkingFee, row.parkingFeeCurrency)}）`,
+      `${financeWageStatementPeriodLabel()}工资扣减HKD${formatDriverWageNumber(deductionsHKD)}（预支杂费${row.adjustmentsDisplay || financeWageFeeText(row.adjustments, row.adjustmentsCurrency)}、牌头费${financeWageFeeText(row.plateFee, row.plateFeeCurrency)}、社保费${financeWageFeeText(row.socialSecurityFee, row.socialSecurityFeeCurrency)}）`,
+      row.parkingFeeDeductionHKD ? `停车费扣减HKD${formatDriverWageNumber(row.parkingFeeDeductionHKD)}` : "",
+      parkingReimbursementHKD ? `停车费报销HKD${formatDriverWageNumber(parkingReimbursementHKD)}` : "",
       exchangeRate ? `${formatDriverWageNumber(miscRMBTotal + freightRMBTotal)}/${formatDriverWageNumber(exchangeRate)}=港币${formatDriverWageNumber(convertedRMB)}` : "",
-      `运费${formatDriverWageNumber(freightHKDTotal)}+杂费HKD${formatDriverWageNumber(miscHKDTotal)}（含司机代垫）+杂费/运费RMB折算${formatDriverWageNumber(convertedRMB)}=应付HKD${formatDriverWageNumber(payableTotal)}`
+      `运费${formatDriverWageNumber(freightHKDTotal)}+杂费HKD${formatDriverWageNumber(miscHKDTotal)}（含司机代垫）+杂费/运费RMB折算${formatDriverWageNumber(convertedRMB)}${parkingReimbursementHKD ? `+停车费报销HKD${formatDriverWageNumber(parkingReimbursementHKD)}` : ""}-工资扣减HKD${formatDriverWageNumber(deductionsHKD)}=应付HKD${formatDriverWageNumber(payableTotal)}`
     ],
     paymentLabel,
     exchangeRate,
@@ -31461,6 +32156,7 @@ function buildFinanceWageStatementExportPayload(row = {}) {
     advanceRMB,
     adjustmentsHKD: advanceHKD,
     deductionsHKD,
+    parkingReimbursementHKD,
     advanceIncludedInMisc: true,
     filename
   };
@@ -37700,7 +38396,7 @@ function orderDetailFeeRows(order = {}) {
 	                    <template v-else-if="column.key === 'advanceAt'">{{ row.advanceAt ? inputDateLabel(row.advanceAt) : '-' }}</template>
 	                    <template v-else-if="column.key === 'plateFee'">{{ financeWageFeeText(row.plateFee, row.plateFeeCurrency) }}</template>
 	                    <template v-else-if="column.key === 'socialSecurityFee'">{{ financeWageFeeText(row.socialSecurityFee, row.socialSecurityFeeCurrency) }}</template>
-	                    <template v-else-if="column.key === 'parkingFee'">{{ financeWageFeeText(row.parkingFee, row.parkingFeeCurrency) }}</template>
+                    <template v-else-if="column.key === 'parkingFee'">{{ financeWageParkingFeeText(row) }}</template>
 	                    <template v-else-if="column.key === 'note'">{{ row.note || '-' }}</template>
 	                    <template v-else-if="column.key === 'total'"><strong>{{ driverWagePayableText(row.total, row.totalRMB) }}</strong></template>
 	                    <template v-else-if="column.key === 'status'">
@@ -37806,6 +38502,10 @@ function orderDetailFeeRows(order = {}) {
                       <option v-for="currency in DRIVER_WAGE_FEE_CURRENCY_OPTIONS" :key="currency" :value="currency">{{ currency }}</option>
                     </select>
                   </span>
+                  <select v-model="financeWageSettlementEditForm.parkingFeeTreatment" aria-label="停车费处理方式">
+                    <option value="reimbursement">报销给司机</option>
+                    <option value="deduction">从工资扣减</option>
+                  </select>
                 </label>
                 <label class="finance-wage-settlement-field">结算状态
                   <select v-model="financeWageSettlementEditForm.status">
@@ -37819,7 +38519,7 @@ function orderDetailFeeRows(order = {}) {
                   <textarea v-model.trim="financeWageSettlementEditForm.note" rows="3" placeholder="可填写说明"></textarea>
                 </label>
               </div>
-              <p class="hint finance-wage-currency-hint">RMB 项目按统计期间的当月汇率折算为 HKD 后扣减工资；列表保留原币种显示。</p>
+              <p class="hint finance-wage-currency-hint">预支杂费、牌头费、社保费按统计期间的当月汇率折算后扣减工资；停车费按所选处理方式折算，历史记录默认保留扣减方式。</p>
               <div class="modal-actions finance-wage-settlement-actions">
                 <button class="ghost-btn" type="button" @click="closeFinanceWageSettlementEditModal">取消</button>
                 <button class="primary-btn" type="submit" :disabled="financeWageSettlementEditSaving">
@@ -38082,14 +38782,32 @@ function orderDetailFeeRows(order = {}) {
             <div class="table-card-head">
               <div>
                 <strong>客户账单列表</strong>
-                <span>{{ statementMonthRangeLabel() }} · 当期有订单客户</span>
+                <span>{{ statementMonthRangeLabel() }} · 显示 {{ filteredStatementCustomerRows.length }} / {{ statementCustomerRows.length }} 个客户</span>
               </div>
+            </div>
+            <div class="customs-business-search-row customs-statement-search-row statement-customer-search-row">
+              <label class="customs-business-search-field statement-customer-search-field">
+                <IconSvg name="search" />
+                <input
+                  v-model.trim="statementCustomerSearch"
+                  type="search"
+                  placeholder="搜索客户名称 / 简称 / 编号"
+                  aria-label="搜索客户对账单"
+                />
+                <button
+                  v-if="statementCustomerSearch"
+                  type="button"
+                  class="customs-business-search-clear"
+                  aria-label="清空搜索"
+                  @click="statementCustomerSearch = ''"
+                >x</button>
+              </label>
             </div>
             <table class="data-table compact statement-customer-table">
               <thead><tr><th>排名</th><th>客户</th><th>结算类别</th><th>汇率</th><th>份数</th><th>应收港币</th><th>应收人民币</th><th>收款状态</th><th>收款日期</th><th>操作</th><th>对账状态</th></tr></thead>
               <tbody>
-                <tr v-for="(row, index) in statementCustomerRows" :key="row.customer">
-                  <td>{{ index + 1 }}</td>
+                <tr v-for="row in filteredStatementCustomerRows" :key="row.customerId || row.customer">
+                  <td>{{ statementCustomerRank(row) }}</td>
                   <td>{{ transportCustomerLabelByReference(row.customer || '', row.customerId || '') || row.customer }}</td>
                   <td><span class="statement-settlement-chip" :class="{ hkd: statementCustomerSettlementCurrency(row) === '港币' }">{{ statementCustomerSettlementCurrency(row) }}</span></td>
                   <td>
@@ -38159,7 +38877,7 @@ function orderDetailFeeRows(order = {}) {
                     <span v-else class="statement-status-text">未导出</span>
                   </td>
                 </tr>
-                <tr v-if="statementCustomerRows.length === 0"><td colspan="11">暂无客户账单</td></tr>
+                <tr v-if="filteredStatementCustomerRows.length === 0"><td colspan="11">{{ statementCustomerSearch ? '没有找到匹配的客户' : '暂无客户账单' }}</td></tr>
               </tbody>
             </table>
           </div>
@@ -38624,20 +39342,22 @@ function orderDetailFeeRows(order = {}) {
             <div class="table-card-head">
               <div>
                 <strong>客户利润排名</strong>
-                <span>按客户维度查看收入、利润和毛利率</span>
+                <span>订单贡献利润 = 客户收入 - 司机工资 - 供应商成本 - 公司承担费用；不含公司期间费用</span>
               </div>
             </div>
             <table class="data-table compact">
-              <thead><tr><th>客户</th><th>订单</th><th>收入</th><th>利润</th><th>毛利率</th></tr></thead>
+              <thead><tr><th>客户</th><th>订单</th><th>收入</th><th>直接成本</th><th>贡献利润</th><th>毛利率</th><th>成本匹配</th></tr></thead>
               <tbody>
-                <tr v-for="row in bossCustomerProfitDisplayRows" :key="row.customer">
+                <tr v-for="row in bossCustomerProfitDisplayRows" :key="row.customerId || row.customer">
                   <td>{{ transportCustomerLabelByReference(row.customer || '', row.customerId || '') || row.customer }}</td>
                   <td>{{ row.orderCountText }}</td>
                   <td>{{ row.revenue }}</td>
+                  <td>{{ row.cost }}</td>
                   <td><strong>{{ row.profit }}</strong></td>
                   <td>{{ row.margin }}</td>
+                  <td>{{ row.costStatus }}</td>
                 </tr>
-                <tr v-if="bossCustomerProfitDisplayRows.length === 0"><td colspan="5">暂无客户利润数据</td></tr>
+                <tr v-if="bossCustomerProfitDisplayRows.length === 0"><td colspan="7">暂无客户利润数据</td></tr>
               </tbody>
             </table>
           </div>
@@ -38650,7 +39370,7 @@ function orderDetailFeeRows(order = {}) {
             </div>
           </div>
           <table class="data-table compact">
-            <thead><tr><th>排名</th><th>车牌</th><th>司机</th><th>单司机订单数</th><th>中港运费收入</th><th>净利润</th><th>净利润（HKD）</th><th>利润率</th></tr></thead>
+            <thead><tr><th>排名</th><th>车牌</th><th>司机</th><th>单司机订单数</th><th>订单收入</th><th>净利润</th><th>净利润（HKD）</th><th>利润率</th></tr></thead>
             <tbody>
               <tr v-for="(row, index) in bossVehicleProfitDisplayRows" :key="row.plate">
                 <td>{{ index + 1 }}</td>
@@ -38694,24 +39414,32 @@ function orderDetailFeeRows(order = {}) {
                   <div class="boss-dashboard-detail-section-head">
                     <div>
                       <strong>按月构成</strong>
-                      <span>净利润 = 运输利润 + 报关利润 + 其他业务利润 + 其他收入 - 公司级支出</span>
+                      <span>净利润 = 运输收入 - 司机工资 - 供应商成本 - 公司承担费用 - 车辆成本 + 报关收入 + 其他业务利润 + 其他收入 - 公司级支出</span>
                     </div>
                   </div>
                   <div class="boss-dashboard-detail-table-wrap">
                     <table class="data-table compact boss-dashboard-month-table">
-                      <thead><tr><th>月份</th><th>运输利润</th><th>报关利润</th><th>其他业务利润</th><th>其他收入</th><th>公司级支出</th><th>净利润</th><th>净利润 RMB</th></tr></thead>
+                      <thead><tr><th>月份</th><th>运输收入 RMB</th><th>司机工资 RMB</th><th>供应商成本 RMB</th><th>公司承担费用 RMB</th><th>车辆固定月成本 RMB</th><th>车辆实际支出 RMB</th><th>运输利润 RMB</th><th>报关收入（未扣成本）</th><th>其他业务利润</th><th>其他收入</th><th>员工工资</th><th>其他公司费用</th><th>净利润</th><th>净利润 RMB</th><th>成本完整性</th></tr></thead>
                       <tbody>
                         <tr v-for="row in bossCompanyProfitDisplayRows" :key="row.period">
                           <td>{{ row.period }}</td>
+                          <td>{{ row.transportRevenueRMB }}</td>
+                          <td>{{ row.driverWageCostRMB }}</td>
+                          <td>{{ row.supplierCostRMB }}</td>
+                          <td>{{ row.companyCoveredCostRMB }}</td>
+                          <td>{{ row.vehicleFixedCostRMB }}</td>
+                          <td>{{ row.vehicleExpenseRMB }}</td>
                           <td>{{ row.transportProfitRMB }}</td>
                           <td>{{ row.customsProfitRMB }}</td>
                           <td>{{ row.otherBusinessProfit }}</td>
                           <td>{{ row.otherIncome }}</td>
-                          <td>{{ row.expenses }}</td>
+                          <td>{{ row.salaryExpenses }}</td>
+                          <td>{{ row.otherCompanyExpenses }}</td>
                           <td>{{ row.netProfit }}</td>
                           <td><strong>{{ row.netProfitRMBDisplay }}</strong></td>
+                          <td>{{ row.missingCostCount }} 项未匹配 / {{ row.uncostedCustomsCount }} 条报关未扣成本</td>
                         </tr>
-                        <tr v-if="bossCompanyProfitDisplayRows.length === 0"><td colspan="8">暂无利润构成数据</td></tr>
+                        <tr v-if="bossCompanyProfitDisplayRows.length === 0"><td colspan="16">暂无利润构成数据</td></tr>
                       </tbody>
                     </table>
                   </div>
@@ -39098,20 +39826,32 @@ function orderDetailFeeRows(order = {}) {
         </div>
         <div class="finance-summary-grid">
           <div class="finance-summary-card"><span>运输利润（RMB）</span><strong>{{ bossCompanyProfitSummary.transportProfitRMB }}</strong></div>
-          <div class="finance-summary-card"><span>报关利润（RMB）</span><strong>{{ bossCompanyProfitSummary.customsProfitRMB }}</strong></div>
+          <div class="finance-summary-card"><span>司机工资（RMB）</span><strong>{{ bossCompanyProfitSummary.driverWageCostRMB }}</strong></div>
+          <div class="finance-summary-card"><span>供应商成本（RMB）</span><strong>{{ bossCompanyProfitSummary.supplierCostRMB }}</strong></div>
+          <div class="finance-summary-card"><span>公司承担费用（RMB）</span><strong>{{ bossCompanyProfitSummary.companyCoveredCostRMB }}</strong></div>
+          <div class="finance-summary-card"><span>车辆固定月成本（RMB）</span><strong>{{ bossCompanyProfitSummary.vehicleFixedCostRMB }}</strong></div>
+          <div class="finance-summary-card"><span>车辆实际支出（RMB）</span><strong>{{ bossCompanyProfitSummary.vehicleExpenseRMB }}</strong></div>
+          <div class="finance-summary-card"><span>报关收入（未扣成本）（RMB）</span><strong>{{ bossCompanyProfitSummary.customsProfitRMB }}</strong></div>
           <div class="finance-summary-card"><span>其他业务利润（RMB）</span><strong>{{ bossCompanyProfitSummary.otherBusinessProfitRMB }}</strong></div>
           <div class="finance-summary-card"><span>其他收入（RMB）</span><strong>{{ bossCompanyProfitSummary.otherIncomeRMB }}</strong></div>
-          <div class="finance-summary-card"><span>公司级支出（RMB）</span><strong>{{ bossCompanyProfitSummary.expensesRMB }}</strong></div>
+          <div class="finance-summary-card"><span>员工工资（RMB）</span><strong>{{ bossCompanyProfitSummary.salaryExpensesRMB }}</strong></div>
+          <div class="finance-summary-card"><span>其他公司费用（RMB）</span><strong>{{ bossCompanyProfitSummary.otherCompanyExpensesRMB }}</strong></div>
           <div class="finance-summary-card"><span>净利润（RMB）</span><strong>{{ bossCompanyProfitSummary.netProfitRMB }}</strong></div>
           <div class="finance-summary-card"><span>利润率</span><strong>{{ bossCompanyProfitSummary.margin }}</strong></div>
         </div>
+        <p class="muted">净利润按运输收入扣司机工资、供应商应付、公司承担费用、车辆固定月成本和车辆实际支出，再加报关收入、其他业务利润及其他收入，扣员工工资和其他公司费用。仍有 {{ bossCompanyProfitSummary.missingCostCount }} 项订单成本未匹配；{{ bossCompanyProfitSummary.uncostedCustomsCount }} 条报关记录没有单独成本字段，按已录收入计入，净利润可能偏高。车辆月成本使用当前车辆档案金额；历史范围按车辆订单/支出记录的首末月份推算，系统没有历史月成本快照。负数成本记录 {{ bossCompanyProfitSummary.invalidNegativeCostCount }} 条，未作为成本扣减。</p>
         <div class="table-card finance-table-card">
           <table class="data-table compact boss-data-table">
-            <thead><tr><th>月份</th><th>运输收入（RMB）</th><th>运输成本（RMB）</th><th>运输利润（RMB）</th><th>报关利润（RMB）</th><th>其他业务收入（RMB）</th><th>其他业务成本（RMB）</th><th>其他业务利润（RMB）</th><th>其他收入（RMB）</th><th>公司级支出（RMB）</th><th>净利润</th><th>净利润（RMB）</th><th>利润率</th></tr></thead>
+            <thead><tr><th>月份</th><th>运输收入（RMB）</th><th>司机工资（RMB）</th><th>供应商成本（RMB）</th><th>公司承担费用（RMB）</th><th>车辆固定月成本（RMB）</th><th>车辆实际支出（RMB）</th><th>运输成本合计（RMB）</th><th>运输利润（RMB）</th><th>报关收入（未扣成本）（RMB）</th><th>其他业务收入（RMB）</th><th>其他业务成本（RMB）</th><th>其他业务利润（RMB）</th><th>其他收入（RMB）</th><th>员工工资（RMB）</th><th>其他公司费用（RMB）</th><th>净利润</th><th>净利润（RMB）</th><th>利润率</th><th>成本完整性</th></tr></thead>
             <tbody>
               <tr v-for="row in bossCompanyProfitDisplayRows" :key="row.period">
                 <td>{{ row.period }}</td>
                 <td>{{ row.transportRevenueRMB }}</td>
+                <td>{{ row.driverWageCostRMB }}</td>
+                <td>{{ row.supplierCostRMB }}</td>
+                <td>{{ row.companyCoveredCostRMB }}</td>
+                <td>{{ row.vehicleFixedCostRMB }}</td>
+                <td>{{ row.vehicleExpenseRMB }}</td>
                 <td>{{ row.vehicleCostRMB }}</td>
                 <td>{{ row.transportProfitRMB }}</td>
                 <td>{{ row.customsProfitRMB }}</td>
@@ -39119,12 +39859,14 @@ function orderDetailFeeRows(order = {}) {
                 <td>{{ row.otherBusinessCost }}</td>
                 <td>{{ row.otherBusinessProfit }}</td>
                 <td>{{ row.otherIncome }}</td>
-                <td>{{ row.expenses }}</td>
+                <td>{{ row.salaryExpenses }}</td>
+                <td>{{ row.otherCompanyExpenses }}</td>
                 <td><strong>{{ row.netProfit }}</strong></td>
                 <td><strong>{{ row.netProfitRMBDisplay }}</strong></td>
                 <td>{{ row.margin }}</td>
+                <td>{{ row.missingCostCount }} 项未匹配 / {{ row.uncostedCustomsCount }} 条报关未扣成本</td>
               </tr>
-              <tr v-if="bossCompanyProfitDisplayRows.length === 0"><td colspan="13">暂无公司利润数据</td></tr>
+              <tr v-if="bossCompanyProfitDisplayRows.length === 0"><td colspan="20">暂无公司利润数据</td></tr>
             </tbody>
           </table>
         </div>
@@ -39280,13 +40022,14 @@ function orderDetailFeeRows(order = {}) {
                   <th>车牌</th>
                   <th>司机</th>
                   <th>单司机订单数</th>
-                  <th>中港运费收入</th>
+                  <th>订单收入</th>
                   <th>单司机订单利润</th>
                   <th>加油费</th>
                   <th>维修费</th>
                   <th>保险费</th>
                   <th>年审费</th>
                   <th>牌头费</th>
+	                  <th>固定月成本</th>
 	                  <th>其他支出</th>
 	                  <th>操作</th>
 	                  <th class="sticky-profit-col">净利润</th>
@@ -39306,6 +40049,7 @@ function orderDetailFeeRows(order = {}) {
                   <td>{{ row.insuranceExpense }}</td>
                   <td>{{ row.reviewExpense }}</td>
                   <td>{{ row.plateHeadExpense }}</td>
+	                  <td>{{ row.fixedCost }}</td>
 	                  <td>{{ row.vehicleOtherExpense }}</td>
 	                  <td class="row-actions boss-vehicle-profit-actions">
 	                    <button class="ghost-btn small" type="button" @click.stop="openBossVehicleProfitDetail(row)"><IconSvg name="eye" />查看详细</button>
@@ -39314,7 +40058,7 @@ function orderDetailFeeRows(order = {}) {
 	                  <td class="sticky-profit-hkd-col"><strong>{{ row.profitHKDEquivalent }}</strong></td>
 	                  <td class="sticky-margin-col">{{ row.margin }}</td>
 	                </tr>
-	                <tr v-if="bossVehicleProfitDisplayRows.length === 0"><td colspan="15">暂无车辆利润数据</td></tr>
+	                <tr v-if="bossVehicleProfitDisplayRows.length === 0"><td colspan="16">暂无车辆利润数据</td></tr>
               </tbody>
             </table>
           </div>
@@ -40596,7 +41340,7 @@ function orderDetailFeeRows(order = {}) {
           </div>
           <div class="modal-body full-detail-body boss-vehicle-profit-detail-body">
             <div class="finance-summary-grid boss-vehicle-profit-detail-summary">
-              <div class="finance-summary-card"><span>中港运费收入</span><strong>{{ activeBossVehicleProfitDetailRow.revenue }}</strong></div>
+              <div class="finance-summary-card"><span>订单收入</span><strong>{{ activeBossVehicleProfitDetailRow.revenue }}</strong></div>
               <div class="finance-summary-card"><span>单司机订单利润</span><strong>{{ activeBossVehicleProfitDetailRow.orderProfit }}</strong></div>
               <div class="finance-summary-card"><span>车辆支出</span><strong>{{ activeBossVehicleProfitDetailRow.expense }}</strong></div>
               <div class="finance-summary-card"><span>净利润</span><strong>{{ activeBossVehicleProfitDetailRow.profit }}</strong></div>

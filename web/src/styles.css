@@ -6362,6 +6362,12 @@ small.vehicle-repair-record-meta {
   max-width: 520px;
 }
 
+.statement-customer-search-field {
+  flex: 1 1 360px;
+  min-width: 0;
+  max-width: 520px;
+}
+
 .customs-business-select-filter {
   flex: 0 0 190px;
   width: 190px;

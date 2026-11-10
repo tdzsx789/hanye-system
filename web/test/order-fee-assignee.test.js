@@ -33,6 +33,9 @@ function createContext({ order = {}, item = {} } = {}) {
     isAdvanceFee: (fee) => fee.category === "代垫",
     advanceFeesForOrder: () => [],
     feeItemForFee: () => item,
+    selectedDriver: { value: { name: "香港司机甲" } },
+    quantityNumber: (value) => Number(value || 0),
+    orderDriverWageRule: () => ({ loadPerBoard: 10, unloadPerBoard: 10 }),
     supplierDisplayLabel: (value) => value === "供应商全称" ? "供应商简称" : value || "",
     scheduleOrderFeeCostSync() {}
   });
@@ -46,6 +49,10 @@ function createContext({ order = {}, item = {} } = {}) {
     "resetOrderFeeAssignee", "handleOrderFeeAssigneeInput", "commitOrderFeeAssigneeInput",
     "syncCrossBorderFreightDriverRole", "feeCostAssigneeBelongsToDriver"
   ]) vm.runInContext(extract(source, name), context);
+  const extraStart = source.indexOf("const DRIVER_EXTRA_FEE_KEYWORDS");
+  const extraEnd = source.indexOf("\nfunction driverByName", extraStart);
+  assert.ok(extraStart >= 0 && extraEnd > extraStart);
+  vm.runInContext(source.slice(extraStart, extraEnd), context);
   return context;
 }
 
@@ -172,9 +179,39 @@ test("manual warehouse assignments survive save/read and explicit clearing overr
   const loaded = server.mapOrderFee({ name: saved.name, driver_role: saved.driverRole, driver_name: saved.driverName });
   const context = createContext();
   assert.equal(context.orderFeeAssigneeInputValue(loaded), "吉华仓库");
+  assert.equal(context.feeCostAssigneeBelongsToDriver(context.orderForm, loaded, { name: "香港司机甲" }), false);
   const cleared = server.normalizeOrderFee({ driverRole: "", driverName: "", driver_role: "手动指定", driver_name: "旧归属" }, "人民币");
   assert.equal(cleared.driverRole, "");
   assert.equal(cleared.driverName, "");
+});
+
+test("warehouse-owned loading and unloading fees do not create driver wages after save/read", () => {
+  const server = createServerContext();
+  const context = createContext();
+  const driver = { name: "曾永钦" };
+  const fees = [["装货费", 10], ["卸货费", 11]].map(([name, quantity]) => {
+    const saved = server.normalizeOrderFee({
+      name,
+      driverRole: "手动指定",
+      driverName: "吉华仓库",
+      quantity,
+      unitPrice: 20
+    }, "港币");
+    return server.mapOrderFee({
+      name: saved.name,
+      category: saved.category,
+      quantity: saved.quantity,
+      unit_price: saved.unitPrice,
+      amount: saved.amount,
+      driver_role: saved.driverRole,
+      driver_name: saved.driverName
+    });
+  });
+  const order = { driver: driver.name, fees };
+
+  assert.deepEqual(fees.map((fee) => fee.driverName), ["吉华仓库", "吉华仓库"]);
+  assert.equal(context.driverExtraTripFee(order, "loadPerBoard", driver), 0);
+  assert.equal(context.driverExtraTripFee(order, "unloadPerBoard", driver), 0);
 });
 
 test("legacy combined-driver role labels survive server normalization and reads", () => {
