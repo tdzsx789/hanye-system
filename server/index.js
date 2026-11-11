@@ -7445,13 +7445,10 @@ function normalizeDriverWageFeeCurrency(value = "", legacyUnit = "") {
   return "HKD";
 }
 
-function normalizeDriverWageParkingFeeTreatment(value = "", fallback = "deduction") {
-  const text = String(value || "").trim().toLowerCase();
-  if (["reimbursement", "报销"].includes(text)) return "reimbursement";
-  if (["deduction", "扣减", "扣除"].includes(text)) return "deduction";
-  return String(fallback || "deduction").trim().toLowerCase() === "reimbursement"
-    ? "reimbursement"
-    : "deduction";
+function normalizeDriverWageParkingFeeTreatment(value = "", fallback = "reimbursement") {
+  // Parking fees are always reimbursed. Legacy deduction values are migrated
+  // on read and write so they cannot reduce the driver's pay.
+  return "reimbursement";
 }
 
 const DRIVER_WAGE_SETTLEMENT_NOTE_META_MARKER = "\n[[hanye-driver-wage-meta:v1]]";
@@ -7563,7 +7560,7 @@ function mapDriverWageSettlement(row) {
     parkingFeeHKD: row.parking_fee_hkd ?? metadata.parkingFeeHKD ?? null,
     parkingFeeUnit: normalizeDriverWageFeeUnit(row.parking_fee_unit ?? metadata.parkingFeeUnit),
     parkingFeeCurrency: normalizeDriverWageFeeCurrency(row.parking_fee_currency ?? metadata.parkingFeeCurrency, row.parking_fee_unit ?? metadata.parkingFeeUnit),
-    parkingFeeTreatment: normalizeDriverWageParkingFeeTreatment(metadata.parkingFeeTreatment, "deduction"),
+    parkingFeeTreatment: normalizeDriverWageParkingFeeTreatment(metadata.parkingFeeTreatment, "reimbursement"),
     advanceAt: row.advance_at || "",
     note: note || "",
     createdAt: row.created_at || "",
@@ -7606,8 +7603,8 @@ function readDriverWageSettlementPayload(body = {}, current = null) {
     parkingFeeUnit: normalizeDriverWageFeeUnit(pickBody(body, "parkingFeeUnit", "parking_fee_unit", current?.parking_fee_unit ?? currentMetadata.parkingFeeUnit)),
     parkingFeeCurrency: normalizeDriverWageFeeCurrency(pickBody(body, "parkingFeeCurrency", "parking_fee_currency", current?.parking_fee_currency ?? currentMetadata.parkingFeeCurrency), pickBody(body, "parkingFeeUnit", "parking_fee_unit", current?.parking_fee_unit ?? currentMetadata.parkingFeeUnit)),
     parkingFeeTreatment: normalizeDriverWageParkingFeeTreatment(
-      pickBody(body, "parkingFeeTreatment", "parking_fee_treatment", currentMetadata.parkingFeeTreatment ?? (current ? "deduction" : "reimbursement")),
-      current ? "deduction" : "reimbursement"
+      pickBody(body, "parkingFeeTreatment", "parking_fee_treatment", currentMetadata.parkingFeeTreatment ?? "reimbursement"),
+      "reimbursement"
     ),
     advanceAt: String(body.advanceAt ?? body.advance_at ?? current?.advance_at ?? "").trim(),
     note: noteValue === null || noteValue === undefined ? "" : String(noteValue).trim()

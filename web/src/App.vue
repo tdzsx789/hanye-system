@@ -11241,9 +11241,8 @@ function normalizeFinanceWageSettlementRow(item = {}) {
     socialSecurityFeeCurrency: feeCurrency(item.socialSecurityFeeCurrency ?? item.social_security_fee_currency, item.socialSecurityFeeUnit ?? item.social_security_fee_unit),
     parkingFeeHKD: item.parkingFeeHKD ?? item.parking_fee_hkd ?? null,
     parkingFeeCurrency: feeCurrency(item.parkingFeeCurrency ?? item.parking_fee_currency, item.parkingFeeUnit ?? item.parking_fee_unit),
-    parkingFeeTreatment: ["reimbursement", "报销"].includes(String(item.parkingFeeTreatment ?? item.parking_fee_treatment ?? "").trim().toLowerCase())
-      ? "reimbursement"
-      : "deduction",
+    // Parking fees are always reimbursed, including legacy settlement rows.
+    parkingFeeTreatment: "reimbursement",
     advanceAt: String(item.advanceAt || item.advance_at || "").trim(),
     note: String(item.note || "").trim(),
     createdAt: String(item.createdAt || item.created_at || "").trim(),
@@ -11382,9 +11381,7 @@ async function saveFinanceWageSettlement(row = {}, status = financeWageSettlemen
   const nextParkingFeeCurrency = Object.prototype.hasOwnProperty.call(patch, "parkingFeeCurrency")
     ? (String(patch.parkingFeeCurrency || "HKD").toUpperCase() === "RMB" ? "RMB" : "HKD")
     : (currentSettlement?.parkingFeeCurrency || "HKD");
-  const nextParkingFeeTreatment = Object.prototype.hasOwnProperty.call(patch, "parkingFeeTreatment")
-    ? (String(patch.parkingFeeTreatment || "").toLowerCase() === "deduction" ? "deduction" : "reimbursement")
-    : (currentSettlement?.parkingFeeTreatment || "reimbursement");
+  const nextParkingFeeTreatment = "reimbursement";
   const adjustmentsChanged = Object.prototype.hasOwnProperty.call(patch, "adjustmentsHKD")
     || Object.prototype.hasOwnProperty.call(patch, "adjustmentsRMB")
     || Object.prototype.hasOwnProperty.call(patch, "plateFeeHKD")
@@ -11943,8 +11940,8 @@ function financeWageSettlementTotals({
   const wage = toFiniteNumber(wageHKD);
   const deductions = toFiniteNumber(deductionsHKD);
   const parkingFee = toFiniteNumber(parkingFeeHKD);
-  const reimbursement = parkingFeeTreatment === "deduction" ? 0 : parkingFee;
-  const parkingDeduction = parkingFeeTreatment === "deduction" ? parkingFee : 0;
+  const reimbursement = parkingFee;
+  const parkingDeduction = 0;
   return {
     totalDeductionHKD: Number((deductions + parkingDeduction).toFixed(2)),
     parkingFeeDeductionHKD: Number(parkingDeduction.toFixed(2)),
@@ -12021,7 +12018,7 @@ function buildFinanceWageRows(sourceOrders, sourceAdjustments, sourceSettlements
     const plateFeeAmount = Number(settlement?.plateFeeHKD || 0);
     const socialSecurityFeeAmount = Number(settlement?.socialSecurityFeeHKD || 0);
     const parkingFeeAmount = Number(settlement?.parkingFeeHKD || 0);
-    const parkingFeeTreatment = settlement?.parkingFeeTreatment || "deduction";
+    const parkingFeeTreatment = "reimbursement";
     const plateFeeHKD = financeWageAmountToHKD(plateFeeAmount, plateFeeCurrency, exchangeRate);
     const socialSecurityFeeHKD = financeWageAmountToHKD(socialSecurityFeeAmount, socialSecurityFeeCurrency, exchangeRate);
     const parkingFeeHKD = financeWageAmountToHKD(parkingFeeAmount, parkingFeeCurrency, exchangeRate);
@@ -31634,21 +31631,6 @@ function financeWageStatementFeeMatches(fee = {}, keywords = []) {
     .some((keyword) => name.includes(keyword));
 }
 
-function financeWageStatementUnloadingCount(order = {}) {
-  const fees = Array.isArray(order?.fees) ? order.fees : [];
-  if (fees.some((fee) => financeWageStatementFeeMatches(fee, ["卸货"]))) return 0;
-  const remarks = [
-    String(order?.note || ""),
-    String(order?.remark || ""),
-    ...fees.map((fee) => String(fee?.remark || ""))
-  ].join("；");
-  if (/(?:取消|不需要|无需|不用|不含|免收|不收费)[^；，,。]{0,6}卸货|卸货[^；，,。]{0,6}(?:不收费|不收取|免收|取消|免费)/.test(remarks)) {
-    return 0;
-  }
-  const unloadDates = Array.from(remarks.matchAll(/(\d{1,2})\s*号\s*卸货/g), (match) => match[1]);
-  return new Set(unloadDates).size;
-}
-
 function financeWageStatementMiscFeeTotal(order = {}, currency = "") {
   return (Array.isArray(order?.fees) ? order.fees : [])
     .filter((fee) => !isAdvanceFee(fee))
@@ -31928,36 +31910,10 @@ function financeWageStatementOrderProjectLines(order = {}, driver = null) {
     });
   });
 
-  const hasCompanyCoveredUnloadingFee =
-    (Array.isArray(order?.fees) ? order.fees : []).some((fee) =>
-      !isAdvanceFee(fee)
-      && financeWageStatementFeeMatches(fee, ["卸货"])
-      && Number(fee?.amount || 0) !== 0
-      && isCompanyCoveredFee(fee)
-    );
-  const unloadingCount = hasCompanyCoveredUnloadingFee ? 0 : financeWageStatementUnloadingCount(order);
-  if (unloadingCount && driver) {
-    const item = feeItemForFee({ name: "卸货费" });
-    const rule = driverCostCenterRuleForOrder(order, driver);
-    if (item && rule) {
-      const detail = driverCostCenterFeeCostForRule(rule, {
-        feeItemId: item.id,
-        name: item.name,
-        currency: item.currency,
-        quantity: unloadingCount,
-        amount: 0
-      }, driver);
-      if (detail.matched && detail.amount) {
-        lines.push({
-          name: item.name,
-          currency: financeWageStatementProjectCurrency(detail.currency),
-          key: financeWageStatementFeeLineKey(item.name, detail.currency),
-          amount: Number(detail.amount || 0),
-          freight: false
-        });
-      }
-    }
-  }
+  // Order remarks such as “21号卸货” describe the operation only. They do not
+  // identify who bears the cost, so they must not create a driver wage line.
+  // Unloading wages come from an actual unloading fee with an explicit driver
+  // cost assignment and are already included in the cost-center/extra-fee paths.
 
   // Driver advances are order projects too. Keep only explicitly saved costs
   // in the wage statement; a missing cost must not expose the order amount.
@@ -32011,6 +31967,8 @@ const FINANCE_WAGE_STATEMENT_PROJECT_ORDER = [
   "香港停车费",
   "香港登记费",
   "香港过磅费",
+  // 代垫卸货费是独立的杂费项目，标准登记表要求它紧跟过磅费。
+  "代垫卸货费",
   "加油费",
   "打车费",
   "代垫装车费",
@@ -32018,7 +31976,18 @@ const FINANCE_WAGE_STATEMENT_PROJECT_ORDER = [
   "装货费",
   "加点费",
   "过海费",
+  "机场附加费",
+  "卸货等候费",
+  "压车费",
+  "装货等候费",
   "香港派送费",
+  "贴标签",
+  "大陆登记费",
+  "大陆过磅费",
+  "大陆停车费",
+  "口岸停车费",
+  "文件打印费",
+  "洗车费",
   "其它费用"
 ];
 
@@ -32095,7 +32064,11 @@ function financeWageStatementCustomerName(order = {}) {
 
 function financeWageStatementMainlandRiderName(order = {}) {
   if (!orderIsDoubleDriverMode(order)) return "";
-  return orderRelayDriverPair(order).mainland || String(order?.mainlandDriver || "").trim();
+  return orderRelayDriverPair(order).mainland;
+}
+
+function financeWageStatementMainlandRiderCount(orders = []) {
+  return orders.filter((order) => financeWageStatementMainlandRiderName(order)).length;
 }
 
 function financeWageStatementRows(row = {}, projectColumns = [], hasFreightRMB = false) {
@@ -32206,7 +32179,7 @@ function buildFinanceWageStatementExportPayload(row = {}) {
     rows,
     driverName: row?.driver?.name || "司机",
     periodLabel: financeWageStatementPeriodLabel(),
-    summaryNote: `${orders.filter((order) => orderIsDoubleDriverMode(order)).length}车骑师/口岸过车 · ${financeWageStatementPeriodLabel()}`,
+    summaryNote: `${financeWageStatementMainlandRiderCount(orders)}车骑师/口岸过车 · ${financeWageStatementPeriodLabel()}`,
     noteLines: [
       `人民币司机代垫${formatDriverWageNumber(advanceRMB)}`,
       `预支HKD${formatDriverWageNumber(advanceHKD)}，司机代垫${formatDriverWageNumber(advanceHKD)}`,
@@ -38568,9 +38541,8 @@ function orderDetailFeeRows(order = {}) {
                       <option v-for="currency in DRIVER_WAGE_FEE_CURRENCY_OPTIONS" :key="currency" :value="currency">{{ currency }}</option>
                     </select>
                   </span>
-                  <select v-model="financeWageSettlementEditForm.parkingFeeTreatment" aria-label="停车费处理方式">
-                    <option value="reimbursement">报销给司机</option>
-                    <option value="deduction">从工资扣减</option>
+                  <select v-model="financeWageSettlementEditForm.parkingFeeTreatment" aria-label="停车费处理方式" disabled>
+                    <option value="reimbursement">报销给司机（计入应付）</option>
                   </select>
                 </label>
                 <label class="finance-wage-settlement-field">结算状态
@@ -38585,7 +38557,7 @@ function orderDetailFeeRows(order = {}) {
                   <textarea v-model.trim="financeWageSettlementEditForm.note" rows="3" placeholder="可填写说明"></textarea>
                 </label>
               </div>
-              <p class="hint finance-wage-currency-hint">预支杂费、牌头费、社保费按统计期间的当月汇率折算后扣减工资；停车费按所选处理方式折算，历史记录默认保留扣减方式。</p>
+              <p class="hint finance-wage-currency-hint">预支杂费、牌头费、社保费按统计期间的当月汇率折算后扣减工资；停车费统一按报销计入应付金额，历史记录也按报销处理。</p>
               <div class="modal-actions finance-wage-settlement-actions">
                 <button class="ghost-btn" type="button" @click="closeFinanceWageSettlementEditModal">取消</button>
                 <button class="primary-btn" type="submit" :disabled="financeWageSettlementEditSaving">

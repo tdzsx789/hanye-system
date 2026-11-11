@@ -118,7 +118,7 @@ test("old schemas persist added deductions in note metadata and expose them as f
   assert.equal(next.socialSecurityFeeHKD, 30);
 });
 
-test("legacy parking fee remains a deduction while new settlements can opt into reimbursement", () => {
+test("legacy parking fees are migrated to reimbursement", () => {
   const legacyRow = {
     period_key: "2026-10",
     driver_id: 9,
@@ -128,16 +128,16 @@ test("legacy parking fee remains a deduction while new settlements can opt into 
     note: "旧备注"
   };
   const mappedLegacy = context.mapDriverWageSettlement(legacyRow);
-  assert.equal(mappedLegacy.parkingFeeTreatment, "deduction");
+  assert.equal(mappedLegacy.parkingFeeTreatment, "reimbursement");
 
   const legacyUpdate = context.readDriverWageSettlementPayload({ note: "更新备注" }, legacyRow);
-  assert.equal(legacyUpdate.parkingFeeTreatment, "deduction");
+  assert.equal(legacyUpdate.parkingFeeTreatment, "reimbursement");
   const savedLegacy = context.normalizeDriverWageSettlementWriteItem(legacyUpdate, {
     parkingFeeHKD: true,
     parkingFeeCurrency: true,
     note: true
   });
-  assert.equal(context.unpackDriverWageSettlementNote(savedLegacy.note).metadata.parkingFeeTreatment, "deduction");
+  assert.equal(context.unpackDriverWageSettlementNote(savedLegacy.note).metadata.parkingFeeTreatment, "reimbursement");
 
   const newSettlement = context.readDriverWageSettlementPayload({
     periodKey: "2026-11",
@@ -145,4 +145,13 @@ test("legacy parking fee remains a deduction while new settlements can opt into 
     parkingFeeHKD: 300
   });
   assert.equal(newSettlement.parkingFeeTreatment, "reimbursement");
+});
+
+test("explicit legacy deduction values are normalized to reimbursement", () => {
+  const mapped = context.mapDriverWageSettlement({
+    parking_fee_hkd: 180,
+    parking_fee_currency: "HKD",
+    note: "旧备注\n[[hanye-driver-wage-meta:v1]]{\"parkingFeeTreatment\":\"deduction\"}"
+  });
+  assert.equal(mapped.parkingFeeTreatment, "reimbursement");
 });

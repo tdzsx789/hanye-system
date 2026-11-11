@@ -35,17 +35,17 @@ test("parking fee is reimbursed instead of deducted from driver wages", () => {
   assert.equal(totals.totalHKD, 3415);
 });
 
-test("legacy parking fees keep their previous deduction behavior", () => {
+test("legacy parking fees are reimbursed after the global rule change", () => {
   const totals = context.financeWageSettlementTotals({
     wageHKD: 10000,
     deductionsHKD: 8000,
     parkingFeeHKD: 1415,
     parkingFeeTreatment: "deduction"
   });
-  assert.equal(totals.totalDeductionHKD, 9415);
-  assert.equal(totals.parkingFeeDeductionHKD, 1415);
-  assert.equal(totals.parkingReimbursementHKD, 0);
-  assert.equal(totals.totalHKD, 585);
+  assert.equal(totals.totalDeductionHKD, 8000);
+  assert.equal(totals.parkingFeeDeductionHKD, 0);
+  assert.equal(totals.parkingReimbursementHKD, 1415);
+  assert.equal(totals.totalHKD, 3415);
 });
 
 test("misc display keeps both currency slots when one amount is zero", () => {
