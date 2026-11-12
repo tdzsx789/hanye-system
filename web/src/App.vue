@@ -8390,6 +8390,93 @@ function driverExtraFeeNameMatchesField(feeName, field) {
   return keywords.some((keyword) => name.includes(keyword));
 }
 
+function orderFeeExplicitCostParts(fee = {}) {
+  const raw = [fee?.costParts, fee?.cost_parts, fee?.costPartsJson, fee?.cost_parts_json, fee?._costParts]
+    .find((value) => value !== undefined && value !== null && String(value).trim() !== "");
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw !== "string") return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function orderFeeHasExplicitCostValue(fee = {}) {
+  const costParts = orderFeeExplicitCostParts(fee);
+  if (costParts.length > 0) return true;
+  // normalizeOrderFeeRow keeps the original database value in _savedCost and
+  // uses cost=0 for an empty editor row. Do not turn that compatibility value
+  // into an explicit zero for historical orders without a saved cost.
+  const hasSavedCostMarker = Object.prototype.hasOwnProperty.call(fee, "_savedCost");
+  const savedCost = fee?._savedCost;
+  if (hasSavedCostMarker && (savedCost === null || savedCost === undefined || String(savedCost).trim() === "")) {
+    return [
+      fee?.costHKD,
+      fee?.cost_hkd,
+      fee?._costHKD,
+      fee?._costHkd,
+      fee?.costRMB,
+      fee?.cost_rmb,
+      fee?._costRMB,
+      fee?._costRmb
+    ].some((value) => value !== undefined && value !== null && String(value).trim() !== "");
+  }
+  const scalarCostFields = [
+    "cost",
+    "costValue",
+    "cost_value",
+    "costAmount",
+    "cost_amount",
+    "costHKD",
+    "cost_hkd",
+    "_costHKD",
+    "_costHkd",
+    "costRMB",
+    "cost_rmb",
+    "_costRMB",
+    "_costRmb"
+  ];
+  if (scalarCostFields.some((field) => {
+    const value = fee?.[field];
+    return value !== undefined && value !== null && String(value).trim() !== "";
+  })) return true;
+  return false;
+}
+
+function orderFeeExplicitCostAmount(fee = {}) {
+  const parts = orderFeeExplicitCostParts(fee);
+  if (parts.length > 0) {
+    return parts.reduce((sum, part) => sum + Number(part?.amount ?? part?.sourceAmount ?? 0), 0);
+  }
+  const costComponents = [
+    fee?.costHKD,
+    fee?.cost_hkd,
+    fee?._costHKD,
+    fee?._costHkd,
+    fee?.costRMB,
+    fee?.cost_rmb,
+    fee?._costRMB,
+    fee?._costRmb
+  ];
+  const hasSavedCostMarker = Object.prototype.hasOwnProperty.call(fee, "_savedCost");
+  const savedCost = fee?._savedCost;
+  const hasMissingSavedCost = hasSavedCostMarker
+    && (savedCost === null || savedCost === undefined || String(savedCost).trim() === "");
+  const hasSplitFlag = booleanFlag(
+    fee.costSplitManual ?? fee.cost_split_manual ?? fee._costSplitManual,
+    false
+  );
+  if ((hasMissingSavedCost || hasSplitFlag)
+    && costComponents.some((value) => value !== undefined && value !== null && String(value).trim() !== "")) {
+    return costComponents.reduce((sum, value) => sum + Number(value || 0), 0);
+  }
+  const cost = normalizeFeeCost(fee);
+  if (cost !== null) return cost;
+  return costComponents.reduce((sum, value) => sum + Number(value || 0), 0);
+}
+
 function orderHasActualDriverExtraFee(order, field, driver = null) {
   if (!(DRIVER_EXTRA_FEE_KEYWORDS[field] || []).length) return false;
   const fees = Array.isArray(order?.fees) ? order.fees : [];
@@ -8397,9 +8484,12 @@ function orderHasActualDriverExtraFee(order, field, driver = null) {
     if (isAdvanceFee(fee)) return false;
     const name = String(fee?.name || "");
     const amount = Number(fee?.amount || 0);
-    return amount !== 0
-      && driverExtraFeeNameMatchesField(name, field)
-      && (!driver || feeCostAssigneeBelongsToDriver(order, fee, driver));
+    if (amount === 0 || !driverExtraFeeNameMatchesField(name, field)) return false;
+    if (driver && !feeCostAssigneeBelongsToDriver(order, fee, driver)) return false;
+    // The fee amount is the customer charge. Once a cost value has been
+    // explicitly saved, only the driver's positive cost can create a wage
+    // extra. A saved cost of 0 means this project is not paid to the driver.
+    return !orderFeeHasExplicitCostValue(fee) || orderFeeExplicitCostAmount(fee) > 0;
   });
 }
 
@@ -8408,9 +8498,9 @@ function orderDriverExtraQuantity(order, field, driver = null) {
   const matchedFee = fees.find((fee) => {
     if (isAdvanceFee(fee)) return false;
     const name = String(fee?.name || "");
-    return Number(fee?.amount || 0) !== 0
-      && driverExtraFeeNameMatchesField(name, field)
-      && (!driver || feeCostAssigneeBelongsToDriver(order, fee, driver));
+    if (Number(fee?.amount || 0) === 0 || !driverExtraFeeNameMatchesField(name, field)) return false;
+    if (driver && !feeCostAssigneeBelongsToDriver(order, fee, driver)) return false;
+    return !orderFeeHasExplicitCostValue(fee) || orderFeeExplicitCostAmount(fee) > 0;
   });
   const feeQuantity = quantityNumber(matchedFee?.quantity);
   if (feeQuantity > 0) return feeQuantity;
@@ -27074,6 +27164,10 @@ function dataLoadScopeMatches(moduleScope = "all", moduleIds = []) {
   return false;
 }
 
+function dataLoadScopeNeedsFeeItems(moduleScope = "all") {
+  return dataLoadScopeMatches(moduleScope, ["orders", "freight", "templates", "financeWages"]);
+}
+
 function currentAuditDataSnapshot() {
   return {
     items: auditRows.value,
@@ -27358,7 +27452,7 @@ async function loadDatabaseData(options = {}) {
     && dataLoadScopeMatches(moduleScope, ["financeCosts", "financeSupplierStatements", "financeCustomsStatements", ...BOSS_CENTER_MODULES]);
   const canLoadStatementCustomerExchangeRates = canReadStatementCustomerExchangeRates
     && dataLoadScopeMatches(moduleScope, ["home", "orders", "dispatchBoard", "financeCosts", ...BOSS_CENTER_MODULES]);
-  const canLoadFeeItems = shouldLoadFreightConfig;
+  const canLoadFeeItems = dataLoadScopeNeedsFeeItems(moduleScope);
   const canLoadFreightRates = shouldLoadFreightConfig;
   const canLoadAddressBook = shouldLoadAddressBook;
   const orderRequestSerial = canLoadOrders ? ++orderListRequestSerial : null;
@@ -31967,7 +32061,7 @@ const FINANCE_WAGE_STATEMENT_PROJECT_ORDER = [
   "香港停车费",
   "香港登记费",
   "香港过磅费",
-  // 代垫卸货费是独立的杂费项目，标准登记表要求它紧跟过磅费。
+  "香港坐车费",
   "代垫卸货费",
   "加油费",
   "打车费",

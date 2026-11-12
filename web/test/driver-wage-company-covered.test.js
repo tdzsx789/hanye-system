@@ -49,6 +49,16 @@ function createContext() {
     },
     feeAssignedDriverName(order, fee = {}) {
       return String(fee.driverName || fee.driver_name || order.driver || "").trim();
+    },
+    normalizeFeeCost(fee = {}) {
+      const value = fee.cost ?? fee.costValue ?? fee.cost_value ?? fee.costAmount ?? fee.cost_amount;
+      if (value === undefined || value === null || String(value).trim() === "") return null;
+      return Number(value);
+    },
+    booleanFlag(value, fallback = false) {
+      if (value === undefined || value === null || value === "") return fallback;
+      if (typeof value === "boolean") return value;
+      return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
     }
   });
 
@@ -141,6 +151,74 @@ test("waiting fee names do not match the per-board loading project", () => {
   assert.equal(context.driverExtraFeeNameMatchesField("装货等候费", "loadPerBoard"), false);
   assert.equal(context.driverExtraFeeNameMatchesField("装货等待费", "loadPerBoard"), false);
   assert.equal(context.driverExtraFeeNameMatchesField("装货等待费", "waitingPerHour"), true);
+});
+
+test("a saved zero driver cost does not create a waiting wage", () => {
+  const context = createContext();
+  const driver = { name: "香港司机甲" };
+  const order = {
+    fees: [{
+      name: "装货等候费",
+      amount: 200,
+      cost: 0,
+      costCurrency: "人民币",
+      driverName: driver.name
+    }]
+  };
+
+  assert.equal(context.orderHasActualDriverExtraFee(order, "waitingPerHour", driver), false);
+  assert.equal(context.driverExtraTripFee(order, "waitingPerHour", driver), 0);
+});
+
+test("legacy orders without a saved cost keep their automatic waiting wage", () => {
+  const context = createContext();
+  const driver = { name: "香港司机甲" };
+  const order = {
+    fees: [{
+      name: "装货等候费",
+      amount: 200,
+      cost: 0,
+      _savedCost: null,
+      driverName: driver.name
+    }]
+  };
+
+  assert.equal(context.orderHasActualDriverExtraFee(order, "waitingPerHour", driver), true);
+  assert.equal(context.driverExtraTripFee(order, "waitingPerHour", driver), 30);
+});
+
+test("legacy JSON cost parts preserve an explicit zero cost", () => {
+  const context = createContext();
+  const driver = { name: "香港司机甲" };
+  const order = {
+    fees: [{
+      name: "装货等候费",
+      amount: 200,
+      cost: 0,
+      _savedCost: null,
+      costPartsJson: JSON.stringify([{ role: "香港司机", amount: 0 }]),
+      driverName: driver.name
+    }]
+  };
+
+  assert.equal(context.orderHasActualDriverExtraFee(order, "waitingPerHour", driver), false);
+  assert.equal(context.driverExtraTripFee(order, "waitingPerHour", driver), 0);
+});
+
+test("a positive saved driver cost still creates the configured waiting wage", () => {
+  const context = createContext();
+  const driver = { name: "香港司机甲" };
+  const order = {
+    fees: [{
+      name: "装货等候费",
+      amount: 200,
+      cost: 50,
+      costCurrency: "港币",
+      driverName: driver.name
+    }]
+  };
+
+  assert.equal(context.driverExtraTripFee(order, "waitingPerHour", driver), 30);
 });
 
 test("legacy company markers are recognized without a fee item id", () => {

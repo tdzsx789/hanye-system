@@ -17,6 +17,7 @@ vm.runInContext(source.slice(end, rowsEnd), context);
 test("driver wage export project headers use the requested order", () => {
   const names = [
     "其它费用",
+    "香港坐车费",
     "装货费",
     "香港派送费",
     "香港停车费",
@@ -41,6 +42,7 @@ test("driver wage export project headers use the requested order", () => {
     "香港停车费",
     "香港登记费",
     "香港过磅费",
+    "香港坐车费",
     "加油费",
     "打车费",
     "代垫装车费",
@@ -57,12 +59,14 @@ test("legacy other-fee spelling is exported as 其它费用", () => {
   assert.equal(context.financeWageStatementProjectDisplayName("其他费用"), "其它费用");
 });
 
-test("代垫卸货费 follows 香港过磅费 in the standard wage statement order", () => {
+test("香港坐车费 immediately follows 香港过磅费 before 代垫卸货费", () => {
   const scaleFee = context.financeWageStatementProjectOrderIndex("香港过磅费");
+  const rideFee = context.financeWageStatementProjectOrderIndex("香港坐车费");
   const advanceUnloadingFee = context.financeWageStatementProjectOrderIndex("代垫卸货费");
   const unloadingFee = context.financeWageStatementProjectOrderIndex("卸货费");
 
-  assert.ok(scaleFee < advanceUnloadingFee);
+  assert.equal(rideFee, scaleFee + 1);
+  assert.ok(rideFee < advanceUnloadingFee);
   assert.ok(advanceUnloadingFee < unloadingFee);
 });
 
@@ -115,11 +119,12 @@ test("standard wage statement project names retain their documented order", () =
   ]);
 });
 
-test("all three reference statements keep project headers and amounts aligned", () => {
+test("reference statements keep project headers and amounts aligned", () => {
   const samples = [
     ["香港停车费:HKD", "香港登记费:HKD", "香港过磅费:HKD", "代垫卸货费:HKD", "卸货费:HKD", "装货费:HKD", "加点费:HKD", "过海费:HKD", "机场附加费:HKD", "卸货等候费:HKD", "压车费:HKD", "装货等候费:HKD", "打车费:RMB", "大陆登记费:RMB", "大陆过磅费:RMB", "大陆停车费:RMB", "口岸停车费:RMB", "文件打印费:RMB"],
     ["香港停车费:HKD", "香港登记费:HKD", "香港过磅费:HKD", "卸货费:HKD", "加点费:HKD", "过海费:HKD", "大陆登记费:RMB", "大陆过磅费:RMB", "大陆停车费:RMB", "文件打印费:RMB", "洗车费:RMB"],
-    ["香港停车费:HKD", "香港登记费:HKD", "香港过磅费:HKD", "加油费:HKD", "打车费:HKD", "代垫装车费:HKD", "卸货费:HKD", "装货费:HKD", "加点费:HKD", "过海费:HKD", "贴标签:HKD", "大陆过磅费:RMB", "大陆停车费:RMB", "口岸停车费:RMB"]
+    ["香港停车费:HKD", "香港登记费:HKD", "香港过磅费:HKD", "加油费:HKD", "打车费:HKD", "代垫装车费:HKD", "卸货费:HKD", "装货费:HKD", "加点费:HKD", "过海费:HKD", "贴标签:HKD", "大陆过磅费:RMB", "大陆停车费:RMB", "口岸停车费:RMB"],
+    ["香港停车费:HKD", "香港登记费:HKD", "香港过磅费:HKD", "香港坐车费:HKD", "卸货费:HKD", "装货费:HKD", "打车费:RMB", "大陆过磅费:RMB", "大陆停车费:RMB", "文件打印费:RMB", "洗车费:RMB"]
   ];
   context.financeWageStatementOrderProjectLines = (order) => order.lines;
   context.financeWageStatementOrders = (row) => row.orders;
