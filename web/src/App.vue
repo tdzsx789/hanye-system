@@ -2634,6 +2634,7 @@ const orderForm = reactive({
   customsPageCount: ""
 });
 const orderFees = ref([]);
+const orderAssignmentBase = ref(null);
 const orderFeeAssigneeDrafts = reactive(new WeakMap());
 const ORDER_FEE_FX_FIELDS = ["unitPrice", "amount", "cost"];
 const ORDER_FEE_FX_FIELD_LABELS = {
@@ -5565,16 +5566,18 @@ const dispatchPlanDisplayRows = computed(() =>
   dispatchPlanRows.value
     .map((row, index) => {
       const order = dispatchRowLiveOrder(row);
+      const quantity = row.quantity ?? order?.quantity ?? "";
       const hkDriverName = String(row.hkDriver || row.driver || "").trim();
       const mainlandDriverName = String(row.mainlandDriver || "").trim();
       return {
         ...row,
+        quantity,
         createdByName: row.createdByName || row.createdByUsername || "",
         index,
         orderRestricted: booleanFlag(row.orderRestricted ?? row.order_restricted, false),
         orderMissing: Boolean(row.orderNo && !order && !booleanFlag(row.orderRestricted ?? row.order_restricted, false)),
         customer: dispatchRowCustomerDisplayText(row) || row.customer || "",
-        order: order || {
+        order: order ? { ...order, quantity } : {
           no: "",
           customerId: row.customerId || "",
           customer: dispatchRowCustomerDisplayText(row) || row.customer || "",
@@ -5584,7 +5587,7 @@ const dispatchPlanDisplayRows = computed(() =>
           direction: row.direction || "",
           needsWeighing: booleanFlag(row.needsWeighing, false),
           tonnage: row.tonnage || "",
-          quantity: row.quantity || "",
+          quantity,
 	          weight: row.weight || "",
 	          loading: row.loading || "",
 	          loadingLocations: row.loadingLocations || [],
@@ -5777,11 +5780,20 @@ function applyDispatchPlanRows(rows = [], date = dispatchDate.value, loadedDates
 }
 
 async function persistDispatchPlanRows(date = dispatchDate.value, rows = dispatchPlanRows.value) {
+  const submittedQuantities = new Map(rows.map((row) => [row.id, row.quantity]));
   const result = await dispatchApi.saveDispatchPlan(date, rows, {
     baseRows: dispatchPlanBaseRowsByDate[date] || [],
     updatedAt: dispatchPlanUpdatedAtByDate[date] || ""
   });
-  updateDispatchPlanBaseFromRecord(result, date);
+  const savedRows = updateDispatchPlanBaseFromRecord(result, date);
+  const savedById = new Map(savedRows.map((row) => [row.id, row]));
+  dispatchPlanRows.value.forEach((row) => {
+    if (dispatchPlanDate(row) !== date) return;
+    const saved = savedById.get(row.id);
+    if (saved && submittedQuantities.has(row.id) && row.quantity === submittedQuantities.get(row.id)) {
+      row.quantity = saved.quantity;
+    }
+  });
   return result;
 }
 
@@ -7903,6 +7915,8 @@ async function exportDispatchPlanRows() {
           date: dispatchPlanDate(row),
           dispatchNo: row.dispatchNo,
           orderNo: row.orderNo,
+          linkedOrderNos: row.linkedOrderNos,
+          linkedDispatchNos: row.linkedDispatchNos,
           customerId: row.customerId,
           customer: dispatchRowCustomerDisplayText(row) || row.customer,
           customerIds: row.customerIds || [],
@@ -17043,13 +17057,16 @@ function orderDisplaySource(order = {}) {
     tonnage: String(sourceOrder.tonnage || dispatchRow.tonnage || "").trim(),
     quantity: String(sourceOrder.quantity || dispatchRow.quantity || "").trim(),
     weight: String(sourceOrder.weight || dispatchRow.weight || "").trim(),
-    vehicleSource: normalizeVehicleSource(sourceOrder.vehicleSource || dispatchRow.vehicleSource || ""),
-    supplier: String(sourceOrder.supplier || dispatchRow.supplier || "").trim(),
-    plate: normalizePlateText(sourceOrder.plate || dispatchRow.plate || ""),
-    driver: String(sourceOrder.driver || dispatchRow.driver || "").trim(),
-    hkDriver: String(sourceOrder.hkDriver || dispatchRow.hkDriver || "").trim(),
-    mainlandDriver: String(sourceOrder.mainlandDriver || dispatchRow.mainlandDriver || "").trim(),
-    transportMode: normalizeTransportMode(sourceOrder.transportMode || dispatchRow.transportMode || ""),
+    // Older dispatch rows may not have assignment fields at all. Prefer a
+    // current dispatch value when present, then fall back to the hydrated
+    // order so historical rows do not blank out the order editor.
+    vehicleSource: normalizeVehicleSource(dispatchRow.vehicleSource || sourceOrder.vehicleSource || ""),
+    supplier: String(dispatchRow.supplier || sourceOrder.supplier || "").trim(),
+    plate: normalizePlateText(dispatchRow.plate || sourceOrder.plate || ""),
+    driver: String(dispatchRow.driver || sourceOrder.driver || "").trim(),
+    hkDriver: String(dispatchRow.hkDriver || sourceOrder.hkDriver || "").trim(),
+    mainlandDriver: String(dispatchRow.mainlandDriver || sourceOrder.mainlandDriver || "").trim(),
+    transportMode: normalizeTransportMode(dispatchRow.transportMode || sourceOrder.transportMode || ""),
     loading: String(sourceOrder.loading || dispatchRow.loading || "").trim(),
     loadingLocations: Array.isArray(sourceOrder.loadingLocations) && sourceOrder.loadingLocations.length ? sourceOrder.loadingLocations : (dispatchRow.loadingLocations || []),
     unloading: String(sourceOrder.unloading || dispatchRow.unloading || "").trim(),
@@ -17058,6 +17075,24 @@ function orderDisplaySource(order = {}) {
     dispatchLoadDate: String(sourceOrder.dispatchLoadDate || dispatchPlanDate(dispatchRow) || dispatchRow.date || "").trim(),
     dispatchLoadTime: String(sourceOrder.dispatchLoadTime || dispatchRow.loadTime || "").trim(),
     dispatchDriver: String(sourceOrder.dispatchDriver || dispatchRow.driver || "").trim()
+  };
+}
+
+function normalizedOrderAssignmentBase(order = orderForm) {
+  const vehicleSource = normalizeVehicleSource(order.vehicleSource || "");
+  const transportMode = normalizeTransportMode(order.transportMode || (vehicleSource === OWN_VEHICLE_SOURCE ? "单司机" : ""));
+  const isOwnVehicle = vehicleSource === OWN_VEHICLE_SOURCE;
+  const isRelay = isOwnVehicle && ["双司机", "口岸转国内车"].includes(transportMode);
+  const hkDriver = isOwnVehicle && isRelay ? String(order.hkDriver || "").trim() : "";
+  const mainlandDriver = isOwnVehicle && isRelay ? String(order.mainlandDriver || "").trim() : "";
+  return {
+    vehicleSource,
+    supplier: String(order.supplier || "").trim(),
+    plate: normalizePlateText(order.plate || ""),
+    driver: !isOwnVehicle ? "" : isRelay ? [hkDriver, mainlandDriver].filter(Boolean).join(" / ") : String(order.driver || "").trim(),
+    hkDriver,
+    mainlandDriver,
+    transportMode
   };
 }
 
@@ -23373,6 +23408,7 @@ function realtimeRefreshBucketsForEvent(event = {}) {
       break;
     case "order":
       buckets.add("orders");
+      if (active === "dispatchBoard") buckets.add("dispatch");
       break;
     case "statement":
       buckets.add("statementDownloads");
@@ -28192,6 +28228,7 @@ async function saveCustomer() {
 function resetOrderForm() {
   autoEnabledOrderRequiredFieldKey.value = "";
   orderCustomsDeclarationNoDraft.value = "";
+  orderAssignmentBase.value = null;
   Object.assign(orderForm, {
     dispatchNo: "",
     customerId: "",
@@ -28590,6 +28627,7 @@ async function openOrderModal(customer = null, order = null, options = {}) {
       orderForm.mainlandDriver = mainlandDriver.trim();
       orderForm.driver = "";
     }
+    orderAssignmentBase.value = normalizedOrderAssignmentBase(orderForm);
     loadCustomsFieldsFromRemark(displayOrder.remark || "");
     orderCustomsStatementSelectedIds.value = orderLinkedCustomsBusinessIdsValue(displayOrder);
     orderCustomsStatementSelectedId.value = orderCustomsStatementSelectedIds.value[0] || "";
@@ -28750,6 +28788,9 @@ async function saveOrder(options = {}) {
     syncOrderFeeCosts();
     const payload = {
       ...buildNormalizedOrderPayload(),
+      ...(editingOrderNo.value && orderAssignmentBase.value
+        ? { orderAssignmentBase: { ...orderAssignmentBase.value } }
+        : {}),
       fees: orderFees.value
         .map((fee) => {
           const normalized = normalizeOrderFeeRow(fee);
@@ -28783,6 +28824,7 @@ async function saveOrder(options = {}) {
     const item = editingOrderNo.value
       ? await ordersApi.updateOrder(editingOrderNo.value, payload)
       : await ordersApi.createOrder(payload);
+    if (editingOrderNo.value) orderAssignmentBase.value = normalizedOrderAssignmentBase(payload);
     orderRows.value = editingOrderNo.value
       ? orderRows.value.map((row) => row.no === item.no ? item : row)
       : [item, ...orderRows.value];

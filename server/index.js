@@ -10845,7 +10845,12 @@ function recordOrderDispatchLoadInfoCandidate(lookup = new Map(), row = {}, plan
     quantity: userTextValue(row.quantity),
     weight: userTextValue(row.weight),
     vehicleSource: normalizeVehicleSource(row.vehicleSource || row.vehicle_source || ""),
+    supplier: userTextValue(row.supplier),
     plate: normalizePlateText(row.plate),
+    driver: userTextValue(row.driver),
+    hkDriver: userTextValue(row.hkDriver || row.hk_driver),
+    mainlandDriver: userTextValue(row.mainlandDriver || row.mainland_driver),
+    transportMode: normalizeTransportMode(row.transportMode || row.transport_mode || ""),
     loading: userTextValue(row.loading),
     unloading: userTextValue(row.unloading),
     driverText: [
@@ -10871,6 +10876,51 @@ function recordOrderDispatchLoadInfoCandidate(lookup = new Map(), row = {}, plan
     );
     if (!duplicate) lookup.set(key, [...candidates, candidate]);
   });
+}
+
+function orderDispatchCandidateForOrder(order = {}, lookup = new Map()) {
+  const orderNo = String(order.no || order.order_no || "").trim();
+  const dispatchNo = String(order.dispatchNo || order.dispatch_no || "").trim();
+  const candidates = [
+    ...(orderNo ? lookup.get(`order:${orderNo}`) || [] : []),
+    ...(dispatchNo ? lookup.get(`dispatch:${dispatchNo}`) || [] : [])
+  ];
+  return Array.from(new Set(candidates)).reduce((best, candidate) => {
+    if (!best) return candidate;
+    if (candidate.priority !== best.priority) return candidate.priority > best.priority ? candidate : best;
+    if (candidate.date !== best.date) return candidate.date > best.date ? candidate : best;
+    if (candidate.statusRank !== best.statusRank) return candidate.statusRank > best.statusRank ? candidate : best;
+    return candidate.createdAt > best.createdAt ? candidate : best;
+  }, null);
+}
+
+function orderAssignmentSourceValue(source = {}, key = "", column = "") {
+  if (Object.prototype.hasOwnProperty.call(source, key)) return source[key];
+  if (column && Object.prototype.hasOwnProperty.call(source, column)) return source[column];
+  return "";
+}
+
+function orderAssignmentFieldsFromSource(source = {}) {
+  return {
+    vehicleSource: normalizeVehicleSource(orderAssignmentSourceValue(source, "vehicleSource", "vehicle_source")),
+    supplier: userTextValue(orderAssignmentSourceValue(source, "supplier")),
+    plate: normalizePlateText(orderAssignmentSourceValue(source, "plate")),
+    driver: userTextValue(orderAssignmentSourceValue(source, "driver")),
+    hkDriver: userTextValue(orderAssignmentSourceValue(source, "hkDriver", "hk_driver")),
+    mainlandDriver: userTextValue(orderAssignmentSourceValue(source, "mainlandDriver", "mainland_driver")),
+    transportMode: normalizeTransportMode(orderAssignmentSourceValue(source, "transportMode", "transport_mode"))
+  };
+}
+
+function applyOrderDispatchAssignment(order = {}, dispatchCandidate = null) {
+  if (!dispatchCandidate) return { ...order, ...orderAssignmentFieldsFromSource(order) };
+  const current = orderAssignmentFieldsFromSource(order);
+  const assignment = orderAssignmentFieldsFromSource(dispatchCandidate);
+  const merged = Object.fromEntries(Object.keys(ORDER_ASSIGNMENT_BASE_FIELDS).map((key) => [
+    key,
+    assignment[key] || current[key] || ""
+  ]));
+  return { ...order, ...merged };
 }
 
 async function orderDispatchLoadInfoLookup() {
@@ -10920,12 +10970,14 @@ async function hydrateOrderDispatchLoadInfo(orders = [], options = {}) {
     const matched = (rangeCandidates.length ? rangeCandidates : candidates).reduce((best, candidate) =>
       isPreferredDispatchDateCandidate(candidate, best) ? candidate : best
     , null);
+    const assignmentCandidate = orderDispatchCandidateForOrder(order, lookup);
+    const orderWithAssignment = applyOrderDispatchAssignment(order, assignmentCandidate);
     const orderDate = String(order?.date || "").trim().slice(0, 10);
     const dispatchLoadDate = hasDateRange && !rangeCandidates.length && dateInRange(orderDate)
       ? orderDate
       : (matched?.date || orderDate);
     return {
-      ...order,
+      ...orderWithAssignment,
       dispatchNo: String(order?.dispatchNo || matched?.dispatchNo || "").trim(),
       businessType: String(order?.businessType || matched?.businessType || "").trim(),
       port: String(order?.port || matched?.port || "").trim(),
@@ -10933,8 +10985,6 @@ async function hydrateOrderDispatchLoadInfo(orders = [], options = {}) {
       tonnage: String(order?.tonnage || matched?.tonnage || "").trim(),
       quantity: String(order?.quantity || matched?.quantity || "").trim(),
       weight: String(order?.weight || matched?.weight || "").trim(),
-      vehicleSource: normalizeVehicleSource(order?.vehicleSource || matched?.vehicleSource || ""),
-      plate: normalizePlateText(order?.plate || matched?.plate || ""),
       loading: String(order?.loading || "").trim() || String(matched?.loading || "").trim(),
       unloading: String(order?.unloading || "").trim() || String(matched?.unloading || "").trim(),
       dispatchLoadDate,
@@ -11032,8 +11082,8 @@ function normalizeDispatchPlanRow(row = {}, existingRow = null, requestCreator =
     id: String(item.id || ""),
     createdAt: dispatchRowCreatedAt(item.createdAt || item.created_at ? item : (existingRow || item), item.date || existingRow?.date || fallbackDate),
     date: String(fallbackDate || item.date || ""),
-    dispatchNo: String(item.dispatchNo || ""),
-    orderNo: String(item.orderNo || ""),
+    dispatchNo: dispatchRowDispatchNo(item),
+    orderNo: dispatchRowOrderNo(item),
     dispatchGroupId,
     linkedOrderNos,
     linkedDispatchNos,
@@ -11048,7 +11098,7 @@ function normalizeDispatchPlanRow(row = {}, existingRow = null, requestCreator =
     needsWeighing: dispatchRowBooleanField(item, existingRow, "needsWeighing", "needs_weighing", false),
     direction: userTextValue(item.direction),
     tonnage: userTextValue(item.tonnage),
-    quantity: userTextValue(item.quantity ?? ""),
+    quantity: dispatchRowStringField(item, existingRow, "quantity"),
     weight: userTextValue(item.weight),
     loading: composeLocationEntriesText(loadingLocations) || userRawMultilineTextValue(item.loading),
     loadingLocations,
@@ -11431,7 +11481,7 @@ function dispatchExportRowsForWorkbook(rows = [], fallbackDate = "", customerSho
       dispatchExportText(row.plate, order.plate),
       dispatchExportRoute(row),
       dispatchExportText(order.tonnage, row.tonnage),
-      dispatchExportText(order.quantity, row.quantity),
+      row.quantity,
       hkDriver,
       mainlandDriver,
       dispatchExportText(normalizePortText(order.port), normalizePortText(row.port)),
@@ -11708,6 +11758,14 @@ function dispatchRowNeedsOrderSync(row = {}, existingRow = null) {
   if (!dispatchRowLinkedOrderNos(row).length && !dispatchRowLinkedDispatchNos(row).length && !dispatchRowGroupId(row)) return false;
   if (!existingRow) return true;
   return dispatchRowOrderSyncKey(row) !== dispatchRowOrderSyncKey(existingRow);
+}
+
+function dispatchRowQuantityWasEdited(row, existingRow, baseRow) {
+  // The base snapshot is the only way to distinguish an intentional quantity
+  // edit from an older page auto-saving a stale row. Without it, preserve the
+  // order's current quantity and let the read/export hydration fill the row.
+  if (!existingRow || !baseRow || !dispatchRowFieldProvided(row, "quantity")) return false;
+  return dispatchRowText(row, "quantity") !== dispatchRowText(baseRow, "quantity");
 }
 
 function dispatchRowCreatorFields(row = {}, existingRow = null, requestCreator = {}) {
@@ -12177,6 +12235,53 @@ async function loadOrdersLinkedToDispatchRow(row = {}, options = {}) {
   }, options);
 }
 
+function dispatchQuantityOrderLookup(orders) {
+  const byNo = new Map();
+  const byDispatchNo = new Map();
+  for (const order of orders) {
+    byNo.set(order.no, order);
+    if (!order.dispatch_no) continue;
+    // A duplicate dispatch number cannot identify an order on its own.
+    byDispatchNo.set(order.dispatch_no, byDispatchNo.has(order.dispatch_no) ? null : order);
+  }
+  return { byNo, byDispatchNo };
+}
+
+function dispatchQuantityOrder(row, { byNo, byDispatchNo }) {
+  const primary = byNo.get(dispatchRowOrderNo(row)) || byDispatchNo.get(dispatchRowDispatchNo(row));
+  if (primary) return primary;
+  const linked = new Set([
+    ...dispatchRowLinkedOrderNos(row, false).map((no) => byNo.get(no)),
+    ...dispatchRowLinkedDispatchNos(row, false).map((no) => byDispatchNo.get(no))
+  ].filter(Boolean));
+  return linked.size === 1 ? linked.values().next().value : null;
+}
+
+async function loadDispatchQuantityOrders(rows, account, specialLookup) {
+  const canViewSpecial = requestCanViewSpecialCustomerOrders({ account });
+  const visibleRows = canViewSpecial ? rows : rows.filter((row) => !row.orderRestricted);
+  const orderNos = compactLookupValues(visibleRows.flatMap((row) => dispatchRowLinkedOrderNos(row)));
+  const dispatchNos = compactLookupValues(visibleRows.flatMap((row) => dispatchRowLinkedDispatchNos(row)));
+  if (!orderNos.length && !dispatchNos.length) return dispatchQuantityOrderLookup([]);
+  const hasDispatchNo = await orderColumnExists("dispatch_no");
+  const orders = await db.prepare(`
+    SELECT no, ${hasDispatchNo ? "dispatch_no" : "NULL AS dispatch_no"}, quantity, customer_id, customer
+    FROM orders
+    WHERE deleted_at IS NULL AND (no = ANY(?::text[])${hasDispatchNo ? " OR dispatch_no = ANY(?::text[])" : ""})
+  `).all(...(hasDispatchNo ? [orderNos, dispatchNos] : [orderNos]));
+  return dispatchQuantityOrderLookup(orders.filter((order) => canViewSpecial || !orderMatchesSpecialCustomer(order, specialLookup)));
+}
+
+function resolveDispatchRowQuantity(row, orderLookup) {
+  const order = row.orderRestricted ? null : dispatchQuantityOrder(row, orderLookup);
+  return {
+    ...row,
+    quantity: order
+      ? dispatchRowText(order, "quantity")
+      : dispatchExportText(row.quantity, row.order?.quantity)
+  };
+}
+
 async function loadOrdersLinkedToOrderRow(orderRow = {}, options = {}) {
   return loadOrdersByDispatchRefs({
     orderNos: [orderRow.no || orderRow.order_no],
@@ -12230,8 +12335,8 @@ function deletedOrderRefsPayload(orderRows = []) {
   };
 }
 
-async function syncDispatchPlanRowsToOrders(planDate, rows = [], rowsForPersistence = null) {
-  const rowsToSync = rows.filter((row) =>
+async function syncDispatchPlanRowsToOrders(planDate, rows = [], rowsForPersistence = null, canEditQuantity = () => true) {
+  const rowsToSync = rows.filter(({ row }) =>
     dispatchRowLinkedOrderNos(row).length || dispatchRowLinkedDispatchNos(row).length || dispatchRowGroupId(row)
   );
   if (!rowsToSync.length) return 0;
@@ -12242,13 +12347,13 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = [], rowsForPersiste
   const persistenceRows = Array.isArray(rowsForPersistence) ? rowsForPersistence : null;
   let persistedRowsChanged = false;
   let synced = 0;
-  for (const row of rowsToSync) {
+  for (const { row, syncOrderFields, quantityEdited } of rowsToSync) {
     const orderNo = dispatchRowText(row, "orderNo");
     const rowDispatchNo = dispatchRowText(row, "dispatchNo");
     const dispatchGroupId = dispatchRowGroupId(row);
     let linkedOrders = await loadOrdersLinkedToDispatchRow(row);
     const normalizedDispatchStatus = normalizeDispatchPlanStatus(row.status);
-    if (!linkedOrders.length && normalizedDispatchStatus === "通关中") {
+    if (syncOrderFields && !linkedOrders.length && normalizedDispatchStatus === "通关中") {
       const createdOrder = await createOrderFromDispatchRowForSync(row, planDate, normalizedDispatchStatus);
       if (createdOrder) {
         linkedOrders = [createdOrder];
@@ -12266,8 +12371,21 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = [], rowsForPersiste
         persistedRowsChanged = rowsChanged || persistedRowsChanged;
       }
     }
+    const quantityOrder = quantityEdited
+      ? dispatchQuantityOrder(row, dispatchQuantityOrderLookup(linkedOrders))
+      : null;
     for (const order of linkedOrders) {
       if (!order || order.status === "已审核") continue;
+      const writesQuantity = order === quantityOrder && canEditQuantity(order);
+      if (!syncOrderFields) {
+        if (writesQuantity) {
+          await db.prepare("UPDATE orders SET quantity = ? WHERE no = ? AND deleted_at IS NULL")
+            .run(dispatchRowText(row, "quantity"), order.no);
+          clearOrderListLookupCache();
+          synced += 1;
+        }
+        continue;
+      }
 
       const currentOrder = mapOrder(order);
       const transportMode = normalizeTransportMode(row.transportMode || order.transport_mode || "") || order.transport_mode || "";
@@ -12292,7 +12410,7 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = [], rowsForPersiste
         port: normalizePortText(dispatchRowText(row, "port") || currentOrder.port || ""),
         direction: dispatchRowText(row, "direction") || currentOrder.direction || "",
         tonnage: dispatchRowText(row, "tonnage") || currentOrder.tonnage || "",
-        quantity: dispatchRowText(row, "quantity") || currentOrder.quantity || "",
+        quantity: writesQuantity ? dispatchRowText(row, "quantity") : currentOrder.quantity,
         weight: dispatchRowText(row, "weight") || currentOrder.weight || "",
         needsWeighing: booleanFlag(row.needsWeighing ?? order.needs_weighing, false),
         vehicleSource: normalizeVehicleSource(dispatchRowText(row, "vehicleSource") || currentOrder.vehicleSource || ""),
@@ -12478,7 +12596,7 @@ app.get("/api/dispatch-plans", async (req, res) => {
     ORDER BY plan_date DESC
   `).all(...params);
   const specialLookup = await loadSpecialCustomerOrderLookup();
-  res.json(await Promise.all(records.map((row) => mapDispatchPlanRecordForAccount(row, req.account, specialLookup))));
+  res.json(await mapDispatchPlanRecordsForAccount(records, req.account, specialLookup));
 });
 
 app.get("/api/dispatch-plans/recycle", async (_req, res) => {
@@ -12621,7 +12739,7 @@ app.delete("/api/dispatch-plans/:date/rows", async (req, res) => {
       const rowsJson = JSON.stringify(nextRows);
       await upsertDispatchPlanRow(date, rowsJson);
       const saved = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
-      return { removed: rowsToRecycle.length, saved: mapDispatchPlanRecord(saved), deletedOrders: linkedOrders };
+      return { removed: rowsToRecycle.length, saved, deletedOrders: linkedOrders };
     })();
   } catch (error) {
     if (error?.statusCode) {
@@ -12640,7 +12758,8 @@ app.delete("/api/dispatch-plans/:date/rows", async (req, res) => {
     return;
   }
   await writeAudit("delete", "dispatch_plan", date, `显式删除 ${result.removed} 条`);
-  res.json({ ok: true, removed: result.removed, plan: result.saved, ...deletedOrderRefsPayload(result.deletedOrders || []) });
+  const [plan] = await mapDispatchPlanRecordsForAccount([result.saved], req.account, specialLookup);
+  res.json({ ok: true, removed: result.removed, plan, ...deletedOrderRefsPayload(result.deletedOrders || []) });
 });
 
 app.post("/api/dispatch-plans/export/xlsx", async (req, res) => {
@@ -12656,8 +12775,10 @@ app.post("/api/dispatch-plans/export/xlsx", async (req, res) => {
       res.status(400).type("text/plain").send("没有可导出的排车数据");
       return;
     }
-    const title = String(req.body?.title || "").trim() || dispatchExportWorkbookTitle(visibleRows, String(req.body?.date || ""));
-    const buffer = await renderDispatchPlanXlsxBuffer(visibleRows, title, String(req.body?.date || ""), {
+    const orderLookup = await loadDispatchQuantityOrders(visibleRows, req.account, specialLookup);
+    const exportRows = visibleRows.map((row) => resolveDispatchRowQuantity(row, orderLookup));
+    const title = String(req.body?.title || "").trim() || dispatchExportWorkbookTitle(exportRows, String(req.body?.date || ""));
+    const buffer = await renderDispatchPlanXlsxBuffer(exportRows, title, String(req.body?.date || ""), {
       exportSpacing: req.body?.exportSpacing
     });
     const date = exportFilenamePart(String(req.body?.date || visibleRows[0]?.order?.date || visibleRows[0]?.date || todayInputValue()).replaceAll("-", ""));
@@ -12747,7 +12868,8 @@ app.get("/api/dispatch-plans/:date", async (req, res) => {
     return;
   }
   const specialLookup = await loadSpecialCustomerOrderLookup();
-  res.json(await mapDispatchPlanRecordForAccount(row, req.account, specialLookup));
+  const [record] = await mapDispatchPlanRecordsForAccount([row], req.account, specialLookup);
+  res.json(record);
 });
 
 app.put("/api/dispatch-plans/:date", async (req, res) => {
@@ -12763,6 +12885,8 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
   }
   const requestCreator = creatorFieldsFromAccount(req.account);
   const baseRows = Array.isArray(req.body.baseRows) ? req.body.baseRows : [];
+  const specialLookup = await loadSpecialCustomerOrderLookup();
+  const canViewSpecial = requestCanViewSpecialCustomerOrders(req);
   let result;
   try {
     result = await db.transaction(async () => {
@@ -12779,6 +12903,9 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
           const existingRow = findExistingDispatchRow(row, existingRowsLookup);
           const cleanRow = normalizeDispatchPlanRow(row, existingRow, requestCreator, date);
           const baseRow = findExistingDispatchRow(row, baseRowsLookup);
+          const quantityEdited = (canViewSpecial || !orderMatchesSpecialCustomer(cleanRow, specialLookup))
+            && dispatchRowQuantityWasEdited(row, existingRow, baseRow);
+          if (!quantityEdited && existingRow) cleanRow.quantity = dispatchRowText(existingRow, "quantity");
           if (existingRow && baseRow) {
             const incomingStatus = normalizeDispatchPlanStatus(cleanRow.status);
             const baseStatus = normalizeDispatchPlanStatus(baseRow.status);
@@ -12792,8 +12919,9 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
               staleStatusRows += 1;
             }
           }
-          if (dispatchRowHasReference(cleanRow) && dispatchRowNeedsOrderSync(cleanRow, existingRow)) {
-            rowsNeedingOrderSync.push(cleanRow);
+          const syncOrderFields = dispatchRowNeedsOrderSync(cleanRow, existingRow);
+          if (dispatchRowHasReference(cleanRow) && (quantityEdited || syncOrderFields)) {
+            rowsNeedingOrderSync.push({ row: cleanRow, quantityEdited, syncOrderFields });
           }
           return cleanRow;
         })
@@ -12806,7 +12934,10 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
         ? creatorFieldsFromRecord(existingPlan)
         : requestCreator;
       await upsertDispatchPlanRow(date, rowsJson, planCreator);
-      await syncDispatchPlanRowsToOrders(date, rowsNeedingOrderSync, savedRows);
+      await syncDispatchPlanRowsToOrders(
+        date, rowsNeedingOrderSync, savedRows,
+        (order) => canViewSpecial || !orderMatchesSpecialCustomer(order, specialLookup)
+      );
       const saved = await db.prepare("SELECT * FROM dispatch_plans WHERE plan_date = ?").get(date);
       return {
         saved,
@@ -12822,7 +12953,9 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
       res.status(409).json({
         message: error.message,
         detail: error.detail || "",
-        latest: latest ? mapDispatchPlanRecord(latest) : { date, rows: [], updatedAt: "" }
+        latest: latest
+          ? (await mapDispatchPlanRecordsForAccount([latest], req.account, specialLookup))[0]
+          : { date, rows: [], updatedAt: "" }
       });
       return;
     }
@@ -12834,7 +12967,8 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
     date,
     `修改排车计划：合并保存 ${result.incomingCount} 条，当前 ${result.savedCount} 条，保护 ${result.stats.protected} 条${result.staleStatusRows ? `，忽略旧状态 ${result.staleStatusRows} 条` : ""}${result.stats.staleSkipped ? `，跳过旧快照 ${result.stats.staleSkipped} 条` : ""}`
   );
-  res.json(mapDispatchPlanRecord(result.saved));
+  const [record] = await mapDispatchPlanRecordsForAccount([result.saved], req.account, specialLookup);
+  res.json(record);
 });
 
 app.get("/api/orders/recycle", async (_req, res) => {
@@ -13017,6 +13151,44 @@ function pickBody(body, camelKey, snakeKey, fallback) {
   if (Object.prototype.hasOwnProperty.call(body, camelKey)) return body[camelKey];
   if (snakeKey && Object.prototype.hasOwnProperty.call(body, snakeKey)) return body[snakeKey];
   return fallback;
+}
+
+const ORDER_ASSIGNMENT_BASE_FIELDS = {
+  vehicleSource: "vehicle_source",
+  supplier: "supplier",
+  plate: "plate",
+  driver: "driver",
+  hkDriver: "hk_driver",
+  mainlandDriver: "mainland_driver",
+  transportMode: "transport_mode"
+};
+
+function orderAssignmentBaseValue(key, value) {
+  if (key === "vehicleSource") return normalizeVehicleSource(value);
+  if (key === "plate") return normalizePlateText(value);
+  if (key === "transportMode") return normalizeTransportMode(value);
+  return userTextValue(value);
+}
+
+function mergeUnchangedOrderAssignmentFields(body = {}, existing = {}, dispatchAssignment = null) {
+  const baseline = body.orderAssignmentBase;
+  const hasBaseline = baseline && typeof baseline === "object" && !Array.isArray(baseline);
+  if (!dispatchAssignment && !hasBaseline) return body;
+
+  const merged = { ...body };
+  const currentAssignment = dispatchAssignment || existing;
+  for (const [key, column] of Object.entries(ORDER_ASSIGNMENT_BASE_FIELDS)) {
+    const hasSubmittedValue = Object.prototype.hasOwnProperty.call(body, key);
+    const hasBaselineValue = hasBaseline && Object.prototype.hasOwnProperty.call(baseline, key);
+    const comparisonValue = hasBaselineValue ? baseline[key] : orderAssignmentSourceValue(existing, key, column);
+    if (hasSubmittedValue && orderAssignmentBaseValue(key, body[key]) !== orderAssignmentBaseValue(key, comparisonValue)) continue;
+    // Keep the live assignment when this editor did not change that field.
+    // The modal can remain open while dispatch management assigns another vehicle.
+    // Older clients without a baseline are compared against the stored order value.
+    merged[key] = orderAssignmentSourceValue(currentAssignment, key, column) ?? "";
+  }
+  delete merged.orderAssignmentBase;
+  return merged;
 }
 
 async function readOrderPayload(body, existing = null) {
@@ -13464,13 +13636,16 @@ async function annotateDispatchRowsForAccount(rows = [], account = null, lookup 
   }));
 }
 
-async function mapDispatchPlanRecordForAccount(row = {}, account = null, lookup = null) {
-  const record = mapDispatchPlanRecord(row);
-  if (requestCanViewSpecialCustomerOrders({ account })) return record;
-  return {
+async function mapDispatchPlanRecordsForAccount(records, account, specialLookup) {
+  const plans = await Promise.all(records.map(async (row) => {
+    const record = mapDispatchPlanRecord(row);
+    return { ...record, rows: await annotateDispatchRowsForAccount(record.rows, account, specialLookup) };
+  }));
+  const orderLookup = await loadDispatchQuantityOrders(plans.flatMap((plan) => plan.rows), account, specialLookup);
+  return plans.map((record) => ({
     ...record,
-    rows: await annotateDispatchRowsForAccount(record.rows, account, lookup)
-  };
+    rows: record.rows.map((row) => resolveDispatchRowQuantity(row, orderLookup))
+  }));
 }
 
 async function assertOrderVisibleForAccount(order = {}, req, lookup = null) {
@@ -13745,7 +13920,10 @@ app.patch("/api/orders/:no", async (req, res) => {
   }
 
   const skipSignValidation = booleanFlag(req.body?.skipSignValidation ?? req.body?.skip_sign_validation, false);
-  const item = await readOrderPayload(req.body, existing);
+  const dispatchLookup = await orderDispatchLoadInfoLookup();
+  const currentDispatchAssignment = orderDispatchCandidateForOrder(existing, dispatchLookup);
+  const updateBody = mergeUnchangedOrderAssignmentFields(req.body, existing, currentDispatchAssignment);
+  const item = await readOrderPayload(updateBody, existing);
   item.no = no;
   item.fees = item.fees || (await hydrateOrderFees([mapOrder(existing)]))[0].fees;
   if (!(await resolveOrderCustomer(item))) {
@@ -15825,17 +16003,43 @@ app.post("/api/fee-items", async (req, res) => {
     res.status(400).json({ message: "收费项目名称不能为空" });
     return;
   }
-  const duplicate = await db.prepare("SELECT id FROM fee_items WHERE name = ? AND deleted_at IS NULL").get(item.name);
-  if (duplicate) {
+  const duplicate = await db.prepare("SELECT id, deleted_at FROM fee_items WHERE name = ?").get(item.name);
+  if (duplicate && !duplicate.deleted_at) {
     res.status(409).json({ message: "收费项目名称不能重复" });
     return;
   }
-  const result = await db.prepare(`
-    INSERT INTO fee_items (category, name, currency, default_amount, default_driver_role, cost_source, sort_order)
-    VALUES (@category, @name, @currency, @defaultAmount, @defaultDriverRole, @costSource, @sortOrder)
-  `).run(item);
-  await writeAudit("create", "fee_item", String(result.lastInsertId), item.name);
-  res.status(201).json(mapFeeItem(await db.prepare("SELECT * FROM fee_items WHERE id = ?").get(result.lastInsertId)));
+  try {
+    let id;
+    if (duplicate) {
+      // 名称在数据库中全局唯一：重新启用已删除项目并使用本次填写的设置。
+      const restored = await db.prepare(`
+        UPDATE fee_items
+        SET category = @category, currency = @currency, default_amount = @defaultAmount,
+            default_driver_role = @defaultDriverRole, cost_source = @costSource,
+            sort_order = @sortOrder, deleted_at = NULL
+        WHERE id = @id AND deleted_at IS NOT NULL
+      `).run({ ...item, id: duplicate.id });
+      if (!restored.changes) {
+        res.status(409).json({ message: "收费项目名称不能重复" });
+        return;
+      }
+      id = duplicate.id;
+    } else {
+      const result = await db.prepare(`
+        INSERT INTO fee_items (category, name, currency, default_amount, default_driver_role, cost_source, sort_order)
+        VALUES (@category, @name, @currency, @defaultAmount, @defaultDriverRole, @costSource, @sortOrder)
+      `).run(item);
+      id = result.lastInsertId;
+    }
+    await writeAudit(duplicate ? "restore" : "create", "fee_item", String(id), item.name);
+    res.status(201).json(mapFeeItem(await db.prepare("SELECT * FROM fee_items WHERE id = ?").get(id)));
+  } catch (error) {
+    if (error?.code === "23505" && error?.constraint === "fee_items_name_key") {
+      res.status(409).json({ message: "收费项目名称不能重复" });
+      return;
+    }
+    throw error;
+  }
 });
 
 app.patch("/api/fee-items/order", async (req, res) => {
@@ -15899,16 +16103,27 @@ app.patch("/api/fee-items/:id", async (req, res) => {
     res.status(400).json({ message: "收费项目名称不能为空" });
     return;
   }
-  const duplicate = await db.prepare("SELECT id FROM fee_items WHERE name = ? AND id <> ? AND deleted_at IS NULL").get(item.name, id);
+  const duplicate = await db.prepare("SELECT id, deleted_at FROM fee_items WHERE name = ? AND id <> ?").get(item.name, id);
   if (duplicate) {
-    res.status(409).json({ message: "收费项目名称不能重复" });
+    res.status(409).json({ message: duplicate.deleted_at
+      ? "该收费项目名称曾被删除，请新建同名项目以恢复，或使用其他名称"
+      : "收费项目名称不能重复" });
     return;
   }
-  const result = await db.prepare(`
+  let result;
+  try {
+    result = await db.prepare(`
     UPDATE fee_items
     SET category = @category, name = @name, currency = @currency, default_amount = @defaultAmount, default_driver_role = @defaultDriverRole, cost_source = @costSource
     WHERE id = @id AND deleted_at IS NULL
-  `).run(item);
+    `).run(item);
+  } catch (error) {
+    if (error?.code === "23505" && error?.constraint === "fee_items_name_key") {
+      res.status(409).json({ message: "收费项目名称已存在，请刷新后重试" });
+      return;
+    }
+    throw error;
+  }
   if (result.changes === 0) {
     res.status(404).json({ message: "收费项目不存在或已删除" });
     return;
