@@ -1364,6 +1364,7 @@ const ORDER_EXPORT_CHARGE_NOTE_COLUMN = { key: "__chargeNote", label: "备注", 
 const ORDER_EXPORT_OPERATING_UNIT_COLUMN = { key: "operatingUnit", label: "经营单位", width: 96, fontSize: 8, system: true };
 const ORDER_EXPORT_NEW_OLD_COLUMN = { key: "newOld", label: "新/旧", width: 52, fontSize: 8, system: true };
 const ORDER_EXPORT_SPECIAL_CAR_COLUMN = { key: "specialCar", label: "专车", width: 52, fontSize: 8, system: true };
+const ORDER_EXPORT_TRIP_NO_COLUMN = { key: "tripNo", label: "车次号", width: 72, fontSize: 8, system: true };
 const ORDER_EXPORT_SIX_SHEET_NO_COLUMN = { key: "sixSheetNo", label: "六联单号", width: 148, fontSize: 8, system: true };
 const EXPORT_FEE_NAME_ALIASES = new Map([
   ["代垫香港政府税金", "香港政府税金"]
@@ -3314,6 +3315,30 @@ function orderSixSheetNoValue(order = {}) {
   return textValue(order?.sixSheetNo || order?.six_sheet_no).trim();
 }
 
+function orderTripNoValue(order = {}) {
+  return textValue(firstExportFieldValue(order?.tripNo, order?.trip_no)).trim();
+}
+
+function ordersHaveTripNo(orders = []) {
+  return orders.some((order) => Boolean(orderTripNoValue(order)));
+}
+
+function insertTripNoExportColumn(columns = []) {
+  const nextColumns = [...columns];
+  const alreadyHasTripNo = nextColumns.some((column) =>
+    ["tripNo", "trip_no", "车次号"].includes(textValue(column?.key).trim())
+    || exportColumnBaseLabel(column).trim() === ORDER_EXPORT_TRIP_NO_COLUMN.label
+  );
+  if (alreadyHasTripNo) return nextColumns;
+  const plateIndex = nextColumns.findIndex((column) => statementColumnMatchesKey(column, "plate"));
+  const firstFeeIndex = nextColumns.findIndex(isExportFeeItemColumn);
+  const insertAt = plateIndex >= 0
+    ? plateIndex + 1
+    : (firstFeeIndex >= 0 ? firstFeeIndex : nextColumns.length);
+  nextColumns.splice(insertAt, 0, { ...ORDER_EXPORT_TRIP_NO_COLUMN });
+  return nextColumns;
+}
+
 function ordersHaveSixSheetNo(orders = []) {
   return orders.some((order) => Boolean(orderSixSheetNoValue(order)));
 }
@@ -3426,6 +3451,10 @@ function exportColumnsForOrders(templatePayload = null, orders = [], options = {
   // 客户对账单：只要本批订单有六联单号，就把该列放到“中港运费”前面；没有则不插入。
   if (options.includeSixSheetNoColumn && ordersHaveSixSheetNo(orders)) {
     exportBodyColumns = insertSixSheetNoExportColumn(exportBodyColumns);
+  }
+  // Customer statements include a trip number whenever any exported order has one.
+  if (options.includeTripNoColumn && ordersHaveTripNo(orders)) {
+    exportBodyColumns = insertTripNoExportColumn(exportBodyColumns);
   }
   return [
     sequenceColumn || { ...ORDER_EXPORT_SYSTEM_SEQUENCE_COLUMN },
@@ -3673,6 +3702,7 @@ async function renderOrdersCsv(orders, title = "订单导出", templatePayload =
     includeOperatingUnitColumn: isCustomerStatement,
     includeCustomerOrderAttributeColumns: isCustomerStatement,
     includeSixSheetNoColumn: isCustomerStatement,
+    includeTripNoColumn: isCustomerStatement,
     includeLinkedCustomsColumns: isCustomerStatement,
     hideEmptyTemplateColumns: isCustomerStatement || isSupplierStatement,
     includeStatementRequiredColumns: isCustomerStatement || isSupplierStatement,
@@ -4476,6 +4506,7 @@ async function renderOrdersXlsxBuffer(orders, title = "订单导出", templatePa
     includeOperatingUnitColumn: isCustomerStatement,
     includeCustomerOrderAttributeColumns: isCustomerStatement,
     includeSixSheetNoColumn: isCustomerStatement,
+    includeTripNoColumn: isCustomerStatement,
     includeLinkedCustomsColumns: isCustomerStatement,
     hideEmptyTemplateColumns: isCustomerStatement || isSupplierStatement,
     includeStatementRequiredColumns: isCustomerStatement || isSupplierStatement,
@@ -5193,6 +5224,7 @@ async function renderOrdersExcelHtml(orders, title = "订单导出", templatePay
     includeChargeNoteColumn: isCustomerStatement,
     includeOperatingUnitColumn: isCustomerStatement,
     includeSixSheetNoColumn: isCustomerStatement,
+    includeTripNoColumn: isCustomerStatement,
     includeLinkedCustomsColumns: isCustomerStatement,
     hideEmptyTemplateColumns: isCustomerStatement || isSupplierStatement,
     includeStatementRequiredColumns: isCustomerStatement || isSupplierStatement,
@@ -6124,6 +6156,7 @@ async function renderOrdersPdf(res, orders, title = "订单导出", templatePayl
     includeOperatingUnitColumn: isCustomerStatement,
     includeCustomerOrderAttributeColumns: isCustomerStatement,
     includeSixSheetNoColumn: isCustomerStatement,
+    includeTripNoColumn: isCustomerStatement,
     includeLinkedCustomsColumns: isCustomerStatement,
     hideEmptyTemplateColumns: isCustomerStatement || isSupplierStatement,
     includeStatementRequiredColumns: isCustomerStatement || isSupplierStatement,
