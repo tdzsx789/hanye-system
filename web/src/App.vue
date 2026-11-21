@@ -29796,12 +29796,12 @@ function statementFilenamePeriodLabel(start = "", end = "") {
   return exportFilenamePart(`${start || "全部"}至${end || "全部"}`);
 }
 
-function monthlyStatementExportFilename(entityName = "对账对象", start = "", end = "", extension = "xlsx", type = "customer") {
+function monthlyStatementExportFilename(entityName = "对账对象", start = "", end = "", extension = "xlsx", type = "customer", entityId = "") {
   const name = type === "customs"
-    ? customsCustomerLabelByReference(entityName)
+    ? customsCustomerLabelByReference(entityName, entityId)
     : type === "supplier"
       ? supplierDisplayLabel(entityName)
-      : transportCustomerLabelByReference(entityName);
+      : transportCustomerLabelByReference(entityName, entityId);
   const typeLabel = type === "customs" ? "报关" : type === "supplier" ? "供应商" : "运输";
   return `${exportFilenamePart(name || entityName)}${statementFilenamePeriodLabel(start, end)}${typeLabel}对账单.${extension}`;
 }
@@ -32574,11 +32574,11 @@ function statementExportTypeLabel() {
   return "客户对账单";
 }
 
-function statementExportFilename(entityName = "对账对象", start = "", end = "", extension = "xlsx") {
+function statementExportFilename(entityName = "对账对象", start = "", end = "", extension = "xlsx", customerId = "") {
   if (statementExportType.value === "driver") {
     return `${exportFilenamePart(entityName)}_司机对账_${start || "全部"}_${end || "全部"}.${extension}`;
   }
-  return monthlyStatementExportFilename(entityName, start, end, extension, statementExportType.value);
+  return monthlyStatementExportFilename(entityName, start, end, extension, statementExportType.value, customerId);
 }
 
 async function toggleStatementExportMenu() {
@@ -32631,13 +32631,13 @@ async function exportStatementByFormat(format, templateRow = selectedTemplate.va
       snapshotReady: true
     };
     const ok = format === "pdf"
-      ? await exportOrderSnapshotsAsPdf(orders, title, templateRow, exchange, statementExportFilename(entityName, start, end, "pdf"), { statementCustomerName: entityName })
+      ? await exportOrderSnapshotsAsPdf(orders, title, templateRow, exchange, statementExportFilename(entityName, start, end, "pdf", exportRow.customerId), { statementCustomerName: entityName })
       : await exportOrderSnapshotsAsExcel(
         orders,
         title,
         templateRow,
         exchange,
-        statementExportFilename(entityName, start, end, "xlsx"),
+        statementExportFilename(entityName, start, end, "xlsx", exportRow.customerId),
         { includeReceiptSheet: true, statementProgress: true, statementCustomerName: entityName }
       );
     if (ok) await markStatementDownloaded(statementExportType.value, entityName, start, end, snapshot);
