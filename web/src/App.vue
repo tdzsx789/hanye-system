@@ -17039,13 +17039,25 @@ function orderDisplaySource(order = {}) {
   const liveOrder = liveOrderNo
     ? orderRows.value.find((item) => String(item.no || "").trim() === liveOrderNo) || null
     : null;
-  const sourceOrder = liveOrder || order;
+  const rawOrder = liveOrder || order;
+  const sourceOrder = {
+    ...rawOrder,
+    vehicleSource: rawOrder.vehicleSource ?? rawOrder.vehicle_source ?? "",
+    transportMode: rawOrder.transportMode ?? rawOrder.transport_mode ?? "",
+    hkDriver: rawOrder.hkDriver ?? rawOrder.hk_driver ?? "",
+    mainlandDriver: rawOrder.mainlandDriver ?? rawOrder.mainland_driver ?? ""
+  };
   const dispatchRow = orderDispatchPlanRow(sourceOrder);
   if (!dispatchRow) return sourceOrder;
   const linkedCustomsBusinessIds = normalizeOrderLinkedCustomsBusinessIds(
     sourceOrder?.linkedCustomsBusinessIds ?? sourceOrder?.linked_customs_business_ids ?? [],
     sourceOrder?.linkedCustomsBusinessId || sourceOrder?.linked_customs_business_id || ""
   );
+  const sourceTransportMode = normalizeTransportMode(sourceOrder.transportMode || "");
+  const dispatchTransportMode = normalizeTransportMode(dispatchRow.transportMode || dispatchRow.transport_mode || "");
+  const preserveOrderRelayAssignment = ["双司机", "口岸转国内车"].includes(sourceTransportMode)
+    && (!dispatchTransportMode || dispatchTransportMode === "单司机");
+  const driverSource = preserveOrderRelayAssignment ? sourceOrder : dispatchRow;
   return {
     ...sourceOrder,
     linkedCustomsBusinessId: linkedCustomsBusinessIds[0] || "",
@@ -17060,13 +17072,13 @@ function orderDisplaySource(order = {}) {
     // Older dispatch rows may not have assignment fields at all. Prefer a
     // current dispatch value when present, then fall back to the hydrated
     // order so historical rows do not blank out the order editor.
-    vehicleSource: normalizeVehicleSource(dispatchRow.vehicleSource || sourceOrder.vehicleSource || ""),
+    vehicleSource: normalizeVehicleSource((dispatchRow.vehicleSource ?? dispatchRow.vehicle_source) || sourceOrder.vehicleSource || ""),
     supplier: String(dispatchRow.supplier || sourceOrder.supplier || "").trim(),
     plate: normalizePlateText(dispatchRow.plate || sourceOrder.plate || ""),
-    driver: String(dispatchRow.driver || sourceOrder.driver || "").trim(),
-    hkDriver: String(dispatchRow.hkDriver || sourceOrder.hkDriver || "").trim(),
-    mainlandDriver: String(dispatchRow.mainlandDriver || sourceOrder.mainlandDriver || "").trim(),
-    transportMode: normalizeTransportMode(dispatchRow.transportMode || sourceOrder.transportMode || ""),
+    driver: String(driverSource.driver || sourceOrder.driver || "").trim(),
+    hkDriver: String((driverSource.hkDriver ?? driverSource.hk_driver) || sourceOrder.hkDriver || "").trim(),
+    mainlandDriver: String((driverSource.mainlandDriver ?? driverSource.mainland_driver) || sourceOrder.mainlandDriver || "").trim(),
+    transportMode: preserveOrderRelayAssignment ? sourceTransportMode : dispatchTransportMode || sourceTransportMode,
     loading: String(sourceOrder.loading || dispatchRow.loading || "").trim(),
     loadingLocations: Array.isArray(sourceOrder.loadingLocations) && sourceOrder.loadingLocations.length ? sourceOrder.loadingLocations : (dispatchRow.loadingLocations || []),
     unloading: String(sourceOrder.unloading || dispatchRow.unloading || "").trim(),
@@ -17076,6 +17088,33 @@ function orderDisplaySource(order = {}) {
     dispatchLoadTime: String(sourceOrder.dispatchLoadTime || dispatchRow.loadTime || "").trim(),
     dispatchDriver: String(sourceOrder.dispatchDriver || dispatchRow.driver || "").trim()
   };
+}
+
+function syncLocalDispatchRowsForOrderAssignment(order = {}) {
+  const orderNo = String(order.no || "").trim();
+  const dispatchNo = String(order.dispatchNo || "").trim();
+  const groupId = String(order.dispatchGroupId || "").trim();
+  if (!orderNo && !dispatchNo && !groupId) return;
+  const assignment = normalizedOrderAssignmentBase(order);
+  if (["双司机", "口岸转国内车"].includes(assignment.transportMode)) assignment.driver = "";
+  dispatchPlanRows.value = dispatchPlanRows.value.map((row) => {
+    const rowOrderNos = [String(row.orderNo || row.order_no || "").trim(),
+      ...normalizeDispatchCustomerSelectionValues(row.linkedOrderNos || row.linked_order_nos),
+      ...normalizeDispatchCustomerSelectionValues(row.orderNos || row.order_nos)];
+    const rowDispatchNos = [String(row.dispatchNo || row.dispatch_no || "").trim(),
+      ...normalizeDispatchCustomerSelectionValues(row.linkedDispatchNos || row.linked_dispatch_nos),
+      ...normalizeDispatchCustomerSelectionValues(row.dispatchNos || row.dispatch_nos)];
+    const matches = (orderNo && rowOrderNos.includes(orderNo))
+      || (dispatchNo && rowDispatchNos.includes(dispatchNo))
+      || (groupId && String(row.dispatchGroupId || row.dispatch_group_id || row.rowSplitFrom || row.row_split_from || "").trim() === groupId);
+    if (!matches) return row;
+    const updated = { ...row, ...assignment };
+    for (const [key, alias] of [["vehicleSource", "vehicle_source"], ["transportMode", "transport_mode"],
+      ["hkDriver", "hk_driver"], ["mainlandDriver", "mainland_driver"]]) {
+      if (Object.prototype.hasOwnProperty.call(row, alias)) updated[alias] = assignment[key];
+    }
+    return updated;
+  });
 }
 
 function normalizedOrderAssignmentBase(order = orderForm) {
@@ -28532,7 +28571,7 @@ function handleOrderTransportModeChange() {
     orderForm.hkDriver = orderForm.hkDriver || orderForm.driver || "";
     orderForm.driver = "";
   } else {
-    orderForm.driver = orderForm.driver || orderForm.hkDriver || "";
+    orderForm.driver = orderForm.hkDriver || orderForm.driver || "";
     orderForm.hkDriver = "";
     orderForm.mainlandDriver = "";
   }
@@ -28824,10 +28863,13 @@ async function saveOrder(options = {}) {
     const item = editingOrderNo.value
       ? await ordersApi.updateOrder(editingOrderNo.value, payload)
       : await ordersApi.createOrder(payload);
-    if (editingOrderNo.value) orderAssignmentBase.value = normalizedOrderAssignmentBase(payload);
+    const savedAssignment = normalizedOrderAssignmentBase(item);
+    Object.assign(orderForm, savedAssignment);
+    orderAssignmentBase.value = savedAssignment;
     orderRows.value = editingOrderNo.value
       ? orderRows.value.map((row) => row.no === item.no ? item : row)
       : [item, ...orderRows.value];
+    syncLocalDispatchRowsForOrderAssignment(item);
     if (item.customerId) {
       selectedCustomerId.value = item.customerId;
       activatePartnerContextById(item.customerId);
@@ -28853,6 +28895,7 @@ async function saveOrder(options = {}) {
         target.vehicleSource = item.vehicleSource || target.vehicleSource;
         target.supplier = item.supplier || target.supplier;
         target.plate = item.plate || target.plate;
+        syncLocalDispatchRowsForOrderAssignment(item);
         saveDispatchPlan({ silent: true });
       }
       pendingDispatchBindId.value = "";

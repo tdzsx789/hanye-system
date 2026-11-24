@@ -10949,9 +10949,18 @@ function applyOrderDispatchAssignment(order = {}, dispatchCandidate = null) {
   if (!dispatchCandidate) return { ...order, ...orderAssignmentFieldsFromSource(order) };
   const current = orderAssignmentFieldsFromSource(order);
   const assignment = orderAssignmentFieldsFromSource(dispatchCandidate);
+  // Some older orders were saved as double-driver while their dispatch row
+  // still contains the previous single-driver assignment or no mode. Keep the order's
+  // relay assignment in that specific conflict so reopening the order does
+  // not silently turn it back into a single-driver order.
+  const orderUsesRelayDrivers = ["双司机", "口岸转国内车"].includes(current.transportMode);
+  const dispatchLacksRelayMode = !assignment.transportMode || assignment.transportMode === "单司机";
   const merged = Object.fromEntries(Object.keys(ORDER_ASSIGNMENT_BASE_FIELDS).map((key) => [
     key,
-    assignment[key] || current[key] || ""
+    orderUsesRelayDrivers && dispatchLacksRelayMode &&
+      ["driver", "hkDriver", "mainlandDriver", "transportMode"].includes(key)
+      ? current[key] || ""
+      : assignment[key] || current[key] || ""
   ]));
   return { ...order, ...merged };
 }
@@ -11793,6 +11802,25 @@ function dispatchRowNeedsOrderSync(row = {}, existingRow = null) {
   return dispatchRowOrderSyncKey(row) !== dispatchRowOrderSyncKey(existingRow);
 }
 
+function mergeUnchangedDispatchAssignmentFields(row = {}, existingRow = null, baseRow = null) {
+  if (!existingRow || !baseRow) return row;
+  const merged = { ...row };
+  const modeChanged = dispatchRowFieldProvided(baseRow, "transportMode", "transport_mode")
+    && orderAssignmentBaseValue("transportMode", orderAssignmentSourceValue(row, "transportMode", "transport_mode"))
+      !== orderAssignmentBaseValue("transportMode", orderAssignmentSourceValue(baseRow, "transportMode", "transport_mode"));
+  for (const [key, column] of Object.entries(ORDER_ASSIGNMENT_BASE_FIELDS)) {
+    if (!dispatchRowFieldProvided(baseRow, key, column) || !dispatchRowFieldProvided(existingRow, key, column)) continue;
+    if (modeChanged && ["driver", "hkDriver", "mainlandDriver"].includes(key)) continue;
+    const incomingValue = orderAssignmentSourceValue(row, key, column);
+    const baselineValue = orderAssignmentSourceValue(baseRow, key, column);
+    if (orderAssignmentBaseValue(key, incomingValue) !== orderAssignmentBaseValue(key, baselineValue)) continue;
+    // An unchanged field in an old page must not undo an order editor's save.
+    merged[key] = orderAssignmentSourceValue(existingRow, key, column);
+    if (column !== key && Object.prototype.hasOwnProperty.call(merged, column)) merged[column] = merged[key];
+  }
+  return merged;
+}
+
 function dispatchRowQuantityWasEdited(row, existingRow, baseRow) {
   // The base snapshot is the only way to distinguish an intentional quantity
   // edit from an older page auto-saving a stale row. Without it, preserve the
@@ -12473,6 +12501,40 @@ async function syncDispatchPlanRowsToOrders(planDate, rows = [], rowsForPersiste
   return synced;
 }
 
+async function syncDispatchPlanRowsAssignmentFromOrder(order = {}) {
+  const orderNo = userTextValue(order.no);
+  const dispatchNo = userTextValue(order.dispatchNo);
+  const dispatchGroupId = userTextValue(order.dispatchGroupId);
+  if (!orderNo && !dispatchNo && !dispatchGroupId) return 0;
+  const assignment = orderAssignmentFieldsFromSource(order);
+  if (["双司机", "口岸转国内车"].includes(assignment.transportMode)) assignment.driver = "";
+  const plans = await db.prepare("SELECT plan_date, rows_json FROM dispatch_plans").all();
+  let changed = 0;
+  for (const plan of plans) {
+    const rows = parseDispatchPlanRowsJson(plan.rows_json);
+    let planChanged = false;
+    for (const row of rows) {
+      if (!dispatchRowMatchesRefs(row, orderNo, dispatchNo, dispatchGroupId)) continue;
+      for (const [key, column] of Object.entries(ORDER_ASSIGNMENT_BASE_FIELDS)) {
+        const value = assignment[key];
+        if (row[key] !== value) {
+          row[key] = value;
+          planChanged = true;
+        }
+        // Older rows may still expose snake_case aliases when a driver is cleared.
+        if (column !== key && Object.prototype.hasOwnProperty.call(row, column) && row[column] !== value) {
+          row[column] = value;
+          planChanged = true;
+        }
+      }
+    }
+    if (!planChanged) continue;
+    await updateDispatchPlanRowsJson(plan.plan_date, JSON.stringify(rows));
+    changed += 1;
+  }
+  return changed;
+}
+
 async function syncDispatchPlanRowsRemarkFromOrder(order = {}) {
   const orderNo = String(order.no || "").trim();
   const dispatchNo = String(order.dispatchNo || "").trim();
@@ -12934,8 +12996,10 @@ app.put("/api/dispatch-plans/:date", async (req, res) => {
       const cleanRows = rows
         .map((row) => {
           const existingRow = findExistingDispatchRow(row, existingRowsLookup);
-          const cleanRow = normalizeDispatchPlanRow(row, existingRow, requestCreator, date);
           const baseRow = findExistingDispatchRow(row, baseRowsLookup);
+          const cleanRow = mergeUnchangedDispatchAssignmentFields(
+            normalizeDispatchPlanRow(row, existingRow, requestCreator, date), existingRow, baseRow
+          );
           const quantityEdited = (canViewSpecial || !orderMatchesSpecialCustomer(cleanRow, specialLookup))
             && dispatchRowQuantityWasEdited(row, existingRow, baseRow);
           if (!quantityEdited && existingRow) cleanRow.quantity = dispatchRowText(existingRow, "quantity");
@@ -13209,12 +13273,28 @@ function mergeUnchangedOrderAssignmentFields(body = {}, existing = {}, dispatchA
   if (!dispatchAssignment && !hasBaseline) return body;
 
   const merged = { ...body };
-  const currentAssignment = dispatchAssignment || existing;
+  // Older clients submit snake_case fields. Promote explicit values, including
+  // empty strings, before comparing them with the editor's baseline.
   for (const [key, column] of Object.entries(ORDER_ASSIGNMENT_BASE_FIELDS)) {
-    const hasSubmittedValue = Object.prototype.hasOwnProperty.call(body, key);
-    const hasBaselineValue = hasBaseline && Object.prototype.hasOwnProperty.call(baseline, key);
-    const comparisonValue = hasBaselineValue ? baseline[key] : orderAssignmentSourceValue(existing, key, column);
-    if (hasSubmittedValue && orderAssignmentBaseValue(key, body[key]) !== orderAssignmentBaseValue(key, comparisonValue)) continue;
+    if (!Object.prototype.hasOwnProperty.call(merged, key) && Object.prototype.hasOwnProperty.call(body, column)) {
+      merged[key] = body[column];
+    }
+  }
+  const currentAssignment = applyOrderDispatchAssignment(existing, dispatchAssignment);
+  const baseTransportMode = hasBaseline && (Object.prototype.hasOwnProperty.call(baseline, "transportMode")
+    || Object.prototype.hasOwnProperty.call(baseline, "transport_mode"))
+    ? orderAssignmentSourceValue(baseline, "transportMode", "transport_mode")
+    : orderAssignmentSourceValue(existing, "transportMode", "transport_mode");
+  const transportModeChanged = Object.prototype.hasOwnProperty.call(merged, "transportMode")
+    && orderAssignmentBaseValue("transportMode", merged.transportMode) !== orderAssignmentBaseValue("transportMode", baseTransportMode);
+  for (const [key, column] of Object.entries(ORDER_ASSIGNMENT_BASE_FIELDS)) {
+    const hasSubmittedValue = Object.prototype.hasOwnProperty.call(merged, key);
+    // A mode change also changes the meaning of all three driver fields.
+    if (transportModeChanged && hasSubmittedValue && ["driver", "hkDriver", "mainlandDriver"].includes(key)) continue;
+    const hasBaselineValue = hasBaseline && (Object.prototype.hasOwnProperty.call(baseline, key)
+      || Object.prototype.hasOwnProperty.call(baseline, column));
+    const comparisonValue = hasBaselineValue ? orderAssignmentSourceValue(baseline, key, column) : orderAssignmentSourceValue(existing, key, column);
+    if (hasSubmittedValue && orderAssignmentBaseValue(key, merged[key]) !== orderAssignmentBaseValue(key, comparisonValue)) continue;
     // Keep the live assignment when this editor did not change that field.
     // The modal can remain open while dispatch management assigns another vehicle.
     // Older clients without a baseline are compared against the stored order value.
@@ -13726,6 +13806,7 @@ app.post("/api/orders", async (req, res) => {
     }
     await writeOrderRow(item, { includeNo: true });
     await saveOrderFees(item.no, item.fees, item.currency);
+    await syncDispatchPlanRowsAssignmentFromOrder(item);
     await syncDispatchPlanRowsRemarkFromOrder(item);
   });
   try {
@@ -13980,6 +14061,7 @@ app.patch("/api/orders/:no", async (req, res) => {
     if (dispatchStatus) {
       await syncDispatchPlanRowsStatusForOrder(item, dispatchStatus);
     }
+    await syncDispatchPlanRowsAssignmentFromOrder(item);
     await syncDispatchPlanRowsRemarkFromOrder(item);
   });
 
