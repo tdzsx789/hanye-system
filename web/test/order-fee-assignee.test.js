@@ -59,6 +59,7 @@ function createContext({ order = {}, item = {} } = {}) {
 function createServerContext() {
   const context = vm.createContext({
     userTextValue: normalizeText,
+    textValue: (value) => String(value ?? ""),
     booleanFlag: (value, fallback) => value === undefined ? fallback : Boolean(value),
     normalizeOrderFeeCategory: (value) => value || "正常",
     normalizeCostCenterCurrency: (value) => value || "港币",
@@ -66,6 +67,8 @@ function createServerContext() {
     normalizeOrderFeeFxLinks: () => ({}),
     parseJsonObjectText: (_value, fallback) => fallback
   });
+  vm.runInContext(serverSource.slice(serverSource.indexOf("const EXPORT_FEE_NAME_ALIASES"),
+    serverSource.indexOf("function normalizeExportTemplateColumn")), context);
   for (const name of ["normalizeOrderFeeAssigneeFields", "normalizeOrderFee", "mapOrderFee"]) {
     vm.runInContext(extract(serverSource, name), context);
   }

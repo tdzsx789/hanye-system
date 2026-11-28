@@ -43,11 +43,13 @@ test("saved order templates survive API restart and are readable by another orde
       canAccessModule,
       writeAudit: async () => {},
       auditChangeSummary: () => "test template change",
-      auditPreviewValue: (value) => value
+      auditPreviewValue: (value) => value,
+      textValue: (value) => String(value ?? "")
     });
     vm.runInContext([
       section(dbSource, "function isNamedParamObject", "export const db ="),
       "const db = { prepare(sql) { return new Statement(sql); } };",
+      section(source, "const EXPORT_FEE_NAME_ALIASES", "function exportTemplateColumnOrder"),
       section(source, "function templateContentType", "function mapRule"),
       section(source, "function requiredModuleForRequest", 'app.use("/api", authenticateApiRequest')
     ].join("\n"), context);
@@ -143,6 +145,25 @@ test("saved order templates survive API restart and are readable by another orde
     assert.equal(simultaneousAfterRestart.body.content, payload.content);
     const persisted = await admin.query(`SELECT count(*)::integer AS count FROM ${schema}.templates`);
     assert.equal(persisted.rows[0].count, 2);
+
+    const legacyTaxTemplate = {
+      name: "历史税金模板", content: JSON.stringify({
+        type: "order-freight-template", fees: [{ name: "代垫香港政府税金", amount: 200, currency: "人民币" }]
+      })
+    };
+    const taxTemplate = await request(restarted, "first", "/templates", "POST", legacyTaxTemplate);
+    assert.equal(taxTemplate.status, 201);
+    const taxId = taxTemplate.body.id;
+    const savedTax = await admin.query(`SELECT content FROM ${schema}.templates WHERE id = $1`, [taxId]);
+    assert.equal(JSON.parse(savedTax.rows[0].content).fees[0].name, "香港政府税金");
+    // Simulate an existing legacy template in the private test schema.
+    await admin.query(`UPDATE ${schema}.templates SET content = $1 WHERE id = $2`, [legacyTaxTemplate.content, taxId]);
+    const readTax = await request(restarted, "second", `/templates/${taxId}`);
+    assert.equal(JSON.parse(readTax.body.content).fees[0].name, "香港政府税金");
+    const resavedTax = await request(restarted, "second", `/templates/${taxId}`, "PATCH", { content: legacyTaxTemplate.content });
+    assert.equal(resavedTax.status, 200);
+    assert.equal(JSON.parse(resavedTax.body.content).fees[0].amount, 200);
+    assert.equal(JSON.parse(resavedTax.body.content).fees[0].name, "香港政府税金");
   } finally {
     await Promise.all([...services].map((service) => service.close()));
     await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);

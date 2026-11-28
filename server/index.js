@@ -2579,6 +2579,7 @@ function feeRowsForColumn(order, column) {
     ...exportFeeNameVariants(rawFeeName),
     ...exportFeeNameVariants(feeName)
   ]);
+  const renamedFeeName = [...EXPORT_FEE_NAME_ALIASES.values()].find((name) => feeNameVariants.has(name));
   const feeCurrency = exportFeeItemCurrencyForColumn(column);
   const normalizedColumnCurrency = normalizeFeeCurrency(feeCurrency);
   if (!feeItemId && !rawFeeName && !feeName) return [];
@@ -2587,7 +2588,12 @@ function feeRowsForColumn(order, column) {
     const canonicalName = canonicalExportFeeName(name);
     const itemId = textValue(fee.feeItemId || fee.fee_item_id).trim();
     const currencyMatches = !feeCurrency || normalizeFeeCurrency(fee.currency) === normalizedColumnCurrency;
-    if (feeItemId && itemId) return itemId === feeItemId && currencyMatches;
+    if (feeItemId && itemId) {
+      // Historical snapshots can use a different item ID for the renamed tax.
+      // The merged alias column must include both IDs without mixing currencies.
+      const renamedFeeMatches = canonicalName === renamedFeeName;
+      return (itemId === feeItemId || renamedFeeMatches) && currencyMatches;
+    }
     return (feeNameVariants.has(name) || feeNameVariants.has(canonicalName)) && currencyMatches;
   });
 }
@@ -3144,13 +3150,13 @@ function pdfTextWithWeight(doc, text, x, y, options = {}, bold = false) {
 function dynamicExportFeeColumns(orders = [], existingColumns = []) {
   const existingFeeKeys = new Set(existingColumns
     .filter(isExportFeeItemColumn)
-    .map((column) => `${textValue(column.feeName || column.label).trim()}|${normalizeFeeCurrency(exportFeeItemCurrencyForColumn(column))}`)
+    .map(exportFeeColumnKey)
     .filter((key) => !key.startsWith("|")));
   const feeColumns = [];
   const seen = new Set();
   orders.forEach((order) => {
     (Array.isArray(order?.fees) ? order.fees : []).forEach((fee) => {
-      const name = textValue(fee.name).trim();
+      const name = canonicalExportFeeName(fee.name);
       const currency = normalizeFeeCurrency(fee.currency);
       if (!name || Number(fee?.amount || 0) === 0) return;
       const key = `${name}|${currency}`;
@@ -3181,18 +3187,39 @@ function normalizeTemplateFeeColumnsForOrders(columns = [], orders = []) {
       orderFeeCurrenciesByName.set(canonicalName, currencies);
     });
   });
-  return columns.map((column) => {
+  const seen = new Set();
+  return columns.flatMap((column) => {
     if (!isExportFeeItemColumn(column)) return column;
+    column = normalizeExportTemplateColumn(column);
     const columnName = canonicalExportFeeName(column.feeName || column.label);
     const actualCurrencies = orderFeeCurrenciesByName.get(columnName);
+    const hasConfiguredCurrency = Boolean(textValue(column.feeCurrency).trim());
+    if (!hasConfiguredCurrency && actualCurrencies?.size > 1) {
+      // Old templates can omit the currency entirely. Give each actual
+      // currency its own column so it is neither lost nor counted twice.
+      return ["RMB", "HKD"].filter((currency) => actualCurrencies.has(currency))
+        .map((currency, index) => ({
+          ...column,
+          key: index === 0 ? column.key : `${column.key}-${currency}`,
+          feeCurrency: currency === "RMB" ? "人民币" : "港币"
+        }));
+    }
     if (!actualCurrencies || actualCurrencies.size !== 1) return column;
     const actualCurrency = [...actualCurrencies][0];
-    const configuredCurrency = normalizeFeeCurrency(exportFeeItemCurrencyForColumn(column));
-    if (configuredCurrency === actualCurrency) return column;
+    const configuredCurrency = normalizeFeeCurrency(column.feeCurrency);
+    if (hasConfiguredCurrency && configuredCurrency === actualCurrency) return column;
     return {
       ...column,
       feeCurrency: actualCurrency === "RMB" ? "人民币" : "港币"
     };
+  }).filter((column) => {
+    if (!isExportFeeItemColumn(column)) return true;
+    // Renamed fee items and old template columns describe the same charge.
+    // Keep one column per canonical name and currency after currency repair.
+    const key = exportFeeColumnKey(column);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
 }
 
@@ -6404,7 +6431,7 @@ function mapOrderFee(row) {
     id: row.id,
     clientKey: userTextValue(row.client_key),
     category: userTextValue(row.category),
-    name: userTextValue(row.name),
+    name: canonicalExportFeeName(userTextValue(row.name)),
     quantity,
     unitPrice: row.unit_price || 0,
     unitPriceManual: Boolean(row.unit_price_manual),
@@ -7082,7 +7109,7 @@ function mapFeeItem(row) {
   return {
     id: row.id,
     category: feeItemCategoryValue(row.category),
-    name: userTextValue(row.name),
+    name: canonicalExportFeeName(userTextValue(row.name)),
     currency: userTextValue(row.currency),
     defaultAmount: row.default_amount,
     defaultDriverRole: userTextValue(row.default_driver_role),
@@ -8774,6 +8801,31 @@ function templateContentType(content = "") {
   }
 }
 
+function normalizeTemplateFeeNames(content = "") {
+  try {
+    const template = JSON.parse(content);
+    if (template?.type === "visual-export-template" && Array.isArray(template.columns)) {
+      template.columns = template.columns.map((column) => {
+        const normalized = normalizeExportTemplateColumn(column);
+        if (normalized === column) return column;
+        const name = textValue(column.feeName || column.label).trim();
+        const label = textValue(column.label).trim();
+        if (canonicalExportFeeName(name) === name && canonicalExportFeeName(label) === label) return column;
+        return { ...normalized, label: canonicalExportFeeName(label) || normalized.label };
+      });
+    } else if (template?.type === "order-freight-template" && Array.isArray(template.fees)) {
+      template.fees = template.fees.map((fee) => fee && typeof fee === "object" && !Array.isArray(fee)
+        ? { ...fee, name: canonicalExportFeeName(fee.name) }
+        : fee);
+    } else {
+      return content;
+    }
+    return JSON.stringify(template);
+  } catch {
+    return content;
+  }
+}
+
 function mapTemplate(row, options = {}) {
   const contentType = templateContentType(row.content);
   const includeContent = options.includeContent !== false;
@@ -8783,7 +8835,7 @@ function mapTemplate(row, options = {}) {
     name: row.name,
     format: row.format,
     description: row.description,
-    content: includeContent ? row.content : "",
+    content: includeContent ? normalizeTemplateFeeNames(row.content) : "",
     contentType,
     contentLoaded: includeContent,
     updatedAt: row.updated_at
@@ -13884,7 +13936,7 @@ function normalizeOrderFee(fee, fallbackCurrency) {
   return {
     clientKey,
     category: normalizeOrderFeeCategory(fee.category),
-    name: userTextValue(fee.name),
+    name: canonicalExportFeeName(userTextValue(fee.name)),
     quantity,
     unitPrice,
     unitPriceManual,
@@ -16098,6 +16150,18 @@ function requestFeeItemCostSource(body = {}, fallback = "供应商") {
   return feeItemCostSourceText(fallback);
 }
 
+async function findFeeItemNameConflict(name, excludingId = 0) {
+  const variants = [...exportFeeNameVariants(name)];
+  const placeholders = variants.map(() => "?").join(",");
+  // Check old stored names too. An active alias takes priority over deleted rows.
+  return db.prepare(`
+    SELECT id, deleted_at FROM fee_items
+    WHERE name IN (${placeholders}) AND id <> ?
+    ORDER BY CASE WHEN deleted_at IS NULL THEN 0 ELSE 1 END, id
+    LIMIT 1
+  `).get(...variants, excludingId);
+}
+
 app.post("/api/fee-items", async (req, res) => {
   const requestedSortOrder = Number(req.body.sortOrder);
   const nextSortOrder = (await db.prepare(`
@@ -16107,7 +16171,7 @@ app.post("/api/fee-items", async (req, res) => {
   `).get()).value;
   const item = {
     category: normalizeFeeItemCategory(req.body.category),
-    name: String(req.body.name || "").trim(),
+    name: canonicalExportFeeName(req.body.name),
     currency: String(req.body.currency || "港币").trim(),
     defaultAmount: Number(req.body.defaultAmount || 0),
     defaultDriverRole: normalizeDefaultDriverRole(req.body.defaultDriverRole || req.body.default_driver_role),
@@ -16118,7 +16182,7 @@ app.post("/api/fee-items", async (req, res) => {
     res.status(400).json({ message: "收费项目名称不能为空" });
     return;
   }
-  const duplicate = await db.prepare("SELECT id, deleted_at FROM fee_items WHERE name = ?").get(item.name);
+  const duplicate = await findFeeItemNameConflict(item.name);
   if (duplicate && !duplicate.deleted_at) {
     res.status(409).json({ message: "收费项目名称不能重复" });
     return;
@@ -16202,7 +16266,7 @@ app.patch("/api/fee-items/:id", async (req, res) => {
     category: req.body.category === undefined
       ? feeItemCategoryValue(current.category)
       : normalizeFeeItemCategory(req.body.category),
-    name: req.body.name === undefined ? current.name : String(req.body.name || "").trim(),
+    name: canonicalExportFeeName(req.body.name === undefined ? current.name : req.body.name),
     currency: req.body.currency === undefined ? current.currency : String(req.body.currency || "港币").trim(),
     defaultAmount: req.body.defaultAmount === undefined ? Number(current.default_amount || 0) : Number(req.body.defaultAmount || 0),
     defaultDriverRole: req.body.defaultDriverRole === undefined && req.body.default_driver_role === undefined
@@ -16218,7 +16282,11 @@ app.patch("/api/fee-items/:id", async (req, res) => {
     res.status(400).json({ message: "收费项目名称不能为空" });
     return;
   }
-  const duplicate = await db.prepare("SELECT id, deleted_at FROM fee_items WHERE name = ? AND id <> ?").get(item.name, id);
+  const unchangedName = item.name === canonicalExportFeeName(current.name);
+  // Keep legacy IDs and stored names stable when editing an existing item.
+  // Historical alias pairs must remain editable without a database cleanup.
+  if (unchangedName) item.name = current.name;
+  const duplicate = unchangedName ? null : await findFeeItemNameConflict(item.name, id);
   if (duplicate) {
     res.status(409).json({ message: duplicate.deleted_at
       ? "该收费项目名称曾被删除，请新建同名项目以恢复，或使用其他名称"
@@ -16423,7 +16491,7 @@ app.post("/api/templates", async (req, res) => {
     name: String(req.body.name || "").trim(),
     format: String(req.body.format || "通用").trim() || "通用",
     description: String(req.body.description || "").trim(),
-    content: String(req.body.content || "").trim()
+    content: normalizeTemplateFeeNames(String(req.body.content || "").trim())
   };
   if (!item.name) {
     res.status(400).json({ message: "模板名称不能为空" });
@@ -16471,7 +16539,7 @@ app.patch("/api/templates/:id", async (req, res) => {
     name: req.body.name === undefined ? current.name : String(req.body.name || "").trim(),
     format: "通用",
     description: req.body.description === undefined ? current.description : String(req.body.description || "").trim(),
-    content: req.body.content === undefined ? current.content : String(req.body.content || "").trim()
+    content: normalizeTemplateFeeNames(req.body.content === undefined ? current.content : String(req.body.content || "").trim())
   };
   if (!item.name) {
     res.status(400).json({ message: "模板名称不能为空" });

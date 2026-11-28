@@ -38,12 +38,14 @@ test("fee items can be recreated after deletion and reject name conflicts", {
       transactionClient: { getStore: () => null },
       transactionStoreClient: () => null,
       userTextValue: (value) => String(value || "").trim(),
+      textValue: (value) => String(value ?? ""),
       writeAudit: async () => {},
       auditChangeSummary: () => "test"
     });
     vm.runInContext([
       section(dbSource, "function isNamedParamObject", "export const db ="),
       "const db = { prepare(sql) { return new Statement(sql); } };",
+      section(source, "const EXPORT_FEE_NAME_ALIASES", "function exportTemplateColumnOrder"),
       section(source, "const FEE_ITEM_CATEGORY_OPTIONS", "function mapFreightRate"),
       section(source, 'app.get("/api/fee-items",', 'app.get("/api/freight-rates",')
     ].join("\n"), context);
@@ -86,6 +88,42 @@ test("fee items can be recreated after deletion and reject name conflicts", {
     assert.deepEqual(edited.body.costSources, ["大陆骑师"]);
     const concurrent = await Promise.all([request("", "POST", initial), request("", "POST", initial)]);
     assert.deepEqual(concurrent.map((result) => result.status).sort(), [201, 409]);
+    const tax = await request("", "POST", { ...initial, name: "代垫香港政府税金", defaultAmount: 200 });
+    assert.equal(tax.status, 201);
+    assert.equal(tax.body.name, "香港政府税金");
+    assert.equal((await request("", "POST", { ...initial, name: "香港政府税金" })).status, 409);
+    assert.equal((await pool.query("SELECT name FROM fee_items WHERE id = $1", [tax.body.id])).rows[0].name, "香港政府税金");
+
+    // Historical databases can still store the former name without a migration.
+    await pool.query("UPDATE fee_items SET name = $1 WHERE id = $2", ["代垫香港政府税金", tax.body.id]);
+    assert.equal((await request("", "POST", { ...initial, name: "香港政府税金" })).status, 409);
+    assert.equal((await request("", "POST", { ...initial, name: "代垫香港政府税金" })).status, 409);
+    assert.equal((await request("/" + other.body.id, "PATCH", { name: "香港政府税金" })).status, 409);
+    const legacyEdited = await request("/" + tax.body.id, "PATCH", { name: "香港政府税金", defaultAmount: 250 });
+    assert.equal(legacyEdited.status, 200);
+    assert.equal(legacyEdited.body.name, "香港政府税金");
+    assert.equal(legacyEdited.body.defaultAmount, 250);
+    assert.equal((await pool.query("SELECT name FROM fee_items WHERE id = $1", [tax.body.id])).rows[0].name, "代垫香港政府税金");
+    assert.equal((await request("/" + tax.body.id, "DELETE")).status, 200);
+    const legacyRestored = await request("", "POST", { ...initial, name: "香港政府税金", defaultAmount: 300 });
+    assert.equal(legacyRestored.status, 201);
+    assert.equal(legacyRestored.body.id, tax.body.id);
+    assert.equal(legacyRestored.body.name, "香港政府税金");
+    assert.equal(legacyRestored.body.defaultAmount, 300);
+    assert.equal((await request("/" + other.body.id, "PATCH", { name: "代垫香港政府税金" })).status, 409);
+
+    // Older versions may already have created both aliases. Editing either ID
+    // must still work, and a deleted alias must not mask an active counterpart.
+    const twin = await pool.query("INSERT INTO fee_items (category, name, currency) VALUES ($1, $2, $3) RETURNING id", ["正常", "香港政府税金", "人民币"]);
+    const twinId = twin.rows[0].id;
+    for (const itemId of [tax.body.id, twinId]) {
+      const editedTwin = await request("/" + itemId, "PATCH", { name: "香港政府税金", defaultAmount: 420 });
+      assert.equal(editedTwin.status, 200);
+      assert.equal(editedTwin.body.defaultAmount, 420);
+    }
+    assert.equal((await request("/" + tax.body.id, "DELETE")).status, 200);
+    assert.equal((await request("", "POST", { ...initial, name: "香港政府税金" })).status, 409);
+    assert.equal((await pool.query("SELECT deleted_at FROM fee_items WHERE id = $1", [tax.body.id])).rows[0].deleted_at != null, true);
   } finally {
     if (server) await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     if (pool) await pool.end();
